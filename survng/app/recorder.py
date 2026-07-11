@@ -15,8 +15,9 @@ ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event
 
 
 class Recorder:
-    def __init__(self, ffmpeg_path: str, storage_dir: Path) -> None:
+    def __init__(self, ffmpeg_path: str, storage_dir: Path, segment_seconds: float = 10.0) -> None:
         self.ffmpeg_path = ffmpeg_path
+        self.segment_seconds = max(2.0, min(300.0, float(segment_seconds or 10.0)))
         self.recordings_dir = storage_dir / "recordings"
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
         self.processes: dict[str, ProcessItem] = {}
@@ -65,7 +66,7 @@ class Recorder:
                 "-f",
                 "segment",
                 "-segment_time",
-                "300",
+                f"{self.segment_seconds:g}",
                 "-strftime",
                 "1",
                 "-reset_timestamps",
@@ -283,9 +284,9 @@ class Recorder:
             next_start_epoch = (
                 self.recording_start_epoch(files[index + 1]) if index + 1 < len(files) else None
             )
-            duration_seconds = 300.0
+            duration_seconds = self.segment_seconds
             if start_epoch is not None and next_start_epoch is not None:
-                duration_seconds = max(1.0, min(300.0, next_start_epoch - start_epoch))
+                duration_seconds = max(1.0, min(self.segment_seconds, next_start_epoch - start_epoch))
             rows.append(
                 {
                     "path": str(file_path),

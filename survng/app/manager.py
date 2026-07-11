@@ -17,7 +17,7 @@ class AppManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.events = EventStore(self.storage_dir)
         self.detector = OpenVinoDetector(config.detector)
-        self.recorder = Recorder(config.ffmpeg_path, self.storage_dir)
+        self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds)
         self.hls = HlsStreamer(config.ffmpeg_path, self.storage_dir)
         self.workers = {
             camera.id: CameraWorker(camera, self.storage_dir, self.detector, self.events, self.recorder)

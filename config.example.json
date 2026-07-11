@@ -3,6 +3,7 @@
   "ffmpeg_path": "ffmpeg",
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
+  "recording_segment_seconds": 10.0,
   "detector": {
     "enabled": false,
     "model_path": "best.onnx",

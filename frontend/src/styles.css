@@ -893,8 +893,8 @@ p {
   width: 100%;
   min-width: 0;
   height: auto;
-  min-height: 104px;
-  max-height: 180px;
+  min-height: 0;
+  max-height: none;
   overflow: hidden;
   border: 0;
   border-radius: 8px;
@@ -902,12 +902,18 @@ p {
   color: inherit;
   padding: 0;
   text-align: inherit;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 10;
+}
+
+.incident-preview .snapshot-frame {
+  height: 100%;
+  aspect-ratio: 16 / 10;
 }
 
 .incident-focus .incident-preview {
-  min-height: 220px;
-  max-height: 340px;
+  min-height: 0;
+  max-height: none;
+  aspect-ratio: 16 / 10;
 }
 
 .incident-preview:focus-visible {
@@ -915,14 +921,82 @@ p {
   outline-offset: -2px;
 }
 
-.incident-preview img,
-.incident-preview .empty-thumb {
+.snapshot-frame {
+  position: relative;
+  width: 100%;
+  height: auto;
+  overflow: hidden;
+  background: var(--thumb);
+  aspect-ratio: var(--snapshot-aspect, 4 / 3);
+}
+
+.snapshot-layer {
+  position: absolute;
+  inset: 0;
+  transition: transform 180ms ease;
+  will-change: transform;
+}
+
+.snapshot-layer img,
+.snapshot-layer .empty-thumb {
   display: block;
   width: 100%;
   height: 100%;
   aspect-ratio: auto;
   background: var(--thumb);
-  object-fit: cover;
+  object-fit: contain;
+}
+
+.object-box-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.object-box {
+  position: absolute;
+  min-width: 7px;
+  min-height: 7px;
+  border: 2px solid #22c55e;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.36), 0 0 12px rgba(34, 197, 94, 0.22);
+}
+
+.object-box strong {
+  position: absolute;
+  left: -2px;
+  bottom: calc(100% + 2px);
+  max-width: 140px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #22c55e;
+  color: #04110a;
+  font-size: 10px;
+  font-weight: 850;
+  line-height: 1;
+  padding: 3px 5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshot-focus-button {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 3;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: 999px;
+  background: rgba(8, 18, 20, 0.72);
+  color: #fff;
+  padding: 0;
+}
+
+.snapshot-focus-button.active {
+  border-color: rgba(125, 211, 199, 0.5);
+  background: var(--active);
+  color: var(--active-ink);
 }
 
 .incident-snapshot-hud {
@@ -930,6 +1004,7 @@ p {
   right: 0;
   bottom: 0;
   left: 0;
+  z-index: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
@@ -1432,14 +1507,12 @@ p {
   outline-offset: 3px;
 }
 
-.event-detail-media img,
-.event-detail-media .empty-thumb,
+.event-detail-media .event-snapshot-frame,
 .event-video-layer {
   display: block;
   width: 100%;
   max-height: 72vh;
-  aspect-ratio: 16 / 9;
-  object-fit: contain;
+  aspect-ratio: var(--snapshot-aspect, 16 / 9);
 }
 
 .event-video-layer {
@@ -1470,6 +1543,63 @@ p {
   font-size: 14px;
 }
 
+.manual-detect-panel {
+  align-content: start;
+}
+
+.manual-detect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.manual-detect-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.manual-detect-head button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.manual-detect-panel input[type="range"] {
+  width: 100%;
+  min-height: 28px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.manual-debug {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.manual-debug span,
+.manual-debug code {
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font: inherit;
+  padding: 4px 7px;
+}
+
+.manual-debug.error {
+  color: var(--bad-ink);
+}
+
+.manual-debug.error,
+.manual-debug.error span {
+  border-radius: 7px;
+  background: var(--bad-bg);
+  padding: 7px 8px;
+}
 
 .recording-review-page {
   min-height: calc(100vh - 86px);
@@ -1566,6 +1696,7 @@ p {
 .review-empty {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: grid;
   place-items: center;
   align-content: center;
@@ -2403,6 +2534,25 @@ p {
     min-height: 0;
     max-height: none;
     aspect-ratio: 16 / 10;
+  }
+
+  .snapshot-focus-button {
+    top: 5px;
+    left: 5px;
+    width: 25px;
+    min-width: 25px;
+    min-height: 25px;
+  }
+
+  .object-box {
+    border-width: 1px;
+    border-radius: 2px;
+  }
+
+  .object-box strong {
+    max-width: 80px;
+    font-size: 8px;
+    padding: 2px 4px;
   }
 
   .incident-snapshot-hud {

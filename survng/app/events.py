@@ -99,6 +99,18 @@ class EventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def update_objects(self, event_id: int, objects_json: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "update events set objects_json = ? where id = ?",
+                (objects_json, event_id),
+            )
+            row = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def for_camera_range(
         self,
         camera_id: str,

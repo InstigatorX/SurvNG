@@ -7,12 +7,14 @@ import {
   Copy,
   CircleDot,
   Clock3,
+  Crop,
   Cog,
   Download,
   Cpu,
   Film,
   Gauge,
   HardDrive,
+  Search,
   ListTree,
   Monitor,
   Moon,
@@ -625,6 +627,143 @@ function hasDetectedObjects(event) {
   return Boolean(event.has_objects) || eventObjects(event).some((object) => object.label) || incidentLabels(event).length > 0;
 }
 
+
+function objectBoxes(event) {
+  return eventObjects(event)
+    .map((object) => ({ object, box: object?.box }))
+    .filter(({ object, box }) => object?.label && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .map(({ object, box }) => ({
+      label: object.label,
+      confidence: object.confidence,
+      x1: Number(box.x1),
+      y1: Number(box.y1),
+      x2: Number(box.x2),
+      y2: Number(box.y2),
+    }))
+    .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
+}
+
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, children }) {
+  const boxes = objectBoxes(event);
+  const frameRef = useRef(null);
+  const [imageSize, setImageSize] = useState(null);
+  const [frameSize, setFrameSize] = useState(null);
+  const [objectFocused, setObjectFocused] = useState(false);
+  const renderedImage = useMemo(() => {
+    if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
+    const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
+    const width = imageSize.width * scale;
+    const height = imageSize.height * scale;
+    return {
+      x: (frameSize.width - width) / 2,
+      y: (frameSize.height - height) / 2,
+      width,
+      height,
+      scale,
+    };
+  }, [frameSize, imageSize]);
+  const canFocus = allowObjectFocus && boxes.length > 0 && renderedImage;
+
+  useEffect(() => {
+    setObjectFocused(false);
+  }, [event?.id, event?.snapshot_path]);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return undefined;
+    function updateFrameSize() {
+      const rect = frame.getBoundingClientRect();
+      if (rect.width && rect.height) setFrameSize({ width: rect.width, height: rect.height });
+    }
+    updateFrameSize();
+    const observer = new ResizeObserver(updateFrameSize);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, []);
+
+  function onImageLoad(loadEvent) {
+    const image = loadEvent.currentTarget;
+    if (image.naturalWidth && image.naturalHeight) {
+      setImageSize({ width: image.naturalWidth, height: image.naturalHeight });
+    }
+  }
+
+  const renderedBoxes = useMemo(() => {
+    if (!renderedImage || !frameSize) return [];
+    return boxes.map((box) => ({
+      ...box,
+      left: renderedImage.x + box.x1 * renderedImage.scale,
+      top: renderedImage.y + box.y1 * renderedImage.scale,
+      width: (box.x2 - box.x1) * renderedImage.scale,
+      height: (box.y2 - box.y1) * renderedImage.scale,
+    })).filter((box) => box.width > 0 && box.height > 0);
+  }, [boxes, frameSize, renderedImage]);
+
+  const focusStyle = useMemo(() => {
+    if (!canFocus || !frameSize || !renderedBoxes.length) return null;
+    const minX = Math.max(0, Math.min(...renderedBoxes.map((box) => box.left)));
+    const minY = Math.max(0, Math.min(...renderedBoxes.map((box) => box.top)));
+    const maxX = Math.min(frameSize.width, Math.max(...renderedBoxes.map((box) => box.left + box.width)));
+    const maxY = Math.min(frameSize.height, Math.max(...renderedBoxes.map((box) => box.top + box.height)));
+    const boxWidth = Math.max(1, maxX - minX);
+    const boxHeight = Math.max(1, maxY - minY);
+    const padX = Math.max(frameSize.width * 0.04, boxWidth * 0.35);
+    const padY = Math.max(frameSize.height * 0.04, boxHeight * 0.35);
+    const cropX1 = Math.max(0, minX - padX);
+    const cropY1 = Math.max(0, minY - padY);
+    const cropX2 = Math.min(frameSize.width, maxX + padX);
+    const cropY2 = Math.min(frameSize.height, maxY + padY);
+    const cropWidth = Math.max(1, cropX2 - cropX1);
+    const cropHeight = Math.max(1, cropY2 - cropY1);
+    const centerX = cropX1 + cropWidth / 2;
+    const centerY = cropY1 + cropHeight / 2;
+    const scale = Math.min(5.5, Math.max(1, Math.min((frameSize.width * 0.82) / cropWidth, (frameSize.height * 0.82) / cropHeight)));
+    return {
+      transform: `translate3d(${frameSize.width / 2 - centerX * scale}px, ${frameSize.height / 2 - centerY * scale}px, 0) scale(${scale})`,
+      transformOrigin: "0 0",
+    };
+  }, [canFocus, frameSize, renderedBoxes]);
+
+  const activeLayerStyle = objectFocused && focusStyle ? focusStyle : layerStyle;
+  const aspect = imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
+
+  return (
+    <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
+      <div className="snapshot-layer" style={activeLayerStyle || undefined}>
+        {event?.snapshot_path ? <img src={apiFile(event.snapshot_path)} alt={alt} onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
+        {renderedBoxes.length ? (
+          <div className="object-box-layer" aria-hidden="true">
+            {renderedBoxes.map((box, index) => (
+              <span
+                className="object-box"
+                key={`${box.label}-${index}-${box.x1}-${box.y1}`}
+                style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
+              >
+                <strong>{box.label}{box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}</strong>
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {canFocus ? (
+        <button
+          type="button"
+          className={`snapshot-focus-button ${objectFocused ? "active" : ""}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setObjectFocused((focused) => !focused);
+          }}
+          title={objectFocused ? "Show full snapshot" : "Focus detected objects"}
+          aria-label={objectFocused ? "Show full snapshot" : "Focus detected objects"}
+        >
+          <Crop size={14} />
+        </button>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
 function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
   const rawEvents = incident.events || [];
   const showSubEvents = rawEvents.length > 1;
@@ -677,19 +816,20 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
       onKeyDown={onKey}
       title={`${incident.camera_id} ${timeText}`}
     >
-      <button className="incident-preview" type="button" onClick={openPreview} aria-label={expanded ? "Open selected event snapshot" : "Expand incident"}>
-        {preview.snapshot_path ? <img src={apiFile(preview.snapshot_path)} alt="incident snapshot" /> : <div className="empty-thumb"><Camera size={24} /></div>}
-        <div className="incident-snapshot-hud">
-          <div className="incident-snapshot-main">
-            <strong>{incident.camera_id}</strong>
-            <time>{expanded ? previewTimeText : timeText}</time>
+      <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Open selected event snapshot" : "Expand incident"}>
+        <SnapshotImage event={preview} alt="incident snapshot">
+          <div className="incident-snapshot-hud">
+            <div className="incident-snapshot-main">
+              <strong>{incident.camera_id}</strong>
+              <time>{expanded ? previewTimeText : timeText}</time>
+            </div>
+            <div className="pill-row compact incident-labels">
+              {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
+            </div>
           </div>
-          <div className="pill-row compact incident-labels">
-            {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
-          </div>
-        </div>
-        <span className="event-count">{countText}</span>
-      </button>
+          <span className="event-count">{countText}</span>
+        </SnapshotImage>
+      </div>
       {expanded && showSubEvents ? (
         <div className="incident-meta">
           <div className="incident-detail" onClick={(event) => event.stopPropagation()}>
@@ -724,9 +864,7 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
   );
 }
 
-function EventOverlay({ event, events, timeZone, onClose, onSelect }) {
-  const objects = eventObjects(event);
-  const detectedObjects = objects.filter((object) => object.label);
+function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
   const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
   const gestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
@@ -735,6 +873,16 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect }) {
   const [clipError, setClipError] = useState("");
   const [videoActive, setVideoActive] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
+  const [manualDetection, setManualDetection] = useState(null);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState("");
+  const displayedEvent = manualDetection ? { ...event, objects: manualDetection.objects || [] } : event;
+  const objects = eventObjects(displayedEvent);
+  const detectedObjects = objects.filter((object) => object.label);
+  const manualConfidenceNumber = Number(manualConfidence);
+  const safeManualConfidence = Number.isFinite(manualConfidenceNumber) ? Math.max(0.01, Math.min(0.99, manualConfidenceNumber)) : 0.35;
+  const manualEventId = Number(event.representative_event_id || event.id);
   const downloadName = `survng-${String(event.camera_id || "camera")}-${String(event.created_at || event.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
 
   useEffect(() => {
@@ -922,7 +1070,33 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect }) {
 
   useEffect(() => {
     resetZoom();
+    setManualDetection(null);
+    setManualError("");
+    setManualLoading(false);
   }, [event.id]);
+
+  async function runManualDetection() {
+    if (!Number.isFinite(manualEventId)) {
+      setManualError("No event id available");
+      return;
+    }
+    setManualLoading(true);
+    setManualError("");
+    try {
+      const response = await fetch(`/api/events/${manualEventId}/detect?confidence=${safeManualConfidence.toFixed(2)}`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Manual detection failed");
+      setManualDetection(payload);
+      if (payload.event) onSelect(payload.event);
+      if (onRefresh) onRefresh();
+      setVideoActive(false);
+      resetZoom();
+    } catch (error) {
+      setManualError(error.message || "Manual detection failed");
+    } finally {
+      setManualLoading(false);
+    }
+  }
 
   useEffect(() => {
     function onKey(keyEvent) {
@@ -991,7 +1165,14 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect }) {
           }}
           title={zoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : clipError || (clipLoading ? "Preparing event clip" : "Scroll or pinch to zoom. Click to play event video.")}
         >
-          {event.snapshot_path ? <img className="zoomable-event-image" src={apiFile(event.snapshot_path)} alt="selected event snapshot" style={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }} /> : <div className="empty-thumb"><Camera size={42} /></div>}
+          <SnapshotImage
+            event={displayedEvent}
+            alt="selected event snapshot"
+            iconSize={42}
+            className="event-snapshot-frame"
+            layerStyle={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }}
+            allowObjectFocus={zoom.scale === 1 && !videoActive}
+          />
           {videoActive && clipInfo && !clipError ? (
             <video className="event-video-layer" ref={clipVideoRef} controls playsInline preload="metadata" onClick={(event) => event.stopPropagation()} />
           ) : null}
@@ -1008,6 +1189,37 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect }) {
               )) : <span className="pill quiet">motion only</span>}
             </div>
           </div>
+          <div className="manual-detect-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="manual-detect-head">
+              <div>
+                <span className="muted">Manual OpenVINO</span>
+                <strong>{Math.round(safeManualConfidence * 100)}% confidence</strong>
+              </div>
+              <button type="button" className="tile-control-button" onClick={runManualDetection} disabled={manualLoading || !Number.isFinite(manualEventId)}>
+                <Search size={15} /> {manualLoading ? "Running" : "Run"}
+              </button>
+            </div>
+            <input
+              type="range"
+              min="0.05"
+              max="0.95"
+              step="0.01"
+              value={safeManualConfidence}
+              onChange={(event) => setManualConfidence(event.target.value)}
+              aria-label="Manual detection confidence"
+            />
+            {manualError ? <span className="manual-debug error">{manualError}</span> : null}
+            {manualDetection ? (
+              <div className="manual-debug">
+                <span>{manualDetection.object_count} objects</span>
+                <span>{manualDetection.elapsed_ms} ms</span>
+                <span>{manualDetection.detector?.loaded_backend || "detector"}</span>
+                <span>{manualDetection.detector?.loaded_device || manualDetection.detector?.configured_device || "device"}</span>
+                <span>{manualDetection.snapshot_width}x{manualDetection.snapshot_height}</span>
+                {manualDetection.labels?.length ? <code>{manualDetection.labels.join(", ")}</code> : <code>no labels</code>}
+              </div>
+            ) : null}
+          </div>
         </div>
       </section>
     </div>
@@ -1015,7 +1227,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect }) {
 }
 
 function IncidentsPage({ timeZone }) {
-  const { cameras, incidents } = usePollingData();
+  const { cameras, incidents, refresh } = usePollingData();
   const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useStoredState("survng.incidentCameraFilter.v1", "all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useStoredState("survng.incidentObjectFilter.v1", "all");
@@ -1066,6 +1278,17 @@ function IncidentsPage({ timeZone }) {
       setExpandedIncidentId(null);
     }
   }, [selectedEvent, expandedIncidentId, visibleIncidents]);
+
+  useEffect(() => {
+    function onKey(keyEvent) {
+      if (keyEvent.key === "Escape" && expandedIncidentId && !selectedEvent) {
+        keyEvent.preventDefault();
+        setExpandedIncidentId(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expandedIncidentId, selectedEvent]);
 
   function toggleIncident(incidentId) {
     setExpandedIncidentId((current) => current === incidentId ? null : incidentId);
@@ -1135,7 +1358,7 @@ function IncidentsPage({ timeZone }) {
           </div>
         ) : null}
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
     </main>
   );
 }
@@ -1217,6 +1440,17 @@ function LivePage({ timeZone }) {
       setExpandedIncidentId(null);
     }
   }, [selectedEvent, expandedIncidentId, visibleIncidents]);
+
+  useEffect(() => {
+    function onKey(keyEvent) {
+      if (keyEvent.key === "Escape" && expandedIncidentId && !selectedEvent) {
+        keyEvent.preventDefault();
+        setExpandedIncidentId(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expandedIncidentId, selectedEvent]);
 
   function toggleIncident(incidentId) {
     setExpandedIncidentId((current) => current === incidentId ? null : incidentId);
@@ -1322,7 +1556,7 @@ function LivePage({ timeZone }) {
           </div>
         ) : null}
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
       {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} onClose={() => setExpandedCamera(null)} /> : null}
     </main>
   );
@@ -1462,7 +1696,7 @@ function RecordingsPage({ timeZone }) {
       const nextCameraId = activeCameraId || nextCameras[0]?.id;
       if (!nextCameraId) return;
       if (!cameraId) setCameraId(nextCameraId);
-      const recordingsResponse = await fetch(`/api/cameras/${nextCameraId}/recordings?limit=1000`);
+      const recordingsResponse = await fetch(`/api/cameras/${nextCameraId}/recordings?limit=20000`);
       setRecordings(await recordingsResponse.json());
       const eventResponse = await fetch(`/api/cameras/${nextCameraId}/recordings/events?limit=5000`);
       setEvents(await eventResponse.json());
@@ -2015,6 +2249,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
           <label>Event Clip Before<input type="number" min="0" max="30" step="1" value={config.event_clip_before_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_before_seconds"], Number(event.target.value))} /></label>
           <label>Event Clip After<input type="number" min="0" max="30" step="1" value={config.event_clip_after_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_after_seconds"], Number(event.target.value))} /></label>
+          <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
         </div>
       </div>
 

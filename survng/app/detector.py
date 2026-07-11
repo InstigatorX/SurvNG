@@ -33,6 +33,7 @@ class OpenVinoDetector:
         self.backend = ""
         self.loaded_device = ""
         self._stats_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
         self._pending_requests = 0
         self._active_inferences = 0
         self._durations_ms: deque[float] = deque(maxlen=100)
@@ -151,11 +152,19 @@ class OpenVinoDetector:
             self.coreml_model = None
             return False
 
-    def detect(self, frame: np.ndarray) -> list[dict[str, Any]]:
+    def detect(self, frame: np.ndarray, confidence_threshold: float | None = None) -> list[dict[str, Any]]:
+        with self._inference_lock:
+            return self._detect_locked(frame, confidence_threshold=confidence_threshold)
+
+    def _detect_locked(self, frame: np.ndarray, confidence_threshold: float | None = None) -> list[dict[str, Any]]:
         if not self.enabled or (
             self.compiled_model is None and self.cv_net is None and self.coreml_model is None
         ):
             return [{"status": "detector_unavailable"}]
+
+        original_threshold = self.config.confidence_threshold
+        if confidence_threshold is not None:
+            self.config.confidence_threshold = max(0.01, min(0.99, float(confidence_threshold)))
 
         self._begin_inference()
         started = time.perf_counter()
@@ -177,6 +186,7 @@ class OpenVinoDetector:
                 objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0])
             return objects
         finally:
+            self.config.confidence_threshold = original_threshold
             self._finish_inference((time.perf_counter() - started) * 1000, objects)
 
     def _begin_inference(self) -> None:

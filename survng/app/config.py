@@ -76,6 +76,7 @@ class AppConfig(BaseModel):
     ffmpeg_path: str = "ffmpeg"
     event_clip_before_seconds: float = 5.0
     event_clip_after_seconds: float = 5.0
+    recording_segment_seconds: float = Field(default=10.0, ge=2.0, le=300.0)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 

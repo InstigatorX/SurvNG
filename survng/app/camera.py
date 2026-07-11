@@ -20,6 +20,8 @@ from .recorder import Recorder
 LOGGER = logging.getLogger(__name__)
 RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
+RECORDED_EVENT_RETRY_SECONDS = 12.0
+RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 
 
 class CameraWorker:
@@ -133,8 +135,7 @@ class CameraWorker:
         frame, objects, recording_path = self._recorded_motion_frame(event_at)
         snapshot_path = ""
         if frame is not None:
-            snapshot_frame = self._annotate_frame(frame, objects)
-            snapshot_path = self._write_snapshot(snapshot_frame)
+            snapshot_path = self._write_snapshot(frame)
         else:
             objects = [{"status": "no_recorded_frame"}]
         self.events.add_event(
@@ -215,42 +216,54 @@ class CameraWorker:
         if wait_seconds > 0:
             time.sleep(min(wait_seconds, 3.0))
 
+        deadline = time.time() + RECORDED_EVENT_RETRY_SECONDS
         best_frame: Any | None = None
         best_objects: list[dict[str, Any]] = []
         best_score = -1.0
         best_distance = float("inf")
         best_recording_path = ""
 
-        for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
-            target_epoch = event_epoch + sample_offset
-            row = self.recorder.recording_at(self.camera.id, target_epoch)
-            if row is None:
-                continue
+        while True:
+            for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
+                target_epoch = event_epoch + sample_offset
+                row = self.recorder.recording_at(self.camera.id, target_epoch)
+                if row is None:
+                    continue
 
-            start_epoch = row.get("start_epoch")
-            if start_epoch is None:
-                continue
-            frame_offset = max(0.0, target_epoch - float(start_epoch))
-            frame = self._read_recorded_frame(Path(row["path"]), frame_offset)
-            if frame is None:
-                continue
+                start_epoch = row.get("start_epoch")
+                if start_epoch is None:
+                    continue
+                frame_offset = max(0.0, target_epoch - float(start_epoch))
+                frame = self._read_recorded_frame(Path(row["path"]), frame_offset)
+                if frame is None:
+                    continue
 
-            objects = self.detector.detect(frame)
-            score = self._motion_object_score(objects)
-            distance = abs(sample_offset)
-            if score > best_score or (score == best_score and distance < best_distance):
-                best_frame = frame
-                best_objects = objects
-                best_score = score
-                best_distance = distance
-                best_recording_path = str(row["path"])
+                objects = self.detector.detect(frame)
+                score = self._motion_object_score(objects)
+                distance = abs(sample_offset)
+                if score > best_score or (score == best_score and distance < best_distance):
+                    best_frame = frame
+                    best_objects = objects
+                    best_score = score
+                    best_distance = distance
+                    best_recording_path = str(row["path"])
+
+            if best_frame is not None or time.time() >= deadline:
+                break
+            time.sleep(RECORDED_EVENT_RETRY_INTERVAL_SECONDS)
 
         if best_frame is not None:
             return best_frame, best_objects, best_recording_path
 
         fallback = self._get_latest_frame()
         if fallback is not None:
-            return fallback, [{"status": "no_recorded_frame"}], ""
+            objects = self.detector.detect(fallback)
+            if objects:
+                for detected in objects:
+                    detected["frame_source"] = "live_fallback"
+                    detected["recording_status"] = "no_recorded_frame"
+                return fallback, objects, ""
+            return fallback, [{"status": "no_recorded_frame", "frame_source": "live_fallback"}], ""
         return None, [{"status": "no_recorded_frame"}], ""
 
     def _read_recorded_frame(self, path: Path, offset_seconds: float) -> Any | None:
@@ -337,59 +350,3 @@ class CameraWorker:
             LOGGER.warning("failed to write snapshot for %s to %s", self.camera.id, path)
             return ""
         return str(path)
-
-    def _annotate_frame(self, frame: Any, objects: list[dict[str, Any]]) -> Any:
-        annotated = frame.copy()
-        height, width = annotated.shape[:2]
-        for detected in objects:
-            box = detected.get("box")
-            if not isinstance(box, dict):
-                continue
-            try:
-                x1 = int(box["x1"])
-                y1 = int(box["y1"])
-                x2 = int(box["x2"])
-                y2 = int(box["y2"])
-            except (KeyError, TypeError, ValueError):
-                continue
-
-            x1 = max(0, min(width - 1, x1))
-            y1 = max(0, min(height - 1, y1))
-            x2 = max(0, min(width - 1, x2))
-            y2 = max(0, min(height - 1, y2))
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            label = str(detected.get("label") or "object")
-            confidence = detected.get("confidence")
-            if isinstance(confidence, (float, int)):
-                label = f"{label} {confidence * 100:.1f}%"
-
-            color = (34, 197, 94)
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-            text_size, baseline = cv2.getTextSize(
-                label,
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                2,
-            )
-            text_width, text_height = text_size
-            text_y = max(text_height + baseline + 4, y1)
-            cv2.rectangle(
-                annotated,
-                (x1, text_y - text_height - baseline - 6),
-                (min(width - 1, x1 + text_width + 8), text_y + baseline - 2),
-                color,
-                -1,
-            )
-            cv2.putText(
-                annotated,
-                label,
-                (x1 + 4, text_y - baseline - 2),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 0, 0),
-                2,
-                cv2.LINE_AA,
-            )
-        return annotated

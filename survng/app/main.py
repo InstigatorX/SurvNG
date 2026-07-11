@@ -9,6 +9,7 @@ import os
 import re
 import platform
 import shutil
+import time
 import socket
 import subprocess
 import tempfile
@@ -20,9 +21,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import cv2
 
 from .baichuan_native import ffmpeg_input_args, is_native_baichuan, start_ffmpeg_pipe
 from .config import AppConfig, load_config, save_config
+from .detector import objects_to_json
 from .manager import AppManager
 
 config = load_config()
@@ -30,6 +33,7 @@ manager = AppManager(config)
 active_mse_streams: set[str] = set()
 LOG_LINES: deque[dict] = deque(maxlen=1000)
 SECRET_URL_RE = re.compile(r"(\b(?:rtsp|rtmp|http|https|reolink)://)([^:/@\s]+):([^@\s]+)@", re.IGNORECASE)
+RECORDING_LOOKUP_LIMIT = 20000
 
 
 class MemoryLogHandler(logging.Handler):
@@ -278,6 +282,60 @@ def incidents(limit: int = 200, gap_seconds: int = 45) -> list[dict]:
     return _incident_rows(rows, gap_seconds=max(5, min(gap_seconds, 300)))
 
 
+@app.post("/api/events/{event_id}/detect")
+def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
+    event = manager.events.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    snapshot_path = Path(str(event.get("snapshot_path") or ""))
+    if not snapshot_path.exists() or not snapshot_path.is_file():
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    try:
+        snapshot_path.resolve().relative_to(Path(config.storage_dir).resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="snapshot outside storage directory") from None
+
+    safe_confidence = max(0.01, min(0.99, float(confidence)))
+    frame = cv2.imread(str(snapshot_path))
+    if frame is None:
+        raise HTTPException(status_code=422, detail="failed to read snapshot")
+
+    started = time.perf_counter()
+    objects = manager.detector.detect(frame, confidence_threshold=safe_confidence)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    for detected_object in objects:
+        detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
+        detected_object["detection_source"] = "manual_openvino"
+        detected_object["manual_confidence_threshold"] = safe_confidence
+    persisted_event = manager.events.update_objects(event_id, objects_to_json(objects))
+    if persisted_event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    detected = [item for item in objects if item.get("label") and item.get("box")]
+    detector_status = manager.detector_status()
+    return {
+        "event_id": event_id,
+        "camera_id": event.get("camera_id"),
+        "snapshot_path": str(snapshot_path),
+        "snapshot_width": int(frame.shape[1]),
+        "snapshot_height": int(frame.shape[0]),
+        "confidence": safe_confidence,
+        "elapsed_ms": elapsed_ms,
+        "objects": objects,
+        "object_count": len(detected),
+        "labels": sorted({str(item.get("label")) for item in detected}),
+        "event": _event_row(persisted_event),
+        "persisted": True,
+        "detector": {
+            "enabled": detector_status.get("enabled"),
+            "loaded_backend": detector_status.get("loaded_backend"),
+            "loaded_device": detector_status.get("loaded_device"),
+            "configured_device": detector_status.get("configured_device"),
+            "input_shape": detector_status.get("input_shape"),
+            "output_format": detector_status.get("output_format"),
+        },
+    }
+
+
 @app.get("/api/cameras/{camera_id}/snapshot.jpg")
 def snapshot(camera_id: str, source: str = "live") -> Response:
     worker = manager.workers.get(camera_id)
@@ -452,12 +510,12 @@ def stop_recording(camera_id: str) -> dict:
 
 @app.get("/api/cameras/{camera_id}/recordings")
 def recordings(camera_id: str, limit: int = 200) -> list[dict]:
-    return _recording_rows(camera_id, limit=max(1, min(limit, 1000)))
+    return _recording_rows(camera_id, limit=max(1, min(limit, RECORDING_LOOKUP_LIMIT)))
 
 
 @app.get("/api/cameras/{camera_id}/recordings/events")
 def recording_events(camera_id: str, limit: int = 1000) -> list[dict]:
-    rows = _recording_rows(camera_id, limit=1000)
+    rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT)
     if not rows:
         return []
     start_epoch = rows[0].get("start_epoch")
@@ -493,7 +551,7 @@ def event_clip(event_id: int, before: float | None = None, after: float | None =
 
 @app.get("/api/cameras/{camera_id}/recordings/stream.mp4")
 def recording_stream(camera_id: str, offset: float = 0.0, duration: float | None = None) -> StreamingResponse:
-    rows = _recording_rows(camera_id, limit=1000)
+    rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT)
     if not rows:
         raise HTTPException(status_code=404, detail="no recordings found")
 
@@ -597,7 +655,7 @@ def recording_clip_hls_playlist(camera_id: str, offset: float = 0.0, duration: f
 
 @app.get("/api/cameras/{camera_id}/recordings/clip.ts")
 def recording_clip_hls_segment(camera_id: str, offset: float = 0.0, duration: float = 20.0) -> StreamingResponse:
-    rows = _recording_rows(camera_id, limit=1000)
+    rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT)
     if not rows:
         raise HTTPException(status_code=404, detail="no recordings found")
 
@@ -675,7 +733,7 @@ def recording_clip_hls_segment(camera_id: str, offset: float = 0.0, duration: fl
 
 @app.get("/api/cameras/{camera_id}/recordings/hls/index.m3u8")
 def recording_hls_playlist(camera_id: str) -> Response:
-    rows = _recording_rows(camera_id, limit=1000)
+    rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT)
     if not rows:
         raise HTTPException(status_code=404, detail="no recordings found")
 
@@ -705,7 +763,7 @@ def recording_hls_playlist(camera_id: str) -> Response:
 
 @app.get("/api/cameras/{camera_id}/recordings/hls/{segment_index}.ts")
 def recording_hls_segment(camera_id: str, segment_index: int) -> StreamingResponse:
-    rows = _recording_rows(camera_id, limit=1000)
+    rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT)
     if segment_index < 0 or segment_index >= len(rows):
         raise HTTPException(status_code=404, detail="recording segment not found")
 
@@ -900,7 +958,7 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     window_end = event_epoch + window_after
 
     rows = [
-        row for row in _recording_rows(camera_id, limit=2000)
+        row for row in _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT)
         if row.get("start_epoch") is not None
         and row.get("end_epoch") is not None
         and Path(str(row.get("path") or "")).exists()
