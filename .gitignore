@@ -1,0 +1,95 @@
+# Python environments and caches
+.venv/
+.venv-*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend dependencies and generated output
+frontend/node_modules/
+frontend/dist/
+survng/static/
+node_modules/
+dist/
+build/
+
+# Runtime config and secrets
+config.json
+*.local.json
+.env
+.env.*
+!.env.example
+!config.example.json
+!config.*.example.json
+
+# Runtime media, recordings, databases, and generated artifacts
+survng/storage/
+recordings/
+recording*/
+media/
+clips/
+event_clips/
+snapshots/
+events/
+exports/
+frames/
+*.sqlite3
+*.sqlite3-*
+*.mp4
+*.mov
+*.avi
+*.m4s
+*.m3u8
+*.ts
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.heic
+
+# Allow intentional project images/assets despite camera media ignores
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!docs/**/*.png
+!docs/**/*.webp
+!frontend/public/**/*.jpg
+!frontend/public/**/*.jpeg
+!frontend/public/**/*.png
+!frontend/public/**/*.webp
+!frontend/src/assets/**/*.jpg
+!frontend/src/assets/**/*.jpeg
+!frontend/src/assets/**/*.png
+!frontend/src/assets/**/*.webp
+
+# Local model artifacts. Keep small label/class files trackable.
+*.onnx
+*.pt
+*.pth
+*.engine
+*.tflite
+*.blob
+*.xml
+*.bin
+*.mlmodel
+*.mlpackage/
+!classes.txt
+
+# Logs and process output
+logs/
+*.log
+*.pid
+kernel.errors.txt
+nohup.out
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

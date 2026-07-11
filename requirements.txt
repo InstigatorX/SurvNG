@@ -1,0 +1,9 @@
+fastapi>=0.121,<1
+uvicorn[standard]>=0.38,<1
+opencv-python==4.10.0.84
+openvino==2026.2.1
+coremltools>=8,<10; platform_system=="Darwin"
+Pillow>=10,<13; platform_system=="Darwin"
+onvif-zeep==0.2.12
+pydantic>=2.12,<3
+cryptography>=42,<46

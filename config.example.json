@@ -1,0 +1,17 @@
+{
+  "storage_dir": "survng/storage",
+  "ffmpeg_path": "ffmpeg",
+  "event_clip_before_seconds": 5.0,
+  "event_clip_after_seconds": 5.0,
+  "detector": {
+    "enabled": false,
+    "model_path": "best.onnx",
+    "model_xml": "",
+    "labels_path": "classes.txt",
+    "device": "CPU",
+    "confidence_threshold": 0.45,
+    "nms_threshold": 0.45,
+    "labels": []
+  },
+  "cameras": []
+}
