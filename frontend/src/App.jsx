@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -19,8 +19,6 @@ import {
   Monitor,
   Moon,
   Plus,
-  Pause,
-  Play,
   Power,
   Radar,
   Radio,
@@ -54,6 +52,86 @@ const THEME_META = {
   light: { label: "Light", icon: Sun },
   dark: { label: "Dark", icon: Moon },
 };
+
+let shakaImport;
+function loadShaka() {
+  if (!shakaImport) shakaImport = import("shaka-player").then((module) => module.default || module);
+  return shakaImport;
+}
+
+const ShakaVideo = forwardRef(function ShakaVideo({
+  src,
+  mimeType,
+  startTime = null,
+  bufferingGoal = 20,
+  autoPlay = false,
+  muted = false,
+  onReady,
+  onError,
+  ...videoProps
+}, forwardedRef) {
+  const videoRef = useRef(null);
+  const [runtime, setRuntime] = useState(null);
+  const callbacksRef = useRef({ onReady, onError });
+  useImperativeHandle(forwardedRef, () => videoRef.current);
+
+  useEffect(() => {
+    callbacksRef.current = { onReady, onError };
+  }, [onReady, onError]);
+
+  useEffect(() => {
+    let disposed = false;
+    let nextPlayer = null;
+    let shaka = null;
+    let handleError = null;
+    loadShaka().then((loadedShaka) => {
+      if (disposed) return;
+      shaka = loadedShaka;
+      shaka.polyfill.installAll();
+      if (!shaka.Player.isBrowserSupported()) {
+        callbacksRef.current.onError?.(new Error("This browser does not support Shaka Player"));
+        return;
+      }
+      nextPlayer = new shaka.Player();
+      handleError = (event) => callbacksRef.current.onError?.(event.detail || event);
+      nextPlayer.addEventListener("error", handleError);
+      nextPlayer.configure({
+        streaming: {
+          preferNativeHls: false,
+          bufferingGoal,
+          rebufferingGoal: 1,
+        },
+      });
+      return nextPlayer.attach(videoRef.current).then(() => {
+        if (!disposed) setRuntime({ player: nextPlayer, shaka });
+      });
+    }).catch((error) => callbacksRef.current.onError?.(error));
+    return () => {
+      disposed = true;
+      if (nextPlayer && handleError) nextPlayer.removeEventListener("error", handleError);
+      nextPlayer?.destroy();
+    };
+  }, [bufferingGoal]);
+
+  useEffect(() => {
+    if (!runtime?.player || !src) return undefined;
+    let cancelled = false;
+    runtime.player.load(src, Number.isFinite(startTime) ? startTime : null, mimeType).then(() => {
+      if (cancelled) return;
+      callbacksRef.current.onReady?.(runtime.player, videoRef.current);
+      if (autoPlay) videoRef.current?.play().catch(() => {});
+    }).catch((error) => {
+      if (!cancelled && error?.code !== runtime.shaka.util.Error.Code.LOAD_INTERRUPTED) {
+        callbacksRef.current.onError?.(error);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [runtime, src, mimeType, startTime]);
+
+  return <video ref={videoRef} muted={muted} {...videoProps} />;
+});
 
 function apiFile(path) {
   return `/api/files?path=${encodeURIComponent(path)}`;
@@ -152,8 +230,22 @@ function formatDayClock(seconds) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function isMobileViewport() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
+}
+
+function preferredStreamSource() {
+  return isMobileViewport() ? "live" : "main";
+}
+
+function sourceLabel(source) {
+  return source === "main" ? "Main" : "Sub";
+}
+
 function dateKeyForTimeZone(value, timeZone) {
-  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value || Date.now());
+  const date = typeof value === "number"
+    ? new Date(value > 100_000_000_000 ? value : value * 1000)
+    : new Date(value || Date.now());
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
@@ -425,11 +517,6 @@ function usePollingData() {
   return { cameras, incidents, loading, refresh: load };
 }
 
-function isSafariBrowser() {
-  const ua = navigator.userAgent || "";
-  return /Safari/.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR/.test(ua);
-}
-
 const STREAM_MODES = ["auto", "mjpeg"];
 const STREAM_LABELS = {
   auto: "Auto",
@@ -451,8 +538,9 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
   const [mjpegToken, setMjpegToken] = useState(() => String(Date.now()));
   const [snapshotToken, setSnapshotToken] = useState(() => String(Date.now()));
   const [streamReady, setStreamReady] = useState(false);
-  const safariSnapshotMode = isSafariBrowser() && normalizedStreamMode === "auto";
-  const shouldUseMjpegStream = camera.running && streamReady && !safariSnapshotMode;
+  const [hlsFailed, setHlsFailed] = useState(false);
+  const shouldUseHls = camera.running && streamReady && normalizedStreamMode === "auto" && !hlsFailed;
+  const shouldUseMjpegStream = camera.running && streamReady && (normalizedStreamMode === "mjpeg" || hlsFailed);
 
   useEffect(() => {
     if (!STREAM_MODES.includes(streamMode)) setStreamMode("auto");
@@ -462,6 +550,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
     setMjpegToken(String(Date.now()));
     setSnapshotToken(String(Date.now()));
     setStreamReady(false);
+    setHlsFailed(false);
   }, [camera.id, sourceMode, normalizedStreamMode]);
 
   useEffect(() => {
@@ -479,10 +568,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
   }, [shouldUseMjpegStream]);
 
   useEffect(() => {
-    if (!safariSnapshotMode || !camera.running) return undefined;
+    if (camera.running && streamReady) return undefined;
     const timer = window.setInterval(() => setSnapshotToken(String(Date.now())), 2000);
     return () => window.clearInterval(timer);
-  }, [safariSnapshotMode, camera.running]);
+  }, [camera.running, streamReady]);
 
   async function post(action) {
     await fetch(`/api/cameras/${camera.id}/${action}`, { method: "POST" });
@@ -518,11 +607,24 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
         }}
         aria-label={`Open ${camera.name} live view`}
       >
-        <img
-          src={imageUrl}
-          alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
-          onLoad={(event) => setAspect(mediaAspect(event.currentTarget))}
-        />
+        {shouldUseHls ? (
+          <ShakaVideo
+            src={`/api/cameras/${camera.id}/hls/${sourceMode}/index.m3u8`}
+            mimeType="application/vnd.apple.mpegurl"
+            autoPlay
+            muted
+            playsInline
+            preload="auto"
+            onReady={(_player, video) => setAspect(mediaAspect(video))}
+            onError={() => setHlsFailed(true)}
+          />
+        ) : (
+          <img
+            src={imageUrl}
+            alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
+            onLoad={(event) => setAspect(mediaAspect(event.currentTarget))}
+          />
+        )}
         <div
           className="tile-header camera-hud"
           onClick={(event) => event.stopPropagation()}
@@ -561,8 +663,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
 }
 
 function LiveCameraOverlay({ camera, onClose }) {
-  const imageRef = useRef(null);
+  const mediaRef = useRef(null);
   const [aspect, setAspect] = useState("16 / 9");
+  const [hlsFailed, setHlsFailed] = useState(false);
+  const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
+  const activeSource = source === "main" ? "main" : "live";
 
   useEffect(() => {
     function onKey(event) {
@@ -572,8 +677,12 @@ function LiveCameraOverlay({ camera, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  function updateImageAspect() {
-    setAspect(mediaAspect(imageRef.current));
+  useEffect(() => {
+    setHlsFailed(false);
+  }, [camera.id, activeSource]);
+
+  function updateMediaAspect() {
+    setAspect(mediaAspect(mediaRef.current));
   }
 
   return (
@@ -583,19 +692,36 @@ function LiveCameraOverlay({ camera, onClose }) {
         <div className="live-overlay-head">
           <div>
             <h2>{camera.name}</h2>
-            <span>Shared main stream</span>
+            <span>{sourceLabel(activeSource)} stream</span>
           </div>
+          <button type="button" className="tile-control-button" onClick={() => setSource(activeSource === "main" ? "live" : "main")} aria-label="Switch live stream">
+            <Radio size={15} /> {sourceLabel(activeSource)}
+          </button>
           <button type="button" className="tile-control-button icon-only" onClick={onClose} aria-label="Close live view">
             <X size={18} />
           </button>
         </div>
         <div className="live-overlay-media">
-          <img
-            ref={imageRef}
-            src={`/api/cameras/${camera.id}/stream.mjpg?source=main`}
-            alt={`${camera.name} main live stream`}
-            onLoad={updateImageAspect}
-          />
+          {hlsFailed ? (
+            <img
+              ref={mediaRef}
+              src={`/api/cameras/${camera.id}/stream.mjpg?source=${activeSource}`}
+              alt={`${camera.name} ${sourceLabel(activeSource).toLowerCase()} live stream`}
+              onLoad={updateMediaAspect}
+            />
+          ) : (
+            <ShakaVideo
+              ref={mediaRef}
+              src={`/api/cameras/${camera.id}/hls/${activeSource}/index.m3u8`}
+              mimeType="application/vnd.apple.mpegurl"
+              autoPlay
+              muted
+              controls
+              playsInline
+              onReady={updateMediaAspect}
+              onError={() => setHlsFailed(true)}
+            />
+          )}
         </div>
       </section>
     </div>
@@ -635,6 +761,9 @@ function objectBoxes(event) {
     .map(({ object, box }) => ({
       label: object.label,
       confidence: object.confidence,
+      maskPolygon: Array.isArray(object.mask_polygon)
+        ? object.mask_polygon.filter((point) => Array.isArray(point) && point.length >= 2).map((point) => [Number(point[0]), Number(point[1])])
+        : [],
       x1: Number(box.x1),
       y1: Number(box.y1),
       x2: Number(box.x2),
@@ -696,6 +825,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
       top: renderedImage.y + box.y1 * renderedImage.scale,
       width: (box.x2 - box.x1) * renderedImage.scale,
       height: (box.y2 - box.y1) * renderedImage.scale,
+      maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * renderedImage.scale},${renderedImage.y + y * renderedImage.scale}`).join(" "),
     })).filter((box) => box.width > 0 && box.height > 0);
   }, [boxes, frameSize, renderedImage]);
 
@@ -733,6 +863,11 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
         {event?.snapshot_path ? <img src={apiFile(event.snapshot_path)} alt={alt} onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
+            <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
+              {renderedBoxes.filter((box) => box.maskPoints).map((box, index) => (
+                <polygon key={`mask-${box.label}-${index}`} points={box.maskPoints} />
+              ))}
+            </svg>
             {renderedBoxes.map((box, index) => (
               <span
                 className="object-box"
@@ -764,11 +899,77 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   );
 }
 
+
+function IncidentClipLayer({ event, active, onEnded }) {
+  const videoRef = useRef(null);
+  const [clipInfo, setClipInfo] = useState(null);
+  const [clipLoading, setClipLoading] = useState(false);
+  const [clipError, setClipError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadClipSettings() {
+      const eventId = Number(event?.representative_event_id || event?.id);
+      if (!active || !Number.isFinite(eventId)) {
+        setClipInfo(null);
+        setClipLoading(false);
+        setClipError(active ? "No event video available" : "");
+        return;
+      }
+      setClipInfo(null);
+      setClipLoading(true);
+      setClipError("");
+      let before = 5;
+      let after = 5;
+      try {
+        const response = await fetch("/api/event-clip/settings");
+        if (response.ok) {
+          const settings = await response.json();
+          before = Number(settings.before_seconds ?? before);
+          after = Number(settings.after_seconds ?? after);
+        }
+      } catch {
+        // Defaults keep inline playback useful if settings are temporarily unavailable.
+      }
+      if (cancelled) return;
+      const safeBefore = Number.isFinite(before) ? before : 5;
+      const safeAfter = Number.isFinite(after) ? after : 5;
+      setClipInfo({ url: eventClipUrl(eventId, safeBefore, safeAfter) });
+      setClipLoading(false);
+    }
+    loadClipSettings();
+    return () => { cancelled = true; };
+  }, [active, event?.id, event?.representative_event_id]);
+
+  if (!active) return null;
+  return (
+    <div className="incident-video-layer" onClick={(event) => event.stopPropagation()}>
+      {clipInfo && !clipError ? (
+        <ShakaVideo
+          ref={videoRef}
+          src={clipInfo.url}
+          mimeType="video/mp4"
+          autoPlay
+          controls
+          playsInline
+          preload="metadata"
+          onReady={() => { setClipLoading(false); setClipError(""); }}
+          onError={() => { setClipLoading(false); setClipError("No recording window found"); }}
+          onEnded={onEnded}
+        />
+      ) : (
+        <div className="incident-video-status">{clipLoading ? "Preparing video..." : clipError || "No event video available"}</div>
+      )}
+    </div>
+  );
+}
+
 function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
   const rawEvents = incident.events || [];
   const showSubEvents = rawEvents.length > 1;
   const [selectedPreview, setSelectedPreview] = useState(null);
   const [subEventsOpen, setSubEventsOpen] = useState(false);
+  const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const preview = selectedPreview || incident;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
@@ -782,13 +983,19 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
     if (!expanded) {
       setSelectedPreview(null);
       setSubEventsOpen(false);
+      setInlineVideoActive(false);
     }
   }, [expanded]);
 
   useEffect(() => {
     setSelectedPreview(null);
     setSubEventsOpen(false);
+    setInlineVideoActive(false);
   }, [incident.id]);
+
+  useEffect(() => {
+    setInlineVideoActive(false);
+  }, [preview.id, preview.created_at]);
 
   function toggle() {
     onToggle(incident.id);
@@ -803,8 +1010,13 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
 
   function openPreview(pointerEvent) {
     pointerEvent.stopPropagation();
-    if (expanded) onSelect(preview);
+    if (expanded) setInlineVideoActive(true);
     else toggle();
+  }
+
+  function openOverlay(pointerEvent) {
+    pointerEvent.stopPropagation();
+    onSelect(preview);
   }
 
   return (
@@ -816,7 +1028,7 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
       onKeyDown={onKey}
       title={`${incident.camera_id} ${timeText}`}
     >
-      <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Open selected event snapshot" : "Expand incident"}>
+      <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Play selected event video" : "Expand incident"}>
         <SnapshotImage event={preview} alt="incident snapshot">
           <div className="incident-snapshot-hud">
             <div className="incident-snapshot-main">
@@ -827,7 +1039,8 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
               {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
             </div>
           </div>
-          <span className="event-count">{countText}</span>
+          <IncidentClipLayer event={preview} active={expanded && inlineVideoActive} onEnded={() => setInlineVideoActive(false)} />
+          <button type="button" className="event-count" onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label="Open event overlay" title="Open event overlay">{countText}</button>
         </SnapshotImage>
       </div>
       {expanded && showSubEvents ? (
@@ -849,7 +1062,7 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
                   const eventLabelText = eventLabels.length ? eventLabels.join(", ") : "motion";
                   const isActive = (preview.id || incident.id) === event.id && (preview.created_at || incident.created_at) === event.created_at;
                   return (
-                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => setSelectedPreview(event)}>
+                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setInlineVideoActive(false); }}>
                       <span>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</span>
                       <strong>{eventLabelText}</strong>
                     </button>
@@ -925,30 +1138,6 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     loadClipSettings();
     return () => { cancelled = true; };
   }, [event.id, event.representative_event_id]);
-
-  useEffect(() => {
-    const video = clipVideoRef.current;
-    if (!video || !clipInfo || !videoActive) return undefined;
-    setClipLoading(true);
-    video.src = clipInfo.url;
-    video.load();
-    function onReady() {
-      setClipLoading(false);
-      setClipError("");
-      video.play().catch(() => {});
-    }
-    function onError() {
-      setClipLoading(false);
-      setVideoActive(false);
-      setClipError("No recording window found");
-    }
-    video.addEventListener("canplay", onReady, { once: true });
-    video.addEventListener("error", onError);
-    return () => {
-      video.removeEventListener("canplay", onReady);
-      video.removeEventListener("error", onError);
-    };
-  }, [clipInfo, videoActive]);
 
   function playEventClip() {
     if (!clipInfo || clipError) return;
@@ -1174,7 +1363,19 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             allowObjectFocus={zoom.scale === 1 && !videoActive}
           />
           {videoActive && clipInfo && !clipError ? (
-            <video className="event-video-layer" ref={clipVideoRef} controls playsInline preload="metadata" onClick={(event) => event.stopPropagation()} />
+            <ShakaVideo
+              className="event-video-layer"
+              ref={clipVideoRef}
+              src={clipInfo.url}
+              mimeType="video/mp4"
+              autoPlay
+              controls
+              playsInline
+              preload="metadata"
+              onReady={() => { setClipLoading(false); setClipError(""); }}
+              onError={() => { setClipLoading(false); setVideoActive(false); setClipError("No recording window found"); }}
+              onClick={(event) => event.stopPropagation()}
+            />
           ) : null}
         </div>
         <div className="event-detail-body">
@@ -1234,7 +1435,7 @@ function IncidentsPage({ timeZone }) {
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
-  const incidentsPerPage = 12;
+  const incidentsPerPage = isMobileViewport() ? 12 : 24;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = useMemo(() => {
     const ids = Array.from(new Set(incidents.map((incident) => incident.camera_id).filter(Boolean)));
@@ -1562,345 +1763,347 @@ function LivePage({ timeZone }) {
   );
 }
 
-function eventClipUrl(eventId, before = 5, after = 5) {
-  const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3) });
+function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
+  const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
   return `/api/events/${eventId}/clip.mp4?${params.toString()}`;
 }
 
-function recordingStreamUrl(cameraId, offset, duration = null) {
-  const params = new URLSearchParams({ offset: offset.toFixed(3) });
-  if (duration !== null && Number.isFinite(duration)) params.set("duration", duration.toFixed(3));
-  return `/api/cameras/${cameraId}/recordings/stream.mp4?${params.toString()}`;
+function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return `/api/cameras/${cameraId}/recordings/day?${params.toString()}`;
 }
 
-function recordingClipHlsUrl(cameraId, offset, duration = null) {
-  const params = new URLSearchParams({ offset: offset.toFixed(3) });
-  if (duration !== null && Number.isFinite(duration)) params.set("duration", duration.toFixed(3));
-  return `/api/cameras/${cameraId}/recordings/clip.m3u8?${params.toString()}`;
-}
-
-function recordingHlsUrl(cameraId) {
-  return `/api/cameras/${cameraId}/recordings/hls/index.m3u8`;
+function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return `/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`;
 }
 
 function RecordingsPage({ timeZone }) {
-  const DAY_SECONDS = 24 * 60 * 60;
   const videoRef = useRef(null);
+  const desiredEpochRef = useRef(null);
+  const autoplayRef = useRef(false);
+  const codecFallbackRef = useRef(false);
+  const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
+  const today = dateKeyForTimeZone(Date.now(), timeZone);
+  const queryDate = initialQuery.get("date") || today;
+  const querySource = initialQuery.get("source");
   const [cameras, setCameras] = useState([]);
-  const [cameraId, setCameraId] = useStoredState("survng.recordingsCamera", "");
-  const [selectedDate, setSelectedDate] = useStoredState("survng.recordingsDate", dateKeyForTimeZone(Date.now(), timeZone));
+  const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
+  const [source, setSource] = useState(querySource === "live" || querySource === "main" ? querySource : preferredStreamSource());
+  const [date, setDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(queryDate) && queryDate <= today ? queryDate : today);
   const [recordings, setRecordings] = useState([]);
   const [events, setEvents] = useState([]);
-  const [dayTime, setDayTimeState] = useStoredState("survng.recordingsDayTime", "0");
-  const [streamBaseGlobal, setStreamBaseGlobal] = useState(0);
-  const [playing, setPlaying] = useState(false);
+  const [availableSources, setAvailableSources] = useState([]);
+  const [playhead, setPlayhead] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [dragValue, setDragValue] = useState(null);
+  const [playbackError, setPlaybackError] = useState("");
+  const [playbackNotice, setPlaybackNotice] = useState("");
 
-  const activeCameraId = cameraId || cameras[0]?.id || "";
-  const dayStartEpoch = useMemo(() => zonedDateSecondToEpoch(selectedDate, 0, timeZone), [selectedDate, timeZone]);
-  const currentDayTime = Math.max(0, Math.min(DAY_SECONDS, dragValue ?? Number(dayTime || 0)));
+  const activeCameraId = cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
+  const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
+  const nextDate = addDaysToDateKey(date, 1);
+  const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
+  const daySeconds = Math.max(1, dayEnd - dayStart);
 
-  const { fullTimeline, dayTimeline } = useMemo(() => {
-    let globalOffset = 0;
-    const all = recordings
-      .filter((clip) => Number.isFinite(clip.duration_seconds) && clip.duration_seconds > 0 && Number.isFinite(clip.start_epoch))
-      .sort((a, b) => (a.start_epoch || 0) - (b.start_epoch || 0))
-      .map((clip) => {
-        const duration = Number(clip.duration_seconds || 0);
-        const next = {
-          ...clip,
-          globalOffset,
-          globalEndOffset: globalOffset + duration,
-          start_epoch: Number(clip.start_epoch),
-          end_epoch: Number(clip.end_epoch || (Number(clip.start_epoch) + duration)),
-        };
-        globalOffset += duration;
-        return next;
+  const timeline = useMemo(() => {
+    let mediaOffset = 0;
+    return recordings
+      .map((item) => ({ ...item, start_epoch: Number(item.start_epoch), end_epoch: Number(item.end_epoch) }))
+      .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
+      .sort((a, b) => a.start_epoch - b.start_epoch)
+      .map((item) => {
+        const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
+        const mapped = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
+        mediaOffset += duration;
+        return mapped;
       });
-    const dayStart = dayStartEpoch;
-    const dayEnd = dayStartEpoch + DAY_SECONDS;
-    const day = all
-      .filter((clip) => clip.end_epoch > dayStart && clip.start_epoch < dayEnd)
-      .map((clip) => {
-        const visibleStart = Math.max(clip.start_epoch, dayStart);
-        const visibleEnd = Math.min(clip.end_epoch, dayEnd);
-        return {
-          ...clip,
-          dayStartOffset: visibleStart - dayStart,
-          dayEndOffset: visibleEnd - dayStart,
-          visibleDuration: Math.max(0, visibleEnd - visibleStart),
-        };
-      });
-    return { fullTimeline: all, dayTimeline: day };
-  }, [recordings, dayStartEpoch]);
+  }, [recordings]);
+  const manifestUrl = activeCameraId && timeline.length
+    ? recordingDayHlsUrl(activeCameraId, dayStart, dayEnd, source)
+    : "";
+  const manifestStartTime = useMemo(() => {
+    if (!timeline.length) return null;
+    const retainedEpoch = desiredEpochRef.current;
+    const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
+      ? retainedEpoch
+      : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
+    return epochToMediaTime(initialEpoch);
+  }, [manifestUrl, timeline]);
 
-  const dayEvents = useMemo(() => events
-    .map((event) => {
-      const eventEpoch = new Date(event.created_at).getTime() / 1000;
-      return { ...event, day_offset: eventEpoch - dayStartEpoch };
-    })
-    .filter((event) => event.day_offset >= 0 && event.day_offset < DAY_SECONDS), [events, dayStartEpoch]);
+  const nearbyEvents = useMemo(() => {
+    if (!Number.isFinite(playhead)) return events.slice(0, 20);
+    return events
+      .map((event) => ({ ...event, distance: Math.abs(new Date(event.created_at).getTime() / 1000 - playhead) }))
+      .filter((event) => event.distance <= 15 * 60)
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      .slice(0, 24);
+  }, [events, playhead]);
 
-  const activeClip = dayTimeline.find((clip) => currentDayTime >= clip.dayStartOffset && currentDayTime < clip.dayEndOffset) || null;
-  const activeCamera = cameras.find((camera) => camera.id === activeCameraId) || null;
-  const objectEventCount = dayEvents.filter((event) => event.has_objects).length;
-  const recordedSeconds = dayTimeline.reduce((total, clip) => total + Number(clip.visibleDuration || 0), 0);
-  const wallClock = dayStartEpoch + currentDayTime;
-
-  function globalOffsetToDayTime(globalOffset) {
-    const clip = dayTimeline.find((item) => globalOffset >= item.globalOffset && globalOffset < item.globalEndOffset);
-    if (!clip) return null;
-    const epoch = clip.start_epoch + (globalOffset - clip.globalOffset);
-    return epoch - dayStartEpoch;
-  }
-
-  function snapDayTimeToRecording(nextDayTime) {
-    const clamped = Math.max(0, Math.min(DAY_SECONDS - 0.01, nextDayTime));
-    if (!dayTimeline.length) return clamped;
-    const active = dayTimeline.find((item) => clamped >= item.dayStartOffset && clamped < item.dayEndOffset);
-    if (active) return clamped;
-    let nearestTime = clamped;
-    let nearestDistance = Infinity;
-    dayTimeline.forEach((clip) => {
-      const start = Math.max(0, Math.min(DAY_SECONDS - 0.01, clip.dayStartOffset));
-      const end = Math.max(0, Math.min(DAY_SECONDS - 0.01, clip.dayEndOffset - 0.01));
-      [start, end].forEach((candidate) => {
-        const distance = Math.abs(candidate - clamped);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearestTime = candidate;
+  function snapToRecording(epoch) {
+    if (!timeline.length) return null;
+    const bounded = Math.max(dayStart, Math.min(dayEnd - 0.01, epoch));
+    const latest = timeline[timeline.length - 1];
+    if (bounded >= latest.end_epoch) return latest.start_epoch;
+    const containing = timeline.find((item) => item.start_epoch <= bounded && bounded < item.end_epoch);
+    if (containing) return bounded;
+    let nearest = timeline[0].start_epoch;
+    let distance = Math.abs(nearest - bounded);
+    timeline.forEach((item) => {
+      [item.start_epoch, item.end_epoch - 0.01].forEach((candidate) => {
+        const nextDistance = Math.abs(candidate - bounded);
+        if (nextDistance < distance) {
+          nearest = candidate;
+          distance = nextDistance;
         }
       });
     });
-    return nearestTime;
+    return nearest;
   }
 
-  function dayTimeToGlobalOffset(nextDayTime) {
-    const clip = dayTimeline.find((item) => nextDayTime >= item.dayStartOffset && nextDayTime < item.dayEndOffset);
+  function epochToMediaTime(epoch) {
+    const target = snapToRecording(epoch);
+    if (target === null) return null;
+    const clip = timeline.find((item) => item.start_epoch <= target && target < item.end_epoch)
+      || timeline[timeline.length - 1];
+    return clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, target - clip.start_epoch));
+  }
+
+  function mediaTimeToEpoch(mediaTime) {
+    const clip = timeline.find((item) => item.media_start <= mediaTime && mediaTime < item.media_end)
+      || timeline[timeline.length - 1];
     if (!clip) return null;
-    const epoch = dayStartEpoch + nextDayTime;
-    return clip.globalOffset + Math.max(0, epoch - clip.start_epoch);
+    return clip.start_epoch + Math.max(0, Math.min(clip.end_epoch - clip.start_epoch, mediaTime - clip.media_start));
   }
 
-  function canUseNativeHls() {
-    return Boolean(videoRef.current?.canPlayType("application/vnd.apple.mpegurl"));
-  }
-
-  async function load() {
-    setLoading(true);
-    try {
-      const cameraResponse = await fetch("/api/cameras");
-      const nextCameras = await cameraResponse.json();
-      setCameras(nextCameras);
-      const nextCameraId = activeCameraId || nextCameras[0]?.id;
-      if (!nextCameraId) return;
-      if (!cameraId) setCameraId(nextCameraId);
-      const recordingsResponse = await fetch(`/api/cameras/${nextCameraId}/recordings?limit=20000`);
-      setRecordings(await recordingsResponse.json());
-      const eventResponse = await fetch(`/api/cameras/${nextCameraId}/recordings/events?limit=5000`);
-      setEvents(await eventResponse.json());
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    load();
-  }, [activeCameraId]);
-
-  useEffect(() => {
-    if (!dayTimeline.length) return;
-    const saved = Number(dayTime || 0);
-    const hasSavedClip = dayTimeline.some((clip) => saved >= clip.dayStartOffset && saved < clip.dayEndOffset);
-    setPlaybackTime(hasSavedClip ? saved : dayTimeline[0].dayStartOffset, false);
-  }, [dayTimeline.length, activeCameraId, selectedDate]);
-
-  function setPlaybackTime(nextTime, autoplay = playing) {
-    if (!activeCameraId) return;
-    const clamped = snapDayTimeToRecording(nextTime);
+  function playAt(epoch, autoplay = true) {
+    const target = snapToRecording(epoch);
     const video = videoRef.current;
-    setDayTimeState(String(clamped));
-    setDragValue(null);
-    const globalOffset = dayTimeToGlobalOffset(clamped);
-    if (!video || globalOffset === null) {
-      if (video) video.pause();
-      return;
-    }
-    if (canUseNativeHls()) {
-      const src = recordingHlsUrl(activeCameraId);
-      if (video.getAttribute("src") !== src) {
-        video.src = src;
-        video.load();
-      }
-      video.currentTime = globalOffset;
-      setStreamBaseGlobal(0);
-    } else {
-      video.src = recordingStreamUrl(activeCameraId, globalOffset);
-      video.load();
-      setStreamBaseGlobal(globalOffset);
-    }
+    if (!video || target === null || !activeCameraId) return;
+    autoplayRef.current = autoplay;
+    setPlaybackError("");
+    setPlayhead(target);
+    desiredEpochRef.current = target;
+    const mediaTime = epochToMediaTime(target);
+    if (Number.isFinite(mediaTime) && video.readyState > 0) video.currentTime = mediaTime;
     if (autoplay) video.play().catch(() => {});
   }
 
   useEffect(() => {
+    fetch("/api/cameras")
+      .then((response) => response.json())
+      .then(setCameras)
+      .catch(() => setPlaybackError("Unable to load cameras"));
+  }, []);
+
+  useEffect(() => {
+    if (!activeCameraId) return undefined;
+    const controller = new AbortController();
+    setLoading(true);
+    setPlaybackError("");
+    setRecordings([]);
+    setEvents([]);
+    setAvailableSources([]);
+    if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
+    setPlayhead(null);
     const video = videoRef.current;
-    if (!video) return undefined;
-    function tick() {
-      const globalOffset = canUseNativeHls() ? video.currentTime : streamBaseGlobal + video.currentTime;
-      const nextDayTime = globalOffsetToDayTime(globalOffset);
-      if (Number.isFinite(nextDayTime)) setDayTimeState(String(Math.max(0, Math.min(DAY_SECONDS, nextDayTime))));
+    if (video) {
+      video.pause();
     }
-    function onPlay() { setPlaying(true); }
-    function onPause() { setPlaying(false); }
-    function onEnded() {
-      const nextClip = dayTimeline.find((clip) => clip.dayStartOffset > currentDayTime + 1);
-      if (nextClip) setPlaybackTime(nextClip.dayStartOffset, false);
-    }
-    video.addEventListener("timeupdate", tick);
-    video.addEventListener("play", onPlay);
-    video.addEventListener("pause", onPause);
-    video.addEventListener("ended", onEnded);
-    return () => {
-      video.removeEventListener("timeupdate", tick);
-      video.removeEventListener("play", onPlay);
-      video.removeEventListener("pause", onPause);
-      video.removeEventListener("ended", onEnded);
-    };
-  }, [streamBaseGlobal, dayTimeline, dayStartEpoch, currentDayTime]);
+    codecFallbackRef.current = false;
+    fetch(recordingDayUrl(activeCameraId, dayStart, dayEnd, source), { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Recording index failed (${response.status})`);
+        return response.json();
+      })
+      .then((payload) => {
+        const nextAvailableSources = payload.available_sources || [];
+        setAvailableSources(nextAvailableSources);
+        if (!(payload.recordings || []).length && source === "main" && nextAvailableSources.includes("live")) {
+          codecFallbackRef.current = true;
+          setPlaybackNotice("No Main recording exists for this day; using Sub.");
+          setSource("live");
+          return;
+        }
+        setRecordings(payload.recordings || []);
+        setEvents(payload.events || []);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") setPlaybackError(error.message || "Unable to load recordings");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [activeCameraId, source, dayStart, dayEnd]);
 
-  function jumpBy(seconds) {
-    setPlaybackTime(currentDayTime + seconds);
+  useEffect(() => {
+    if (!timeline.length || Number.isFinite(playhead)) return;
+    const retainedEpoch = desiredEpochRef.current;
+    const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
+      ? retainedEpoch
+      : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
+    playAt(initialEpoch, false);
+  }, [timeline, playhead]);
+
+  useEffect(() => {
+    if (!activeCameraId) return;
+    const params = new URLSearchParams({ camera: activeCameraId, date, source });
+    window.history.replaceState(null, "", `/recordings?${params.toString()}`);
+  }, [activeCameraId, date, source]);
+
+  function handleRecordingReady(_player, video) {
+    const retained = desiredEpochRef.current;
+    const target = Number.isFinite(retained) ? snapToRecording(retained) : snapToRecording(Date.now() / 1000);
+    const mediaTime = epochToMediaTime(target);
+    if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;
+    if (Number.isFinite(target)) {
+      desiredEpochRef.current = target;
+      setPlayhead(target);
+    }
+    setPlaybackError("");
+    if (autoplayRef.current) video.play().catch(() => {});
   }
 
-  function jumpToEvent(event) {
-    const offset = Number(event.day_offset);
-    if (Number.isFinite(offset)) setPlaybackTime(offset, true);
+  function handleRecordingTimeUpdate(event) {
+    const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
+    if (!Number.isFinite(epoch)) return;
+    desiredEpochRef.current = epoch;
+    setPlayhead(epoch);
   }
 
-  function nudgeDay(days) {
-    setSelectedDate(addDaysToDateKey(selectedDate, days));
+  function handleRecordingError() {
+    if (source === "main" && availableSources.includes("live") && !codecFallbackRef.current) {
+      codecFallbackRef.current = true;
+      setPlaybackNotice("Main stream is not supported by this browser; using Sub.");
+      setSource("live");
+      return;
+    }
+    setPlaybackError("This browser could not play the selected recording stream");
+  }
+
+  function changeDate(next) {
+    setDate(next > today ? today : next);
   }
 
   return (
-    <main className="recording-review-page">
-      <section className="bento-card recording-review-shell">
-        <div className="review-topbar">
-          <div>
-            <h2>{activeCamera?.name || "Recordings"}</h2>
-            <p>{formatDateTime(wallClock, timeZone)}</p>
-          </div>
-          <div className="review-date-controls">
-            <button type="button" onClick={() => nudgeDay(-1)}><SkipBack size={15} /> Day</button>
-            <input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} />
-            <button type="button" onClick={() => nudgeDay(1)}>Day <SkipForward size={15} /></button>
-          </div>
+    <main className="recordings-v2-page">
+      <aside className="recordings-v2-cameras" aria-label="Cameras">
+        {cameras.map((camera) => (
+          <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
+            <Camera size={16} />
+            <span>{camera.name}</span>
+            <i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />
+          </button>
+        ))}
+      </aside>
+
+      <section className="recordings-v2-workspace">
+        <div className="recordings-v2-player">
+          {manifestUrl ? (
+            <ShakaVideo
+              ref={videoRef}
+              src={manifestUrl}
+              mimeType="application/vnd.apple.mpegurl"
+              startTime={manifestStartTime}
+              bufferingGoal={8}
+              controls
+              playsInline
+              preload="auto"
+              onReady={handleRecordingReady}
+              onError={handleRecordingError}
+              onTimeUpdate={handleRecordingTimeUpdate}
+              onPlay={() => { autoplayRef.current = true; }}
+              onPause={(event) => { if (!event.currentTarget.ended) autoplayRef.current = false; }}
+            />
+          ) : null}
+          {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
+          {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
+          {playbackError ? <div className="recordings-v2-error">{playbackError}</div> : null}
+          {playbackNotice && !playbackError ? <div className="recordings-v2-notice">{playbackNotice}</div> : null}
         </div>
 
-        <div className="camera-day-rail" aria-label="Camera selection">
-          {cameras.map((camera) => (
-            <button key={camera.id} className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
-              <Camera size={15} />
-              <span>{camera.name}</span>
-              <small>{camera.recording ? "rec" : "idle"}</small>
-            </button>
-          ))}
-        </div>
-
-        <div className="daily-review-stage">
-          <div className="review-player cohesive-player">
-            <video ref={videoRef} controls playsInline preload="metadata" />
-            {!dayTimeline.length && !loading ? <div className="review-empty"><Film size={34} />No recordings for this camera on this day.</div> : null}
+        <div className="recordings-v2-controls">
+          <div className="recordings-v2-toolbar">
+            <div className="recordings-v2-source" aria-label="Recording stream">
+              <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
+              <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
+            </div>
+            <div className="recordings-v2-date">
+              <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={16} /></button>
+              <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
+              <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={16} /></button>
+              <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+            </div>
           </div>
 
-          <div className="day-summary-strip">
-            <span><strong>{formatDayClock(currentDayTime)}</strong><small>current</small></span>
-            <span><strong>{formatDuration(recordedSeconds)}</strong><small>recorded</small></span>
-            <span><strong>{dayEvents.length}</strong><small>motion</small></span>
-            <span><strong>{objectEventCount}</strong><small>objects</small></span>
-            <span><strong>{activeClip ? "recorded" : dayTimeline.length ? "gap" : "empty"}</strong><small>position</small></span>
-          </div>
-
-          <RecordingScrubber
-            timeline={dayTimeline}
-            events={dayEvents}
-            totalDuration={DAY_SECONDS}
-            timeZone={timeZone}
-            value={Math.round(currentDayTime)}
-            onDrag={setDragValue}
-            onCommit={() => setPlaybackTime(dragValue ?? currentDayTime)}
-            onEventClick={jumpToEvent}
+          <RecordingTimeline
+            startEpoch={dayStart}
+            endEpoch={dayEnd}
+            recordings={timeline}
+            playhead={playhead ?? dayStart}
+            onSeek={(epoch) => playAt(epoch, true)}
           />
+        </div>
 
-          <div className="review-controls cohesive-controls">
-            <button onClick={() => jumpBy(-300)}><SkipBack size={16} /> 5m</button>
-            <button onClick={() => jumpBy(-10)}><SkipBack size={16} /> 10s</button>
-            <button className="primary" onClick={() => videoRef.current?.paused ? videoRef.current?.play() : videoRef.current?.pause()} disabled={!dayTimeline.length}>{playing ? <Pause size={16} /> : <Play size={16} />}{playing ? "Pause" : "Play"}</button>
-            <button onClick={() => jumpBy(10)}>10s <SkipForward size={16} /></button>
-            <button onClick={() => jumpBy(300)}>5m <SkipForward size={16} /></button>
-          </div>
-
-          <div className="day-event-dock">
-            {dayEvents.slice(0, 18).map((event) => (
-              <button key={event.id} type="button" className={event.has_objects ? "has-object" : ""} onClick={() => jumpToEvent(event)}>
-                <span>{formatDayClock(event.day_offset)}</span>
-                <strong>{event.labels?.length ? event.labels.join(", ") : event.has_objects ? "object" : "motion"}</strong>
-              </button>
-            ))}
-          </div>
+        <div className="recordings-v2-events">
+          {nearbyEvents.length ? nearbyEvents.map((event) => (
+            <button key={event.id} type="button" onClick={() => playAt(new Date(event.created_at).getTime() / 1000, true)}>
+              <time>{formatTimeOnly(event.created_at, timeZone)}</time>
+              <span>{event.labels?.length ? event.labels.join(", ") : "motion"}</span>
+            </button>
+          )) : <div className="recordings-v2-no-events"><Radar size={17} />No events near this time</div>}
         </div>
       </section>
     </main>
   );
 }
 
-function RecordingScrubber({ timeline, events, totalDuration, timeZone, value, onDrag, onCommit, onEventClick }) {
+function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek }) {
+  const duration = Math.max(1, endEpoch - startEpoch);
+  const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
+  const [draft, setDraft] = useState(offset);
+  useEffect(() => setDraft(offset), [offset]);
+  const percent = (draft / duration) * 100;
+  function commit(value) {
+    const next = Number(value);
+    setDraft(next);
+    onSeek(startEpoch + next);
+  }
   return (
-    <div className="merged-scrubber">
-      <span>00:00</span>
-      <div className="segment-track scrubber-track">
-        {timeline.map((clip) => {
-          const offset = Number.isFinite(clip.dayStartOffset) ? clip.dayStartOffset : clip.offset || 0;
-          const duration = Number.isFinite(clip.visibleDuration) ? clip.visibleDuration : clip.duration_seconds || 0;
-          return (
-            <span
-              key={`${clip.name}-${offset}`}
-              className="recording-span"
-              style={{ left: `${totalDuration ? (offset / totalDuration) * 100 : 0}%`, width: `${totalDuration ? (duration / totalDuration) * 100 : 0}%` }}
-            />
-          );
-        })}
-        {events.map((event) => {
-          const offset = Math.max(0, Math.min(totalDuration, Number.isFinite(event.day_offset) ? event.day_offset : Number(event.timeline_offset) || 0));
-          const labels = event.labels?.length ? `: ${event.labels.join(", ")}` : "";
-          const title = `${event.has_objects ? "Object detected" : "Motion"}${labels} at ${formatDateTime(event.created_at, timeZone)}`;
-          return (
-            <button
-              key={event.id}
-              type="button"
-              className={event.has_objects ? "object-event" : "motion-event"}
-              title={title}
-              style={{ left: `${totalDuration ? (offset / totalDuration) * 100 : 0}%`, width: `${totalDuration ? Math.max(0.25, (12 / totalDuration) * 100) : 0}%` }}
-              onClick={() => onEventClick?.(event)}
-            />
-          );
-        })}
+    <div className="recordings-v2-timeline">
+      <div className="recordings-v2-track">
+        {recordings.map((item) => (
+          <span
+            key={item.path}
+            style={{
+              left: `${((Math.max(startEpoch, item.start_epoch) - startEpoch) / duration) * 100}%`,
+              width: `${((Math.min(endEpoch, item.end_epoch) - Math.max(startEpoch, item.start_epoch)) / duration) * 100}%`,
+            }}
+          />
+        ))}
+        <i style={{ left: `${percent}%` }} />
+        <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatDayClock(draft)}</output>
         <input
-          className="timeline-range"
           type="range"
           min="0"
-          max={totalDuration}
+          max={duration}
           step="1"
-          value={value}
-          onChange={(event) => onDrag(Number(event.target.value))}
-          onMouseUp={onCommit}
-          onTouchEnd={onCommit}
-          onKeyUp={onCommit}
-          onBlur={onCommit}
-          aria-label="Daily recording timeline"
+          value={Math.round(draft)}
+          onChange={(event) => setDraft(Number(event.target.value))}
+          onMouseUp={(event) => commit(event.currentTarget.value)}
+          onTouchEnd={(event) => commit(event.currentTarget.value)}
+          onKeyUp={(event) => commit(event.currentTarget.value)}
+          aria-label="24 hour recording timeline"
         />
       </div>
-      <span>24:00</span>
     </div>
   );
 }
@@ -1909,6 +2112,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
   const [accelerator, setAccelerator] = useState(null);
+  const [detectorModels, setDetectorModels] = useState([]);
+  const [recordingCache, setRecordingCache] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("");
@@ -1918,15 +2123,19 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [logLevel, setLogLevel] = useStoredState("survng.logLevel.v1", "INFO");
 
   async function load() {
-    const [response, statusResponse, acceleratorResponse] = await Promise.all([
+    const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse] = await Promise.all([
       fetch("/api/config"),
       fetch("/api/cameras"),
       fetch("/api/accelerator"),
+      fetch("/api/detector/models"),
+      fetch("/api/recordings/cache/status"),
     ]);
     const nextConfig = await response.json();
     setConfig(nextConfig);
     if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
     if (acceleratorResponse.ok) setAccelerator(await acceleratorResponse.json());
+    if (modelsResponse.ok) setDetectorModels((await modelsResponse.json()).models || []);
+    if (cacheResponse.ok) setRecordingCache(await cacheResponse.json());
     setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
   }
 
@@ -2083,6 +2292,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             theme={theme}
             setTheme={setTheme}
             accelerator={accelerator}
+            detectorModels={detectorModels}
+            recordingCache={recordingCache}
           />
           {status ? <div className="save-status settings-status">{status}</div> : null}
         </section>
@@ -2134,7 +2345,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
               <div className="field-row">
                 <label>Main Stream URL<input value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} /></label>
                 <label>Live/Sub Stream URL<input value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} /></label>
-                <label className="check-field"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record automatically</label>
+                <label className="check-field"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record main stream</label>
+                <label className="check-field"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record sub stream</label>
               </div>
 
               <div className="config-panels">
@@ -2208,7 +2420,7 @@ function ProbeResult({ probe }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator }) {
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache }) {
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
   const detectorBackend = config.detector?.backend || "openvino";
@@ -2229,6 +2441,27 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     ["GPU", hasOpenvinoGpu ? "GPU" : "GPU (if OpenVINO plugin is available)"],
     ["AUTO", "AUTO"],
   ];
+  const ffmpegAcceleration = accelerator?.ffmpeg_hardware_acceleration || {};
+  const vaapi = ffmpegAcceleration.vaapi || {};
+  const qsv = ffmpegAcceleration.qsv || {};
+  const vaapiLabel = vaapi.available
+    ? `VAAPI available (${(vaapi.encoders || []).join(", ") || "encoders detected"})`
+    : vaapi.listed
+      ? "VAAPI listed by FFmpeg but runtime init failed"
+      : "VAAPI not available to FFmpeg";
+  const qsvLabel = qsv.available
+    ? `Intel QSV available (${(qsv.encoders || []).join(", ") || "encoders detected"})`
+    : qsv.listed
+      ? "Intel QSV listed by FFmpeg but runtime init failed"
+      : "Intel QSV not available to FFmpeg";
+  const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
+  const activeModel = detectorModels.find((model) => model.path === activeModelPath);
+
+  function selectOpenvinoModel(path) {
+    updateConfig(["detector", "model_path"], path);
+    updateConfig(["detector", "model_xml"], "");
+    if (path.endsWith(".xml")) updateConfig(["detector", "labels_path"], "");
+  }
 
   return (
     <div className="config-form">
@@ -2247,9 +2480,19 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <h3>Storage</h3>
           <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
           <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
+          <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
+            <option value="auto">Auto (VAAPI preferred)</option>
+            <option value="vaapi">VAAPI</option>
+            <option value="qsv">Intel QSV</option>
+            <option value="off">Off</option>
+          </select></label>
           <label>Event Clip Before<input type="number" min="0" max="30" step="1" value={config.event_clip_before_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_before_seconds"], Number(event.target.value))} /></label>
           <label>Event Clip After<input type="number" min="0" max="30" step="1" value={config.event_clip_after_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_after_seconds"], Number(event.target.value))} /></label>
           <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
+          <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
+          <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
+          {recordingCache ? <div className="probe-result"><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span></div> : null}
         </div>
       </div>
 
@@ -2267,10 +2510,25 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Confidence<input type="number" min="0" max="1" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
         </div>
         <div className="field-row">
-          <label>ONNX Model Path<input value={config.detector?.model_path || ""} onChange={(event) => updateConfig(["detector", "model_path"], event.target.value)} /></label>
-          <label>OpenVINO XML<input value={config.detector?.model_xml || ""} onChange={(event) => updateConfig(["detector", "model_xml"], event.target.value)} /></label>
-          <label>Labels Path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} /></label>
+          <label>Detected Model<select value={detectorModels.some((model) => model.path === activeModelPath) ? activeModelPath : ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
+            <option value="">Custom path</option>
+            {detectorModels.map((model) => <option key={model.path} value={model.path} disabled={!model.valid}>{model.name} ({model.task || "detect"}, {model.valid ? "ready" : "incomplete"})</option>)}
+          </select></label>
+          <label>OpenVINO / ONNX Model<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
+          <label>Labels Path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Optional; metadata.yaml is automatic" /></label>
         </div>
+        {activeModel ? (
+          <div className={`probe-result ${activeModel.valid ? "ok" : "bad"}`}>
+            <strong>{activeModel.valid ? "OpenVINO IR ready" : "OpenVINO IR incomplete"}</strong>
+            <span>XML: {activeModel.path}</span>
+            <span>Weights: {activeModel.bin_present ? activeModel.bin_path : "matching .bin file not found"}</span>
+            <span>Input: {activeModel.input_shape.join(" x ") || "unknown"}</span>
+            <span>Output: {activeModel.output_shapes.map((shape) => shape.join(" x ")).join(", ") || "unknown"}</span>
+            <span>Task: {activeModel.task || "detect"}</span>
+            <span>Classes: {activeModel.classes.join(", ") || "none found"}</span>
+            {activeModel.error ? <span>{activeModel.error}</span> : null}
+          </div>
+        ) : null}
         {detectorBackend === "coreml" ? (
           <div className="field-row">
             <label>Core ML Model Path<input value={config.detector?.coreml_model_path || ""} onChange={(event) => updateConfig(["detector", "coreml_model_path"], event.target.value)} placeholder="model.mlpackage or model.mlmodel" /></label>
@@ -2283,6 +2541,18 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <span>{coremlLabel}</span>
           <span>OpenVINO devices: {openvinoDevices.length ? openvinoDevices.join(", ") : "none reported"}</span>
           <span>{gpuLabel}</span>
+          <span>FFmpeg acceleration: {ffmpegAcceleration.configured || config.hardware_acceleration || "auto"}</span>
+          <span>FFmpeg: {ffmpegAcceleration.ffmpeg_path || accelerator?.ffmpeg_path || config.ffmpeg_path || "ffmpeg"}</span>
+          <span>FFprobe: {ffmpegAcceleration.ffprobe_path || accelerator?.ffprobe_path || "ffprobe"}</span>
+          <span>FFplay: {ffmpegAcceleration.ffplay_path || accelerator?.ffplay_path || "ffplay"}</span>
+          <span>{vaapiLabel}</span>
+          {vaapi.render_devices?.length ? <span>VAAPI render devices: {vaapi.render_devices.join(", ")}</span> : null}
+          {vaapi.filters?.length ? <span>VAAPI filters: {vaapi.filters.join(", ")}</span> : null}
+          {vaapi.runtime_error ? <span>VAAPI runtime: {vaapi.runtime_error}</span> : null}
+          <span>{qsvLabel}</span>
+          {qsv.render_devices?.length ? <span>QSV render devices: {qsv.render_devices.join(", ")}</span> : null}
+          {qsv.decoders?.length ? <span>QSV decoders: {qsv.decoders.join(", ")}</span> : null}
+          {qsv.runtime_error ? <span>QSV runtime: {qsv.runtime_error}</span> : null}
           {accelerator?.recommended_openvino_device ? <span>Recommended OpenVINO device: {accelerator.recommended_openvino_device}</span> : null}
           {accelerator?.coreml_error ? <span>{accelerator.coreml_error}</span> : null}
           {accelerator?.openvino_error ? <span>{accelerator.openvino_error}</span> : null}

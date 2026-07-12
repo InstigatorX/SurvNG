@@ -14,6 +14,7 @@ import numpy as np
 from .config import CameraConfig
 from .detector import OpenVinoDetector, objects_to_json
 from .events import EventStore
+from .ffmpeg_hw import recorded_frame_hw_args
 from .onvif_events import OnvifEventListener
 from .recorder import Recorder
 
@@ -272,54 +273,60 @@ class CameraWorker:
 
         attempts = [0.0, -0.25, 0.25, -0.75, 0.75]
         last_error = ""
+        hw_input_args, hw_filter_args = recorded_frame_hw_args(self.recorder.hardware_acceleration)
+        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
+        decode_plans.append(("cpu", [], []))
         for nudge in attempts:
             sample_at = max(0.0, offset_seconds + nudge)
-            command = [
-                self.recorder.ffmpeg_path,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-fflags",
-                "+discardcorrupt",
-                "-err_detect",
-                "ignore_err",
-                "-ss",
-                f"{sample_at:.3f}",
-                "-i",
-                str(path),
-                "-map",
-                "0:v:0",
-                "-an",
-                "-frames:v",
-                "1",
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "mjpeg",
-                "pipe:1",
-            ]
-            try:
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=8,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                last_error = "timed out"
-                continue
+            for backend, input_args, filter_args in decode_plans:
+                command = [
+                    self.recorder.ffmpeg_path,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-fflags",
+                    "+discardcorrupt",
+                    "-err_detect",
+                    "ignore_err",
+                    *input_args,
+                    "-ss",
+                    f"{sample_at:.3f}",
+                    "-i",
+                    str(path),
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-frames:v",
+                    "1",
+                    *filter_args,
+                    "-f",
+                    "image2pipe",
+                    "-vcodec",
+                    "mjpeg",
+                    "pipe:1",
+                ]
+                try:
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=8,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    last_error = f"{backend} timed out"
+                    continue
 
-            if result.returncode != 0 or not result.stdout:
-                last_error = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-                last_error = " ".join(last_error)[:180]
-                continue
+                if result.returncode != 0 or not result.stdout:
+                    detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
+                    last_error = f"{backend}: {' '.join(detail)[:180]}"
+                    continue
 
-            array = np.frombuffer(result.stdout, dtype=np.uint8)
-            frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
-            if frame is not None:
-                return frame
-            last_error = "mjpeg decode returned no frame"
+                array = np.frombuffer(result.stdout, dtype=np.uint8)
+                frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    return frame
+                last_error = f"{backend}: mjpeg decode returned no frame"
 
         LOGGER.debug(
             "skipped unreadable recording sample for %s at %.2fs: %s%s",

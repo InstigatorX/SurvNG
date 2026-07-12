@@ -32,6 +32,7 @@ class CameraConfig(BaseModel):
     stream_url: str
     live_stream_url: str | None = None
     record: bool = True
+    record_sub: bool = False
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     baichuan: BaichuanConfig = Field(default_factory=BaichuanConfig)
 
@@ -74,9 +75,13 @@ class DetectorConfig(BaseModel):
 class AppConfig(BaseModel):
     storage_dir: str = "survng/storage"
     ffmpeg_path: str = "ffmpeg"
+    hardware_acceleration: str = "auto"
     event_clip_before_seconds: float = 5.0
     event_clip_after_seconds: float = 5.0
     recording_segment_seconds: float = Field(default=10.0, ge=2.0, le=300.0)
+    recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
+    recording_cache_max_days: int = Field(default=7, ge=1, le=90)
+    recording_cache_prewarm: bool = True
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 

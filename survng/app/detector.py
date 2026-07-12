@@ -28,6 +28,7 @@ class OpenVinoDetector:
         self.coreml_image_input = False
         self.input_layer: Any = None
         self.output_layer: Any = None
+        self.output_layers: list[Any] = []
         self.input_shape: tuple[int, int] = (300, 300)
         self.output_format = "unknown"
         self.backend = ""
@@ -91,6 +92,7 @@ class OpenVinoDetector:
                 self.loaded_device = self.config.device
             self.input_layer = self.compiled_model.input(0)
             self.output_layer = self.compiled_model.output(0)
+            self.output_layers = list(self.compiled_model.outputs)
             _, _, height, width = self.input_layer.shape
             self.input_shape = (int(width), int(height))
             self.output_format = self._detect_output_format()
@@ -176,7 +178,12 @@ class OpenVinoDetector:
 
             tensor, metadata = self._preprocess(frame)
             if self.compiled_model is not None:
-                output = self.compiled_model([tensor])[self.output_layer]
+                inference = self.compiled_model([tensor])
+                if self.output_format == "yolo-seg":
+                    outputs = [np.asarray(inference[layer]) for layer in self.output_layers]
+                    objects = self._parse_yolo_seg_outputs(outputs, metadata)
+                    return objects
+                output = inference[self.output_layer]
             else:
                 self.cv_net.setInput(tensor)
                 output = self.cv_net.forward()
@@ -275,6 +282,22 @@ class OpenVinoDetector:
                     for line in labels_path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                 ]
+        if not labels:
+            model_path_text = config.resolved_model_path()
+            model_path = Path(model_path_text) if model_path_text else None
+            metadata_path = model_path.parent / "metadata.yaml" if model_path else None
+            if metadata_path and metadata_path.exists():
+                try:
+                    import yaml
+
+                    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+                    names = metadata.get("names") or {}
+                    if isinstance(names, dict):
+                        labels = [str(value) for _, value in sorted(names.items(), key=lambda item: int(item[0]))]
+                    elif isinstance(names, list):
+                        labels = [str(value) for value in names]
+                except Exception:
+                    LOGGER.exception("Failed to load detector labels from %s", metadata_path)
         return labels
 
     def _detect_coreml(self, frame: np.ndarray) -> list[dict[str, Any]]:
@@ -402,12 +425,107 @@ class OpenVinoDetector:
         return objects
 
     def _detect_output_format(self) -> str:
+        shapes = [[int(dim) for dim in layer.shape if int(dim) > 0] for layer in self.output_layers]
+        if any(len(shape) == 4 and shape[1] == 32 for shape in shapes) and any(
+            len(shape) == 3 and shape[-1] >= 38 for shape in shapes
+        ):
+            return "yolo-seg"
         shape = [int(dim) for dim in self.output_layer.shape if int(dim) > 0]
         if len(shape) == 3:
             channels = min(shape[1], shape[2])
             if channels >= 6 and channels == len(self.labels) + 4:
                 return "yolo"
         return "ssd"
+
+    def _parse_yolo_seg_outputs(
+        self,
+        outputs: list[np.ndarray],
+        metadata: dict[str, float],
+    ) -> list[dict[str, Any]]:
+        detections_output = next((value for value in outputs if value.ndim == 3), None)
+        prototypes_output = next((value for value in outputs if value.ndim == 4 and value.shape[1] == 32), None)
+        if detections_output is None:
+            return []
+        detections = np.squeeze(detections_output, axis=0)
+        prototypes = np.squeeze(prototypes_output, axis=0) if prototypes_output is not None else None
+        image_width = int(metadata["image_width"])
+        image_height = int(metadata["image_height"])
+        scale = metadata["scale"]
+        pad_x = metadata["pad_x"]
+        pad_y = metadata["pad_y"]
+        objects: list[dict[str, Any]] = []
+
+        for detection in detections:
+            if len(detection) < 6:
+                continue
+            confidence = float(detection[4])
+            if confidence < self.config.confidence_threshold:
+                continue
+            class_id = int(detection[5])
+            input_x1, input_y1, input_x2, input_y2 = [float(value) for value in detection[:4]]
+            x1 = max(0, min(image_width, (input_x1 - pad_x) / scale))
+            y1 = max(0, min(image_height, (input_y1 - pad_y) / scale))
+            x2 = max(0, min(image_width, (input_x2 - pad_x) / scale))
+            y2 = max(0, min(image_height, (input_y2 - pad_y) / scale))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            item: dict[str, Any] = {
+                "label": self.labels[class_id] if class_id < len(self.labels) else str(class_id),
+                "confidence": round(confidence, 4),
+                "box": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
+            }
+            if prototypes is not None and len(detection) >= 6 + prototypes.shape[0]:
+                polygon = self._segmentation_polygon(
+                    detection[6 : 6 + prototypes.shape[0]],
+                    prototypes,
+                    metadata,
+                    (input_x1, input_y1, input_x2, input_y2),
+                )
+                if polygon:
+                    item["mask_polygon"] = polygon
+            objects.append(item)
+        return objects
+
+    def _segmentation_polygon(
+        self,
+        coefficients: np.ndarray,
+        prototypes: np.ndarray,
+        metadata: dict[str, float],
+        input_box: tuple[float, float, float, float],
+    ) -> list[list[int]]:
+        mask_height, mask_width = prototypes.shape[1:]
+        logits = np.asarray(coefficients, dtype=np.float32) @ prototypes.reshape(prototypes.shape[0], -1)
+        mask = (1.0 / (1.0 + np.exp(-np.clip(logits, -30, 30)))).reshape(mask_height, mask_width)
+        input_width, input_height = self.input_shape
+        x1, y1, x2, y2 = input_box
+        mx1 = max(0, min(mask_width, int(x1 * mask_width / input_width)))
+        my1 = max(0, min(mask_height, int(y1 * mask_height / input_height)))
+        mx2 = max(0, min(mask_width, int(np.ceil(x2 * mask_width / input_width))))
+        my2 = max(0, min(mask_height, int(np.ceil(y2 * mask_height / input_height))))
+        cropped = np.zeros_like(mask, dtype=np.uint8)
+        if mx2 <= mx1 or my2 <= my1:
+            return []
+        cropped[my1:my2, mx1:mx2] = (mask[my1:my2, mx1:mx2] >= 0.5).astype(np.uint8)
+        contours, _ = cv2.findContours(cropped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return []
+        contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(contour) < 2:
+            return []
+        contour = cv2.approxPolyDP(contour, max(1.0, 0.01 * cv2.arcLength(contour, True)), True)
+        scale = metadata["scale"]
+        pad_x = metadata["pad_x"]
+        pad_y = metadata["pad_y"]
+        image_width = int(metadata["image_width"])
+        image_height = int(metadata["image_height"])
+        polygon: list[list[int]] = []
+        for point in contour.reshape(-1, 2):
+            input_x = float(point[0]) * input_width / mask_width
+            input_y = float(point[1]) * input_height / mask_height
+            image_x = int(max(0, min(image_width, (input_x - pad_x) / scale)))
+            image_y = int(max(0, min(image_height, (input_y - pad_y) / scale)))
+            polygon.append([image_x, image_y])
+        return polygon if len(polygon) >= 3 else []
 
     def _preprocess(self, frame: np.ndarray) -> tuple[np.ndarray, dict[str, float]]:
         input_width, input_height = self.input_shape

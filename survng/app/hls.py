@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -8,24 +9,47 @@ from .baichuan_native import BaichuanFfmpegPipe
 from .baichuan_native import ffmpeg_input_args, start_ffmpeg_pipe
 from .baichuan_native import is_native_baichuan
 from .config import CameraConfig
+from .ffmpeg_hw import encoder_device_args, hls_video_args
 
 
 class HlsStreamer:
-    def __init__(self, ffmpeg_path: str, storage_dir: Path) -> None:
+    def __init__(
+        self,
+        ffmpeg_path: str,
+        storage_dir: Path,
+        hardware_acceleration: str = "auto",
+        idle_timeout: float = 20.0,
+    ) -> None:
         self.ffmpeg_path = ffmpeg_path
+        self.hardware_acceleration = hardware_acceleration
+        self.idle_timeout = max(10.0, float(idle_timeout))
         self.hls_dir = storage_dir / "hls"
         self.hls_dir.mkdir(parents=True, exist_ok=True)
         self.processes: dict[str, tuple[subprocess.Popen, BaichuanFfmpegPipe | None]] = {}
+        self.last_access: dict[str, float] = {}
+        self._lock = threading.RLock()
+        self._start_locks: dict[str, threading.Lock] = {}
+        self._shutdown = threading.Event()
+        self._reaper = threading.Thread(target=self._reap_idle, name="hls-idle-reaper", daemon=True)
+        self._reaper.start()
 
     def start(self, camera: CameraConfig, source: str = "live") -> Path:
         key = self._key(camera.id, source)
+        with self._lock:
+            start_lock = self._start_locks.setdefault(key, threading.Lock())
+        with start_lock:
+            return self._start(camera, source)
+
+    def _start(self, camera: CameraConfig, source: str) -> Path:
+        key = self._key(camera.id, source)
+        self.touch(camera.id, source)
         playlist = self.playlist_path(camera.id, source)
-        item = self.processes.get(key)
+        with self._lock:
+            item = self.processes.get(key)
         if item is not None and item[0].poll() is None:
             return playlist
 
         self.stop(key)
-        self.stop_camera_sources(camera.id, except_key=key)
         camera_dir = self.hls_dir / camera.id / source
         camera_dir.mkdir(parents=True, exist_ok=True)
         for path in camera_dir.glob("*"):
@@ -41,23 +65,11 @@ class HlsStreamer:
             "-hide_banner",
             "-loglevel",
             "warning",
+            *encoder_device_args(self.hardware_acceleration),
             *ffmpeg_input_args(camera, source),
             "-an",
             "-sn",
-            "-vf",
-            "scale='min(1280,iw)':-2",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-tune",
-            "zerolatency",
-            "-profile:v",
-            "baseline",
-            "-level",
-            "3.1",
-            "-pix_fmt",
-            "yuv420p",
+            *hls_video_args(self.hardware_acceleration),
             "-force_key_frames",
             f"expr:gte(t,n_forced*{keyframe_seconds})",
             "-sc_threshold",
@@ -82,11 +94,14 @@ class HlsStreamer:
             stdin=subprocess.PIPE if is_native_baichuan(camera) else None,
         )
         pipe = start_ffmpeg_pipe(camera, source, process)
-        self.processes[key] = (process, pipe)
+        with self._lock:
+            self.processes[key] = (process, pipe)
         return playlist
 
     def stop(self, key: str) -> None:
-        item = self.processes.pop(key, None)
+        with self._lock:
+            item = self.processes.pop(key, None)
+            self.last_access.pop(key, None)
         if item is None:
             return
         process, pipe = item
@@ -101,13 +116,37 @@ class HlsStreamer:
             process.kill()
 
     def stop_all(self) -> None:
-        for key in list(self.processes):
-            self.stop(key)
+        self._shutdown.set()
+        self._reaper.join(timeout=2)
+        with self._lock:
+            keys = list(self.processes)
+        shutdowns = [threading.Thread(target=self.stop, args=(key,), daemon=True) for key in keys]
+        for thread in shutdowns:
+            thread.start()
+        for thread in shutdowns:
+            thread.join(timeout=7)
 
     def stop_camera_sources(self, camera_id: str, except_key: str = "") -> None:
         prefix = f"{camera_id}:"
-        for key in list(self.processes):
+        with self._lock:
+            keys = list(self.processes)
+        for key in keys:
             if key.startswith(prefix) and key != except_key:
+                self.stop(key)
+
+    def touch(self, camera_id: str, source: str = "live") -> None:
+        with self._lock:
+            self.last_access[self._key(camera_id, source)] = time.monotonic()
+
+    def _reap_idle(self) -> None:
+        while not self._shutdown.wait(2.0):
+            cutoff = time.monotonic() - self.idle_timeout
+            with self._lock:
+                idle_keys = [
+                    key for key in self.processes
+                    if self.last_access.get(key, 0.0) < cutoff
+                ]
+            for key in idle_keys:
                 self.stop(key)
 
     def playlist_path(self, camera_id: str, source: str = "live") -> Path:

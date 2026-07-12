@@ -106,3 +106,17 @@ The detector supports YOLO-style ONNX output shaped like `[1, 4 + classes, ancho
 On macOS, the detector can also use Core ML. Set `detector.backend` to `coreml` and `coreml_model_path` to a `.mlmodel` or `.mlpackage` detection model. If Core ML is unavailable or the Core ML model cannot load, the detector falls back to the configured OpenVINO/ONNX model.
 
 The detector is optional. If OpenVINO or the model is missing, the app records a motion event and reports `detector_unavailable` instead of failing the camera loop.
+
+## Recording Playback Test
+
+Install the Playwright browser once, then run the recording scrub/soak test against a day with sufficient history:
+
+```bash
+npx --prefix frontend playwright install chromium
+DATE=2026-07-11 CAMERA=front-door SOURCE=main SOAK_SECONDS=90 SCRUBS=12 \
+  npm --prefix frontend run test:recordings-soak
+```
+
+The test fails on media errors, stalled playback, failed segment requests, or inadequate timeline advancement. Expected request cancellation caused by moving between scrub positions is ignored.
+
+Real Safari validation must run on a Mac because Linux Chromium does not provide Safari's HEVC pipeline. Open the same camera/day in Safari, play through several segment boundaries, scrub to widely separated times, and confirm playback resumes without a black frame. Use an H.265 camera such as Upper Garage to exercise `hvc1` playback.

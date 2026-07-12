@@ -34,7 +34,8 @@
         "port": 8000,
         "username": "USER",
         "password": "PASSWORD"
-      }
+      },
+      "record_sub": false
     }
   ]
 }

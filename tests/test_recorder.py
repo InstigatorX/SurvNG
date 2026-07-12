@@ -24,6 +24,20 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(rows[0]["duration_seconds"], 10.0)
         self.assertEqual(rows[1]["duration_seconds"], 10.0)
 
+    def test_recording_rows_can_read_sub_stream_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour_dir = Path(tmpdir) / "recordings" / "back-middle" / "live" / "2026-07-11" / "11"
+            hour_dir.mkdir(parents=True)
+            clip = hour_dir / "20260711-113000.mp4"
+            clip.write_bytes(b"sub")
+
+            rows = recorder.recording_rows("back-middle", limit=10, source="live")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "20260711-113000.mp4")
+        self.assertEqual(rows[0]["source"], "live")
+
 
 if __name__ == "__main__":
     unittest.main()
