@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .config import CameraConfig, DetectionZone
+
+
+def _class_applies(zone: DetectionZone, label: str) -> bool:
+    classes = {item.strip().lower() for item in zone.object_classes if item.strip()}
+    return not classes or label.lower() in classes
+
+
+def _point_in_polygon(x: float, y: float, zone: DetectionZone) -> bool:
+    points = zone.points
+    if len(points) < 3:
+        return False
+    inside = False
+    previous = points[-1]
+    for current in points:
+        if (current.y > y) != (previous.y > y):
+            crossing_x = (previous.x - current.x) * (y - current.y) / (previous.y - current.y) + current.x
+            if x < crossing_x:
+                inside = not inside
+        previous = current
+    return inside
+
+
+def detection_threshold(camera: CameraConfig, default: float) -> float:
+    thresholds = [default]
+    thresholds.extend(
+        zone.confidence_threshold
+        for zone in camera.zones
+        if zone.enabled and len(zone.points) >= 3 and zone.confidence_threshold is not None
+    )
+    return max(0.01, min(float(value) for value in thresholds))
+
+
+def apply_detection_zones(
+    camera: CameraConfig,
+    objects: list[dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+    default_confidence: float,
+) -> list[dict[str, Any]]:
+    zones = [zone for zone in camera.zones if zone.enabled and len(zone.points) >= 3]
+    if not zones:
+        for detected in objects:
+            if detected.get("label"):
+                detected["incident_eligible"] = True
+                detected["zones"] = []
+        return objects
+
+    width = max(1, frame_width)
+    height = max(1, frame_height)
+    for detected in objects:
+        label = str(detected.get("label") or "")
+        box = detected.get("box") or {}
+        confidence = float(detected.get("confidence") or 0.0)
+        if not label or not all(key in box for key in ("x1", "y1", "x2", "y2")):
+            continue
+
+        x = ((float(box["x1"]) + float(box["x2"])) / 2.0) / width
+        y = float(box["y2"]) / height
+        relevant = [zone for zone in zones if _class_applies(zone, label)]
+        incident_zones = [zone for zone in relevant if zone.behavior == "incident"]
+        matches = []
+        for zone in relevant:
+            threshold = zone.confidence_threshold if zone.confidence_threshold is not None else default_confidence
+            if confidence >= threshold and _point_in_polygon(x, y, zone):
+                matches.append(zone)
+
+        ignored = any(zone.behavior == "ignore" for zone in matches)
+        admitted = any(zone.behavior == "incident" for zone in matches)
+        meets_default = confidence >= default_confidence
+        detected["zones"] = [zone.name for zone in matches]
+        detected["zone_matches"] = [
+            {"name": zone.name, "behavior": zone.behavior, "color": zone.color}
+            for zone in matches
+        ]
+        detected["zone_point"] = {"x": round(x, 5), "y": round(y, 5)}
+        detected["incident_eligible"] = bool(not ignored and (admitted if incident_zones else meets_default))
+    return objects

@@ -17,6 +17,7 @@ from .events import EventStore
 from .ffmpeg_hw import recorded_frame_hw_args
 from .onvif_events import OnvifEventListener
 from .recorder import Recorder
+from .zones import apply_detection_zones, detection_threshold
 
 LOGGER = logging.getLogger(__name__)
 RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
@@ -51,6 +52,7 @@ class CameraWorker:
         self._source_errors: dict[str, str] = {}
         self.last_error = ""
         self.last_frame_at = ""
+        self.last_motion_at = ""
         self.onvif = OnvifEventListener(camera, self.handle_motion_event)
 
     def start(self) -> None:
@@ -91,6 +93,7 @@ class CameraWorker:
             "onvif_enabled": self.camera.onvif.enabled,
             "onvif_connected": self.onvif.connected,
             "onvif_last_event_at": self.onvif.last_event_at,
+            "last_motion_at": self.last_motion_at,
             "onvif_last_error": self.onvif.last_error,
             "onvif_last_connected_at": self.onvif.last_connected_at,
             "onvif_retry_attempts": self.onvif.retry_attempts,
@@ -103,7 +106,7 @@ class CameraWorker:
         ok, buffer = cv2.imencode(".jpg", frame)
         return buffer.tobytes() if ok else None
 
-    def mjpeg_frames(self, fps: float = 8.0, source: str = "live"):
+    def mjpeg_frames(self, fps: float = 4.0, source: str = "live"):
         source = self.camera.normalized_source(source)
         delay = 1.0 / max(fps, 1.0)
         while not self._stop.is_set():
@@ -126,6 +129,7 @@ class CameraWorker:
         message: str = "",
         event_at: datetime | None = None,
     ) -> None:
+        self.last_motion_at = datetime.now(timezone.utc).isoformat()
         if event_at is None:
             event_at = datetime.now(timezone.utc)
         elif event_at.tzinfo is None:
@@ -239,7 +243,15 @@ class CameraWorker:
                 if frame is None:
                     continue
 
-                objects = self.detector.detect(frame)
+                threshold = detection_threshold(self.camera, self.detector.config.confidence_threshold)
+                objects = self.detector.detect(frame, confidence_threshold=threshold)
+                apply_detection_zones(
+                    self.camera,
+                    objects,
+                    int(frame.shape[1]),
+                    int(frame.shape[0]),
+                    self.detector.config.confidence_threshold,
+                )
                 score = self._motion_object_score(objects)
                 distance = abs(sample_offset)
                 if score > best_score or (score == best_score and distance < best_distance):
@@ -258,7 +270,15 @@ class CameraWorker:
 
         fallback = self._get_latest_frame()
         if fallback is not None:
-            objects = self.detector.detect(fallback)
+            threshold = detection_threshold(self.camera, self.detector.config.confidence_threshold)
+            objects = self.detector.detect(fallback, confidence_threshold=threshold)
+            apply_detection_zones(
+                self.camera,
+                objects,
+                int(fallback.shape[1]),
+                int(fallback.shape[0]),
+                self.detector.config.confidence_threshold,
+            )
             if objects:
                 for detected in objects:
                     detected["frame_source"] = "live_fallback"
@@ -341,7 +361,7 @@ class CameraWorker:
         score = 0.0
         for detected in objects:
             label = detected.get("label")
-            if not label:
+            if not label or detected.get("incident_eligible") is False:
                 continue
             confidence = detected.get("confidence")
             if isinstance(confidence, (float, int)):

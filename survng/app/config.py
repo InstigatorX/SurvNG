@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import BaseModel, Field, model_validator
@@ -25,6 +25,22 @@ class BaichuanConfig(BaseModel):
     channel: int = 0
 
 
+class ZonePoint(BaseModel):
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+
+
+class DetectionZone(BaseModel):
+    name: str
+    color: str = "#22c55e"
+    enabled: bool = True
+    points: list[ZonePoint] = Field(default_factory=list)
+    object_classes: list[str] = Field(default_factory=list)
+    confidence_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    behavior: Literal["incident", "ignore"] = "incident"
+    trigger: Literal["bottom_center"] = "bottom_center"
+
+
 class CameraConfig(BaseModel):
     id: str
     name: str
@@ -35,6 +51,7 @@ class CameraConfig(BaseModel):
     record_sub: bool = False
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     baichuan: BaichuanConfig = Field(default_factory=BaichuanConfig)
+    zones: list[DetectionZone] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def derive_connection_from_url(self) -> "CameraConfig":
@@ -61,6 +78,9 @@ class DetectorConfig(BaseModel):
     coreml_model_path: str = ""
     labels_path: str = ""
     device: str = "CPU"
+    cache_enabled: bool = True
+    cache_dir: str = ".cache/openvino"
+    warmup_enabled: bool = True
     confidence_threshold: float = 0.45
     nms_threshold: float = 0.45
     labels: list[str] = Field(default_factory=list)
@@ -78,6 +98,7 @@ class AppConfig(BaseModel):
     hardware_acceleration: str = "auto"
     event_clip_before_seconds: float = 5.0
     event_clip_after_seconds: float = 5.0
+    incident_thumbnail_annotations: bool = True
     recording_segment_seconds: float = Field(default=10.0, ge=2.0, le=300.0)
     recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)

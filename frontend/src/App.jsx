@@ -4,6 +4,8 @@ import {
   Activity,
   ArrowLeft,
   Camera,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   CircleDot,
   Clock3,
@@ -13,6 +15,8 @@ import {
   Cpu,
   Film,
   Gauge,
+  Grid2X2,
+  GripVertical,
   HardDrive,
   Search,
   ListTree,
@@ -30,6 +34,8 @@ import {
   SkipForward,
   Sun,
   Trash2,
+  Undo2,
+  Rows3,
   Video,
   X,
 } from "lucide-react";
@@ -131,6 +137,188 @@ const ShakaVideo = forwardRef(function ShakaVideo({
   }, [runtime, src, mimeType, startTime]);
 
   return <video ref={videoRef} muted={muted} {...videoProps} />;
+});
+
+function RecordingFallback({ cameraId, source, timeZone, muted, controls, onReady, onError }) {
+  const [playback, setPlayback] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const day = dateKeyForTimeZone(Date.now(), timeZone || DEFAULT_TIME_ZONE);
+    const nextDay = addDaysToDateKey(day, 1);
+    const start = zonedDateSecondToEpoch(day, 0, timeZone || DEFAULT_TIME_ZONE);
+    const end = zonedDateSecondToEpoch(nextDay, 0, timeZone || DEFAULT_TIME_ZONE);
+    const candidates = source === "live" ? ["live", "main"] : ["main"];
+
+    async function load() {
+      for (const candidate of candidates) {
+        const response = await fetch(recordingDayUrl(cameraId, start, end, candidate));
+        if (!response.ok) continue;
+        const payload = await response.json();
+        const rows = Array.isArray(payload) ? payload : payload.recordings;
+        if (!Array.isArray(rows) || !rows.length) continue;
+        const duration = rows.reduce((total, row) => total + Math.max(0, Number(row.duration_seconds) || 0), 0);
+        if (!cancelled) {
+          setPlayback({
+            src: recordingDayHlsUrl(cameraId, start, end, candidate),
+            startTime: Math.max(0, duration - 3),
+          });
+        }
+        return;
+      }
+      throw new Error("No near-live recording is available");
+    }
+
+    load().catch((error) => !cancelled && onError?.(error));
+    return () => { cancelled = true; };
+  }, [cameraId, source, timeZone, onError]);
+
+  if (!playback) return null;
+  return (
+    <ShakaVideo
+      src={playback.src}
+      mimeType="application/vnd.apple.mpegurl"
+      startTime={playback.startTime}
+      bufferingGoal={6}
+      autoPlay
+      muted={muted}
+      controls={controls}
+      playsInline
+      onReady={(_player, video) => onReady?.(video, "recording")}
+      onError={onError}
+    />
+  );
+}
+
+const WebRtcLive = forwardRef(function WebRtcLive({
+  cameraId,
+  source = "live",
+  timeZone = DEFAULT_TIME_ZONE,
+  muted = true,
+  controls = false,
+  onReady,
+}, forwardedRef) {
+  const videoRef = useRef(null);
+  const [stage, setStage] = useState("webrtc");
+  const [compatibility, setCompatibility] = useState("native");
+  const [snapshotToken, setSnapshotToken] = useState(() => Date.now());
+  useImperativeHandle(forwardedRef, () => videoRef.current);
+
+  useEffect(() => {
+    setStage("webrtc");
+    setCompatibility("native");
+  }, [cameraId, source]);
+
+  useEffect(() => {
+    if (stage !== "webrtc") return undefined;
+    let disposed = false;
+    let connected = false;
+    let socket = null;
+    let peer = null;
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const fallback = () => {
+      if (disposed) return;
+      if (compatibility === "native") setCompatibility("h264");
+      else setStage("recording");
+    };
+    const failTimer = window.setTimeout(() => !connected && fallback(), compatibility === "native" ? 8000 : 15000);
+
+    try {
+      peer = new RTCPeerConnection({
+        bundlePolicy: "max-bundle",
+        iceServers: [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }],
+      });
+      peer.addTransceiver("video", { direction: "recvonly" });
+      peer.addTransceiver("audio", { direction: "recvonly" });
+      const media = new MediaStream();
+      peer.addEventListener("track", (event) => {
+        media.addTrack(event.track);
+        if (videoRef.current) videoRef.current.srcObject = media;
+      });
+      peer.addEventListener("icecandidate", (event) => {
+        if (socket?.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "webrtc/candidate", value: event.candidate?.candidate || "" }));
+        }
+      });
+      peer.addEventListener("connectionstatechange", () => {
+        if (peer.connectionState === "connected") {
+          connected = true;
+          window.clearTimeout(failTimer);
+        } else if (["failed", "disconnected"].includes(peer.connectionState) && !disposed) {
+          fallback();
+        }
+      });
+      socket = new WebSocket(`${protocol}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(source)}&compat=${compatibility}`);
+      socket.addEventListener("open", async () => {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        socket.send(JSON.stringify({ type: "webrtc/offer", value: offer.sdp }));
+      });
+      socket.addEventListener("message", (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === "webrtc/answer") {
+          peer.setRemoteDescription({ type: "answer", sdp: message.value }).catch(fallback);
+        } else if (message.type === "webrtc/candidate" && message.value) {
+          peer.addIceCandidate({ candidate: message.value, sdpMid: "0" }).catch(() => {});
+        } else if (message.type === "error" && String(message.value).includes("webrtc")) {
+          fallback();
+        }
+      });
+      socket.addEventListener("error", fallback);
+    } catch (_error) {
+      fallback();
+    }
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(failTimer);
+      socket?.close();
+      peer?.close();
+      if (videoRef.current) videoRef.current.srcObject = null;
+    };
+  }, [cameraId, source, stage, compatibility]);
+
+  useEffect(() => {
+    if (stage !== "snapshot") return undefined;
+    const timer = window.setInterval(() => setSnapshotToken(Date.now()), 2000);
+    return () => window.clearInterval(timer);
+  }, [stage]);
+
+  return (
+    <div className="live-stack" data-stage={stage}>
+      <img
+        className="live-poster"
+        src={`/api/cameras/${cameraId}/snapshot.jpg?source=${source}&t=${snapshotToken}`}
+        alt=""
+        onLoad={(event) => stage !== "webrtc" && onReady?.(event.currentTarget, "snapshot")}
+      />
+      {stage === "webrtc" ? (
+        <video
+          ref={videoRef}
+          className="live-video"
+          muted={muted}
+          controls={controls}
+          autoPlay
+          playsInline
+          onLoadedData={(event) => {
+            event.currentTarget.play().catch(() => {});
+            onReady?.(event.currentTarget, "webrtc");
+          }}
+        />
+      ) : null}
+      {stage === "recording" ? (
+        <RecordingFallback
+          cameraId={cameraId}
+          source={source}
+          timeZone={timeZone}
+          muted={muted}
+          controls={controls}
+          onReady={onReady}
+          onError={() => setStage("snapshot")}
+        />
+      ) : null}
+    </div>
+  );
 });
 
 function apiFile(path) {
@@ -380,6 +568,8 @@ function defaultCamera(cameras, seed = {}) {
     stream_url: seed.stream_url || "",
     live_stream_url: seed.live_stream_url || "",
     record: seed.record ?? true,
+    record_sub: seed.record_sub ?? false,
+    zones: structuredClone(seed.zones || []),
     onvif: {
       enabled: seed.onvif?.enabled || false,
       host,
@@ -460,6 +650,9 @@ function LiveHeaderStats() {
 
   const detector = stats.detector || {};
   const runtime = detector.runtime || {};
+  const inferenceStages = runtime.stages || {};
+  const lastStages = inferenceStages.last_ms || {};
+  const averageStages = inferenceStages.average_ms || {};
   const detectorLoaded = detector.coreml_loaded || detector.openvino_loaded || detector.opencv_loaded;
   const detectorLabel = detector.enabled
     ? `${detector.loaded_backend || detector.configured_backend || "det"}${detector.loaded_device ? ` ${detector.loaded_device}` : ""}`
@@ -473,9 +666,21 @@ function LiveHeaderStats() {
       <span className="header-stat hot"><Activity size={15} /><small>Objects</small><strong>{stats.objects}</strong></span>
       <span className="header-stat"><HardDrive size={15} /><small>Storage</small><strong>{storageLabel}</strong></span>
       <span className={`header-stat ${detectorLoaded ? "ok" : "warn"}`}><Gauge size={15} /><small>Detect</small><strong>{detectorLabel}</strong></span>
-      <span className="header-stat"><Cpu size={15} /><small>Infer</small><strong>{formatMilliseconds(runtime.last_inference_ms)}</strong></span>
-      <span className="header-stat"><Activity size={15} /><small>Avg</small><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong></span>
-      <span className="header-stat"><Gauge size={15} /><small>Det/s</small><strong>{formatRate(runtime.detection_fps)}</strong></span>
+      <span className="header-stat infer-stat" tabIndex={0}>
+        <Cpu size={15} /><small>Infer</small><strong>{formatMilliseconds(runtime.last_inference_ms)}</strong>
+        <span className="infer-tooltip" role="tooltip">
+          <span className="infer-tooltip-head"><strong>OpenVINO latency</strong><small>{detector.loaded_device || detector.configured_device || "device"} · {detector.performance_hint || "default"}</small></span>
+          <span className="infer-tooltip-summary">
+            <span><small>Average</small><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong></span>
+            <span><small>Detection rate</small><strong>{formatRate(runtime.detection_fps)} det/s</strong></span>
+          </span>
+          <span className="infer-tooltip-row labels"><b>Stage</b><b>Last</b><b>Average</b></span>
+          {[["Queue", "queue"], ["Preprocess", "preprocess"], ["Accelerator", "inference"], ["Postprocess", "postprocess"], ["Total", "total"]].map(([label, key]) => (
+            <span className="infer-tooltip-row" key={key}><span>{label}</span><strong>{formatMilliseconds(lastStages[key])}</strong><strong>{formatMilliseconds(averageStages[key])}</strong></span>
+          ))}
+          <span className="infer-tooltip-foot">1 stream · mmap {detector.mmap_enabled ? "on" : "off"} · cache {detector.cache_enabled ? "on" : "off"} · warm-up {formatMilliseconds(detector.warmup_ms)}</span>
+        </span>
+      </span>
       <span className={runtime.queue_depth > 0 ? "header-stat warn" : "header-stat"}><ListTree size={15} /><small>Queue</small><strong>{Number.isFinite(runtime.queue_depth) ? runtime.queue_depth : "--"}</strong></span>
       <span className="header-stat hot"><Clock3 size={15} /><small>Last Hit</small><strong>{formatAge(runtime.last_detection_age_seconds)}</strong></span>
       <span className="header-stat"><Camera size={15} /><small>Cameras</small><strong>{cameraLabel}</strong></span>
@@ -496,15 +701,18 @@ function StatCard({ icon, label, value, tone = "default" }) {
 function usePollingData() {
   const [cameras, setCameras] = useState([]);
   const [incidents, setIncidents] = useState([]);
+  const [appConfig, setAppConfig] = useState(null);
   const [loading, setLoading] = useState(true);
 
   async function load() {
-    const [cameraResponse, incidentResponse] = await Promise.all([
+    const [cameraResponse, incidentResponse, configResponse] = await Promise.all([
       fetch("/api/cameras"),
       fetch("/api/incidents?limit=250&gap_seconds=45"),
+      fetch("/api/config"),
     ]);
     setCameras(await cameraResponse.json());
     setIncidents(await incidentResponse.json());
+    if (configResponse.ok) setAppConfig(await configResponse.json());
     setLoading(false);
   }
 
@@ -514,14 +722,16 @@ function usePollingData() {
     return () => window.clearInterval(timer);
   }, []);
 
-  return { cameras, incidents, loading, refresh: load };
+  return { cameras, incidents, appConfig, loading, refresh: load };
 }
 
-const STREAM_MODES = ["auto", "mjpeg"];
+const STREAM_MODES = ["motion", "mjpeg", "webrtc"];
 const STREAM_LABELS = {
-  auto: "Auto",
+  motion: "Auto",
   mjpeg: "MJPEG",
+  webrtc: "WebRTC",
 };
+const MOTION_WEBRTC_HOLD_MS = 30_000;
 
 function mediaAspect(element) {
   const width = element?.videoWidth || element?.naturalWidth || 0;
@@ -530,28 +740,29 @@ function mediaAspect(element) {
   return `${width} / ${height}`;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragProps = {}, dragging = false }) {
-  const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v2.${camera.id}`, "auto");
+function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
+  const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
-  const normalizedStreamMode = STREAM_MODES.includes(streamMode) ? streamMode : "auto";
+  const normalizedStreamMode = STREAM_MODES.includes(streamMode) ? streamMode : "motion";
+  const lastMotionMs = new Date(camera.last_motion_at || 0).getTime();
+  const motionActive = Number.isFinite(lastMotionMs) && Date.now() - lastMotionMs <= MOTION_WEBRTC_HOLD_MS;
+  const activeTransport = normalizedStreamMode === "motion" ? (motionActive ? "webrtc" : "snapshot") : normalizedStreamMode;
   const [aspect, setAspect] = useState("16 / 9");
   const [mjpegToken, setMjpegToken] = useState(() => String(Date.now()));
   const [snapshotToken, setSnapshotToken] = useState(() => String(Date.now()));
   const [streamReady, setStreamReady] = useState(false);
-  const [hlsFailed, setHlsFailed] = useState(false);
-  const shouldUseHls = camera.running && streamReady && normalizedStreamMode === "auto" && !hlsFailed;
-  const shouldUseMjpegStream = camera.running && streamReady && (normalizedStreamMode === "mjpeg" || hlsFailed);
+  const shouldUseWebRtc = camera.running && streamReady && activeTransport === "webrtc";
+  const shouldUseMjpegStream = camera.running && streamReady && activeTransport === "mjpeg";
 
   useEffect(() => {
-    if (!STREAM_MODES.includes(streamMode)) setStreamMode("auto");
+    if (!STREAM_MODES.includes(streamMode)) setStreamMode("motion");
   }, [streamMode, setStreamMode]);
 
   useEffect(() => {
     setMjpegToken(String(Date.now()));
     setSnapshotToken(String(Date.now()));
     setStreamReady(false);
-    setHlsFailed(false);
-  }, [camera.id, sourceMode, normalizedStreamMode]);
+  }, [camera.id, sourceMode, activeTransport]);
 
   useEffect(() => {
     setStreamReady(false);
@@ -559,19 +770,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
     if (!camera.running) return undefined;
     const timer = window.setTimeout(() => setStreamReady(true), startDelayMs);
     return () => window.clearTimeout(timer);
-  }, [camera.id, camera.running, sourceMode, normalizedStreamMode, startDelayMs]);
+  }, [camera.id, camera.running, sourceMode, activeTransport, startDelayMs]);
 
   useEffect(() => {
-    if (!shouldUseMjpegStream) return undefined;
-    const timer = window.setInterval(() => setMjpegToken(String(Date.now())), 30000);
-    return () => window.clearInterval(timer);
-  }, [shouldUseMjpegStream]);
-
-  useEffect(() => {
-    if (camera.running && streamReady) return undefined;
+    if (camera.running && streamReady && activeTransport !== "snapshot") return undefined;
     const timer = window.setInterval(() => setSnapshotToken(String(Date.now())), 2000);
     return () => window.clearInterval(timer);
-  }, [camera.running, streamReady]);
+  }, [camera.running, streamReady, activeTransport]);
 
   async function post(action) {
     await fetch(`/api/cameras/${camera.id}/${action}`, { method: "POST" });
@@ -592,7 +797,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
     : `/api/cameras/${camera.id}/snapshot.jpg?source=${sourceMode}&t=${snapshotToken}`;
 
   return (
-    <article className={`bento-card camera-tile ${dragging ? "dragging" : ""}`} {...dragProps}>
+    <article className={`bento-card camera-tile ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`} {...dropProps}>
       <div
         className="video-frame camera-open-target"
         style={{ "--media-aspect": aspect }}
@@ -607,16 +812,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
         }}
         aria-label={`Open ${camera.name} live view`}
       >
-        {shouldUseHls ? (
-          <ShakaVideo
-            src={`/api/cameras/${camera.id}/hls/${sourceMode}/index.m3u8`}
-            mimeType="application/vnd.apple.mpegurl"
-            autoPlay
+        {shouldUseWebRtc ? (
+          <WebRtcLive
+            cameraId={camera.id}
+            source={sourceMode}
+            timeZone={timeZone}
             muted
-            playsInline
-            preload="auto"
-            onReady={(_player, video) => setAspect(mediaAspect(video))}
-            onError={() => setHlsFailed(true)}
+            onReady={(media) => setAspect(mediaAspect(media))}
           />
         ) : (
           <img
@@ -634,6 +836,15 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
             <h2>{camera.name}</h2>
           </div>
           <div className="tile-controls" aria-label={`${camera.name} controls`}>
+            <button
+              type="button"
+              className="tile-control-button icon-only camera-drag-handle"
+              title="Drag to reorder camera"
+              aria-label={`Reorder ${camera.name}`}
+              {...dragHandleProps}
+            >
+              <GripVertical size={16} />
+            </button>
             <span className={`status-pill ${camera.running ? "ok" : "bad"}`} title={camera.running ? "Online" : "Offline"}>
               <CircleDot size={13} /> {camera.running ? "online" : "offline"}
             </span>
@@ -643,8 +854,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
             <button type="button" className="tile-control-button" onClick={toggleSourceMode} title="Switch main/sub stream">
               <Radio size={15} /> {sourceMode === "main" ? "Main" : "Sub"}
             </button>
-            <button type="button" className="tile-control-button" onClick={cycleStreamMode} title="Cycle transport: Auto, MJPEG">
-              {STREAM_LABELS[normalizedStreamMode] || "Auto"}
+            <button
+              type="button"
+              className="tile-control-button"
+              onClick={cycleStreamMode}
+              title={normalizedStreamMode === "motion" ? `Automatic motion switching: ${activeTransport === "webrtc" ? "WebRTC active" : "snapshot idle"}` : "Cycle transport: Auto, MJPEG, WebRTC"}
+            >
+              {normalizedStreamMode === "motion" ? `Auto ${activeTransport === "webrtc" ? "RTC" : "Snap"}` : STREAM_LABELS[normalizedStreamMode]}
             </button>
             <button
               type="button"
@@ -662,10 +878,9 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dragP
   );
 }
 
-function LiveCameraOverlay({ camera, onClose }) {
+function LiveCameraOverlay({ camera, timeZone, onClose }) {
   const mediaRef = useRef(null);
   const [aspect, setAspect] = useState("16 / 9");
-  const [hlsFailed, setHlsFailed] = useState(false);
   const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
   const activeSource = source === "main" ? "main" : "live";
 
@@ -676,10 +891,6 @@ function LiveCameraOverlay({ camera, onClose }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-
-  useEffect(() => {
-    setHlsFailed(false);
-  }, [camera.id, activeSource]);
 
   function updateMediaAspect() {
     setAspect(mediaAspect(mediaRef.current));
@@ -702,26 +913,15 @@ function LiveCameraOverlay({ camera, onClose }) {
           </button>
         </div>
         <div className="live-overlay-media">
-          {hlsFailed ? (
-            <img
-              ref={mediaRef}
-              src={`/api/cameras/${camera.id}/stream.mjpg?source=${activeSource}`}
-              alt={`${camera.name} ${sourceLabel(activeSource).toLowerCase()} live stream`}
-              onLoad={updateMediaAspect}
-            />
-          ) : (
-            <ShakaVideo
-              ref={mediaRef}
-              src={`/api/cameras/${camera.id}/hls/${activeSource}/index.m3u8`}
-              mimeType="application/vnd.apple.mpegurl"
-              autoPlay
-              muted
-              controls
-              playsInline
-              onReady={updateMediaAspect}
-              onError={() => setHlsFailed(true)}
-            />
-          )}
+          <WebRtcLive
+            ref={mediaRef}
+            cameraId={camera.id}
+            source={activeSource}
+            timeZone={timeZone}
+            muted
+            controls
+            onReady={(media) => setAspect(mediaAspect(media))}
+          />
         </div>
       </section>
     </div>
@@ -742,22 +942,51 @@ function eventObjects(event) {
   return event.objects || [];
 }
 
+function eventEpoch(event) {
+  const explicit = Number(event?.created_epoch);
+  if (Number.isFinite(explicit)) return explicit;
+  const parsed = new Date(event?.created_at || 0).getTime() / 1000;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function incidentClipWindow(event, before, after) {
+  const anchor = eventEpoch(event);
+  const children = event?.events || [];
+  const childEpochs = children.map(eventEpoch).filter(Number.isFinite);
+  const explicitStart = Number(event?.start_epoch);
+  const explicitEnd = Number(event?.last_epoch);
+  const start = Number.isFinite(explicitStart) ? explicitStart : childEpochs.length ? Math.min(...childEpochs) : anchor;
+  const end = Number.isFinite(explicitEnd) ? explicitEnd : childEpochs.length ? Math.max(...childEpochs) : anchor;
+  return {
+    before: Math.max(0, before + (Number.isFinite(anchor) && Number.isFinite(start) ? anchor - start : 0)),
+    after: Math.max(0, after + (Number.isFinite(anchor) && Number.isFinite(end) ? end - anchor : 0)),
+  };
+}
+
 function incidentLabels(incident) {
-  const labels = incident.labels?.length
+  const labels = Array.isArray(incident.labels)
     ? incident.labels
-    : eventObjects(incident).map((object) => object.label).filter(Boolean);
+    : eventObjects(incident).filter((object) => object.incident_eligible !== false).map((object) => object.label).filter(Boolean);
   return Array.from(new Set(labels.filter(Boolean)));
 }
 
 function hasDetectedObjects(event) {
-  return Boolean(event.has_objects) || eventObjects(event).some((object) => object.label) || incidentLabels(event).length > 0;
+  if (typeof event.has_objects === "boolean") return event.has_objects;
+  return eventObjects(event).some((object) => object.label && object.incident_eligible !== false) || incidentLabels(event).length > 0;
+}
+
+function incidentZones(incident) {
+  const zones = Array.isArray(incident.zones)
+    ? incident.zones
+    : eventObjects(incident).filter((object) => object.incident_eligible !== false).flatMap((object) => object.zones || []);
+  return Array.from(new Set(zones.filter(Boolean)));
 }
 
 
 function objectBoxes(event) {
   return eventObjects(event)
     .map((object) => ({ object, box: object?.box }))
-    .filter(({ object, box }) => object?.label && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .filter(({ object, box }) => object?.label && object.incident_eligible !== false && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
     .map(({ object, box }) => ({
       label: object.label,
       confidence: object.confidence,
@@ -772,7 +1001,7 @@ function objectBoxes(event) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, children }) {
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, children }) {
   const boxes = objectBoxes(event);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
@@ -791,7 +1020,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
       scale,
     };
   }, [frameSize, imageSize]);
-  const canFocus = allowObjectFocus && boxes.length > 0 && renderedImage;
+  const canFocus = allowObjectFocus && showAnnotations && boxes.length > 0 && renderedImage;
 
   useEffect(() => {
     setObjectFocused(false);
@@ -861,7 +1090,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
         {event?.snapshot_path ? <img src={apiFile(event.snapshot_path)} alt={alt} onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
-        {renderedBoxes.length ? (
+        {showAnnotations && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
               {renderedBoxes.filter((box) => box.maskPoints).map((box, index) => (
@@ -905,6 +1134,7 @@ function IncidentClipLayer({ event, active, onEnded }) {
   const [clipInfo, setClipInfo] = useState(null);
   const [clipLoading, setClipLoading] = useState(false);
   const [clipError, setClipError] = useState("");
+  const [playback, setPlayback] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -912,11 +1142,13 @@ function IncidentClipLayer({ event, active, onEnded }) {
       const eventId = Number(event?.representative_event_id || event?.id);
       if (!active || !Number.isFinite(eventId)) {
         setClipInfo(null);
+        setPlayback(null);
         setClipLoading(false);
         setClipError(active ? "No event video available" : "");
         return;
       }
       setClipInfo(null);
+      setPlayback(null);
       setClipLoading(true);
       setClipError("");
       let before = 5;
@@ -934,29 +1166,45 @@ function IncidentClipLayer({ event, active, onEnded }) {
       if (cancelled) return;
       const safeBefore = Number.isFinite(before) ? before : 5;
       const safeAfter = Number.isFinite(after) ? after : 5;
-      setClipInfo({ url: eventClipUrl(eventId, safeBefore, safeAfter) });
-      setClipLoading(false);
+      const window = incidentClipWindow(event, safeBefore, safeAfter);
+      const info = {
+        streamUrl: eventStreamUrl(eventId, window.before, window.after),
+        downloadUrl: eventClipUrl(eventId, window.before, window.after),
+      };
+      setClipInfo(info);
+      setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [active, event?.id, event?.representative_event_id]);
+  }, [active, event?.id, event?.representative_event_id, event?.start_epoch, event?.last_epoch]);
 
   if (!active) return null;
   return (
     <div className="incident-video-layer" onClick={(event) => event.stopPropagation()}>
-      {clipInfo && !clipError ? (
-        <ShakaVideo
-          ref={videoRef}
-          src={clipInfo.url}
-          mimeType="video/mp4"
-          autoPlay
-          controls
-          playsInline
-          preload="metadata"
-          onReady={() => { setClipLoading(false); setClipError(""); }}
-          onError={() => { setClipLoading(false); setClipError("No recording window found"); }}
-          onEnded={onEnded}
-        />
+      {clipInfo && playback && !clipError ? (
+        <>
+          <ShakaVideo
+            ref={videoRef}
+            src={playback.url}
+            mimeType={playback.mimeType}
+            autoPlay
+            controls
+            playsInline
+            preload="metadata"
+            onReady={() => { setClipLoading(false); setClipError(""); }}
+            onError={() => {
+              if (playback.url !== clipInfo.downloadUrl) {
+                setClipLoading(true);
+                setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
+              } else {
+                setClipLoading(false);
+                setClipError("No recording window found");
+              }
+            }}
+            onEnded={onEnded}
+          />
+          {clipLoading ? <div className="incident-video-status preparing">Preparing incident video...</div> : null}
+        </>
       ) : (
         <div className="incident-video-status">{clipLoading ? "Preparing video..." : clipError || "No event video available"}</div>
       )}
@@ -964,7 +1212,7 @@ function IncidentClipLayer({ event, active, onEnded }) {
   );
 }
 
-function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
+function IncidentCard({ incident, timeZone, expanded, thumbnailAnnotations = true, onToggle, onSelect }) {
   const rawEvents = incident.events || [];
   const showSubEvents = rawEvents.length > 1;
   const [selectedPreview, setSelectedPreview] = useState(null);
@@ -1016,7 +1264,15 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
 
   function openOverlay(pointerEvent) {
     pointerEvent.stopPropagation();
-    onSelect(preview);
+    onSelect({
+      ...preview,
+      start_epoch: incident.start_epoch,
+      last_epoch: incident.last_epoch,
+      start_at: incident.start_at,
+      end_at: incident.end_at,
+      event_count: eventCount,
+      events: rawEvents,
+    });
   }
 
   return (
@@ -1029,7 +1285,7 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
       title={`${incident.camera_id} ${timeText}`}
     >
       <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Play selected event video" : "Expand incident"}>
-        <SnapshotImage event={preview} alt="incident snapshot">
+        <SnapshotImage event={preview} alt="incident snapshot" showAnnotations={expanded || thumbnailAnnotations}>
           <div className="incident-snapshot-hud">
             <div className="incident-snapshot-main">
               <strong>{incident.camera_id}</strong>
@@ -1039,7 +1295,7 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
               {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
             </div>
           </div>
-          <IncidentClipLayer event={preview} active={expanded && inlineVideoActive} onEnded={() => setInlineVideoActive(false)} />
+          <IncidentClipLayer event={incident} active={expanded && inlineVideoActive} onEnded={() => setInlineVideoActive(false)} />
           <button type="button" className="event-count" onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label="Open event overlay" title="Open event overlay">{countText}</button>
         </SnapshotImage>
       </div>
@@ -1077,6 +1333,186 @@ function IncidentCard({ incident, timeZone, expanded, onToggle, onSelect }) {
   );
 }
 
+function IncidentInspector({ incident, appConfig, timeZone, onOpen }) {
+  if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
+  const objects = eventObjects(incident).filter((object) => object.label && object.incident_eligible !== false);
+  const zones = incidentZones(incident);
+  const eventId = Number(incident.representative_event_id || incident.id);
+  const before = Number(appConfig?.event_clip_before_seconds ?? 5);
+  const after = Number(appConfig?.event_clip_after_seconds ?? 5);
+  const window = incidentClipWindow(incident, before, after);
+  const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, window.before, window.after) : "";
+
+  return (
+    <aside className="incident-inspector">
+      <div className="incident-inspector-head">
+        <div><strong>{incident.camera_id}</strong><time>{formatDateTime(incident.created_at, timeZone)}</time></div>
+        <button type="button" onClick={() => onOpen(incident)}>Open viewer</button>
+      </div>
+      <section>
+        <h3>Objects</h3>
+        {objects.length ? objects.map((object, index) => {
+          const box = object.box || {};
+          return (
+            <div className="inspector-detection" key={`${object.label}-${index}`}>
+              <div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div>
+              <code>{Math.round(Number(box.x1 || 0))}, {Math.round(Number(box.y1 || 0))} → {Math.round(Number(box.x2 || 0))}, {Math.round(Number(box.y2 || 0))}</code>
+              {object.zones?.length ? <small>{object.zones.join(", ")}</small> : null}
+            </div>
+          );
+        }) : <p>No eligible object detections.</p>}
+      </section>
+      <section>
+        <h3>Zones</h3>
+        <div className="pill-row">{zones.length ? zones.map((zone) => <span className="pill" key={zone}>{zone}</span>) : <span className="pill quiet">none</span>}</div>
+      </section>
+      <section>
+        <h3>Incident</h3>
+        <dl>
+          <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
+          <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
+          <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
+          <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
+        </dl>
+      </section>
+      <div className="incident-inspector-actions">
+        {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
+        {incident.snapshot_path ? <a href={apiFile(incident.snapshot_path)} download><Download size={15} /> Snapshot</a> : null}
+        <button type="button" onClick={() => onOpen(incident)}><Cpu size={15} /> Manual detect</button>
+      </div>
+    </aside>
+  );
+}
+
+function detectionIou(left, right) {
+  const x1 = Math.max(Number(left.x1), Number(right.x1));
+  const y1 = Math.max(Number(left.y1), Number(right.y1));
+  const x2 = Math.min(Number(left.x2), Number(right.x2));
+  const y2 = Math.min(Number(left.y2), Number(right.y2));
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const leftArea = Math.max(0, left.x2 - left.x1) * Math.max(0, left.y2 - left.y1);
+  const rightArea = Math.max(0, right.x2 - right.x1) * Math.max(0, right.y2 - right.y1);
+  return intersection / Math.max(1, leftArea + rightArea - intersection);
+}
+
+function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats }) {
+  const canvasRef = useRef(null);
+  const captureRef = useRef(document.createElement("canvas"));
+  const tracksRef = useRef([]);
+  const nextTrackIdRef = useRef(1);
+
+  useEffect(() => {
+    if (!active) {
+      tracksRef.current = [];
+      const canvas = canvasRef.current;
+      canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+      return undefined;
+    }
+    let disposed = false;
+    let timer = null;
+
+    function updateTracks(detections) {
+      const now = performance.now();
+      const available = [...tracksRef.current];
+      const next = detections.map((object) => {
+        let bestIndex = -1;
+        let bestScore = 0.25;
+        available.forEach((track, index) => {
+          if (!track || track.label !== object.label) return;
+          const score = detectionIou(track.box, object.box);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+          }
+        });
+        const previous = bestIndex >= 0 ? available.splice(bestIndex, 1)[0] : null;
+        return {
+          id: previous?.id || nextTrackIdRef.current++,
+          label: object.label,
+          confidence: Number(object.confidence) || 0,
+          box: object.box,
+          seenAt: now,
+        };
+      });
+      tracksRef.current = [...next, ...available.filter((track) => now - track.seenAt < 1200)].slice(0, 40);
+      return next;
+    }
+
+    function draw(tracks, frameWidth, frameHeight) {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) return;
+      const width = Math.max(1, video.clientWidth);
+      const height = Math.max(1, video.clientHeight);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      const context = canvas.getContext("2d");
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, width, height);
+      const scale = Math.min(width / frameWidth, height / frameHeight);
+      const offsetX = (width - frameWidth * scale) / 2;
+      const offsetY = (height - frameHeight * scale) / 2;
+      context.font = "700 12px system-ui, sans-serif";
+      context.lineWidth = 2;
+      tracks.forEach((track) => {
+        const x = offsetX + track.box.x1 * scale;
+        const y = offsetY + track.box.y1 * scale;
+        const boxWidth = (track.box.x2 - track.box.x1) * scale;
+        const boxHeight = (track.box.y2 - track.box.y1) * scale;
+        const label = `#${track.id} ${track.label} ${Math.round(track.confidence * 100)}%`;
+        const labelWidth = context.measureText(label).width + 10;
+        context.strokeStyle = "#2dd4bf";
+        context.fillStyle = "rgba(13, 148, 136, 0.88)";
+        context.strokeRect(x, y, boxWidth, boxHeight);
+        context.fillRect(x, Math.max(0, y - 20), labelWidth, 20);
+        context.fillStyle = "#ffffff";
+        context.fillText(label, x + 5, Math.max(14, y - 6));
+      });
+    }
+
+    async function sample() {
+      const video = videoRef.current;
+      if (disposed) return;
+      if (!video || video.readyState < 2 || video.paused || document.hidden) {
+        timer = window.setTimeout(sample, 350);
+        return;
+      }
+      const capture = captureRef.current;
+      const width = Math.min(960, video.videoWidth || 960);
+      const height = Math.max(1, Math.round(width * (video.videoHeight || 540) / (video.videoWidth || 960)));
+      capture.width = width;
+      capture.height = height;
+      capture.getContext("2d").drawImage(video, 0, 0, width, height);
+      try {
+        const blob = await new Promise((resolve) => capture.toBlob(resolve, "image/jpeg", 0.78));
+        if (!blob || disposed) return;
+        const response = await fetch(`/api/detector/frame?confidence=${Number(confidence).toFixed(2)}`, {
+          method: "POST",
+          headers: { "Content-Type": "image/jpeg" },
+          body: blob,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const tracks = updateTracks(payload.objects || []);
+        draw(tracks, payload.width || width, payload.height || height);
+        onStats?.({ inferenceMs: payload.elapsed_ms, objects: tracks.length, tracks: tracks.map((track) => track.id) });
+      } catch (error) {
+        onStats?.({ error: error.message || "Detection failed" });
+      }
+      if (!disposed) timer = window.setTimeout(sample, 500);
+    }
+
+    sample();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [active, confidence, videoRef, onStats]);
+
+  return <canvas ref={canvasRef} className="event-detection-canvas" aria-hidden="true" />;
+}
+
 function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
   const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
@@ -1084,7 +1520,10 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [clipInfo, setClipInfo] = useState(null);
   const [clipLoading, setClipLoading] = useState(false);
   const [clipError, setClipError] = useState("");
+  const [playback, setPlayback] = useState(null);
   const [videoActive, setVideoActive] = useState(false);
+  const [detectionDebug, setDetectionDebug] = useState(false);
+  const [detectionDebugStats, setDetectionDebugStats] = useState(null);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
   const [manualDetection, setManualDetection] = useState(null);
@@ -1109,6 +1548,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
         return;
       }
       setClipInfo(null);
+      setPlayback(null);
       setClipLoading(true);
       setClipError("");
       setVideoActive(false);
@@ -1127,17 +1567,20 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       if (cancelled) return;
       const safeBefore = Number.isFinite(before) ? before : 5;
       const safeAfter = Number.isFinite(after) ? after : 5;
-      setClipInfo({
-        url: eventClipUrl(eventId, safeBefore, safeAfter),
-        before: safeBefore,
-        after: safeAfter,
-        duration: safeBefore + safeAfter,
-      });
-      setClipLoading(false);
+      const window = incidentClipWindow(event, safeBefore, safeAfter);
+      const info = {
+        streamUrl: eventStreamUrl(eventId, window.before, window.after),
+        downloadUrl: eventClipUrl(eventId, window.before, window.after),
+        before: window.before,
+        after: window.after,
+        duration: window.before + window.after,
+      };
+      setClipInfo(info);
+      setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [event.id, event.representative_event_id]);
+  }, [event.id, event.representative_event_id, event.start_epoch, event.last_epoch]);
 
   function playEventClip() {
     if (!clipInfo || clipError) return;
@@ -1259,6 +1702,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 
   useEffect(() => {
     resetZoom();
+    setDetectionDebug(false);
+    setDetectionDebugStats(null);
     setManualDetection(null);
     setManualError("");
     setManualLoading(false);
@@ -1317,8 +1762,21 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             <time>{formatDateTime(event.created_at, timeZone)}</time>
           </div>
           <div className="overlay-actions">
+            <button
+              type="button"
+              className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
+              onClick={() => {
+                if (!videoActive) playEventClip();
+                setDetectionDebug((enabled) => !enabled);
+              }}
+              disabled={!clipInfo || Boolean(clipError)}
+              title="Toggle real-time OpenVINO detection and tracking"
+              aria-pressed={detectionDebug}
+            >
+              <Activity size={16} /> AI
+            </button>
             {clipInfo && !clipError ? (
-              <a className="tile-control-button icon-only" href={clipInfo.url} download={downloadName} title="Download event video" aria-label="Download event video">
+              <a className="tile-control-button icon-only" href={clipInfo.downloadUrl} download={downloadName} title="Download event video" aria-label="Download event video">
                 <Download size={18} />
               </a>
             ) : (
@@ -1361,21 +1819,47 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             className="event-snapshot-frame"
             layerStyle={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }}
             allowObjectFocus={zoom.scale === 1 && !videoActive}
+            showAnnotations
           />
-          {videoActive && clipInfo && !clipError ? (
-            <ShakaVideo
-              className="event-video-layer"
-              ref={clipVideoRef}
-              src={clipInfo.url}
-              mimeType="video/mp4"
-              autoPlay
-              controls
-              playsInline
-              preload="metadata"
-              onReady={() => { setClipLoading(false); setClipError(""); }}
-              onError={() => { setClipLoading(false); setVideoActive(false); setClipError("No recording window found"); }}
-              onClick={(event) => event.stopPropagation()}
-            />
+          {videoActive && clipInfo && playback && !clipError ? (
+            <>
+              <ShakaVideo
+                className="event-video-layer"
+                ref={clipVideoRef}
+                src={playback.url}
+                mimeType={playback.mimeType}
+                autoPlay
+                controls
+                playsInline
+                preload="metadata"
+                onReady={() => { setClipLoading(false); setClipError(""); }}
+                onError={() => {
+                  if (playback.url !== clipInfo.downloadUrl) {
+                    setClipLoading(true);
+                    setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
+                  } else {
+                    setClipLoading(false);
+                    setVideoActive(false);
+                    setClipError("No recording window found");
+                  }
+                }}
+                onClick={(event) => event.stopPropagation()}
+              />
+              <DebugDetectionOverlay
+                videoRef={clipVideoRef}
+                active={detectionDebug}
+                confidence={safeManualConfidence}
+                onStats={setDetectionDebugStats}
+              />
+              {clipLoading ? <div className="event-video-preparing">Preparing incident video...</div> : null}
+            </>
+          ) : null}
+          {videoActive && detectionDebug && detectionDebugStats ? (
+            <div className={`event-detection-stats ${detectionDebugStats.error ? "error" : ""}`}>
+              {detectionDebugStats.error
+                ? detectionDebugStats.error
+                : `${detectionDebugStats.inferenceMs ?? "--"} ms · ${detectionDebugStats.objects ?? 0} objects`}
+            </div>
           ) : null}
         </div>
         <div className="event-detail-body">
@@ -1428,14 +1912,19 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 }
 
 function IncidentsPage({ timeZone }) {
-  const { cameras, incidents, refresh } = usePollingData();
+  const { cameras, incidents, appConfig, refresh } = usePollingData();
+  const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useStoredState("survng.incidentCameraFilter.v1", "all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useStoredState("survng.incidentObjectFilter.v1", "all");
+  const [incidentZoneFilter, setIncidentZoneFilter] = useStoredState("survng.incidentZoneFilter.v1", "all");
+  const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
+  const [inspectorState, setInspectorState] = useStoredState("survng.incidentInspector.v1", "open");
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
-  const incidentsPerPage = isMobileViewport() ? 12 : 24;
+  const mobileView = isMobileViewport();
+  const incidentsPerPage = mobileView ? 12 : incidentDensity === "comfortable" ? 10 : 18;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = useMemo(() => {
     const ids = Array.from(new Set(incidents.map((incident) => incident.camera_id).filter(Boolean)));
@@ -1446,13 +1935,20 @@ function IncidentsPage({ timeZone }) {
     incidents.forEach((incident) => incidentLabels(incident).forEach((label) => labels.add(label)));
     return Array.from(labels).sort((left, right) => left.localeCompare(right));
   }, [incidents]);
+  const incidentZoneOptions = useMemo(() => {
+    const zones = new Set();
+    incidents.forEach((incident) => incidentZones(incident).forEach((zone) => zones.add(zone)));
+    return Array.from(zones).sort((left, right) => left.localeCompare(right));
+  }, [incidents]);
   const visibleIncidents = useMemo(() => incidents.filter((incident) => {
     if (eventFilter === "object" && !hasDetectedObjects(incident)) return false;
     if (incidentCameraFilter !== "all" && incident.camera_id !== incidentCameraFilter) return false;
     if (incidentObjectFilter !== "all" && !incidentLabels(incident).includes(incidentObjectFilter)) return false;
+    if (incidentZoneFilter !== "all" && !incidentZones(incident).includes(incidentZoneFilter)) return false;
     return true;
-  }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter]);
-  const focusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
+  const explicitlyFocusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  const focusedIncident = mobileView ? explicitlyFocusedIncident : explicitlyFocusedIncident || visibleIncidents[0] || null;
   const galleryIncidents = focusedIncident
     ? visibleIncidents.filter((incident) => incident.id !== focusedIncident.id)
     : visibleIncidents;
@@ -1462,7 +1958,7 @@ function IncidentsPage({ timeZone }) {
 
   useEffect(() => {
     setIncidentPage(0);
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, expandedIncidentId]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -1492,7 +1988,101 @@ function IncidentsPage({ timeZone }) {
   }, [expandedIncidentId, selectedEvent]);
 
   function toggleIncident(incidentId) {
+    if (!mobileView) {
+      setExpandedIncidentId(incidentId);
+      return;
+    }
     setExpandedIncidentId((current) => current === incidentId ? null : incidentId);
+  }
+
+  const focusedIndex = focusedIncident ? visibleIncidents.findIndex((incident) => incident.id === focusedIncident.id) : -1;
+
+  function moveFocus(direction) {
+    if (!visibleIncidents.length) return;
+    const nextIndex = Math.max(0, Math.min(visibleIncidents.length - 1, focusedIndex + direction));
+    setExpandedIncidentId(visibleIncidents[nextIndex].id);
+  }
+
+  useEffect(() => {
+    if (mobileView || selectedEvent) return undefined;
+    function onIncidentArrow(event) {
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))) return;
+      if (event.key === "ArrowLeft" && focusedIndex > 0) {
+        event.preventDefault();
+        moveFocus(-1);
+      }
+      if (event.key === "ArrowRight" && focusedIndex >= 0 && focusedIndex < visibleIncidents.length - 1) {
+        event.preventDefault();
+        moveFocus(1);
+      }
+    }
+    window.addEventListener("keydown", onIncidentArrow);
+    return () => window.removeEventListener("keydown", onIncidentArrow);
+  }, [mobileView, selectedEvent, focusedIndex, visibleIncidents]);
+
+  if (!mobileView) {
+    return (
+      <main className={`incidents-desktop-page ${inspectorState === "open" ? "with-inspector" : ""}`}>
+        <section className="bento-card incidents-desktop-shell">
+          <div className="incidents-desktop-toolbar">
+            <div className="incident-filter-toggle compact" aria-label="Incident type filter">
+              <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
+              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}>Motion</button>
+            </div>
+            <div className="incident-filter-selects desktop">
+              <label><span>Camera</span><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
+              <label><span>Object</span><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
+              <label><span>Zone</span><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
+            </div>
+            <span className="shown-bubble">{visibleIncidents.length} shown</span>
+            <button type="button" className={inspectorState === "open" ? "active" : ""} onClick={() => setInspectorState(inspectorState === "open" ? "closed" : "open")}>Inspector</button>
+          </div>
+
+          <div className="incidents-desktop-workspace">
+            <aside className={`incident-rail ${incidentDensity}`}>
+              <div className="incident-rail-head">
+                <strong>Incidents</strong>
+                <div className="density-control" aria-label="Thumbnail density">
+                  <button type="button" className={incidentDensity === "compact" ? "active" : ""} onClick={() => setIncidentDensity("compact")} title="Compact thumbnails" aria-label="Compact thumbnails"><Grid2X2 size={15} /></button>
+                  <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} onClick={() => setIncidentDensity("comfortable")} title="Comfortable thumbnails" aria-label="Comfortable thumbnails"><Rows3 size={15} /></button>
+                </div>
+              </div>
+              <div className="incident-rail-list">
+                {galleryIncidents.length ? pagedIncidents.map((incident) => (
+                  <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} />
+                )) : <div className="empty-state">No other incidents.</div>}
+              </div>
+              {galleryIncidents.length > incidentsPerPage ? (
+                <div className="incident-pager" aria-label="Incident pages">
+                  <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
+                  <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
+                  <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
+                </div>
+              ) : null}
+            </aside>
+
+            <section className="incident-investigation">
+              <div className="incident-focus-nav">
+                <span>{focusedIndex >= 0 ? `${focusedIndex + 1} of ${visibleIncidents.length}` : "No incident selected"}</span>
+              </div>
+              <div className="incident-desktop-focus">
+                {focusedIncident ? (
+                  <>
+                    <button type="button" className="incident-focus-arrow previous" onClick={() => moveFocus(-1)} disabled={focusedIndex <= 0} title="Previous incident" aria-label="Previous incident"><ChevronLeft size={26} /></button>
+                    <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
+                  </>
+                ) : null}
+                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} /> : <div className="empty-state">No incidents match the current filters.</div>}
+              </div>
+            </section>
+
+            {inspectorState === "open" ? <IncidentInspector incident={focusedIncident} appConfig={appConfig} timeZone={timeZone} onOpen={setSelectedEvent} /> : null}
+          </div>
+        </section>
+        {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
+      </main>
+    );
   }
 
   return (
@@ -1524,6 +2114,13 @@ function IncidentsPage({ timeZone }) {
                 {incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}
               </select>
             </label>
+            <label>
+              <span>Zone</span>
+              <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}>
+                <option value="all">All zones</option>
+                {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
+              </select>
+            </label>
           </div>
         </div>
         {focusedIncident ? (
@@ -1532,6 +2129,7 @@ function IncidentsPage({ timeZone }) {
               incident={focusedIncident}
               timeZone={timeZone}
               expanded
+              thumbnailAnnotations={thumbnailAnnotations}
               onToggle={toggleIncident}
               onSelect={setSelectedEvent}
             />
@@ -1545,6 +2143,7 @@ function IncidentsPage({ timeZone }) {
                 incident={incident}
                 timeZone={timeZone}
                 expanded={false}
+                thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
                 onSelect={setSelectedEvent}
               />
@@ -1565,12 +2164,15 @@ function IncidentsPage({ timeZone }) {
 }
 
 function LivePage({ timeZone }) {
-  const { cameras, incidents, refresh } = usePollingData();
+  const { cameras, incidents, appConfig, refresh } = usePollingData();
+  const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useStoredState("survng.incidentCameraFilter.v1", "all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useStoredState("survng.incidentObjectFilter.v1", "all");
+  const [incidentZoneFilter, setIncidentZoneFilter] = useStoredState("survng.incidentZoneFilter.v1", "all");
   const [cameraOrder, setCameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [dragCameraId, setDragCameraId] = useState("");
+  const [dragOverCameraId, setDragOverCameraId] = useState("");
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
@@ -1598,12 +2200,18 @@ function LivePage({ timeZone }) {
     incidents.forEach((incident) => incidentLabels(incident).forEach((label) => labels.add(label)));
     return Array.from(labels).sort((left, right) => left.localeCompare(right));
   }, [incidents]);
+  const incidentZoneOptions = useMemo(() => {
+    const zones = new Set();
+    incidents.forEach((incident) => incidentZones(incident).forEach((zone) => zones.add(zone)));
+    return Array.from(zones).sort((left, right) => left.localeCompare(right));
+  }, [incidents]);
   const visibleIncidents = useMemo(() => incidents.filter((incident) => {
     if (eventFilter === "object" && !hasDetectedObjects(incident)) return false;
     if (incidentCameraFilter !== "all" && incident.camera_id !== incidentCameraFilter) return false;
     if (incidentObjectFilter !== "all" && !incidentLabels(incident).includes(incidentObjectFilter)) return false;
+    if (incidentZoneFilter !== "all" && !incidentZones(incident).includes(incidentZoneFilter)) return false;
     return true;
-  }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter]);
+  }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
   const focusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
   const galleryIncidents = focusedIncident
     ? visibleIncidents.filter((incident) => incident.id !== focusedIncident.id)
@@ -1624,7 +2232,7 @@ function LivePage({ timeZone }) {
 
   useEffect(() => {
     setIncidentPage(0);
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, expandedIncidentId]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, expandedIncidentId]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -1670,26 +2278,36 @@ function LivePage({ timeZone }) {
               onOpen={setExpandedCamera}
               startDelayMs={index * 450}
               dragging={dragCameraId === camera.id}
-              dragProps={{
+              dragOver={dragOverCameraId === camera.id && dragCameraId !== camera.id}
+              dragHandleProps={{
                 draggable: true,
                 onDragStart: (event) => {
                   setDragCameraId(camera.id);
                   event.dataTransfer.effectAllowed = "move";
                   event.dataTransfer.setData("text/plain", camera.id);
                 },
+                onDragEnd: () => {
+                  setDragCameraId("");
+                  setDragOverCameraId("");
+                },
+              }}
+              dropProps={{
                 onDragOver: (event) => {
                   if (!dragCameraId || dragCameraId === camera.id) return;
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "move";
+                  setDragOverCameraId(camera.id);
+                },
+                onDragLeave: (event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setDragOverCameraId("");
                 },
                 onDrop: (event) => {
                   event.preventDefault();
                   const sourceId = event.dataTransfer.getData("text/plain") || dragCameraId;
                   moveCameraBefore(sourceId, camera.id);
                   setDragCameraId("");
+                  setDragOverCameraId("");
                 },
-                onDragEnd: () => setDragCameraId(""),
-                title: "Drag to reorder camera tiles",
               }}
             />
           ))}
@@ -1722,6 +2340,13 @@ function LivePage({ timeZone }) {
                 {incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}
               </select>
             </label>
+            <label>
+              <span>Zone</span>
+              <select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}>
+                <option value="all">All zones</option>
+                {incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}
+              </select>
+            </label>
           </div>
         </div>
         {focusedIncident ? (
@@ -1730,6 +2355,7 @@ function LivePage({ timeZone }) {
               incident={focusedIncident}
               timeZone={timeZone}
               expanded
+              thumbnailAnnotations={thumbnailAnnotations}
               onToggle={toggleIncident}
               onSelect={setSelectedEvent}
             />
@@ -1743,6 +2369,7 @@ function LivePage({ timeZone }) {
                 incident={incident}
                 timeZone={timeZone}
                 expanded={false}
+                thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
                 onSelect={setSelectedEvent}
               />
@@ -1758,7 +2385,7 @@ function LivePage({ timeZone }) {
         ) : null}
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
-      {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} onClose={() => setExpandedCamera(null)} /> : null}
+      {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} timeZone={timeZone} onClose={() => setExpandedCamera(null)} /> : null}
     </main>
   );
 }
@@ -1766,6 +2393,11 @@ function LivePage({ timeZone }) {
 function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
   const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
   return `/api/events/${eventId}/clip.mp4?${params.toString()}`;
+}
+
+function eventStreamUrl(eventId, before = 5, after = 5, source = "main") {
+  const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
+  return `/api/events/${eventId}/stream.m3u8?${params.toString()}`;
 }
 
 function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
@@ -1806,6 +2438,7 @@ function RecordingsPage({ timeZone }) {
   const [loading, setLoading] = useState(true);
   const [playbackError, setPlaybackError] = useState("");
   const [playbackNotice, setPlaybackNotice] = useState("");
+  const [playbackWindow, setPlaybackWindow] = useState(null);
 
   const activeCameraId = cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
@@ -1826,8 +2459,20 @@ function RecordingsPage({ timeZone }) {
         return mapped;
       });
   }, [recordings]);
-  const manifestUrl = activeCameraId && timeline.length
-    ? recordingDayHlsUrl(activeCameraId, dayStart, dayEnd, source)
+  const playbackTimeline = useMemo(() => {
+    if (!playbackWindow) return [];
+    let mediaOffset = 0;
+    return timeline
+      .filter((item) => item.end_epoch > playbackWindow.start && item.start_epoch < playbackWindow.end)
+      .map((item) => {
+        const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
+        const mapped = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
+        mediaOffset += duration;
+        return mapped;
+      });
+  }, [timeline, playbackWindow]);
+  const manifestUrl = activeCameraId && playbackWindow && playbackTimeline.length
+    ? recordingDayHlsUrl(activeCameraId, playbackWindow.start, playbackWindow.end, source)
     : "";
   const manifestStartTime = useMemo(() => {
     if (!timeline.length) return null;
@@ -1835,8 +2480,8 @@ function RecordingsPage({ timeZone }) {
     const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
       ? retainedEpoch
       : date === today ? Date.now() / 1000 : timeline[0].start_epoch;
-    return epochToMediaTime(initialEpoch);
-  }, [manifestUrl, timeline]);
+    return epochToPlaybackMediaTime(initialEpoch);
+  }, [manifestUrl, playbackTimeline]);
 
   const nearbyEvents = useMemo(() => {
     if (!Number.isFinite(playhead)) return events.slice(0, 20);
@@ -1868,32 +2513,39 @@ function RecordingsPage({ timeZone }) {
     return nearest;
   }
 
-  function epochToMediaTime(epoch) {
-    const target = snapToRecording(epoch);
-    if (target === null) return null;
-    const clip = timeline.find((item) => item.start_epoch <= target && target < item.end_epoch)
-      || timeline[timeline.length - 1];
-    return clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, target - clip.start_epoch));
-  }
-
   function mediaTimeToEpoch(mediaTime) {
-    const clip = timeline.find((item) => item.media_start <= mediaTime && mediaTime < item.media_end)
-      || timeline[timeline.length - 1];
+    const clip = playbackTimeline.find((item) => item.media_start <= mediaTime && mediaTime < item.media_end)
+      || playbackTimeline[playbackTimeline.length - 1];
     if (!clip) return null;
     return clip.start_epoch + Math.max(0, Math.min(clip.end_epoch - clip.start_epoch, mediaTime - clip.media_start));
   }
 
+  function epochToPlaybackMediaTime(epoch) {
+    if (!playbackTimeline.length) return null;
+    const clip = playbackTimeline.find((item) => item.start_epoch <= epoch && epoch < item.end_epoch)
+      || playbackTimeline.reduce((nearest, item) => {
+        if (!nearest) return item;
+        return Math.abs(item.start_epoch - epoch) < Math.abs(nearest.start_epoch - epoch) ? item : nearest;
+      }, null);
+    return clip.media_start + Math.max(0, Math.min(clip.media_end - clip.media_start - 0.01, epoch - clip.start_epoch));
+  }
+
+  function windowAround(epoch) {
+    return {
+      start: Math.max(dayStart, epoch),
+      end: Math.min(dayEnd, epoch + 60),
+    };
+  }
+
   function playAt(epoch, autoplay = true) {
     const target = snapToRecording(epoch);
-    const video = videoRef.current;
-    if (!video || target === null || !activeCameraId) return;
+    if (target === null || !activeCameraId) return;
     autoplayRef.current = autoplay;
     setPlaybackError("");
     setPlayhead(target);
     desiredEpochRef.current = target;
-    const mediaTime = epochToMediaTime(target);
-    if (Number.isFinite(mediaTime) && video.readyState > 0) video.currentTime = mediaTime;
-    if (autoplay) video.play().catch(() => {});
+    setPlaybackNotice("Seeking...");
+    setPlaybackWindow(windowAround(target));
   }
 
   useEffect(() => {
@@ -1911,6 +2563,7 @@ function RecordingsPage({ timeZone }) {
     setRecordings([]);
     setEvents([]);
     setAvailableSources([]);
+    setPlaybackWindow(null);
     if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
     setPlayhead(null);
     const video = videoRef.current;
@@ -1962,13 +2615,14 @@ function RecordingsPage({ timeZone }) {
   function handleRecordingReady(_player, video) {
     const retained = desiredEpochRef.current;
     const target = Number.isFinite(retained) ? snapToRecording(retained) : snapToRecording(Date.now() / 1000);
-    const mediaTime = epochToMediaTime(target);
+    const mediaTime = epochToPlaybackMediaTime(target);
     if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;
     if (Number.isFinite(target)) {
       desiredEpochRef.current = target;
       setPlayhead(target);
     }
     setPlaybackError("");
+    setPlaybackNotice("");
     if (autoplayRef.current) video.play().catch(() => {});
   }
 
@@ -2009,6 +2663,7 @@ function RecordingsPage({ timeZone }) {
         <div className="recordings-v2-player">
           {manifestUrl ? (
             <ShakaVideo
+              key={manifestUrl}
               ref={videoRef}
               src={manifestUrl}
               mimeType="application/vnd.apple.mpegurl"
@@ -2020,6 +2675,11 @@ function RecordingsPage({ timeZone }) {
               onReady={handleRecordingReady}
               onError={handleRecordingError}
               onTimeUpdate={handleRecordingTimeUpdate}
+              onEnded={() => {
+                if (playbackWindow && playbackWindow.end < dayEnd - 0.01) {
+                  playAt(playbackWindow.end + 0.01, true);
+                }
+              }}
               onPlay={() => { autoplayRef.current = true; }}
               onPause={(event) => { if (!event.currentTarget.ended) autoplayRef.current = false; }}
             />
@@ -2163,6 +2823,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const cameras = config?.cameras || [];
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
+  const activeDetectorPath = config?.detector?.model_path || config?.detector?.model_xml || "";
+  const activeDetectorModel = detectorModels.find((model) => model.path === activeDetectorPath);
+  const zoneClassOptions = activeDetectorModel?.classes?.length
+    ? activeDetectorModel.classes
+    : config?.detector?.labels || [];
 
 
 
@@ -2360,6 +3025,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 </div>
               </div>
 
+              <ZoneEditor
+                camera={selectedCamera}
+                classOptions={zoneClassOptions}
+                onChange={(zones) => updateCamera(selectedCamera.id, ["zones"], zones)}
+              />
+
               <div className="actions">
                 <button onClick={() => cloneCamera(selectedCamera)}><Copy size={16} /> Clone Camera</button>
                 <button onClick={() => probeCamera(selectedCamera)}><Radar size={16} /> Auto-detect</button>
@@ -2377,6 +3048,173 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         </>
       )}
     </main>
+  );
+}
+
+function ZoneEditor({ camera, classOptions = [], onChange }) {
+  const zones = camera.zones || [];
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [dragPoint, setDragPoint] = useState(null);
+  const snapshotUrl = useMemo(() => `/api/cameras/${camera.id}/zone-snapshot.jpg?source=live&t=${Date.now()}`, [camera.id]);
+  const selectedZone = zones[selectedIndex] || null;
+
+  useEffect(() => {
+    setSelectedIndex(0);
+    setDragPoint(null);
+  }, [camera.id]);
+
+  function replaceZone(index, patch) {
+    onChange(zones.map((zone, zoneIndex) => zoneIndex === index ? { ...zone, ...patch } : zone));
+  }
+
+  function addZone() {
+    const next = [...zones, {
+      name: `Zone ${zones.length + 1}`,
+      color: ["#22c55e", "#38bdf8", "#f59e0b", "#e879f9"][zones.length % 4],
+      enabled: true,
+      points: [],
+      object_classes: [],
+      confidence_threshold: null,
+      behavior: "incident",
+      trigger: "bottom_center",
+    }];
+    onChange(next);
+    setSelectedIndex(next.length - 1);
+  }
+
+  function removeZone(index) {
+    onChange(zones.filter((_, zoneIndex) => zoneIndex !== index));
+    setSelectedIndex((current) => Math.max(0, Math.min(current, zones.length - 2)));
+  }
+
+  function undoPoint() {
+    if (!selectedZone?.points?.length) return;
+    replaceZone(selectedIndex, { points: selectedZone.points.slice(0, -1) });
+  }
+
+  function pointerPosition(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+    };
+  }
+
+  function addPoint(event) {
+    if (!selectedZone || event.target !== event.currentTarget) return;
+    replaceZone(selectedIndex, { points: [...(selectedZone.points || []), pointerPosition(event)] });
+  }
+
+  function movePoint(event) {
+    if (!dragPoint || dragPoint.zoneIndex !== selectedIndex || !selectedZone) return;
+    const points = [...(selectedZone.points || [])];
+    points[dragPoint.pointIndex] = pointerPosition(event);
+    replaceZone(selectedIndex, { points });
+  }
+
+  return (
+    <div className="sub-panel zone-settings">
+      <div className="zone-settings-head">
+        <div><h3>Detection Zones</h3><p>Objects match using the bottom-center of their detection box.</p></div>
+        <div className="zone-settings-actions">
+          <button type="button" onClick={undoPoint} disabled={!selectedZone?.points?.length} title="Remove last point"><Undo2 size={15} /> Undo Point</button>
+          <button type="button" onClick={addZone}><Plus size={15} /> Add Zone</button>
+        </div>
+      </div>
+      <div className="zone-editor-layout">
+        <div className="zone-canvas">
+          <img src={snapshotUrl} alt={`${camera.name} zone editor`} />
+          <svg
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            onPointerDown={addPoint}
+            onPointerMove={movePoint}
+            onPointerUp={() => setDragPoint(null)}
+            onPointerCancel={() => setDragPoint(null)}
+            aria-label="Zone polygon editor"
+          >
+            {zones.map((zone, zoneIndex) => {
+              const points = (zone.points || []).map((point) => `${point.x * 100},${point.y * 100}`).join(" ");
+              return (
+                <g key={`${zone.name}-${zoneIndex}`} opacity={zone.enabled === false ? 0.35 : 1}>
+                  {zone.points?.length >= 3 ? <polygon points={points} fill={`${zone.color || "#22c55e"}33`} stroke={zone.color || "#22c55e"} strokeWidth="0.55" vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null}
+                  {zone.points?.length === 2 ? <polyline points={points} fill="none" stroke={zone.color || "#22c55e"} strokeWidth="0.55" vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null}
+                  {zoneIndex === selectedIndex ? (zone.points || []).map((point, pointIndex) => (
+                    <circle
+                      key={pointIndex}
+                      cx={point.x * 100}
+                      cy={point.y * 100}
+                      r="1.7"
+                      fill="#fff"
+                      stroke={zone.color || "#22c55e"}
+                      strokeWidth="0.7"
+                      vectorEffect="non-scaling-stroke"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        setDragPoint({ zoneIndex, pointIndex });
+                      }}
+                    />
+                  )) : null}
+                </g>
+              );
+            })}
+          </svg>
+          {!selectedZone ? <div className="zone-canvas-empty">Add a zone to begin</div> : selectedZone.points?.length < 3 ? <div className="zone-canvas-hint">Click at least three points</div> : null}
+        </div>
+        <div className="zone-list">
+          {zones.map((zone, index) => (
+            <button type="button" key={`${zone.name}-${index}`} className={index === selectedIndex ? "active" : ""} onClick={() => setSelectedIndex(index)}>
+              <span className="zone-swatch" style={{ background: zone.color || "#22c55e" }} />
+              <span>{zone.name || `Zone ${index + 1}`}</span>
+              <small>{zone.behavior}</small>
+            </button>
+          ))}
+          {!zones.length ? <div className="empty-state compact">No zones configured.</div> : null}
+        </div>
+      </div>
+      {selectedZone ? (
+        <div className="zone-fields">
+          <label>Name<input value={selectedZone.name || ""} onChange={(event) => replaceZone(selectedIndex, { name: event.target.value })} /></label>
+          <label>Color<input className="zone-color-input" type="color" value={selectedZone.color || "#22c55e"} onChange={(event) => replaceZone(selectedIndex, { color: event.target.value })} /></label>
+          <label>Behavior<select value={selectedZone.behavior || "incident"} onChange={(event) => replaceZone(selectedIndex, { behavior: event.target.value })}><option value="incident">Incident</option><option value="ignore">Ignore</option></select></label>
+          <div className="zone-class-field">
+            <span>Object Classes</span>
+            <details className="zone-class-dropdown">
+              <summary>{selectedZone.object_classes?.length ? selectedZone.object_classes.join(", ") : "All classes"}</summary>
+              <div className="zone-class-menu">
+                <label>
+                  <input type="checkbox" checked={!selectedZone.object_classes?.length} onChange={() => replaceZone(selectedIndex, { object_classes: [] })} />
+                  All classes
+                </label>
+                {classOptions.map((className) => {
+                  const selectedClasses = selectedZone.object_classes || [];
+                  const checked = selectedClasses.includes(className);
+                  return (
+                    <label key={className}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => replaceZone(selectedIndex, {
+                          object_classes: checked
+                            ? selectedClasses.filter((item) => item !== className)
+                            : [...selectedClasses, className],
+                        })}
+                      />
+                      {className}
+                    </label>
+                  );
+                })}
+                {!classOptions.length ? <small>No model classes reported</small> : null}
+              </div>
+            </details>
+          </div>
+          <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder="Global" value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
+          <label className="check-field"><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
+          <button type="button" className="danger" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -2474,6 +3312,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Theme<select value={theme} onChange={(event) => setTheme(event.target.value)}>
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
+          <label className="check-field"><input type="checkbox" checked={config.incident_thumbnail_annotations ?? true} onChange={(event) => updateConfig(["incident_thumbnail_annotations"], event.target.checked)} /> Show boxes on incident thumbnails</label>
         </div>
 
         <div className="sub-panel">
@@ -2516,6 +3355,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           </select></label>
           <label>OpenVINO / ONNX Model<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
           <label>Labels Path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Optional; metadata.yaml is automatic" /></label>
+          <label>Compiled Model Cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /> Cache compiled model</label>
+          <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
         </div>
         {activeModel ? (
           <div className={`probe-result ${activeModel.valid ? "ok" : "bad"}`}>

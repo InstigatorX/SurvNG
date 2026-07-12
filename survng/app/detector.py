@@ -22,6 +22,7 @@ class OpenVinoDetector:
         self.config = config
         self.labels = self._load_labels(config)
         self.compiled_model: Any = None
+        self.infer_request: Any = None
         self.cv_net: Any = None
         self.coreml_model: Any = None
         self.coreml_input_name = ""
@@ -33,11 +34,24 @@ class OpenVinoDetector:
         self.output_format = "unknown"
         self.backend = ""
         self.loaded_device = ""
+        self.cache_dir = ""
+        self.performance_hint = ""
+        self.num_streams: int | None = None
+        self.model_load_ms: float | None = None
+        self.warmup_ms: float | None = None
+        self.warmup_error = ""
+        self._openvino_embedded_preprocess = False
+        self._preprocess_canvas: np.ndarray | None = None
+        self._resize_buffers: dict[tuple[int, int], np.ndarray] = {}
         self._stats_lock = threading.Lock()
         self._inference_lock = threading.Lock()
         self._pending_requests = 0
         self._active_inferences = 0
         self._durations_ms: deque[float] = deque(maxlen=100)
+        self._stage_durations_ms: dict[str, deque[float]] = {
+            name: deque(maxlen=100) for name in ("queue", "preprocess", "inference", "postprocess", "total")
+        }
+        self._last_stage_ms: dict[str, float] = {}
         self._completion_times: deque[float] = deque(maxlen=240)
         self._last_inference_ms: float | None = None
         self._last_inference_at = ""
@@ -72,31 +86,69 @@ class OpenVinoDetector:
         if not model_path.exists():
             return False
 
+        started = time.perf_counter()
         try:
             try:
-                from openvino import Core
+                from openvino import Core, Layout, Type
+                from openvino.preprocess import ColorFormat, PrePostProcessor
             except ImportError:
-                from openvino.runtime import Core
+                from openvino.runtime import Core, Layout, Type
+                from openvino.preprocess import ColorFormat, PrePostProcessor
 
             core = Core()
+            core.set_property({"ENABLE_MMAP": True})
+            if self.config.cache_enabled:
+                cache_dir = Path(self.config.cache_dir or ".cache/openvino").expanduser().resolve()
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                core.set_property({"CACHE_DIR": str(cache_dir)})
+                self.cache_dir = str(cache_dir)
             model = core.read_model(model=model_path)
+            original_shape = [int(value) for value in model.input(0).shape]
+            if len(original_shape) >= 4:
+                self.input_shape = (original_shape[-1], original_shape[-2])
+            preprocessor = PrePostProcessor(model)
+            preprocessor.input().tensor().set_element_type(Type.u8).set_layout(Layout("NHWC")).set_color_format(ColorFormat.BGR)
+            preprocessor.input().model().set_layout(Layout("NCHW"))
+            preprocessor.input().preprocess().convert_color(ColorFormat.RGB).convert_element_type(Type.f32).scale(255.0)
+            model = preprocessor.build()
+            self._openvino_embedded_preprocess = True
+            device = self.config.device.upper()
+            compile_config: dict[str, Any] = {"PERFORMANCE_HINT": "LATENCY"}
+            if device != "AUTO":
+                compile_config["NUM_STREAMS"] = "1"
             try:
-                self.compiled_model = core.compile_model(model=model, device_name=self.config.device)
+                self.compiled_model = core.compile_model(model=model, device_name=self.config.device, config=compile_config)
             except Exception:
                 if self.config.device.upper() == "CPU":
                     raise
                 LOGGER.warning("OpenVINO failed on %s, retrying on CPU", self.config.device)
-                self.compiled_model = core.compile_model(model=model, device_name="CPU")
+                self.compiled_model = core.compile_model(
+                    model=model,
+                    device_name="CPU",
+                    config={"PERFORMANCE_HINT": "LATENCY", "NUM_STREAMS": "1"},
+                )
                 self.loaded_device = "CPU"
             if not self.loaded_device:
                 self.loaded_device = self.config.device
+            self.infer_request = self.compiled_model.create_infer_request()
             self.input_layer = self.compiled_model.input(0)
             self.output_layer = self.compiled_model.output(0)
             self.output_layers = list(self.compiled_model.outputs)
-            _, _, height, width = self.input_layer.shape
-            self.input_shape = (int(width), int(height))
+            self._preprocess_canvas = np.full((self.input_shape[1], self.input_shape[0], 3), 114, dtype=np.uint8)
             self.output_format = self._detect_output_format()
             self.backend = "openvino"
+            self.performance_hint = "LATENCY"
+            self.num_streams = 1 if self.loaded_device.upper() != "AUTO" else None
+            self.model_load_ms = round((time.perf_counter() - started) * 1000, 1)
+            if self.config.warmup_enabled:
+                self._warmup_openvino()
+            LOGGER.info(
+                "OpenVINO ready on %s in %.1f ms (cache=%s, warmup=%s)",
+                self.loaded_device,
+                self.model_load_ms,
+                self.cache_dir or "off",
+                f"{self.warmup_ms:.1f} ms" if self.warmup_ms is not None else self.warmup_error or "off",
+            )
             return True
         except Exception as exc:
             if model_path.suffix.lower() != ".onnx":
@@ -109,6 +161,20 @@ class OpenVinoDetector:
             self.backend = "opencv-dnn"
             self.loaded_device = "CPU"
             return True
+
+    def _warmup_openvino(self) -> None:
+        if self.compiled_model is None:
+            return
+        try:
+            input_width, input_height = self.input_shape
+            frame = np.zeros((input_height, input_width, 3), dtype=np.uint8)
+            tensor, _ = self._preprocess(frame)
+            started = time.perf_counter()
+            self.infer_request.infer([tensor])
+            self.warmup_ms = round((time.perf_counter() - started) * 1000, 1)
+        except Exception as exc:
+            self.warmup_error = str(exc) or "warm-up failed"
+            LOGGER.warning("OpenVINO warm-up failed: %s", self.warmup_error)
 
     def _load_coreml(self, model_path_text: str) -> bool:
         if not model_path_text:
@@ -155,65 +221,88 @@ class OpenVinoDetector:
             return False
 
     def detect(self, frame: np.ndarray, confidence_threshold: float | None = None) -> list[dict[str, Any]]:
-        with self._inference_lock:
-            return self._detect_locked(frame, confidence_threshold=confidence_threshold)
-
-    def _detect_locked(self, frame: np.ndarray, confidence_threshold: float | None = None) -> list[dict[str, Any]]:
         if not self.enabled or (
             self.compiled_model is None and self.cv_net is None and self.coreml_model is None
         ):
             return [{"status": "detector_unavailable"}]
+        queued_at = time.perf_counter()
+        self._begin_inference()
+        with self._inference_lock:
+            queue_ms = (time.perf_counter() - queued_at) * 1000
+            self._activate_inference()
+            return self._detect_locked(frame, confidence_threshold=confidence_threshold, queue_ms=queue_ms)
 
+    def _detect_locked(self, frame: np.ndarray, confidence_threshold: float | None = None, queue_ms: float = 0.0) -> list[dict[str, Any]]:
         original_threshold = self.config.confidence_threshold
         if confidence_threshold is not None:
             self.config.confidence_threshold = max(0.01, min(0.99, float(confidence_threshold)))
 
-        self._begin_inference()
         started = time.perf_counter()
+        stages = {"queue": queue_ms, "preprocess": 0.0, "inference": 0.0, "postprocess": 0.0}
         objects: list[dict[str, Any]] = []
         try:
             if self.coreml_model is not None:
+                inference_started = time.perf_counter()
                 objects = self._detect_coreml(frame)
+                stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 return objects
 
+            preprocess_started = time.perf_counter()
             tensor, metadata = self._preprocess(frame)
+            stages["preprocess"] = (time.perf_counter() - preprocess_started) * 1000
+            inference_started = time.perf_counter()
             if self.compiled_model is not None:
-                inference = self.compiled_model([tensor])
+                inference = self.infer_request.infer([tensor])
+                stages["inference"] = (time.perf_counter() - inference_started) * 1000
+                postprocess_started = time.perf_counter()
                 if self.output_format == "yolo-seg":
                     outputs = [np.asarray(inference[layer]) for layer in self.output_layers]
                     objects = self._parse_yolo_seg_outputs(outputs, metadata)
+                    stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
                     return objects
                 output = inference[self.output_layer]
             else:
                 self.cv_net.setInput(tensor)
                 output = self.cv_net.forward()
+                stages["inference"] = (time.perf_counter() - inference_started) * 1000
+                postprocess_started = time.perf_counter()
             if self.output_format == "yolo":
                 objects = self._parse_yolo_output(output, metadata)
             else:
                 objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0])
+            stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
             return objects
         finally:
             self.config.confidence_threshold = original_threshold
-            self._finish_inference((time.perf_counter() - started) * 1000, objects)
+            stages["total"] = (time.perf_counter() - started) * 1000 + queue_ms
+            self._finish_inference(stages, objects)
 
     def _begin_inference(self) -> None:
         with self._stats_lock:
             self._pending_requests += 1
+
+    def _activate_inference(self) -> None:
+        with self._stats_lock:
+            self._pending_requests = max(0, self._pending_requests - 1)
             self._active_inferences += 1
 
-    def _finish_inference(self, duration_ms: float, objects: list[dict[str, Any]]) -> None:
+    def _finish_inference(self, stages: dict[str, float], objects: list[dict[str, Any]]) -> None:
         now_monotonic = time.monotonic()
         now_epoch = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
         labels = sorted({str(item.get("label")) for item in objects if item.get("label")})
         failed = any(item.get("status") == "detector_unavailable" for item in objects)
         with self._stats_lock:
-            self._pending_requests = max(0, self._pending_requests - 1)
             self._active_inferences = max(0, self._active_inferences - 1)
             self._total_inferences += 1
-            self._last_inference_ms = duration_ms
+            inference_ms = stages.get("inference", 0.0)
+            self._last_inference_ms = inference_ms
             self._last_inference_at = now_iso
-            self._durations_ms.append(duration_ms)
+            self._durations_ms.append(inference_ms)
+            self._last_stage_ms = {name: round(float(value), 2) for name, value in stages.items()}
+            for name, value in stages.items():
+                if name in self._stage_durations_ms:
+                    self._stage_durations_ms[name].append(float(value))
             self._completion_times.append(now_monotonic)
             while self._completion_times and now_monotonic - self._completion_times[0] > 60:
                 self._completion_times.popleft()
@@ -238,6 +327,10 @@ class OpenVinoDetector:
             else:
                 detections_per_second = float(len(self._completion_times)) if self._completion_times else 0.0
             last_detection_age = (now_epoch - self._last_detection_epoch) if self._last_detection_epoch else None
+            stage_averages = {
+                name: round(sum(values) / len(values), 2) if values else None
+                for name, values in self._stage_durations_ms.items()
+            }
             return {
                 "last_inference_ms": round(self._last_inference_ms, 1) if self._last_inference_ms is not None else None,
                 "average_inference_ms": round(average_ms, 1) if average_ms is not None else None,
@@ -252,6 +345,10 @@ class OpenVinoDetector:
                 "total_inferences": self._total_inferences,
                 "failed_inferences": self._failed_inferences,
                 "object_hit_inferences": self._object_hit_inferences,
+                "stages": {
+                    "last_ms": dict(self._last_stage_ms),
+                    "average_ms": stage_averages,
+                },
             }
 
     def status(self) -> dict[str, Any]:
@@ -269,6 +366,15 @@ class OpenVinoDetector:
             "coreml_image_input": self.coreml_image_input,
             "openvino_loaded": self.compiled_model is not None,
             "opencv_loaded": self.cv_net is not None,
+            "cache_enabled": self.config.cache_enabled,
+            "cache_dir": self.cache_dir,
+            "mmap_enabled": True,
+            "performance_hint": self.performance_hint,
+            "num_streams": self.num_streams,
+            "model_load_ms": self.model_load_ms,
+            "warmup_enabled": self.config.warmup_enabled,
+            "warmup_ms": self.warmup_ms,
+            "warmup_error": self.warmup_error,
             "runtime": self._runtime_stats(),
         }
 
@@ -359,8 +465,18 @@ class OpenVinoDetector:
         pad_x = (input_width - resized_width) / 2
         pad_y = (input_height - resized_height) / 2
 
-        resized = cv2.resize(frame, (resized_width, resized_height))
-        canvas = np.full((input_height, input_width, 3), 114, dtype=np.uint8)
+        resize_key = (resized_width, resized_height)
+        resized = self._resize_buffers.get(resize_key)
+        if resized is None:
+            resized = np.empty((resized_height, resized_width, 3), dtype=np.uint8)
+            if len(self._resize_buffers) >= 8:
+                self._resize_buffers.clear()
+            self._resize_buffers[resize_key] = resized
+        cv2.resize(frame, (resized_width, resized_height), dst=resized)
+        if self._preprocess_canvas is None or self._preprocess_canvas.shape != (input_height, input_width, 3):
+            self._preprocess_canvas = np.empty((input_height, input_width, 3), dtype=np.uint8)
+        canvas = self._preprocess_canvas
+        canvas.fill(114)
         left = int(round(pad_x - 0.1))
         top = int(round(pad_y - 0.1))
         canvas[top : top + resized_height, left : left + resized_width] = resized
@@ -542,8 +658,11 @@ class OpenVinoDetector:
         top = int(round(pad_y - 0.1))
         canvas[top : top + resized_height, left : left + resized_width] = resized
 
-        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-        tensor = rgb.transpose((2, 0, 1))[np.newaxis, :].astype(np.float32) / 255.0
+        if self._openvino_embedded_preprocess:
+            tensor = canvas[np.newaxis, :]
+        else:
+            rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+            tensor = rgb.transpose((2, 0, 1))[np.newaxis, :].astype(np.float32) / 255.0
         return tensor, {
             "scale": scale,
             "pad_x": float(left),

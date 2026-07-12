@@ -12,6 +12,7 @@ import platform
 import shutil
 import time
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
@@ -20,16 +21,21 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote, urlsplit
+from urllib.request import Request as UrlRequest, urlopen
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import websockets
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import cv2
+import numpy as np
 
 from .baichuan_native import ffmpeg_input_args, is_native_baichuan, start_ffmpeg_pipe
-from .config import AppConfig, load_config, save_config
+from .config import AppConfig, camera_by_id, load_config, save_config
 from .detector import objects_to_json
 from .manager import AppManager
+from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
 manager = AppManager(config)
@@ -39,6 +45,8 @@ SECRET_URL_RE = re.compile(r"(\b(?:rtsp|rtmp|http|https|reolink)://)([^:/@\s]+):
 RECORDING_LOOKUP_LIMIT = 20000
 RECORDING_FMP4_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 RECORDING_FMP4_LOCKS_GUARD = threading.Lock()
+EVENT_CLIP_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+EVENT_CLIP_LOCKS_GUARD = threading.Lock()
 RECORDING_DAY_CACHE: dict[tuple[str, str, int, int], tuple[float, list[dict]]] = {}
 RECORDING_DAY_CACHE_LOCK = threading.Lock()
 RECORDING_DAY_CACHE_SECONDS = 30.0
@@ -46,6 +54,8 @@ RECORDING_CACHE_MAINTENANCE_LOCK = threading.Lock()
 RECORDING_CACHE_LAST_MAINTENANCE = 0.0
 RECORDING_PREWARM_STOP = threading.Event()
 RECORDING_PREWARM_THREAD: threading.Thread | None = None
+GO2RTC_COMPAT_STREAMS: set[str] = set()
+GO2RTC_COMPAT_LOCK = threading.Lock()
 
 
 class MemoryLogHandler(logging.Handler):
@@ -96,6 +106,33 @@ def _ffplay_path() -> str:
 
 def normalize_source(source: str) -> str:
     return "main" if source == "main" else "live"
+
+
+def _ensure_go2rtc_h264(host: str, stream_name: str) -> str:
+    compat_name = "survng_" + re.sub(r"[^a-zA-Z0-9_-]+", "_", stream_name) + "_h264"
+    with GO2RTC_COMPAT_LOCK:
+        if compat_name in GO2RTC_COMPAT_STREAMS:
+            return compat_name
+        params = f"name={quote(compat_name, safe='')}&src={quote(f'ffmpeg:{stream_name}#video=h264#width=1920', safe='')}"
+        request = UrlRequest(f"http://{host}:1984/api/streams?{params}", method="PUT")
+        with urlopen(request, timeout=5) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"go2rtc returned HTTP {response.status}")
+        GO2RTC_COMPAT_STREAMS.add(compat_name)
+    return compat_name
+
+
+def _go2rtc_ws_url(camera_id: str, source: str, compatibility: str = "native") -> str:
+    camera = next((item for item in config.cameras if item.id == camera_id), None)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    parsed = urlsplit(camera.source_url(normalize_source(source)))
+    stream_name = parsed.path.strip("/")
+    if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname or not stream_name:
+        raise HTTPException(status_code=409, detail="camera source is not a go2rtc RTSP restream")
+    if compatibility == "h264":
+        stream_name = _ensure_go2rtc_h264(parsed.hostname, stream_name)
+    return f"ws://{parsed.hostname}:1984/api/ws?src={quote(stream_name, safe='')}"
 
 
 def recording_source(source: str = "main") -> str:
@@ -322,6 +359,96 @@ def _probe_video_codec(path: Path) -> str:
         return (result.stdout or "").strip().lower()
     except Exception:
         return ""
+
+
+def _mp4_boxes(data: bytes | bytearray, start: int = 0, end: int | None = None):
+    limit = len(data) if end is None else min(end, len(data))
+    cursor = start
+    while cursor + 8 <= limit:
+        size = struct.unpack_from(">I", data, cursor)[0]
+        box_type = bytes(data[cursor + 4:cursor + 8])
+        header = 8
+        if size == 1 and cursor + 16 <= limit:
+            size = struct.unpack_from(">Q", data, cursor + 8)[0]
+            header = 16
+        elif size == 0:
+            size = limit - cursor
+        if size < header or cursor + size > limit:
+            break
+        yield box_type, cursor, cursor + header, cursor + size
+        cursor += size
+
+
+def _mp4_track_timescales(init_data: bytes) -> dict[int, int]:
+    timescales: dict[int, int] = {}
+    for box_type, _, payload, box_end in _mp4_boxes(init_data):
+        if box_type != b"moov":
+            continue
+        for child_type, _, child_payload, child_end in _mp4_boxes(init_data, payload, box_end):
+            if child_type != b"trak":
+                continue
+            track_id = None
+            timescale = None
+            for trak_type, _, trak_payload, trak_end in _mp4_boxes(init_data, child_payload, child_end):
+                if trak_type == b"tkhd":
+                    version = init_data[trak_payload]
+                    offset = trak_payload + (20 if version == 1 else 12)
+                    if offset + 4 <= trak_end:
+                        track_id = struct.unpack_from(">I", init_data, offset)[0]
+                elif trak_type == b"mdia":
+                    for mdia_type, _, mdia_payload, mdia_end in _mp4_boxes(init_data, trak_payload, trak_end):
+                        if mdia_type != b"mdhd":
+                            continue
+                        version = init_data[mdia_payload]
+                        offset = mdia_payload + (20 if version == 1 else 12)
+                        if offset + 4 <= mdia_end:
+                            timescale = struct.unpack_from(">I", init_data, offset)[0]
+            if track_id and timescale:
+                timescales[track_id] = timescale
+    return timescales
+
+
+def _offset_fmp4_timestamps(init_path: Path, media_path: Path, seconds: float) -> None:
+    if seconds <= 0:
+        return
+    timescales = _mp4_track_timescales(init_path.read_bytes())
+    if not timescales:
+        raise RuntimeError("fragment init has no track timescales")
+    data = bytearray(media_path.read_bytes())
+    adjusted = 0
+    for box_type, _, payload, box_end in _mp4_boxes(data):
+        if box_type != b"moof":
+            continue
+        for child_type, _, child_payload, child_end in _mp4_boxes(data, payload, box_end):
+            if child_type != b"traf":
+                continue
+            track_id = None
+            tfdt = None
+            for traf_type, _, traf_payload, traf_end in _mp4_boxes(data, child_payload, child_end):
+                if traf_type == b"tfhd" and traf_payload + 8 <= traf_end:
+                    track_id = struct.unpack_from(">I", data, traf_payload + 4)[0]
+                elif traf_type == b"tfdt":
+                    tfdt = (traf_payload, traf_end)
+            if not track_id or not tfdt or track_id not in timescales:
+                continue
+            tfdt_payload, tfdt_end = tfdt
+            version = data[tfdt_payload]
+            value_offset = tfdt_payload + 4
+            increment = round(seconds * timescales[track_id])
+            if version == 1 and value_offset + 8 <= tfdt_end:
+                current = struct.unpack_from(">Q", data, value_offset)[0]
+                struct.pack_into(">Q", data, value_offset, current + increment)
+                adjusted += 1
+            elif version == 0 and value_offset + 4 <= tfdt_end:
+                current = struct.unpack_from(">I", data, value_offset)[0]
+                next_value = current + increment
+                if next_value > 0xFFFFFFFF:
+                    raise RuntimeError("fragment timestamp exceeds version 0 tfdt")
+                struct.pack_into(">I", data, value_offset, next_value)
+                adjusted += 1
+    if not adjusted:
+        raise RuntimeError("fragment has no adjustable tfdt boxes")
+    media_path.write_bytes(data)
 
 
 def _event_clip_cache_suffix(source_codec: str, backend: str) -> str:
@@ -609,10 +736,18 @@ def event_clip_settings() -> dict:
 def recording_cache_status() -> dict:
     root = manager.storage_dir / "playback-cache" / "fmp4"
     files = [path for path in root.glob("*/*") if path.is_file()] if root.exists() else []
+    existing_files: list[Path] = []
+    total_bytes = 0
+    for path in files:
+        try:
+            total_bytes += path.stat().st_size
+            existing_files.append(path)
+        except FileNotFoundError:
+            continue
     return {
         "path": str(root),
-        "entries": len({path.parent for path in files}),
-        "bytes": sum(path.stat().st_size for path in files),
+        "entries": len({path.parent for path in existing_files}),
+        "bytes": total_bytes,
         "max_bytes": int(float(config.recording_cache_max_gb) * 1024 * 1024 * 1024),
         "max_days": int(config.recording_cache_max_days),
         "prewarm": bool(config.recording_cache_prewarm),
@@ -727,7 +862,11 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         raise HTTPException(status_code=422, detail="failed to read snapshot")
 
     started = time.perf_counter()
-    objects = manager.detector.detect(frame, confidence_threshold=safe_confidence)
+    camera = camera_by_id(config, str(event.get("camera_id") or ""))
+    effective_confidence = detection_threshold(camera, safe_confidence) if camera else safe_confidence
+    objects = manager.detector.detect(frame, confidence_threshold=effective_confidence)
+    if camera:
+        apply_detection_zones(camera, objects, int(frame.shape[1]), int(frame.shape[0]), safe_confidence)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     for detected_object in objects:
         detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
@@ -736,7 +875,10 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     persisted_event = manager.events.update_objects(event_id, objects_to_json(objects))
     if persisted_event is None:
         raise HTTPException(status_code=404, detail="event not found")
-    detected = [item for item in objects if item.get("label") and item.get("box")]
+    detected = [
+        item for item in objects
+        if item.get("label") and item.get("box") and item.get("incident_eligible") is not False
+    ]
     detector_status = manager.detector_status()
     return {
         "event_id": event_id,
@@ -762,6 +904,31 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     }
 
 
+@app.post("/api/detector/frame")
+async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict:
+    content_length = int(request.headers.get("content-length") or 0)
+    if content_length > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="debug frame is too large")
+    payload = await request.body()
+    if not payload or len(payload) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="invalid debug frame")
+    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=422, detail="failed to decode debug frame")
+    safe_confidence = max(0.01, min(0.99, float(confidence)))
+    started = time.perf_counter()
+    objects = manager.detector.detect(frame, confidence_threshold=safe_confidence)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    detected = [item for item in objects if item.get("label") and item.get("box")]
+    return {
+        "width": int(frame.shape[1]),
+        "height": int(frame.shape[0]),
+        "confidence": safe_confidence,
+        "elapsed_ms": elapsed_ms,
+        "objects": detected,
+    }
+
+
 @app.get("/api/cameras/{camera_id}/snapshot.jpg")
 def snapshot(camera_id: str, source: str = "live") -> Response:
     worker = manager.workers.get(camera_id)
@@ -773,15 +940,111 @@ def snapshot(camera_id: str, source: str = "live") -> Response:
     return Response(image, media_type="image/jpeg")
 
 
-@app.get("/api/cameras/{camera_id}/stream.mjpg")
-def stream(camera_id: str, source: str = "live") -> StreamingResponse:
+@app.get("/api/cameras/{camera_id}/zone-snapshot.jpg")
+def zone_snapshot(camera_id: str, source: str = "live") -> Response:
     worker = manager.workers.get(camera_id)
     if worker is None:
         raise HTTPException(status_code=404, detail="camera not found")
+    image = worker.snapshot(source)
+    if image is not None:
+        return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    storage_root = Path(config.storage_dir).resolve()
+    for event in manager.events.recent(1000):
+        if event.get("camera_id") != camera_id:
+            continue
+        snapshot_path = Path(str(event.get("snapshot_path") or ""))
+        if not snapshot_path.is_file():
+            continue
+        try:
+            snapshot_path.resolve().relative_to(storage_root)
+        except ValueError:
+            continue
+        return FileResponse(snapshot_path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    raise HTTPException(status_code=503, detail="no camera or event snapshot available")
+
+
+@app.get("/api/cameras/{camera_id}/stream.mjpg")
+async def stream(camera_id: str, request: Request, source: str = "live") -> StreamingResponse:
+    worker = manager.workers.get(camera_id)
+    if worker is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+
+    async def frames():
+        while not await request.is_disconnected():
+            image = await asyncio.to_thread(worker.snapshot, source)
+            if image is not None:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Cache-Control: no-cache\r\n\r\n"
+                    + image
+                    + b"\r\n"
+                )
+            await asyncio.sleep(0.25 if image is not None else 0.1)
+
     return StreamingResponse(
-        worker.mjpeg_frames(source=source),
+        frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.websocket("/api/cameras/{camera_id}/webrtc")
+async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
+    """Relay go2rtc signaling while its WebRTC media remains direct and shared."""
+    try:
+        upstream_url = _go2rtc_ws_url(
+            camera_id,
+            websocket.query_params.get("source", "live"),
+            websocket.query_params.get("compat", "native"),
+        )
+    except (HTTPException, OSError, RuntimeError):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    try:
+        async with websockets.connect(
+            upstream_url,
+            open_timeout=5,
+            close_timeout=2,
+            ping_interval=20,
+            ping_timeout=10,
+            max_size=2 * 1024 * 1024,
+        ) as upstream:
+            async def browser_to_go2rtc() -> None:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    if message.get("text") is not None:
+                        await upstream.send(message["text"])
+                    elif message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
+
+            async def go2rtc_to_browser() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = [
+                asyncio.create_task(browser_to_go2rtc()),
+                asyncio.create_task(go2rtc_to_browser()),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*done, *pending, return_exceptions=True)
+    except (WebSocketDisconnect, websockets.ConnectionClosed):
+        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("WebRTC signaling failed for %s: %s", camera_id, exc)
+    finally:
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
 
 
 @app.get("/api/cameras/{camera_id}/hls/index.m3u8")
@@ -1018,7 +1281,7 @@ def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, so
 
 def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> tuple[Path, Path]:
     stat = path.stat()
-    fingerprint = f"v2:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}"
+    fingerprint = f"v3:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}"
     cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
     cache_dir = manager.storage_dir / "playback-cache" / "fmp4" / cache_key
     init_path = cache_dir / "init.mp4"
@@ -1090,6 +1353,11 @@ def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> t
             with RECORDING_DAY_CACHE_LOCK:
                 RECORDING_DAY_CACHE.clear()
             raise HTTPException(status_code=500, detail=f"recording fragment failed: {error[-300:]}")
+        try:
+            _offset_fmp4_timestamps(generated_init, generated_media, media_offset)
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"recording fragment timestamp repair failed: {exc}") from exc
         os.replace(generated_init, init_path)
         os.replace(generated_media, media_path)
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1289,11 +1557,68 @@ def event_clip(event_id: int, before: float | None = None, after: float | None =
     clip_source = recording_source(source)
     clip_path = _event_clip_path(enriched, before=before_seconds, after=after_seconds, source=clip_source)
     if not clip_path.exists() or clip_path.stat().st_size == 0:
-        _build_event_clip(enriched, before=before_seconds, after=after_seconds, output_path=clip_path, source=clip_source)
+        cache_key = str(clip_path)
+        with EVENT_CLIP_LOCKS_GUARD:
+            lock = EVENT_CLIP_LOCKS.setdefault(cache_key, threading.Lock())
+        with lock:
+            if not clip_path.exists() or clip_path.stat().st_size == 0:
+                _build_event_clip(enriched, before=before_seconds, after=after_seconds, output_path=clip_path, source=clip_source)
     return FileResponse(
         clip_path,
         media_type="video/mp4",
         headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/events/{event_id}/stream.m3u8")
+def event_stream(event_id: int, before: float | None = None, after: float | None = None, source: str = "main") -> Response:
+    event = manager.events.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    enriched = _event_row(event)
+    camera_id = str(enriched.get("camera_id") or "")
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="event is missing camera")
+    before_seconds, after_seconds = _event_clip_window(before, after)
+    event_epoch = _event_epoch(enriched)
+    window_start = event_epoch - before_seconds
+    window_end = event_epoch + after_seconds
+    selected_source = recording_source(source)
+    rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
+    if not rows:
+        raise HTTPException(status_code=404, detail="no recording window found")
+
+    first_start = float(rows[0]["start_epoch"])
+    start_offset = max(0.0, window_start - first_start)
+    target_duration = max(1, math.ceil(max(float(row["duration_seconds"]) for row in rows)))
+    query = f"start_epoch={window_start:.3f}&end_epoch={window_end:.3f}&source={selected_source}"
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:7",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
+    ]
+    media_offset = 0.0
+    for index, row in enumerate(rows):
+        row_start = float(row["start_epoch"])
+        segment_query = f"{query}&media_offset={media_offset:.3f}"
+        if index == 0:
+            lines.append(
+                f'#EXT-X-MAP:URI="/api/cameras/{quote(camera_id, safe="")}/recordings/day/0/init.mp4?{segment_query}"'
+            )
+        lines.extend([
+            f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
+            f"#EXTINF:{float(row['duration_seconds']):.3f},",
+            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/{index}.m4s?{segment_query}",
+        ])
+        media_offset += float(row["duration_seconds"])
+    lines.append("#EXT-X-ENDLIST")
+    return Response(
+        "\n".join(lines) + "\n",
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "private, max-age=30"},
     )
 
 
@@ -1311,11 +1636,19 @@ def _event_row(row: dict) -> dict:
         objects = []
     detected_objects = [
         item for item in objects
-        if item.get("label") and float(item.get("confidence") or 0) > 0
+        if item.get("label")
+        and float(item.get("confidence") or 0) > 0
+        and item.get("incident_eligible") is not False
     ]
     event["objects"] = objects
     event["has_objects"] = bool(detected_objects)
     event["labels"] = sorted({str(item["label"]) for item in detected_objects})
+    event["zones"] = sorted({
+        str(zone_name)
+        for item in detected_objects
+        for zone_name in item.get("zones", [])
+        if zone_name
+    })
     return event
 
 
@@ -1373,6 +1706,7 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
     representative = _best_incident_event(ordered)
     representative_payload = _incident_event_payload(representative)
     labels = sorted({label for event in ordered for label in event.get("labels", [])})
+    zones = sorted({zone for event in ordered for zone in event.get("zones", [])})
     start_epoch = _event_epoch(first)
     last_epoch = _event_epoch(last)
     object_count = sum(1 for event in ordered if event.get("has_objects"))
@@ -1393,6 +1727,7 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         "object_event_count": object_count,
         "has_objects": bool(labels),
         "labels": labels,
+        "zones": zones,
         "events": [_incident_event_payload(event) for event in reversed(ordered)],
     }
     return incident
@@ -1409,16 +1744,16 @@ def _recording_event_row(event: dict, recordings: list[dict]) -> dict:
 def _event_clip_window(before: float | None, after: float | None) -> tuple[float, float]:
     configured_before = config.event_clip_before_seconds if before is None else before
     configured_after = config.event_clip_after_seconds if after is None else after
-    safe_before = max(0.0, min(float(configured_before or 0.0), 30.0))
-    safe_after = max(0.0, min(float(configured_after or 0.0), 30.0))
+    safe_before = max(0.0, min(float(configured_before or 0.0), 3600.0))
+    safe_after = max(0.0, min(float(configured_after or 0.0), 3600.0))
     return safe_before, safe_after
 
 
 def _event_clip_path(event: dict, before: float, after: float, source: str = "main") -> Path:
     event_id = int(event.get("id") or 0)
     camera_id = str(event.get("camera_id") or "camera").replace("/", "_").replace("\\", "_")
-    safe_before = int(max(0.0, min(float(before or 5.0), 30.0)) * 1000)
-    safe_after = int(max(0.0, min(float(after or 5.0), 30.0)) * 1000)
+    safe_before = int(max(0.0, min(float(before or 5.0), 3600.0)) * 1000)
+    safe_after = int(max(0.0, min(float(after or 5.0), 3600.0)) * 1000)
     clip_source = recording_source(source)
     clip_dir = manager.storage_dir / "event_clips" / camera_id / clip_source
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -1432,8 +1767,8 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
         raise HTTPException(status_code=400, detail="event is missing camera")
 
     event_epoch = _event_epoch(event)
-    window_before = max(0.0, min(float(before or 5.0), 30.0))
-    window_after = max(0.0, min(float(after or 5.0), 30.0))
+    window_before = max(0.0, min(float(before or 5.0), 3600.0))
+    window_after = max(0.0, min(float(after or 5.0), 3600.0))
     window_start = event_epoch - window_before
     window_end = event_epoch + window_after
 
@@ -1471,7 +1806,8 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
         last_error = "event clip generation failed"
         for backend, command in commands:
             tmp_path.unlink(missing_ok=True)
-            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=60)
+            clip_timeout = max(60.0, min(600.0, duration * 2.0))
+            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
             if result.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
                 tmp_path.replace(output_path)
                 logging.getLogger(__name__).info(
