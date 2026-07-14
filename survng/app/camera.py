@@ -27,6 +27,8 @@ RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 CAPTURE_OPEN_TIMEOUT_MS = 5000
 CAPTURE_READ_TIMEOUT_MS = 5000
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
+FRAME_STALE_SECONDS = 10.0
+MAIN_SOURCE_IDLE_SECONDS = 20.0
 
 
 class CameraWorker:
@@ -48,6 +50,8 @@ class CameraWorker:
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
+        self._stop.set()
+        self._enabled = False
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
@@ -55,6 +59,8 @@ class CameraWorker:
         self._source_stops: dict[str, threading.Event] = {}
         self._source_frames: dict[str, Any] = {}
         self._source_frame_at: dict[str, str] = {}
+        self._source_frame_monotonic: dict[str, float] = {}
+        self._source_last_access: dict[str, float] = {}
         self._source_errors: dict[str, str] = {}
         self.last_error = ""
         self.last_frame_at = ""
@@ -64,12 +70,14 @@ class CameraWorker:
 
     def start(self) -> None:
         with self._lifecycle_lock:
+            self._enabled = True
             self._stop.clear()
             self._start_source("live")
             self.onvif.start()
 
     def stop(self) -> None:
         with self._lifecycle_lock:
+            self._enabled = False
             self._stop.set()
             with self._frame_lock:
                 stops = list(self._source_stops.values())
@@ -98,21 +106,42 @@ class CameraWorker:
                 }
                 self._source_frames.clear()
                 self._source_frame_at.clear()
+                self._source_frame_monotonic.clear()
+                self._source_last_access.clear()
                 self._source_errors.clear()
+                self.last_frame_at = ""
             self._thread = self._source_threads.get("live")
 
     def status(self) -> dict[str, Any]:
-        live_thread = self._source_threads.get("live")
-        main_thread = self._source_threads.get("main")
+        with self._lifecycle_lock:
+            enabled = self._enabled
+        with self._frame_lock:
+            live_thread = self._source_threads.get("live")
+            main_thread = self._source_threads.get("main")
+            live_frame_at = self._source_frame_at.get("live", "")
+            main_frame_at = self._source_frame_at.get("main", "")
+            live_frame_clock = self._source_frame_monotonic.get("live")
+            main_frame_clock = self._source_frame_monotonic.get("main")
+            main_error = self._source_errors.get("main", "")
+        now = time.monotonic()
+        live_age = max(0.0, now - live_frame_clock) if live_frame_clock is not None else None
+        main_age = max(0.0, now - main_frame_clock) if main_frame_clock is not None else None
+        connected = bool(enabled and live_age is not None and live_age <= FRAME_STALE_SECONDS)
         return {
             "id": self.camera.id,
             "name": self.camera.name,
-            "running": live_thread is not None and live_thread.is_alive(),
+            "running": enabled,
+            "connected": connected,
+            "capture_running": live_thread is not None and live_thread.is_alive(),
+            "frame_fresh": connected,
+            "last_frame_age_seconds": round(live_age, 3) if live_age is not None else None,
             "main_running": main_thread is not None and main_thread.is_alive(),
-            "last_frame_at": self.last_frame_at,
-            "main_last_frame_at": self._source_frame_at.get("main", ""),
+            "main_frame_fresh": bool(main_age is not None and main_age <= FRAME_STALE_SECONDS),
+            "main_last_frame_age_seconds": round(main_age, 3) if main_age is not None else None,
+            "last_frame_at": live_frame_at,
+            "main_last_frame_at": main_frame_at,
             "last_error": self.last_error,
-            "main_last_error": self._source_errors.get("main", ""),
+            "main_last_error": main_error,
             "onvif_enabled": self.camera.onvif.enabled,
             "onvif_connected": self.onvif.connected,
             "onvif_last_event_at": self.onvif.last_event_at,
@@ -222,12 +251,16 @@ class CameraWorker:
                 "incident_objects": eligible_objects,
             })
 
-    def _start_source(self, source: str) -> None:
+    def _start_source(self, source: str) -> bool:
         source = self.camera.normalized_source(source)
+        if self._stop.is_set():
+            return False
         with self._frame_lock:
+            if self._stop.is_set():
+                return False
             thread = self._source_threads.get(source)
             if thread is not None and thread.is_alive():
-                return
+                return True
             stop_event = threading.Event()
             thread = threading.Thread(
                 target=self._run_source,
@@ -240,44 +273,77 @@ class CameraWorker:
             if source == "live":
                 self._thread = thread
             thread.start()
+        return True
+
+    def _source_is_idle(self, source: str) -> bool:
+        if source == "live":
+            return False
+        with self._frame_lock:
+            last_access = self._source_last_access.get(source)
+        return last_access is None or time.monotonic() - last_access >= MAIN_SOURCE_IDLE_SECONDS
+
+    def _source_finished(self, source: str) -> None:
+        current = threading.current_thread()
+        with self._frame_lock:
+            if self._source_threads.get(source) is not current:
+                return
+            self._source_threads.pop(source, None)
+            self._source_stops.pop(source, None)
+            self._source_last_access.pop(source, None)
+            if source != "live":
+                self._source_frames.pop(source, None)
+                self._source_frame_at.pop(source, None)
+                self._source_frame_monotonic.pop(source, None)
+                self._source_errors.pop(source, None)
+            else:
+                self._thread = None
 
     def _run_source(self, source: str, stop_event: threading.Event) -> None:
-        while not self._stop.is_set() and not stop_event.is_set():
-            capture = cv2.VideoCapture()
-            try:
-                opened = capture.open(
-                    self.camera.source_url(source),
-                    cv2.CAP_FFMPEG,
-                    [
-                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
-                        CAPTURE_OPEN_TIMEOUT_MS,
-                        cv2.CAP_PROP_READ_TIMEOUT_MSEC,
-                        CAPTURE_READ_TIMEOUT_MS,
-                    ],
-                )
-                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                if not opened or not capture.isOpened():
-                    self._set_source_error(source, "failed to open stream")
-                else:
-                    self._set_source_error(source, "")
-                    while not self._stop.is_set() and not stop_event.is_set():
-                        ok, frame = capture.read()
-                        if not ok:
-                            self._set_source_error(source, "stream read failed")
-                            break
-                        stamp = datetime.now(timezone.utc).isoformat()
-                        with self._frame_lock:
-                            self._source_frames[source] = frame.copy()
-                            self._source_frame_at[source] = stamp
-                            if source == "live":
-                                self.last_frame_at = stamp
-            except Exception as exc:
-                self._set_source_error(source, f"stream error: {str(exc)[:160]}")
-                LOGGER.warning("camera stream failed for %s/%s: %s", self.camera.id, source, exc)
-            finally:
-                capture.release()
-            if stop_event.wait(1.0):
-                break
+        try:
+            while not self._stop.is_set() and not stop_event.is_set():
+                if self._source_is_idle(source):
+                    return
+                capture = cv2.VideoCapture()
+                try:
+                    opened = capture.open(
+                        self.camera.source_url(source),
+                        cv2.CAP_FFMPEG,
+                        [
+                            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                            CAPTURE_OPEN_TIMEOUT_MS,
+                            cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                            CAPTURE_READ_TIMEOUT_MS,
+                        ],
+                    )
+                    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    if not opened or not capture.isOpened():
+                        self._set_source_error(source, "failed to open stream")
+                    else:
+                        self._set_source_error(source, "")
+                        while not self._stop.is_set() and not stop_event.is_set():
+                            if self._source_is_idle(source):
+                                return
+                            ok, frame = capture.read()
+                            if not ok:
+                                self._set_source_error(source, "stream read failed")
+                                break
+                            stamp = datetime.now(timezone.utc).isoformat()
+                            frame_clock = time.monotonic()
+                            with self._frame_lock:
+                                self._source_frames[source] = frame.copy()
+                                self._source_frame_at[source] = stamp
+                                self._source_frame_monotonic[source] = frame_clock
+                                if source == "live":
+                                    self.last_frame_at = stamp
+                except Exception as exc:
+                    self._set_source_error(source, f"stream error: {str(exc)[:160]}")
+                    LOGGER.warning("camera stream failed for %s/%s: %s", self.camera.id, source, exc)
+                finally:
+                    capture.release()
+                if stop_event.wait(1.0):
+                    break
+        finally:
+            self._source_finished(source)
 
     def _set_source_error(self, source: str, message: str) -> None:
         with self._frame_lock:
@@ -287,7 +353,12 @@ class CameraWorker:
 
     def _get_latest_frame(self, source: str = "live") -> Any:
         source = self.camera.normalized_source(source)
-        self._start_source(source)
+        if self._stop.is_set():
+            return None
+        with self._frame_lock:
+            self._source_last_access[source] = time.monotonic()
+        if not self._start_source(source):
+            return None
         with self._frame_lock:
             frame = self._source_frames.get(source)
             if frame is None:

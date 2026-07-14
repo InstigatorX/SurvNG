@@ -22,7 +22,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
-from urllib.request import Request as UrlRequest, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
@@ -37,6 +36,7 @@ from .baichuan_native import ffmpeg_input_args, is_native_baichuan, start_ffmpeg
 from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
 from .detector import objects_to_json
 from .manager import AppManager
+from .go2rtc import Go2RtcError
 from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
@@ -56,8 +56,6 @@ RECORDING_CACHE_MAINTENANCE_LOCK = threading.Lock()
 RECORDING_CACHE_LAST_MAINTENANCE = 0.0
 RECORDING_PREWARM_STOP = threading.Event()
 RECORDING_PREWARM_THREAD: threading.Thread | None = None
-GO2RTC_COMPAT_STREAMS: set[str] = set()
-GO2RTC_COMPAT_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNCED = False
 
 
@@ -113,33 +111,6 @@ def _ffplay_path() -> str:
 
 def normalize_source(source: str) -> str:
     return "main" if source == "main" else "live"
-
-
-def _ensure_go2rtc_h264(host: str, stream_name: str) -> str:
-    compat_name = "survng_" + re.sub(r"[^a-zA-Z0-9_-]+", "_", stream_name) + "_h264"
-    with GO2RTC_COMPAT_LOCK:
-        if compat_name in GO2RTC_COMPAT_STREAMS:
-            return compat_name
-        params = f"name={quote(compat_name, safe='')}&src={quote(f'ffmpeg:{stream_name}#video=h264#width=1920', safe='')}"
-        request = UrlRequest(f"http://{host}:1984/api/streams?{params}", method="PUT")
-        with urlopen(request, timeout=5) as response:
-            if response.status >= 300:
-                raise RuntimeError(f"go2rtc returned HTTP {response.status}")
-        GO2RTC_COMPAT_STREAMS.add(compat_name)
-    return compat_name
-
-
-def _go2rtc_ws_url(camera_id: str, source: str, compatibility: str = "native") -> str:
-    camera = next((item for item in config.cameras if item.id == camera_id), None)
-    if camera is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    parsed = urlsplit(camera.source_url(normalize_source(source)))
-    stream_name = parsed.path.strip("/")
-    if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname or not stream_name:
-        raise HTTPException(status_code=409, detail="camera source is not a go2rtc RTSP restream")
-    if compatibility == "h264":
-        stream_name = _ensure_go2rtc_h264(parsed.hostname, stream_name)
-    return f"ws://{parsed.hostname}:1984/api/ws?src={quote(stream_name, safe='')}"
 
 
 def recording_source(source: str = "main") -> str:
@@ -802,6 +773,7 @@ def system_status() -> dict:
             "recording": sum(1 for camera in cameras if camera.get("recording")),
         },
         "mqtt": manager.mqtt_status(),
+        "go2rtc": manager.go2rtc_status(),
     }
 
 
@@ -1255,20 +1227,34 @@ async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict
 @app.get("/api/cameras/{camera_id}/snapshot.jpg")
 def snapshot(camera_id: str, source: str = "live") -> Response:
     worker = manager.workers.get(camera_id)
-    if worker is None:
+    camera = manager.camera(camera_id)
+    if worker is None or camera is None:
         raise HTTPException(status_code=404, detail="camera not found")
-    image = worker.snapshot(source)
+    if not worker.status().get("running"):
+        raise HTTPException(status_code=503, detail="camera is powered off")
+    try:
+        image = manager.go2rtc.snapshot(camera, source)
+    except Go2RtcError:
+        fallback_source = "live" if source == "main" and camera.source_url("main") == camera.source_url("live") else source
+        image = worker.snapshot(fallback_source)
     if image is None:
         raise HTTPException(status_code=503, detail="no frame available")
-    return Response(image, media_type="image/jpeg")
+    return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/cameras/{camera_id}/zone-snapshot.jpg")
 def zone_snapshot(camera_id: str, source: str = "live") -> Response:
     worker = manager.workers.get(camera_id)
-    if worker is None:
+    camera = manager.camera(camera_id)
+    if worker is None or camera is None:
         raise HTTPException(status_code=404, detail="camera not found")
-    image = worker.snapshot(source)
+    image = None
+    if worker.status().get("running"):
+        try:
+            image = manager.go2rtc.snapshot(camera, source)
+        except Go2RtcError:
+            fallback_source = "live" if source == "main" and camera.source_url("main") == camera.source_url("live") else source
+            image = worker.snapshot(fallback_source)
     if image is not None:
         return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
@@ -1285,6 +1271,23 @@ def zone_snapshot(camera_id: str, source: str = "live") -> Response:
             continue
         return FileResponse(snapshot_path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
     raise HTTPException(status_code=503, detail="no camera or event snapshot available")
+
+
+@app.get("/api/cameras/{camera_id}/live-info")
+def live_info(camera_id: str, source: str = "live") -> dict:
+    camera = manager.camera(camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    try:
+        return manager.go2rtc.stream_info(camera, source)
+    except Go2RtcError as exc:
+        return {
+            "available": False,
+            "video_codec": "",
+            "video_codecs": [],
+            "compatibility": "native",
+            "error": str(exc)[:160],
+        }
 
 
 @app.get("/api/cameras/{camera_id}/stream.mjpg")
@@ -1316,12 +1319,15 @@ async def stream(camera_id: str, request: Request, source: str = "live") -> Stre
 async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
     """Relay go2rtc signaling while its WebRTC media remains direct and shared."""
     try:
-        upstream_url = _go2rtc_ws_url(
-            camera_id,
+        camera = manager.camera(camera_id)
+        if camera is None:
+            raise Go2RtcError("camera not found")
+        upstream_url = manager.go2rtc.websocket_url(
+            camera,
             websocket.query_params.get("source", "live"),
             websocket.query_params.get("compat", "native"),
         )
-    except (HTTPException, OSError, RuntimeError):
+    except (Go2RtcError, OSError, RuntimeError):
         await websocket.close(code=1008)
         return
     await websocket.accept()

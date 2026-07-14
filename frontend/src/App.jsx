@@ -204,17 +204,30 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 }, forwardedRef) {
   const videoRef = useRef(null);
   const [stage, setStage] = useState("webrtc");
-  const [compatibility, setCompatibility] = useState("native");
+  const [compatibility, setCompatibility] = useState("detect");
   const [snapshotToken, setSnapshotToken] = useState(() => Date.now());
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
     setStage("webrtc");
-    setCompatibility("native");
+    setCompatibility("detect");
   }, [cameraId, source]);
 
   useEffect(() => {
-    if (stage !== "webrtc") return undefined;
+    if (stage !== "webrtc" || compatibility !== "detect") return undefined;
+    const controller = new AbortController();
+    fetch(`/api/cameras/${encodeURIComponent(cameraId)}/live-info?source=${encodeURIComponent(source)}`, {
+      signal: controller.signal,
+    }).then((response) => response.ok ? response.json() : null).then((info) => {
+      if (!controller.signal.aborted) setCompatibility(info?.compatibility === "h264" ? "h264" : "native");
+    }).catch(() => {
+      if (!controller.signal.aborted) setCompatibility("native");
+    });
+    return () => controller.abort();
+  }, [cameraId, source, stage, compatibility]);
+
+  useEffect(() => {
+    if (stage !== "webrtc" || compatibility === "detect") return undefined;
     let disposed = false;
     let connected = false;
     let socket = null;
@@ -259,7 +272,13 @@ const WebRtcLive = forwardRef(function WebRtcLive({
         socket.send(JSON.stringify({ type: "webrtc/offer", value: offer.sdp }));
       });
       socket.addEventListener("message", (event) => {
-        const message = JSON.parse(event.data);
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          fallback();
+          return;
+        }
         if (message.type === "webrtc/answer") {
           peer.setRemoteDescription({ type: "answer", sdp: message.value }).catch(fallback);
         } else if (message.type === "webrtc/candidate" && message.value) {
@@ -269,6 +288,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
         }
       });
       socket.addEventListener("error", fallback);
+      socket.addEventListener("close", () => !disposed && fallback());
     } catch (_error) {
       fallback();
     }
@@ -283,6 +303,16 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   }, [cameraId, source, stage, compatibility]);
 
   useEffect(() => {
+    if (stage === "webrtc") return undefined;
+    const timer = window.setTimeout(() => {
+      setCompatibility("detect");
+      setStage("webrtc");
+      setSnapshotToken(Date.now());
+    }, 30_000);
+    return () => window.clearTimeout(timer);
+  }, [stage]);
+
+  useEffect(() => {
     if (stage !== "snapshot") return undefined;
     const timer = window.setInterval(() => setSnapshotToken(Date.now()), 2000);
     return () => window.clearInterval(timer);
@@ -292,7 +322,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     <div className="live-stack" data-stage={stage}>
       <img
         className="live-poster"
-        src={`/api/cameras/${cameraId}/snapshot.jpg?source=${source}&t=${snapshotToken}`}
+        src={`/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`}
         alt=""
         onLoad={(event) => stage !== "webrtc" && onReady?.(event.currentTarget, "snapshot")}
       />
@@ -763,6 +793,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   const [detectionError, setDetectionError] = useState("");
   const shouldUseWebRtc = camera.running && streamReady && activeTransport === "webrtc";
   const shouldUseMjpegStream = camera.running && streamReady && activeTransport === "mjpeg";
+  const cameraConnected = camera.connected ?? camera.running;
 
   useEffect(() => {
     if (!STREAM_MODES.includes(streamMode)) setStreamMode("motion");
@@ -783,6 +814,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   }, [camera.id, camera.running, sourceMode, activeTransport, startDelayMs]);
 
   useEffect(() => {
+    if (!camera.running) return undefined;
     if (camera.running && streamReady && activeTransport !== "snapshot") return undefined;
     const timer = window.setInterval(() => setSnapshotToken(String(Date.now())), 2000);
     return () => window.clearInterval(timer);
@@ -840,9 +872,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
     setSourceMode(sourceMode === "main" ? "live" : "main");
   }
 
+  const posterSource = activeTransport === "webrtc" && sourceMode === "main" ? "live" : sourceMode;
   const imageUrl = shouldUseMjpegStream
     ? `/api/cameras/${camera.id}/stream.mjpg?source=${sourceMode}&t=${mjpegToken}`
-    : `/api/cameras/${camera.id}/snapshot.jpg?source=${sourceMode}&t=${snapshotToken}`;
+    : `/api/cameras/${camera.id}/snapshot.jpg?source=${posterSource}&t=${snapshotToken}`;
 
   return (
     <article className={`bento-card camera-tile ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`} {...dropProps}>
@@ -860,7 +893,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
         }}
         aria-label={`Open ${camera.name} live view`}
       >
-        {shouldUseWebRtc ? (
+        {!camera.running ? (
+          <div className="camera-offline-state" role="img" aria-label={`${camera.name} is powered off`}>
+            <Power size={24} />
+          </div>
+        ) : shouldUseWebRtc ? (
           <WebRtcLive
             cameraId={camera.id}
             source={sourceMode}
@@ -893,8 +930,8 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
             >
               <GripVertical size={16} />
             </button>
-            <span className={`status-pill hud-status ${camera.running ? "ok" : "bad"}`} title={camera.running ? "Online" : "Offline"}>
-              <CircleDot size={13} /> <span className="hud-full-label">{camera.running ? "online" : "offline"}</span>
+            <span className={`status-pill hud-status ${cameraConnected ? "ok" : "bad"}`} title={!camera.running ? "Powered off" : cameraConnected ? "Connected" : "Waiting for a fresh frame"}>
+              <CircleDot size={13} /> <span className="hud-full-label">{cameraConnected ? "online" : "offline"}</span>
             </span>
             <button type="button" className="tile-control-button" onClick={toggleSourceMode} title="Switch main/sub stream">
               <Radio size={15} />

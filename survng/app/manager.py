@@ -13,6 +13,7 @@ from .events import EventStore
 from .face_recognition import OpenVinoFaceRecognizer
 from .faces import FaceStore
 from .hls import HlsStreamer
+from .go2rtc import Go2RtcAdapter
 from .mqtt import MqttService
 from .recorder import Recorder
 
@@ -35,6 +36,7 @@ class AppManager:
         )
         self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds, config.hardware_acceleration)
         self.hls = HlsStreamer(config.ffmpeg_path, self.storage_dir, config.hardware_acceleration)
+        self.go2rtc = Go2RtcAdapter()
         self.mqtt = MqttService(
             config.mqtt,
             self._mqtt_power_command,
@@ -320,3 +322,6 @@ class AppManager:
 
     def detector_status(self) -> dict:
         return self.detector.status()
+
+    def go2rtc_status(self) -> dict:
+        return self.go2rtc.status(list(self._unique_cameras()))

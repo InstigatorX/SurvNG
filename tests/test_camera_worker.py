@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -41,6 +42,55 @@ class DummyRecorder:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_powered_off_worker_does_not_start_snapshot_source(self) -> None:
+        camera = CameraConfig(
+            id="back-middle",
+            name="Back Middle",
+            stream_url="rtsp://example.invalid/main",
+            live_stream_url="rtsp://example.invalid/sub",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            with patch.object(worker, "_start_source", wraps=worker._start_source) as start_source:
+                self.assertIsNone(worker.snapshot("main"))
+
+        start_source.assert_not_called()
+
+    def test_status_separates_power_capture_and_frame_freshness(self) -> None:
+        camera = CameraConfig(
+            id="back-middle",
+            name="Back Middle",
+            stream_url="rtsp://example.invalid/main",
+            live_stream_url="rtsp://example.invalid/sub",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker._enabled = True
+            worker._stop.clear()
+            worker._source_threads["live"] = Mock(is_alive=lambda: True)
+            worker._source_frame_at["live"] = "2026-07-14T12:00:00+00:00"
+            worker._source_frame_monotonic["live"] = time.monotonic()
+            status = worker.status()
+
+        self.assertTrue(status["running"])
+        self.assertTrue(status["capture_running"])
+        self.assertTrue(status["connected"])
+        self.assertTrue(status["frame_fresh"])
+
+    def test_only_main_source_expires_when_idle(self) -> None:
+        camera = CameraConfig(
+            id="back-middle",
+            name="Back Middle",
+            stream_url="rtsp://example.invalid/main",
+            live_stream_url="rtsp://example.invalid/sub",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker._source_last_access["main"] = time.monotonic() - 60
+
+            self.assertTrue(worker._source_is_idle("main"))
+            self.assertFalse(worker._source_is_idle("live"))
+
     def test_disabled_detection_ignores_motion_event(self) -> None:
         camera = CameraConfig(
             id="back-middle",
