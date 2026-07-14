@@ -268,6 +268,8 @@ class OpenVinoDetector:
                 postprocess_started = time.perf_counter()
             if self.output_format == "yolo":
                 objects = self._parse_yolo_output(output, metadata)
+            elif self.output_format == "yolo-e2e":
+                objects = self._parse_yolo_e2e_output(output, metadata)
             else:
                 objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0])
             stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
@@ -548,6 +550,8 @@ class OpenVinoDetector:
             return "yolo-seg"
         shape = [int(dim) for dim in self.output_layer.shape if int(dim) > 0]
         if len(shape) == 3:
+            if 6 in shape[1:] and max(shape[1:]) > 6:
+                return "yolo-e2e"
             channels = min(shape[1], shape[2])
             if channels >= 6 and channels == len(self.labels) + 4:
                 return "yolo"
@@ -706,6 +710,53 @@ class OpenVinoDetector:
                     },
                 }
             )
+        return objects
+
+    def _parse_yolo_e2e_output(
+        self,
+        output: np.ndarray,
+        metadata: dict[str, float],
+    ) -> list[dict[str, Any]]:
+        detections = np.squeeze(output)
+        if detections.ndim != 2:
+            return []
+        if detections.shape[0] == 6 and detections.shape[1] != 6:
+            detections = detections.T
+
+        image_width = int(metadata["image_width"])
+        image_height = int(metadata["image_height"])
+        input_width, input_height = self.input_shape
+        scale = metadata["scale"]
+        pad_x = metadata["pad_x"]
+        pad_y = metadata["pad_y"]
+        objects: list[dict[str, Any]] = []
+        for detection in detections:
+            if len(detection) < 6:
+                continue
+            confidence = float(detection[4])
+            if not np.isfinite(confidence) or confidence < self.config.confidence_threshold:
+                continue
+            class_value = float(detection[5])
+            if not np.isfinite(class_value):
+                continue
+            class_id = int(round(class_value))
+            input_x1, input_y1, input_x2, input_y2 = [float(value) for value in detection[:4]]
+            if max(abs(input_x1), abs(input_y1), abs(input_x2), abs(input_y2)) <= 2.0:
+                input_x1 *= input_width
+                input_x2 *= input_width
+                input_y1 *= input_height
+                input_y2 *= input_height
+            x1 = max(0, min(image_width, (input_x1 - pad_x) / scale))
+            y1 = max(0, min(image_height, (input_y1 - pad_y) / scale))
+            x2 = max(0, min(image_width, (input_x2 - pad_x) / scale))
+            y2 = max(0, min(image_height, (input_y2 - pad_y) / scale))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            objects.append({
+                "label": self.labels[class_id] if 0 <= class_id < len(self.labels) else str(class_id),
+                "confidence": round(confidence, 4),
+                "box": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
+            })
         return objects
 
     def _parse_yolo_output(

@@ -11,15 +11,19 @@ from xml.etree import ElementTree
 
 from .config import CameraConfig
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
 RETRY_INITIAL_SECONDS = 2.0
 RETRY_MAX_SECONDS = 60.0
 POLL_RETRY_SECONDS = 2.0
-PULL_TIMEOUT_SECONDS = 30
+PULL_TIMEOUT_SECONDS = 5
 TRANSPORT_OPERATION_TIMEOUT_SECONDS = 45
+STOP_JOIN_SECONDS = TRANSPORT_OPERATION_TIMEOUT_SECONDS + 5
 MAX_POLL_FAILURES = 6
 TIMEOUT_WORDS = ("timed out", "timeout", "read timed out", "operation timed out")
+PULLPOINT_NAMESPACE = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
+SUBSCRIPTION_MANAGER_BINDING = "{http://www.onvif.org/ver10/events/wsdl}SubscriptionManagerBinding"
+SUBSCRIPTION_DURATION = "PT1H"
 
 
 class OnvifEventListener:
@@ -32,12 +36,23 @@ class OnvifEventListener:
         self.on_motion = on_motion
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._transport: Any = None
+        self._subscription_manager: Any = None
         self.connected = False
         self.last_event_at = ""
         self.last_error = ""
         self.last_topic = ""
         self.last_connected_at = ""
+        self.last_poll_success_at = ""
+        self.last_poll_error = ""
+        self.last_poll_error_at = ""
         self.retry_attempts = 0
+        self.poll_timeouts = 0
+        self.poll_errors = 0
+        self.resubscriptions = 0
+        self.subscription_current_time = ""
+        self.subscription_termination_time = ""
+        self.subscription_lifetime_seconds: float | None = None
 
     def start(self) -> None:
         if not self.camera.onvif.enabled:
@@ -45,15 +60,31 @@ class OnvifEventListener:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"onvif-{self.camera.id}",
+            daemon=False,
+        )
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=PULL_TIMEOUT_SECONDS + 5)
+            if thread.is_alive():
+                transport = self._transport
+                if transport is not None:
+                    try:
+                        transport.session.close()
+                    except Exception:
+                        LOGGER.debug("failed to close ONVIF transport for %s", self.camera.id, exc_info=True)
+                thread.join(timeout=STOP_JOIN_SECONDS)
+                if thread.is_alive():
+                    LOGGER.error("ONVIF worker did not stop for %s", self.camera.id)
         self.connected = False
-        self._thread = None
+        self._thread = thread if thread is not None and thread.is_alive() else None
+        self._transport = None
 
     def _run(self) -> None:
         try:
@@ -66,10 +97,25 @@ class OnvifEventListener:
             self.last_error = "onvif-zeep is not installed"
             return
 
+        class SingleSubscriptionCamera(ONVIFCamera):
+            def update_xaddrs(self) -> None:
+                self._defer_pullpoint_subscription = True
+                try:
+                    super().update_xaddrs()
+                finally:
+                    self._defer_pullpoint_subscription = False
+
+            def create_events_service(self, from_template: bool = True) -> Any:
+                if getattr(self, "_defer_pullpoint_subscription", False):
+                    raise RuntimeError("PullPoint subscription is managed by SurvNG")
+                return super().create_events_service(from_template)
+
         retry_delay = RETRY_INITIAL_SECONDS
         while not self._stop.is_set():
             try:
-                pullpoint = self._subscribe(ONVIFCamera, Transport, SqliteCache)
+                pullpoint = self._subscribe(SingleSubscriptionCamera, Transport, SqliteCache)
+                if self.last_connected_at:
+                    self.resubscriptions += 1
                 retry_delay = RETRY_INITIAL_SECONDS
                 self.retry_attempts = 0
                 self.connected = True
@@ -96,9 +142,11 @@ class OnvifEventListener:
                     response = pullpoint.PullMessages(
                         {"Timeout": f"PT{PULL_TIMEOUT_SECONDS}S", "MessageLimit": 10}
                     )
+                    self._record_subscription_times(response)
                     failures = 0
                     self.connected = True
                     self.last_error = ""
+                    self.last_poll_success_at = datetime.now(timezone.utc).isoformat()
                     for notification in getattr(response, "NotificationMessage", []) or []:
                         topic, message = self._extract_event(notification)
                         event_at = self._event_time(notification, message)
@@ -108,9 +156,12 @@ class OnvifEventListener:
                         if self._is_motion_event(topic, message):
                             self.on_motion(topic, message, event_at)
                 except Exception as exc:
-                    error_text = str(exc).strip()
+                    error_text = self._error_text(exc)
+                    self.last_poll_error = error_text
+                    self.last_poll_error_at = datetime.now(timezone.utc).isoformat()
                     if self._is_timeout_error(exc):
                         failures += 1
+                        self.poll_timeouts += 1
                         self.connected = True
                         self.last_error = f"poll timeout ({failures}/{MAX_POLL_FAILURES})"
                         LOGGER.debug(
@@ -121,10 +172,16 @@ class OnvifEventListener:
                             error_text[:200],
                         )
                     else:
-                        failures += 1
+                        self.poll_errors += 1
                         self.connected = False
-                        self.last_error = f"polling failed ({failures}/{MAX_POLL_FAILURES}): {error_text[:200]}"
-                        LOGGER.warning("ONVIF event polling failed for %s: %s", self.camera.id, error_text[:300])
+                        self.retry_attempts += 1
+                        self.last_error = f"polling failed; re-subscribing: {error_text[:200]}"
+                        LOGGER.warning(
+                            "ONVIF event polling failed for %s; re-subscribing: %s",
+                            self.camera.id,
+                            error_text,
+                        )
+                        break
                     if failures >= MAX_POLL_FAILURES:
                         self.retry_attempts += 1
                         LOGGER.warning(
@@ -136,6 +193,7 @@ class OnvifEventListener:
                     if self._stop.wait(POLL_RETRY_SECONDS):
                         return
 
+            self._unsubscribe()
             self.connected = False
             if not self._stop.is_set():
                 if self._stop.wait(retry_delay):
@@ -148,6 +206,8 @@ class OnvifEventListener:
             cache=SqliteCache(path=cache_path),
             operation_timeout=TRANSPORT_OPERATION_TIMEOUT_SECONDS,
         )
+        self._transport = transport
+        self._subscription_manager = None
         camera = ONVIFCamera(
             self.camera.onvif.host,
             self.camera.onvif.port,
@@ -156,13 +216,71 @@ class OnvifEventListener:
             transport=transport,
         )
         events_service = camera.create_events_service()
-        events_service.CreatePullPointSubscription()
+        subscription = events_service.CreatePullPointSubscription(
+            {"InitialTerminationTime": SUBSCRIPTION_DURATION}
+        )
+        address = self._subscription_address(subscription)
+        if not address:
+            raise RuntimeError("ONVIF subscription did not return a PullPoint address")
+        camera.xaddrs[PULLPOINT_NAMESPACE] = address
+        self._record_subscription_times(subscription)
+        try:
+            self._subscription_manager = events_service.zeep_client.create_service(
+                SUBSCRIPTION_MANAGER_BINDING,
+                address,
+            )
+        except Exception:
+            LOGGER.debug(
+                "ONVIF subscription manager unavailable for %s",
+                self.camera.id,
+                exc_info=True,
+            )
         return camera.create_pullpoint_service()
+
+    @staticmethod
+    def _subscription_address(subscription: Any) -> str:
+        reference = getattr(subscription, "SubscriptionReference", None)
+        address = getattr(reference, "Address", None)
+        return str(getattr(address, "_value_1", "") or "").strip()
+
+    def _record_subscription_times(self, response: Any) -> None:
+        current = self._parse_event_time(getattr(response, "CurrentTime", None))
+        termination = self._parse_event_time(getattr(response, "TerminationTime", None))
+        self.subscription_current_time = current.isoformat() if current else ""
+        self.subscription_termination_time = termination.isoformat() if termination else ""
+        if current is not None and termination is not None:
+            self.subscription_lifetime_seconds = max(
+                0.0, (termination - current).total_seconds()
+            )
+        else:
+            self.subscription_lifetime_seconds = None
+
+    def _unsubscribe(self) -> None:
+        manager = self._subscription_manager
+        self._subscription_manager = None
+        if manager is None:
+            return
+        try:
+            manager.Unsubscribe()
+        except Exception:
+            LOGGER.debug(
+                "failed to release ONVIF subscription for %s",
+                self.camera.id,
+                exc_info=True,
+            )
 
 
     def _is_timeout_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
-        return any(word in text for word in TIMEOUT_WORDS)
+        exception_types = " ".join(
+            item.__name__.lower() for item in type(exc).__mro__
+        )
+        return "timeout" in exception_types or any(word in text for word in TIMEOUT_WORDS)
+
+    @staticmethod
+    def _error_text(exc: Exception) -> str:
+        detail = str(exc).strip() or repr(exc)
+        return f"{type(exc).__name__}: {detail}"[:300]
 
     def _event_time(self, notification: Any, message: str) -> datetime | None:
         for name in ("UtcTime", "utcTime", "timestamp", "Timestamp"):

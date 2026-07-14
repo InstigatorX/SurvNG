@@ -41,6 +41,20 @@ class DetectionZone(BaseModel):
     trigger: Literal["bottom_center"] = "bottom_center"
 
 
+class MqttConfig(BaseModel):
+    enabled: bool = False
+    host: str = ""
+    port: int = Field(default=1883, ge=1, le=65535)
+    username: str = ""
+    password: str = ""
+    client_id: str = "survng"
+    topic_prefix: str = "survng"
+    qos: int = Field(default=0, ge=0, le=2)
+    tls: bool = False
+    discovery_enabled: bool = True
+    discovery_prefix: str = "homeassistant"
+
+
 class CameraConfig(BaseModel):
     id: str
     name: str
@@ -81,6 +95,14 @@ class DetectorConfig(BaseModel):
     cache_enabled: bool = True
     cache_dir: str = ".cache/openvino"
     warmup_enabled: bool = True
+    face_max_observations: int = Field(default=1000, ge=100, le=100000)
+    face_recognition_enabled: bool = False
+    face_embedding_model_path: str = ""
+    face_landmark_model_path: str = ""
+    face_recognition_device: str = "AUTO"
+    face_match_threshold: float = Field(default=0.40, ge=0.0, le=1.0)
+    face_min_size: int = Field(default=48, ge=16, le=1024)
+    face_max_references: int = Field(default=20, ge=1, le=200)
     confidence_threshold: float = 0.45
     nms_threshold: float = 0.45
     labels: list[str] = Field(default_factory=list)
@@ -103,6 +125,7 @@ class AppConfig(BaseModel):
     recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
+    mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
 
@@ -183,8 +206,8 @@ def load_config(path: str = "config.json") -> AppConfig:
         return normalize_config(AppConfig.model_validate(json.load(handle)), assign_ids=False)
 
 
-def save_config(config: AppConfig, path: str = "config.json") -> None:
-    config = normalize_config(config, assign_ids=True)
+def save_config(config: AppConfig, path: str = "config.json", assign_ids: bool = True) -> None:
+    config = normalize_config(config, assign_ids=assign_ids)
     config_path = Path(path)
     with config_path.open("w", encoding="utf-8") as handle:
         json.dump(config.model_dump(mode="json"), handle, indent=2)

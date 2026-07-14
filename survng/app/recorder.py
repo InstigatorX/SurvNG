@@ -223,11 +223,19 @@ class Recorder:
         with self._lock:
             items = list(self.processes.values())
             self.processes.clear()
-        shutdowns = [threading.Thread(target=self._stop_item, args=(item,), daemon=True) for item in items]
+        shutdowns = [
+            threading.Thread(
+                target=self._stop_item,
+                args=(item,),
+                name=f"stop-recorder-{item[0].pid}",
+                daemon=False,
+            )
+            for item in items
+        ]
         for thread in shutdowns:
             thread.start()
         for thread in shutdowns:
-            thread.join(timeout=12)
+            thread.join()
 
     def start_watchdog(self, cameras: list[CameraConfig], interval: float = 15.0) -> None:
         self._watchdog_stop.clear()

@@ -36,6 +36,49 @@ class EventStore:
                 )
                 """
             )
+            conn.execute(
+                "create index if not exists idx_events_created_at on events(created_at desc)"
+            )
+            conn.execute(
+                "create index if not exists idx_events_camera_created_at on events(camera_id, created_at desc)"
+            )
+            self._rebase_media_paths(conn)
+
+    def _rebase_media_paths(self, conn: sqlite3.Connection) -> None:
+        storage_root = self.db_path.parent.resolve()
+        rows = conn.execute(
+            "select id, snapshot_path, recording_path from events where snapshot_path != '' or recording_path != ''"
+        ).fetchall()
+        updates: list[tuple[str, str, int]] = []
+        for row in rows:
+            snapshot_path = self._rebased_path(str(row["snapshot_path"] or ""), storage_root)
+            recording_path = self._rebased_path(str(row["recording_path"] or ""), storage_root)
+            if snapshot_path != str(row["snapshot_path"] or "") or recording_path != str(row["recording_path"] or ""):
+                updates.append((snapshot_path, recording_path, int(row["id"])))
+        if updates:
+            conn.executemany(
+                "update events set snapshot_path = ?, recording_path = ? where id = ?",
+                updates,
+            )
+
+    @staticmethod
+    def _rebased_path(raw_path: str, storage_root: Path) -> str:
+        if not raw_path:
+            return raw_path
+        path = Path(raw_path)
+        try:
+            path.resolve().relative_to(storage_root)
+            return raw_path
+        except ValueError:
+            pass
+        parts = path.parts
+        for directory in ("snapshots", "recordings"):
+            if directory not in parts:
+                continue
+            candidate = storage_root.joinpath(*parts[parts.index(directory):])
+            if candidate.is_file():
+                return str(candidate)
+        return raw_path
 
     def add_event(
         self,
@@ -88,6 +131,19 @@ class EventStore:
             rows = conn.execute(
                 "select * from events order by id desc limit ?",
                 (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def between(self, start_at: str, end_at: str, limit: int = 50000) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from events
+                where created_at >= ? and created_at < ?
+                order by created_at desc, id desc
+                limit ?
+                """,
+                (start_at, end_at, max(1, min(int(limit), 200000))),
             ).fetchall()
         return [dict(row) for row in rows]
 

@@ -114,17 +114,26 @@ class HlsStreamer:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
+            process.wait(timeout=5)
 
     def stop_all(self) -> None:
         self._shutdown.set()
         self._reaper.join(timeout=2)
         with self._lock:
             keys = list(self.processes)
-        shutdowns = [threading.Thread(target=self.stop, args=(key,), daemon=True) for key in keys]
+        shutdowns = [
+            threading.Thread(
+                target=self.stop,
+                args=(key,),
+                name=f"stop-hls-{key}",
+                daemon=False,
+            )
+            for key in keys
+        ]
         for thread in shutdowns:
             thread.start()
         for thread in shutdowns:
-            thread.join(timeout=7)
+            thread.join()
 
     def stop_camera_sources(self, camera_id: str, except_key: str = "") -> None:
         prefix = f"{camera_id}:"

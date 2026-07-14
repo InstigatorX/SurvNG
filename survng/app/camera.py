@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -24,6 +24,9 @@ RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 12.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
+CAPTURE_OPEN_TIMEOUT_MS = 5000
+CAPTURE_READ_TIMEOUT_MS = 5000
+CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
 
 
 class CameraWorker:
@@ -34,16 +37,19 @@ class CameraWorker:
         detector: OpenVinoDetector,
         events: EventStore,
         recorder: Recorder,
+        event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
         self.detector = detector
         self.events = events
         self.recorder = recorder
+        self.event_callback = event_callback
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stops: dict[str, threading.Event] = {}
@@ -56,27 +62,43 @@ class CameraWorker:
         self.onvif = OnvifEventListener(camera, self.handle_motion_event)
 
     def start(self) -> None:
-        self._stop.clear()
-        self._start_source("live")
-        self.onvif.start()
+        with self._lifecycle_lock:
+            self._stop.clear()
+            self._start_source("live")
+            self.onvif.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self.onvif.stop()
-        with self._frame_lock:
-            stops = list(self._source_stops.values())
-            threads = list(self._source_threads.values())
-        for stop_event in stops:
-            stop_event.set()
-        for thread in threads:
-            thread.join(timeout=2)
-        with self._frame_lock:
-            self._source_threads.clear()
-            self._source_stops.clear()
-            self._source_frames.clear()
-            self._source_frame_at.clear()
-            self._source_errors.clear()
-        self._thread = None
+        with self._lifecycle_lock:
+            self._stop.set()
+            with self._frame_lock:
+                stops = list(self._source_stops.values())
+                threads = list(self._source_threads.items())
+            for stop_event in stops:
+                stop_event.set()
+            self.onvif.stop()
+            deadline = time.monotonic() + CAPTURE_STOP_TIMEOUT_SECONDS
+            for _source, thread in threads:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            alive = [source for source, thread in threads if thread.is_alive()]
+            if alive:
+                LOGGER.error(
+                    "camera capture threads did not stop for %s: %s",
+                    self.camera.id,
+                    ", ".join(alive),
+                )
+            with self._frame_lock:
+                self._source_threads = {
+                    source: thread for source, thread in self._source_threads.items()
+                    if thread.is_alive()
+                }
+                self._source_stops = {
+                    source: stop for source, stop in self._source_stops.items()
+                    if source in self._source_threads
+                }
+                self._source_frames.clear()
+                self._source_frame_at.clear()
+                self._source_errors.clear()
+            self._thread = self._source_threads.get("live")
 
     def status(self) -> dict[str, Any]:
         live_thread = self._source_threads.get("live")
@@ -96,7 +118,16 @@ class CameraWorker:
             "last_motion_at": self.last_motion_at,
             "onvif_last_error": self.onvif.last_error,
             "onvif_last_connected_at": self.onvif.last_connected_at,
+            "onvif_last_poll_success_at": self.onvif.last_poll_success_at,
+            "onvif_last_poll_error": self.onvif.last_poll_error,
+            "onvif_last_poll_error_at": self.onvif.last_poll_error_at,
             "onvif_retry_attempts": self.onvif.retry_attempts,
+            "onvif_poll_timeouts": self.onvif.poll_timeouts,
+            "onvif_poll_errors": self.onvif.poll_errors,
+            "onvif_resubscriptions": self.onvif.resubscriptions,
+            "onvif_subscription_current_time": self.onvif.subscription_current_time,
+            "onvif_subscription_termination_time": self.onvif.subscription_termination_time,
+            "onvif_subscription_lifetime_seconds": self.onvif.subscription_lifetime_seconds,
         }
 
     def snapshot(self, source: str = "live") -> bytes | None:
@@ -137,13 +168,20 @@ class CameraWorker:
         else:
             event_at = event_at.astimezone(timezone.utc)
 
+        if self.event_callback:
+            self.event_callback("motion", {
+                "camera_id": self.camera.id,
+                "timestamp": event_at.isoformat(),
+                "source": "manual" if topic.startswith("manual") else "onvif",
+            })
+
         frame, objects, recording_path = self._recorded_motion_frame(event_at)
         snapshot_path = ""
         if frame is not None:
             snapshot_path = self._write_snapshot(frame)
         else:
             objects = [{"status": "no_recorded_frame"}]
-        self.events.add_event(
+        event = self.events.add_event(
             camera_id=self.camera.id,
             kind="motion",
             topic=topic,
@@ -153,6 +191,24 @@ class CameraWorker:
             objects_json=objects_to_json(objects),
             created_at=event_at.isoformat(),
         )
+        detected_objects = [
+            detected for detected in objects
+            if detected.get("label")
+        ]
+        eligible_objects = [
+            detected for detected in objects
+            if detected.get("label") and detected.get("incident_eligible") is not False
+        ]
+        if self.event_callback and detected_objects:
+            self.event_callback("object", {
+                "event_id": event.get("id"),
+                "camera_id": self.camera.id,
+                "timestamp": event_at.isoformat(),
+                "snapshot_path": snapshot_path,
+                "recording_path": recording_path,
+                "objects": detected_objects,
+                "incident_objects": eligible_objects,
+            })
 
     def _start_source(self, source: str) -> None:
         source = self.camera.normalized_source(source)
@@ -161,7 +217,12 @@ class CameraWorker:
             if thread is not None and thread.is_alive():
                 return
             stop_event = threading.Event()
-            thread = threading.Thread(target=self._run_source, args=(source, stop_event), daemon=True)
+            thread = threading.Thread(
+                target=self._run_source,
+                args=(source, stop_event),
+                name=f"camera-{self.camera.id}-{source}",
+                daemon=False,
+            )
             self._source_stops[source] = stop_event
             self._source_threads[source] = thread
             if source == "live":
@@ -170,31 +231,41 @@ class CameraWorker:
 
     def _run_source(self, source: str, stop_event: threading.Event) -> None:
         while not self._stop.is_set() and not stop_event.is_set():
-            capture = cv2.VideoCapture(self.camera.source_url(source), cv2.CAP_FFMPEG)
+            capture = cv2.VideoCapture()
             try:
+                opened = capture.open(
+                    self.camera.source_url(source),
+                    cv2.CAP_FFMPEG,
+                    [
+                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                        CAPTURE_OPEN_TIMEOUT_MS,
+                        cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                        CAPTURE_READ_TIMEOUT_MS,
+                    ],
+                )
                 capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-                capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
-            except Exception:
-                pass
-            if not capture.isOpened():
-                self._set_source_error(source, "failed to open stream")
-                time.sleep(5)
-                continue
-            self._set_source_error(source, "")
-            while not self._stop.is_set() and not stop_event.is_set():
-                ok, frame = capture.read()
-                if not ok:
-                    self._set_source_error(source, "stream read failed")
-                    break
-                stamp = datetime.now(timezone.utc).isoformat()
-                with self._frame_lock:
-                    self._source_frames[source] = frame.copy()
-                    self._source_frame_at[source] = stamp
-                    if source == "live":
-                        self.last_frame_at = stamp
-            capture.release()
-            time.sleep(1)
+                if not opened or not capture.isOpened():
+                    self._set_source_error(source, "failed to open stream")
+                else:
+                    self._set_source_error(source, "")
+                    while not self._stop.is_set() and not stop_event.is_set():
+                        ok, frame = capture.read()
+                        if not ok:
+                            self._set_source_error(source, "stream read failed")
+                            break
+                        stamp = datetime.now(timezone.utc).isoformat()
+                        with self._frame_lock:
+                            self._source_frames[source] = frame.copy()
+                            self._source_frame_at[source] = stamp
+                            if source == "live":
+                                self.last_frame_at = stamp
+            except Exception as exc:
+                self._set_source_error(source, f"stream error: {str(exc)[:160]}")
+                LOGGER.warning("camera stream failed for %s/%s: %s", self.camera.id, source, exc)
+            finally:
+                capture.release()
+            if stop_event.wait(1.0):
+                break
 
     def _set_source_error(self, source: str, message: str) -> None:
         with self._frame_lock:

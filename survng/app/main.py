@@ -23,16 +23,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from urllib.request import Request as UrlRequest, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 
 from .baichuan_native import ffmpeg_input_args, is_native_baichuan, start_ffmpeg_pipe
-from .config import AppConfig, camera_by_id, load_config, save_config
+from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
 from .detector import objects_to_json
 from .manager import AppManager
 from .zones import apply_detection_zones, detection_threshold
@@ -56,6 +58,7 @@ RECORDING_PREWARM_STOP = threading.Event()
 RECORDING_PREWARM_THREAD: threading.Thread | None = None
 GO2RTC_COMPAT_STREAMS: set[str] = set()
 GO2RTC_COMPAT_LOCK = threading.Lock()
+FACE_OBSERVATIONS_SYNCED = False
 
 
 class MemoryLogHandler(logging.Handler):
@@ -140,13 +143,16 @@ def recording_source(source: str = "main") -> str:
 
 
 def reload_manager(next_config: AppConfig) -> None:
-    global config, manager
+    global config, manager, FACE_OBSERVATIONS_SYNCED
+    _stop_recording_prewarmer()
     manager.stop_all()
     with RECORDING_DAY_CACHE_LOCK:
         RECORDING_DAY_CACHE.clear()
     config = next_config
     manager = AppManager(config)
+    FACE_OBSERVATIONS_SYNCED = False
     manager.start_all()
+    _start_recording_prewarmer()
 
 
 @asynccontextmanager
@@ -179,6 +185,11 @@ def config_page() -> FileResponse:
 
 @app.get("/incidents")
 def incidents_page() -> FileResponse:
+    return FileResponse("survng/static/index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/faces")
+def faces_page() -> FileResponse:
     return FileResponse("survng/static/index.html", headers={"Cache-Control": "no-store"})
 
 
@@ -775,6 +786,7 @@ def system_status() -> dict:
             "online": sum(1 for camera in cameras if camera.get("running")),
             "recording": sum(1 for camera in cameras if camera.get("recording")),
         },
+        "mqtt": manager.mqtt_status(),
     }
 
 
@@ -783,6 +795,76 @@ def put_config(next_config: AppConfig) -> dict:
     save_config(next_config)
     reload_manager(next_config)
     return {"ok": True, "cameras": len(next_config.cameras)}
+
+
+@app.put("/api/config/cameras/{camera_id}/zones")
+def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:
+    next_config = config.model_copy(deep=True)
+    camera = camera_by_id(next_config, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    camera.zones = zones
+    save_config(next_config, assign_ids=False)
+    reload_manager(next_config)
+    return {
+        "ok": True,
+        "camera_id": camera.id,
+        "zones": [zone.model_dump(mode="json") for zone in camera.zones],
+    }
+
+
+@app.put("/api/config/cameras/order")
+def put_camera_order(camera_ids: list[str]) -> dict:
+    global config
+    existing_ids = [camera.id for camera in config.cameras]
+    if len(camera_ids) != len(existing_ids) or len(set(camera_ids)) != len(camera_ids):
+        raise HTTPException(status_code=400, detail="camera order must contain every camera exactly once")
+    if set(camera_ids) != set(existing_ids):
+        raise HTTPException(status_code=400, detail="camera order does not match configured cameras")
+    camera_by_identifier = {camera.id: camera for camera in config.cameras}
+    next_config = config.model_copy(deep=True)
+    next_config.cameras = [camera_by_identifier[camera_id].model_copy(deep=True) for camera_id in camera_ids]
+    save_config(next_config, assign_ids=False)
+
+    config = next_config
+    manager.config = next_config
+    manager.workers = {camera_id: manager.workers[camera_id] for camera_id in camera_ids}
+    return {"ok": True, "camera_ids": camera_ids}
+
+
+@app.put("/api/config/cameras/{camera_id}")
+def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
+    next_config = config.model_copy(deep=True)
+    existing_index = next((index for index, item in enumerate(next_config.cameras) if item.id == camera_id), None)
+    existing = next_config.cameras[existing_index] if existing_index is not None else None
+    used_ids = {item.id for item in next_config.cameras if item.id != camera_id}
+    base_id = slugify_camera_id(camera_settings.name or camera_settings.id)
+    next_id = base_id
+    suffix = 2
+    while next_id in used_ids:
+        next_id = f"{base_id}-{suffix}"
+        suffix += 1
+    camera_settings.id = next_id
+    camera_settings.zones = existing.zones if existing is not None else []
+    if existing_index is None:
+        next_config.cameras.append(camera_settings)
+    else:
+        next_config.cameras[existing_index] = camera_settings
+    save_config(next_config, assign_ids=False)
+    reload_manager(next_config)
+    return {"ok": True, "camera": camera_settings.model_dump(mode="json")}
+
+
+@app.delete("/api/config/cameras/{camera_id}")
+def delete_camera(camera_id: str) -> dict:
+    next_config = config.model_copy(deep=True)
+    remaining = [camera for camera in next_config.cameras if camera.id != camera_id]
+    if len(remaining) == len(next_config.cameras):
+        raise HTTPException(status_code=404, detail="camera not found")
+    next_config.cameras = remaining
+    save_config(next_config, assign_ids=False)
+    reload_manager(next_config)
+    return {"ok": True, "camera_id": camera_id}
 
 
 @app.post("/api/config/probe")
@@ -840,7 +922,214 @@ def events(limit: int = 100) -> list[dict]:
 @app.get("/api/incidents")
 def incidents(limit: int = 200, gap_seconds: int = 45) -> list[dict]:
     rows = [_event_row(row) for row in manager.events.recent(max(limit, 1))]
-    return _incident_rows(rows, gap_seconds=max(5, min(gap_seconds, 300)))
+    return _incidents_with_faces(
+        _incident_rows(rows, gap_seconds=max(5, min(gap_seconds, 300)))
+    )
+
+
+@app.get("/api/incidents/search")
+def incident_search(
+    day: str = "",
+    time_zone: str = "America/New_York",
+    camera_id: str = "",
+    event_type: str = "motion",
+    object_label: str = "",
+    zone: str = "",
+    limit: int = 18,
+    offset: int = 0,
+    gap_seconds: int = 45,
+) -> dict:
+    try:
+        selected_zone = ZoneInfo(time_zone)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(status_code=422, detail="unknown timezone") from exc
+    if day:
+        try:
+            selected_date = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="day must use YYYY-MM-DD") from exc
+    else:
+        selected_date = datetime.now(selected_zone).date()
+        day = selected_date.isoformat()
+    day_start = datetime.combine(selected_date, datetime.min.time(), selected_zone)
+    day_end = day_start + timedelta(days=1)
+    bounded_gap = max(5, min(gap_seconds, 300))
+    query_start = day_start.astimezone(timezone.utc) - timedelta(seconds=bounded_gap)
+    query_end = day_end.astimezone(timezone.utc) + timedelta(seconds=bounded_gap)
+    rows = [
+        _event_row(row)
+        for row in manager.events.between(query_start.isoformat(), query_end.isoformat())
+    ]
+    day_start_epoch = day_start.timestamp()
+    day_end_epoch = day_end.timestamp()
+    day_incidents = [
+        incident
+        for incident in _incident_rows(rows, gap_seconds=bounded_gap)
+        if incident["last_epoch"] >= day_start_epoch and incident["start_epoch"] < day_end_epoch
+    ]
+    facets = {
+        "camera_ids": sorted({str(item.get("camera_id") or "") for item in day_incidents if item.get("camera_id")}),
+        "labels": sorted({str(label) for item in day_incidents for label in item.get("labels", []) if label}),
+        "zones": sorted({str(item_zone) for item in day_incidents for item_zone in item.get("zones", []) if item_zone}),
+    }
+    filtered = day_incidents
+    if event_type == "object":
+        filtered = [item for item in filtered if item.get("has_objects")]
+    if camera_id:
+        filtered = [item for item in filtered if item.get("camera_id") == camera_id]
+    if object_label:
+        filtered = [item for item in filtered if object_label in item.get("labels", [])]
+    if zone:
+        filtered = [item for item in filtered if zone in item.get("zones", [])]
+    bounded_limit = max(1, min(limit, 100))
+    bounded_offset = max(0, offset)
+    page_items = filtered[bounded_offset:bounded_offset + bounded_limit]
+    return {
+        "items": _incidents_with_faces(page_items),
+        "total": len(filtered),
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+        "day": day,
+        "time_zone": time_zone,
+        "start_at": day_start.astimezone(timezone.utc).isoformat(),
+        "end_at": day_end.astimezone(timezone.utc).isoformat(),
+        "facets": facets,
+    }
+
+
+class FacePersonCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    notes: str = Field(default="", max_length=1000)
+    observation_id: int | None = None
+
+
+class FaceAssignment(BaseModel):
+    person_id: int | None = None
+
+
+def _sync_face_observations(limit: int = 5000) -> int:
+    global FACE_OBSERVATIONS_SYNCED
+    if FACE_OBSERVATIONS_SYNCED:
+        return 0
+    inserted = manager.faces.ingest_events(manager.events.recent(max(1, min(limit, 20000))))
+    FACE_OBSERVATIONS_SYNCED = True
+    return inserted
+
+
+@app.get("/api/faces/status")
+def face_status() -> dict:
+    _sync_face_observations()
+    stats = manager.faces.stats()
+    recognition = manager.faces.recognition_status()
+    if recognition.get("ready"):
+        recognition_message = (
+            f"Recognition ready on {recognition.get('device') or 'OpenVINO'}; "
+            f"{recognition.get('embedded', 0)} faces embedded and "
+            f"{recognition.get('suggested', 0)} suggestions awaiting review."
+        )
+    else:
+        recognition_message = str(recognition.get("error") or "Configure an OpenVINO face embedding model.")
+    return {
+        **stats,
+        "recognition_ready": bool(recognition.get("ready")),
+        "recognition_message": recognition_message,
+        "recognition": recognition,
+    }
+
+
+@app.get("/api/faces/people")
+def face_people() -> list[dict]:
+    _sync_face_observations()
+    return manager.faces.people()
+
+
+@app.post("/api/faces/people")
+def create_face_person(payload: FacePersonCreate) -> dict:
+    return manager.faces.create_person(payload.name, payload.observation_id, payload.notes)
+
+
+@app.delete("/api/faces/people/{person_id}")
+def delete_face_person(person_id: int) -> dict:
+    if not manager.faces.delete_person(person_id):
+        raise HTTPException(status_code=404, detail="person not found")
+    return {"deleted": True, "person_id": person_id}
+
+
+@app.get("/api/faces/observations")
+def face_observations(
+    person_id: int | None = None,
+    camera_id: str = "",
+    status: str = "all",
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict]:
+    _sync_face_observations()
+    return manager.faces.observations(
+        person_id=person_id,
+        camera_id=camera_id,
+        status=status if status in {"all", "known", "unknown", "suggested"} else "all",
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/faces/observations/count")
+def face_observation_count(
+    person_id: int | None = None,
+    camera_id: str = "",
+    status: str = "all",
+) -> dict:
+    _sync_face_observations()
+    return {
+        "total": manager.faces.observation_count(
+            person_id=person_id,
+            camera_id=camera_id,
+            status=status if status in {"all", "known", "unknown", "suggested"} else "all",
+        )
+    }
+
+
+@app.get("/api/faces/observations/{observation_id}")
+def face_observation(observation_id: int) -> dict:
+    observation = manager.faces.observation(observation_id)
+    if observation is None:
+        raise HTTPException(status_code=404, detail="face observation not found")
+    return observation
+
+
+@app.put("/api/faces/observations/{observation_id}")
+def assign_face_observation(observation_id: int, payload: FaceAssignment) -> dict:
+    try:
+        observation = manager.faces.assign(observation_id, payload.person_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if observation is None:
+        raise HTTPException(status_code=404, detail="face observation not found")
+    return observation
+
+
+@app.get("/api/faces/observations/{observation_id}/crop.jpg")
+def face_crop(observation_id: int, padding: float = 0.2) -> Response:
+    result = manager.faces.snapshot_path(observation_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="face observation not found")
+    snapshot_path, box = result
+    frame = cv2.imread(str(snapshot_path))
+    if frame is None:
+        raise HTTPException(status_code=404, detail="snapshot is unavailable")
+    height, width = frame.shape[:2]
+    x1, y1 = float(box.get("x1", 0)), float(box.get("y1", 0))
+    x2, y2 = float(box.get("x2", 0)), float(box.get("y2", 0))
+    pad = max(0.0, min(float(padding), 1.0))
+    dx, dy = (x2 - x1) * pad, (y2 - y1) * pad
+    left, top = max(0, int(x1 - dx)), max(0, int(y1 - dy))
+    right, bottom = min(width, int(x2 + dx)), min(height, int(y2 + dy))
+    if right <= left or bottom <= top:
+        raise HTTPException(status_code=422, detail="face crop is invalid")
+    ok, encoded = cv2.imencode(".jpg", frame[top:bottom, left:right], [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to encode face crop")
+    return Response(encoded.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.post("/api/events/{event_id}/detect")
@@ -879,6 +1168,16 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         item for item in objects
         if item.get("label") and item.get("box") and item.get("incident_eligible") is not False
     ]
+    if detected:
+        manager.publish_event("object", {
+            "event_id": event_id,
+            "camera_id": str(event.get("camera_id") or ""),
+            "timestamp": str(event.get("created_at") or datetime.now(timezone.utc).isoformat()),
+            "snapshot_path": str(snapshot_path),
+            "recording_path": str(event.get("recording_path") or ""),
+            "source": "manual_openvino",
+            "objects": detected,
+        })
     detector_status = manager.detector_status()
     return {
         "event_id": event_id,
@@ -1409,7 +1708,7 @@ def _start_recording_prewarmer() -> None:
     RECORDING_PREWARM_THREAD = threading.Thread(
         target=_recording_prewarm_loop,
         name="recording-prewarmer",
-        daemon=True,
+        daemon=False,
     )
     RECORDING_PREWARM_THREAD.start()
 
@@ -1418,8 +1717,11 @@ def _stop_recording_prewarmer() -> None:
     global RECORDING_PREWARM_THREAD
     RECORDING_PREWARM_STOP.set()
     if RECORDING_PREWARM_THREAD is not None:
-        RECORDING_PREWARM_THREAD.join(timeout=3)
-        RECORDING_PREWARM_THREAD = None
+        RECORDING_PREWARM_THREAD.join(timeout=35)
+        if RECORDING_PREWARM_THREAD.is_alive():
+            logging.getLogger(__name__).error("recording prewarmer did not stop")
+        else:
+            RECORDING_PREWARM_THREAD = None
 
 
 def _recording_prewarm_loop() -> None:
@@ -1689,6 +1991,66 @@ def _incident_rows(rows: list[dict], gap_seconds: int = 45) -> list[dict]:
             incidents.append(_incident_row(camera_id, current))
 
     incidents.sort(key=lambda item: item["last_epoch"], reverse=True)
+    return incidents
+
+
+def _incidents_with_faces(incidents: list[dict]) -> list[dict]:
+    event_ids = [
+        int(event["id"])
+        for incident in incidents
+        for event in incident.get("events", [])
+        if str(event.get("id", "")).isdigit()
+    ]
+    observations_by_event: dict[int, list[dict]] = {}
+    for observation in manager.faces.for_event_ids(event_ids):
+        observations_by_event.setdefault(int(observation["event_id"]), []).append(observation)
+
+    status_rank = {"confirmed": 0, "possible": 1, "unknown": 2}
+
+    def summarize(observations: list[dict]) -> list[dict]:
+        summaries: dict[tuple[str, int], dict] = {}
+        for observation in observations:
+            person_id = observation.get("person_id")
+            candidate_id = observation.get("candidate_person_id")
+            if person_id is not None:
+                status = "confirmed"
+                identity_id = int(person_id)
+                name = str(observation.get("person_name") or "Unknown")
+                confidence = observation.get("match_confidence")
+            elif candidate_id is not None:
+                status = "possible"
+                identity_id = int(candidate_id)
+                name = str(observation.get("candidate_person_name") or "Unknown")
+                confidence = observation.get("candidate_confidence")
+            else:
+                status = "unknown"
+                identity_id = 0
+                name = "Unknown"
+                confidence = observation.get("candidate_confidence")
+                if confidence is None:
+                    confidence = observation.get("confidence")
+            score = max(0.0, min(1.0, float(confidence or 0)))
+            key = (status, identity_id)
+            current = summaries.get(key)
+            if current is None or score > current["confidence"]:
+                summaries[key] = {
+                    "observation_id": int(observation["observation_id"]),
+                    "name": name,
+                    "status": status,
+                    "confidence": round(score, 4),
+                }
+        return sorted(
+            summaries.values(),
+            key=lambda face: (status_rank[face["status"]], -face["confidence"], face["name"].lower()),
+        )
+
+    for incident in incidents:
+        incident_observations: list[dict] = []
+        for event in incident.get("events", []):
+            event_observations = observations_by_event.get(int(event.get("id") or 0), [])
+            event["faces"] = summarize(event_observations)
+            incident_observations.extend(event_observations)
+        incident["faces"] = summarize(incident_observations)
     return incidents
 
 

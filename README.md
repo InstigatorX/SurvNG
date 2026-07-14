@@ -107,6 +107,45 @@ On macOS, the detector can also use Core ML. Set `detector.backend` to `coreml` 
 
 The detector is optional. If OpenVINO or the model is missing, the app records a motion event and reports `detector_unavailable` instead of failing the camera loop.
 
+## Face Recognition
+
+SurvNG stores detected face observations separately from object detections. Install the default OpenVINO embedding model with:
+
+```bash
+scripts/install-face-model.sh
+```
+
+Then enable face recognition under Config > General > Object Detection. Set the embedding model to `face_model/face-recognition-resnet100-arcface-onnx.xml` and the landmark model to `face_model/landmarks-regression-retail-0009.xml`. SurvNG aligns each face from five landmarks before generating its 512-dimensional ArcFace embedding. Enroll several clear observations for each person in Faces. New observations are matched asynchronously and remain suggestions until they are confirmed. Model binaries are intentionally excluded from Git; the installer restores them on a new server.
+
+The default ArcFace cosine-similarity threshold is `0.40`. Raise it to reduce false matches or lower it cautiously to recognize more difficult views; thresholds from the previous embedding model are not directly comparable.
+
+## MQTT
+
+Enable MQTT under Config > General and set the broker connection and topic prefix. The default prefix is `survng`.
+
+Published topics:
+
+```text
+survng/status
+survng/camera/CAMERA_ID/state
+survng/camera/CAMERA_ID/motion
+survng/camera/CAMERA_ID/object
+```
+
+Availability and camera state are retained. Motion payloads include the camera, timestamp, and event source. Object payloads include the event ID, camera, timestamp, aggregate `classes` and `zones`, plus each object's confidence, box, zone match, and zone test point.
+
+Turn a camera and its configured recorders on or off by publishing `ON` or `OFF` to:
+
+```text
+survng/camera/CAMERA_ID/power/set
+```
+
+The power command also accepts JSON such as `{"state":"OFF"}`. Replace `survng` with the configured topic prefix.
+
+When Home Assistant Discovery is enabled, SurvNG publishes retained entity configuration under `homeassistant/` by default. Each camera appears as a Home Assistant device with a power switch, camera-wide motion and object binary sensors, and a last-object sensor. Every enabled detection zone appears as its own device with an any-object binary sensor and one binary sensor for each class configured on that zone. A zone with no class filter receives sensors for every class in the active detection model. Change the discovery prefix if the Home Assistant MQTT integration uses a non-default prefix.
+
+Zone object events are published under `survng/zone/CAMERA_ID/ZONE/object`; per-class events use `survng/zone/CAMERA_ID/ZONE/class/CLASS`. Camera topics contain every object detected for that camera event and are not filtered by incident-zone eligibility.
+
 ## Recording Playback Test
 
 Install the Playwright browser once, then run the recording scrub/soak test against a day with sufficient history:

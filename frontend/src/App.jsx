@@ -27,7 +27,9 @@ import {
   Radar,
   Radio,
   RefreshCcw,
+  RotateCcw,
   Save,
+  ScanFace,
   ShieldCheck,
   Siren,
   SkipBack,
@@ -35,6 +37,8 @@ import {
   Sun,
   Trash2,
   Undo2,
+  UserPlus,
+  Users,
   Rows3,
   Video,
   X,
@@ -592,21 +596,23 @@ function Shell({ page, theme, children }) {
   const isRecordings = page === "recordings";
   const isConfig = page === "config";
   const isIncidents = page === "incidents";
+  const isFaces = page === "faces";
   return (
-    <div className="app-shell">
+    <div className={`app-shell page-${page}`}>
       <header className="topbar">
         <div className="brand-block">
           <div className="brand-mark"><ShieldCheck size={22} /></div>
           <div>
-            <h1>{isConfig ? "Config" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : "SurvNG"}</h1>
-            <p>{isConfig ? "Camera inventory, cloning, and capability detection" : isRecordings ? "Continuous review of saved camera history" : isIncidents ? "Motion and object incident review" : "Streams, events, recordings, and object detections"}</p>
+            <h1>{isConfig ? "Config" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : isFaces ? "Faces" : "SurvNG"}</h1>
+            <p>{isConfig ? "Camera inventory, cloning, and capability detection" : isRecordings ? "Continuous review of saved camera history" : isIncidents ? "Motion and object incident review" : isFaces ? "Face enrollment and observation review" : "Streams, events, recordings, and object detections"}</p>
           </div>
-          {!isConfig && !isRecordings && !isIncidents ? <LiveHeaderStats /> : null}
+          {!isConfig && !isRecordings && !isIncidents && !isFaces ? <LiveHeaderStats /> : null}
         </div>
         <div className="top-actions">
           <nav className="topnav" aria-label="Primary">
             <a className="nav-button" href="/"><Video size={16} /> Live</a>
             <a className="nav-button incidents-nav" href="/incidents"><Siren size={16} /> Incidents</a>
+            <a className="nav-button" href="/faces"><ScanFace size={16} /> Faces</a>
             <a className="nav-button" href="/recordings"><Film size={16} /> Recordings</a>
             <a className="nav-button" href="/config"><Cog size={16} /> Config</a>
           </nav>
@@ -698,7 +704,7 @@ function StatCard({ icon, label, value, tone = "default" }) {
   );
 }
 
-function usePollingData() {
+function usePollingData(includeIncidents = true) {
   const [cameras, setCameras] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [appConfig, setAppConfig] = useState(null);
@@ -707,11 +713,11 @@ function usePollingData() {
   async function load() {
     const [cameraResponse, incidentResponse, configResponse] = await Promise.all([
       fetch("/api/cameras"),
-      fetch("/api/incidents?limit=250&gap_seconds=45"),
+      includeIncidents ? fetch("/api/incidents?limit=120&gap_seconds=45") : Promise.resolve(null),
       fetch("/api/config"),
     ]);
     setCameras(await cameraResponse.json());
-    setIncidents(await incidentResponse.json());
+    if (incidentResponse?.ok) setIncidents(await incidentResponse.json());
     if (configResponse.ok) setAppConfig(await configResponse.json());
     setLoading(false);
   }
@@ -720,7 +726,7 @@ function usePollingData() {
     load();
     const timer = window.setInterval(load, 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [includeIncidents]);
 
   return { cameras, incidents, appConfig, loading, refresh: load };
 }
@@ -983,10 +989,10 @@ function incidentZones(incident) {
 }
 
 
-function objectBoxes(event) {
+function objectBoxes(event, incidentEligibleOnly = false) {
   return eventObjects(event)
     .map((object) => ({ object, box: object?.box }))
-    .filter(({ object, box }) => object?.label && object.incident_eligible !== false && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .filter(({ object, box }) => object?.label && (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
     .map(({ object, box }) => ({
       label: object.label,
       confidence: object.confidence,
@@ -1001,8 +1007,8 @@ function objectBoxes(event) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, children }) {
-  const boxes = objectBoxes(event);
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, incidentEligibleOnly = false, children }) {
+  const boxes = objectBoxes(event, incidentEligibleOnly);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
   const [frameSize, setFrameSize] = useState(null);
@@ -1212,7 +1218,7 @@ function IncidentClipLayer({ event, active, onEnded }) {
   );
 }
 
-function IncidentCard({ incident, timeZone, expanded, thumbnailAnnotations = true, onToggle, onSelect }) {
+function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, onToggle, onSelect, onPreviewChange }) {
   const rawEvents = incident.events || [];
   const showSubEvents = rawEvents.length > 1;
   const [selectedPreview, setSelectedPreview] = useState(null);
@@ -1244,6 +1250,12 @@ function IncidentCard({ incident, timeZone, expanded, thumbnailAnnotations = tru
   useEffect(() => {
     setInlineVideoActive(false);
   }, [preview.id, preview.created_at]);
+
+  useEffect(() => {
+    if (!expanded || !onPreviewChange) return;
+    const representative = rawEvents.find((event) => Number(event.id) === Number(incident.representative_event_id));
+    onPreviewChange(Number((selectedPreview || representative || incident).id));
+  }, [expanded, incident, onPreviewChange, rawEvents, selectedPreview]);
 
   function toggle() {
     onToggle(incident.id);
@@ -1277,15 +1289,21 @@ function IncidentCard({ incident, timeZone, expanded, thumbnailAnnotations = tru
 
   return (
     <article
-      className={`incident-card ${hasDetectedObjects(incident) ? "has-objects" : ""} ${expanded ? "expanded" : ""}`}
+      className={`incident-card ${hasDetectedObjects(incident) ? "has-objects" : ""} ${expanded ? "expanded" : ""} ${selected ? "selected" : ""}`}
       role="button"
       tabIndex={0}
+      aria-current={selected ? "true" : undefined}
       onClick={toggle}
       onKeyDown={onKey}
       title={`${incident.camera_id} ${timeText}`}
     >
       <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Play selected event video" : "Expand incident"}>
-        <SnapshotImage event={preview} alt="incident snapshot" showAnnotations={expanded || thumbnailAnnotations}>
+        <SnapshotImage
+          event={preview}
+          alt="incident snapshot"
+          showAnnotations={expanded || thumbnailAnnotations}
+          incidentEligibleOnly={!expanded}
+        >
           <div className="incident-snapshot-hud">
             <div className="incident-snapshot-main">
               <strong>{incident.camera_id}</strong>
@@ -1333,9 +1351,10 @@ function IncidentCard({ incident, timeZone, expanded, thumbnailAnnotations = tru
   );
 }
 
-function IncidentInspector({ incident, appConfig, timeZone, onOpen }) {
+function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, onFaceOpen }) {
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
   const objects = eventObjects(incident).filter((object) => object.label && object.incident_eligible !== false);
+  const faces = faceEvent?.faces || [];
   const zones = incidentZones(incident);
   const eventId = Number(incident.representative_event_id || incident.id);
   const before = Number(appConfig?.event_clip_before_seconds ?? 5);
@@ -1361,6 +1380,15 @@ function IncidentInspector({ incident, appConfig, timeZone, onOpen }) {
             </div>
           );
         }) : <p>No eligible object detections.</p>}
+      </section>
+      <section>
+        <h3>Faces</h3>
+        {faces.length ? faces.map((face, index) => (
+          <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
+            <strong>{face.name || "Unknown"}</strong>
+            <span>{Math.round(Number(face.confidence || 0) * 100)}%</span>
+          </button>
+        )) : <p>No recognized faces.</p>}
       </section>
       <section>
         <h3>Zones</h3>
@@ -1912,57 +1940,118 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 }
 
 function IncidentsPage({ timeZone }) {
-  const { cameras, incidents, appConfig, refresh } = usePollingData();
+  const { cameras, appConfig, refresh: refreshBase } = usePollingData(false);
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useStoredState("survng.incidentCameraFilter.v1", "all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useStoredState("survng.incidentObjectFilter.v1", "all");
   const [incidentZoneFilter, setIncidentZoneFilter] = useStoredState("survng.incidentZoneFilter.v1", "all");
   const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
-  const [inspectorState, setInspectorState] = useStoredState("survng.incidentInspector.v1", "open");
+  const today = dateKeyForTimeZone(Date.now(), timeZone);
+  const [incidentDay, setIncidentDay] = useStoredState("survng.incidentDay.v1", today);
+  const [incidents, setIncidents] = useState([]);
+  const [incidentTotal, setIncidentTotal] = useState(0);
+  const [incidentFacets, setIncidentFacets] = useState({ camera_ids: [], labels: [], zones: [] });
+  const [incidentLoading, setIncidentLoading] = useState(true);
+  const [incidentLoadError, setIncidentLoadError] = useState("");
+  const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState(null);
+  const [focusedFaceEventId, setFocusedFaceEventId] = useState(null);
+  const [selectedFace, setSelectedFace] = useState(null);
+  const [facePeople, setFacePeople] = useState([]);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
   const mobileView = isMobileViewport();
-  const incidentsPerPage = mobileView ? 12 : incidentDensity === "comfortable" ? 10 : 18;
+  const incidentsPerPage = mobileView ? 12 : incidentDensity === "comfortable" ? 10 : 16;
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
-  const incidentCameraOptions = useMemo(() => {
-    const ids = Array.from(new Set(incidents.map((incident) => incident.camera_id).filter(Boolean)));
-    return ids.sort((left, right) => (cameraNameById.get(left) || left).localeCompare(cameraNameById.get(right) || right));
-  }, [incidents, cameraNameById]);
-  const incidentObjectOptions = useMemo(() => {
-    const labels = new Set();
-    incidents.forEach((incident) => incidentLabels(incident).forEach((label) => labels.add(label)));
-    return Array.from(labels).sort((left, right) => left.localeCompare(right));
-  }, [incidents]);
-  const incidentZoneOptions = useMemo(() => {
-    const zones = new Set();
-    incidents.forEach((incident) => incidentZones(incident).forEach((zone) => zones.add(zone)));
-    return Array.from(zones).sort((left, right) => left.localeCompare(right));
-  }, [incidents]);
-  const visibleIncidents = useMemo(() => incidents.filter((incident) => {
-    if (eventFilter === "object" && !hasDetectedObjects(incident)) return false;
-    if (incidentCameraFilter !== "all" && incident.camera_id !== incidentCameraFilter) return false;
-    if (incidentObjectFilter !== "all" && !incidentLabels(incident).includes(incidentObjectFilter)) return false;
-    if (incidentZoneFilter !== "all" && !incidentZones(incident).includes(incidentZoneFilter)) return false;
-    return true;
-  }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
+  const incidentCameraOptions = incidentFacets.camera_ids || [];
+  const incidentObjectOptions = incidentFacets.labels || [];
+  const incidentZoneOptions = incidentFacets.zones || [];
+  const visibleIncidents = incidents;
   const explicitlyFocusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
   const focusedIncident = mobileView ? explicitlyFocusedIncident : explicitlyFocusedIncident || visibleIncidents[0] || null;
-  const galleryIncidents = focusedIncident
-    ? visibleIncidents.filter((incident) => incident.id !== focusedIncident.id)
-    : visibleIncidents;
-  const incidentPageCount = Math.max(1, Math.ceil(galleryIncidents.length / incidentsPerPage));
+  const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
+    || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
+    || focusedIncident;
+  const galleryIncidents = visibleIncidents;
+  const incidentPageCount = Math.max(1, Math.ceil(incidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
-  const pagedIncidents = galleryIncidents.slice(clampedIncidentPage * incidentsPerPage, (clampedIncidentPage + 1) * incidentsPerPage);
+  const pagedIncidents = galleryIncidents;
+
+  function refresh() {
+    refreshBase();
+    setIncidentRefreshToken((value) => value + 1);
+  }
+
+  async function openFaceReview(face) {
+    const observationId = Number(face?.observation_id);
+    if (!Number.isFinite(observationId)) return;
+    const [observationResponse, peopleResponse] = await Promise.all([
+      fetch(`/api/faces/observations/${observationId}`),
+      fetch("/api/faces/people"),
+    ]);
+    if (!observationResponse.ok || !peopleResponse.ok) return;
+    setFacePeople(await peopleResponse.json());
+    setSelectedFace(await observationResponse.json());
+  }
+
+  useEffect(() => {
+    if (incidentDay > today) setIncidentDay(today);
+  }, [incidentDay, setIncidentDay, today]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadIncidentPage() {
+      setIncidentLoading(true);
+      setIncidentLoadError("");
+      const query = new URLSearchParams({
+        day: incidentDay || today,
+        time_zone: timeZone,
+        event_type: eventFilter,
+        limit: String(incidentsPerPage),
+        offset: String(incidentPage * incidentsPerPage),
+        gap_seconds: "45",
+      });
+      if (incidentCameraFilter !== "all") query.set("camera_id", incidentCameraFilter);
+      if (incidentObjectFilter !== "all") query.set("object_label", incidentObjectFilter);
+      if (incidentZoneFilter !== "all") query.set("zone", incidentZoneFilter);
+      try {
+        const response = await fetch(`/api/incidents/search?${query}`);
+        if (!response.ok) throw new Error("Unable to load incidents");
+        const payload = await response.json();
+        if (cancelled) return;
+        setIncidents(payload.items || []);
+        setIncidentTotal(Number(payload.total || 0));
+        setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
+      } catch (error) {
+        if (!cancelled) {
+          setIncidents([]);
+          setIncidentTotal(0);
+          setIncidentLoadError(error.message || "Unable to load incidents");
+        }
+      } finally {
+        if (!cancelled) setIncidentLoading(false);
+      }
+    }
+    loadIncidentPage();
+    const timer = window.setInterval(loadIncidentPage, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
 
   useEffect(() => {
     setIncidentPage(0);
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentDay, incidentDensity]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
   }, [incidentPage, incidentPageCount]);
+
+  useEffect(() => {
+    setFocusedFaceEventId(null);
+  }, [focusedIncident?.id]);
 
   useEffect(() => {
     if (selectedEvent && !visibleIncidents.some((incident) => {
@@ -2023,7 +2112,7 @@ function IncidentsPage({ timeZone }) {
 
   if (!mobileView) {
     return (
-      <main className={`incidents-desktop-page ${inspectorState === "open" ? "with-inspector" : ""}`}>
+      <main className="incidents-desktop-page with-inspector">
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
             <div className="incident-filter-toggle compact" aria-label="Incident type filter">
@@ -2031,12 +2120,12 @@ function IncidentsPage({ timeZone }) {
               <button className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}>Motion</button>
             </div>
             <div className="incident-filter-selects desktop">
+              <label className="incident-day-field"><span>Day</span><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
               <label><span>Camera</span><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
               <label><span>Object</span><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
               <label><span>Zone</span><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
             </div>
-            <span className="shown-bubble">{visibleIncidents.length} shown</span>
-            <button type="button" className={inspectorState === "open" ? "active" : ""} onClick={() => setInspectorState(inspectorState === "open" ? "closed" : "open")}>Inspector</button>
+            <span className="shown-bubble">{incidentTotal} shown</span>
           </div>
 
           <div className="incidents-desktop-workspace">
@@ -2049,11 +2138,14 @@ function IncidentsPage({ timeZone }) {
                 </div>
               </div>
               <div className="incident-rail-list">
-                {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} />
-                )) : <div className="empty-state">No other incidents.</div>}
+                {incidentLoading ? <div className="empty-state">Loading incidents...</div> : null}
+                {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+                {!incidentLoading && !incidentLoadError && galleryIncidents.length ? pagedIncidents.map((incident) => (
+                  <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} />
+                )) : null}
+                {!incidentLoading && !incidentLoadError && !galleryIncidents.length ? <div className="empty-state">No other incidents.</div> : null}
               </div>
-              {galleryIncidents.length > incidentsPerPage ? (
+              {incidentTotal > incidentsPerPage ? (
                 <div className="incident-pager" aria-label="Incident pages">
                   <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
                   <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
@@ -2064,7 +2156,7 @@ function IncidentsPage({ timeZone }) {
 
             <section className="incident-investigation">
               <div className="incident-focus-nav">
-                <span>{focusedIndex >= 0 ? `${focusedIndex + 1} of ${visibleIncidents.length}` : "No incident selected"}</span>
+                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${incidentTotal}` : "No incident selected"}</span>
               </div>
               <div className="incident-desktop-focus">
                 {focusedIncident ? (
@@ -2073,14 +2165,15 @@ function IncidentsPage({ timeZone }) {
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} /> : <div className="empty-state">No incidents match the current filters.</div>}
+                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} onPreviewChange={setFocusedFaceEventId} /> : <div className="empty-state">No incidents match the current filters.</div>}
               </div>
             </section>
 
-            {inspectorState === "open" ? <IncidentInspector incident={focusedIncident} appConfig={appConfig} timeZone={timeZone} onOpen={setSelectedEvent} /> : null}
+            <IncidentInspector incident={focusedIncident} faceEvent={focusedEvent} appConfig={appConfig} timeZone={timeZone} onOpen={setSelectedEvent} onFaceOpen={openFaceReview} />
           </div>
         </section>
         {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
+        {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
       </main>
     );
   }
@@ -2095,11 +2188,15 @@ function IncidentsPage({ timeZone }) {
               <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
               <button className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}>Motion</button>
             </div>
-            <span className="shown-bubble">{visibleIncidents.length} shown</span>
+            <span className="shown-bubble">{incidentTotal} shown</span>
           </div>
         </div>
         <div className="event-filter incident-filter-panel" aria-label="Incident filters">
           <div className="incident-filter-selects">
+            <label>
+              <span>Day</span>
+              <input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" />
+            </label>
             <label>
               <span>Camera</span>
               <select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}>
@@ -2136,21 +2233,25 @@ function IncidentsPage({ timeZone }) {
           </div>
         ) : null}
         <div className="incident-gallery">
-          {visibleIncidents.length
+          {incidentLoading ? <div className="empty-state">Loading incidents...</div> : null}
+          {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+          {!incidentLoading && !incidentLoadError && visibleIncidents.length
             ? pagedIncidents.map((incident) => (
               <IncidentCard
                 key={incident.id}
                 incident={incident}
                 timeZone={timeZone}
                 expanded={false}
+                selected={incident.id === focusedIncident?.id}
                 thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
                 onSelect={setSelectedEvent}
               />
             ))
-            : <div className="empty-state">No incidents match the current filters.</div>}
+            : null}
+          {!incidentLoading && !incidentLoadError && !visibleIncidents.length ? <div className="empty-state">No incidents match the current filters.</div> : null}
         </div>
-        {galleryIncidents.length > incidentsPerPage ? (
+        {incidentTotal > incidentsPerPage ? (
           <div className="incident-pager" aria-label="Incident pages">
             <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
             <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
@@ -2213,9 +2314,7 @@ function LivePage({ timeZone }) {
     return true;
   }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
   const focusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
-  const galleryIncidents = focusedIncident
-    ? visibleIncidents.filter((incident) => incident.id !== focusedIncident.id)
-    : visibleIncidents;
+  const galleryIncidents = visibleIncidents;
   const incidentPageCount = Math.max(1, Math.ceil(galleryIncidents.length / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents.slice(clampedIncidentPage * incidentsPerPage, (clampedIncidentPage + 1) * incidentsPerPage);
@@ -2232,7 +2331,7 @@ function LivePage({ timeZone }) {
 
   useEffect(() => {
     setIncidentPage(0);
-  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, expandedIncidentId]);
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -2369,6 +2468,7 @@ function LivePage({ timeZone }) {
                 incident={incident}
                 timeZone={timeZone}
                 expanded={false}
+                selected={incident.id === focusedIncident?.id}
                 thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
                 onSelect={setSelectedEvent}
@@ -2730,13 +2830,74 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
-  useEffect(() => setDraft(offset), [offset]);
+  const draftRef = useRef(offset);
+  const dragRef = useRef(null);
+  useEffect(() => {
+    if (dragRef.current) return;
+    draftRef.current = offset;
+    setDraft(offset);
+  }, [offset]);
   const percent = (draft / duration) * 100;
-  function commit(value) {
-    const next = Number(value);
+
+  function updateDraft(value) {
+    const next = Math.max(0, Math.min(duration, Number(value) || 0));
+    draftRef.current = next;
     setDraft(next);
+    return next;
+  }
+
+  function commit(value) {
+    const next = updateDraft(value);
     onSeek(startEpoch + next);
   }
+
+  function pointerValue(event, drag) {
+    const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
+    if (drag.precise) {
+      return drag.startValue + (pointerX - drag.startX);
+    }
+    return (pointerX / drag.width) * duration;
+  }
+
+  function startDrag(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width) return;
+    const pointerX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    const playheadX = (draftRef.current / duration) * rect.width;
+    const grabRadius = event.pointerType === "touch" ? 24 : 14;
+    const drag = {
+      pointerId: event.pointerId,
+      left: rect.left,
+      width: rect.width,
+      startX: pointerX,
+      startValue: draftRef.current,
+      precise: Math.abs(pointerX - playheadX) <= grabRadius,
+    };
+    dragRef.current = drag;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    if (!drag.precise) updateDraft(pointerValue(event, drag));
+  }
+
+  function moveDrag(event) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    updateDraft(pointerValue(event, drag));
+  }
+
+  function finishDrag(event, cancelled = false) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragRef.current = null;
+    if (cancelled) updateDraft(offset);
+    else commit(pointerValue(event, drag));
+  }
+
   return (
     <div className="recordings-v2-timeline">
       <div className="recordings-v2-track">
@@ -2755,11 +2916,15 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
           type="range"
           min="0"
           max={duration}
-          step="1"
-          value={Math.round(draft)}
-          onChange={(event) => setDraft(Number(event.target.value))}
-          onMouseUp={(event) => commit(event.currentTarget.value)}
-          onTouchEnd={(event) => commit(event.currentTarget.value)}
+          step="0.1"
+          value={draft}
+          onChange={(event) => {
+            if (!dragRef.current) updateDraft(event.target.value);
+          }}
+          onPointerDown={startDrag}
+          onPointerMove={moveDrag}
+          onPointerUp={(event) => finishDrag(event)}
+          onPointerCancel={(event) => finishDrag(event, true)}
           onKeyUp={(event) => commit(event.currentTarget.value)}
           aria-label="24 hour recording timeline"
         />
@@ -2774,21 +2939,34 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [accelerator, setAccelerator] = useState(null);
   const [detectorModels, setDetectorModels] = useState([]);
   const [recordingCache, setRecordingCache] = useState(null);
+  const [mqttStatus, setMqttStatus] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
+  const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("");
+  const [zoneSaveStatus, setZoneSaveStatus] = useState("");
+  const [zonesSaving, setZonesSaving] = useState(false);
+  const [cameraSaveStatus, setCameraSaveStatus] = useState("");
+  const [cameraSaving, setCameraSaving] = useState(false);
+  const [cameraOrderEditing, setCameraOrderEditing] = useState(false);
+  const [cameraOrderSaving, setCameraOrderSaving] = useState(false);
+  const [dragConfigCameraId, setDragConfigCameraId] = useState("");
+  const [dragConfigCameraTarget, setDragConfigCameraTarget] = useState("");
+  const [dragConfigCameraAfter, setDragConfigCameraAfter] = useState(false);
+  const cameraOrderOriginalRef = useRef([]);
   const [probe, setProbe] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [logFilter, setLogFilter] = useStoredState("survng.logFilter.v1", "");
   const [logLevel, setLogLevel] = useStoredState("survng.logLevel.v1", "INFO");
 
   async function load() {
-    const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse] = await Promise.all([
+    const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse, systemResponse] = await Promise.all([
       fetch("/api/config"),
       fetch("/api/cameras"),
       fetch("/api/accelerator"),
       fetch("/api/detector/models"),
       fetch("/api/recordings/cache/status"),
+      fetch("/api/system/status"),
     ]);
     const nextConfig = await response.json();
     setConfig(nextConfig);
@@ -2796,6 +2974,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     if (acceleratorResponse.ok) setAccelerator(await acceleratorResponse.json());
     if (modelsResponse.ok) setDetectorModels((await modelsResponse.json()).models || []);
     if (cacheResponse.ok) setRecordingCache(await cacheResponse.json());
+    if (systemResponse.ok) setMqttStatus((await systemResponse.json()).mqtt || null);
     setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
   }
 
@@ -2876,6 +3055,62 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     setProbe(null);
   }
 
+  function startCameraOrderEdit() {
+    cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
+    setCameraOrderEditing(true);
+    setCameraSaveStatus("");
+  }
+
+  function cancelCameraOrderEdit() {
+    const originalOrder = cameraOrderOriginalRef.current;
+    setConfig((current) => {
+      const cameraById = new Map((current.cameras || []).map((camera) => [camera.id, camera]));
+      const ordered = originalOrder.map((cameraId) => cameraById.get(cameraId)).filter(Boolean);
+      const seen = new Set(ordered.map((camera) => camera.id));
+      return { ...current, cameras: [...ordered, ...(current.cameras || []).filter((camera) => !seen.has(camera.id))] };
+    });
+    setCameraOrderEditing(false);
+    setDragConfigCameraId("");
+    setDragConfigCameraTarget("");
+  }
+
+  function moveConfigCamera(sourceId, targetId, after) {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    setConfig((current) => {
+      const nextCameras = [...(current.cameras || [])];
+      const sourceIndex = nextCameras.findIndex((camera) => camera.id === sourceId);
+      if (sourceIndex < 0) return current;
+      const [source] = nextCameras.splice(sourceIndex, 1);
+      const targetIndex = nextCameras.findIndex((camera) => camera.id === targetId);
+      if (targetIndex < 0) return current;
+      nextCameras.splice(targetIndex + (after ? 1 : 0), 0, source);
+      return { ...current, cameras: nextCameras };
+    });
+  }
+
+  async function saveCameraOrder() {
+    if (cameraOrderSaving) return;
+    setCameraOrderSaving(true);
+    setCameraSaveStatus("Saving default camera order...");
+    try {
+      const response = await fetch("/api/config/cameras/order", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cameras.map((camera) => camera.id)),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
+      setCameraOrderEditing(false);
+      setCameraSaveStatus("Default live-view order saved.");
+    } catch (error) {
+      setCameraSaveStatus(error.message || "Unable to save camera order.");
+    } finally {
+      setCameraOrderSaving(false);
+      setDragConfigCameraId("");
+      setDragConfigCameraTarget("");
+    }
+  }
+
   async function save() {
     const ids = new Set();
     const configToSave = {
@@ -2901,6 +3136,92 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     }
     setStatus("Saved. Camera workers reloaded.");
     await load();
+  }
+
+  async function saveZones(camera) {
+    if (!camera || zonesSaving) return;
+    setZonesSaving(true);
+    setZoneSaveStatus("Saving zones and reloading cameras...");
+    try {
+      const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}/zones`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(camera.zones || []),
+      });
+      if (!response.ok) {
+        setZoneSaveStatus(await response.text());
+        return;
+      }
+      const payload = await response.json();
+      updateCamera(camera.id, ["zones"], payload.zones || []);
+      setZoneSaveStatus("Zones saved. Camera workers reloaded.");
+      const statusResponse = await fetch("/api/cameras");
+      if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
+    } catch (error) {
+      setZoneSaveStatus(error.message || "Unable to save zones.");
+    } finally {
+      setZonesSaving(false);
+    }
+  }
+
+  async function saveCamera(camera) {
+    if (!camera || cameraSaving) return;
+    setCameraSaving(true);
+    setCameraSaveStatus("Saving camera settings...");
+    try {
+      const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(camera),
+      });
+      if (!response.ok) {
+        setCameraSaveStatus(await response.text());
+        return;
+      }
+      const payload = await response.json();
+      const savedCamera = payload.camera;
+      setConfig((current) => ({
+        ...current,
+        cameras: current.cameras.map((item) => item.id === camera.id
+          ? { ...savedCamera, zones: item.zones || [] }
+          : item),
+      }));
+      setSelectedId(savedCamera.id);
+      setCameraSaveStatus("Camera settings saved. Workers reloaded.");
+      const statusResponse = await fetch("/api/cameras");
+      if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
+    } catch (error) {
+      setCameraSaveStatus(error.message || "Unable to save camera settings.");
+    } finally {
+      setCameraSaving(false);
+    }
+  }
+
+  async function deleteCamera(camera) {
+    if (!camera || cameraSaving || !window.confirm(`Remove ${camera.name || camera.id}?`)) return;
+    const isPersisted = runtimeStatus.some((item) => item.id === camera.id);
+    if (!isPersisted) {
+      removeCamera(camera.id);
+      setCameraSaveStatus("Unsaved camera removed.");
+      return;
+    }
+    setCameraSaving(true);
+    setCameraSaveStatus("Removing camera...");
+    try {
+      const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, { method: "DELETE" });
+      if (!response.ok) {
+        setCameraSaveStatus(await response.text());
+        return;
+      }
+      removeCamera(camera.id);
+      setCameraSaveStatus("Camera removed. Workers reloaded.");
+      const statusResponse = await fetch("/api/cameras");
+      if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
+    } catch (error) {
+      setCameraSaveStatus(error.message || "Unable to remove camera.");
+    } finally {
+      setCameraSaving(false);
+    }
   }
 
   async function probeCamera(camera) {
@@ -2944,6 +3265,16 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       </div>
 
       {settingsTab === "general" ? (
+        <>
+        <section className="bento-card camera-tree config-tree settings-section-tree">
+          <div className="section-head compact"><div><h2>General</h2><p>Configuration sections</p></div></div>
+          <div className="tree-list">
+            <button type="button" className={generalSection === "general" ? "active" : ""} onClick={() => setGeneralSection("general")}><Cog size={16} /><span>General</span></button>
+            <button type="button" className={generalSection === "storage" ? "active" : ""} onClick={() => setGeneralSection("storage")}><HardDrive size={16} /><span>Storage</span></button>
+            <button type="button" className={generalSection === "mqtt" ? "active" : ""} onClick={() => setGeneralSection("mqtt")}><Radio size={16} /><span>MQTT</span></button>
+            <button type="button" className={generalSection === "detection" ? "active" : ""} onClick={() => setGeneralSection("detection")}><Cpu size={16} /><span>Object Detection</span></button>
+          </div>
+        </section>
         <section className="bento-card config-editor settings-panel">
           <div className="section-head">
             <div><h2>General</h2><p>Application preferences and detector settings</p></div>
@@ -2959,10 +3290,22 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             accelerator={accelerator}
             detectorModels={detectorModels}
             recordingCache={recordingCache}
+            mqttStatus={mqttStatus}
+            section={generalSection}
           />
           {status ? <div className="save-status settings-status">{status}</div> : null}
         </section>
+        </>
       ) : settingsTab === "logs" ? (
+        <>
+        <section className="bento-card camera-tree config-tree settings-section-tree">
+          <div className="section-head compact"><div><h2>Logs</h2><p>Minimum severity</p></div></div>
+          <div className="tree-list">
+            {[["DEBUG", "Debug+"], ["INFO", "Info+"], ["WARNING", "Warning+"], ["ERROR", "Error+"], ["CRITICAL", "Critical"]].map(([value, label]) => (
+              <button type="button" className={logLevel === value ? "active" : ""} key={value} onClick={() => setLogLevel(value)}><ListTree size={16} /><span>{label}</span></button>
+            ))}
+          </div>
+        </section>
         <section className="bento-card config-editor settings-panel log-panel">
           <div className="section-head">
             <div><h2>Logs</h2><p>Live application log stream</p></div>
@@ -2977,17 +3320,61 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             timeZone={timeZone}
           />
         </section>
+        </>
       ) : (
         <>
       <section className="bento-card camera-tree config-tree">
         <div className="section-head compact">
           <div><h2>Cameras</h2><p>Add, clone, or select</p></div>
-          <button onClick={() => addCamera()}><Plus size={16} /> Add</button>
+          <div className="camera-tree-actions">
+            {cameraOrderEditing ? (
+              <>
+                <button type="button" onClick={cancelCameraOrderEdit} disabled={cameraOrderSaving}>Cancel</button>
+                <button type="button" className="primary" onClick={saveCameraOrder} disabled={cameraOrderSaving}><Save size={14} /> {cameraOrderSaving ? "Saving" : "Save"}</button>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={startCameraOrderEdit}><GripVertical size={14} /> Edit Order</button>
+                <button type="button" onClick={() => addCamera()}><Plus size={14} /> Add</button>
+              </>
+            )}
+          </div>
         </div>
         <div className="tree-list">
           {cameras.map((camera) => (
-            <button key={camera.id} className={camera.id === selectedCamera?.id ? "active" : ""} onClick={() => { setSelectedId(camera.id); setProbe(null); }}>
-              <Camera size={16} />
+            <button
+              type="button"
+              key={camera.id}
+              draggable={cameraOrderEditing}
+              className={`${camera.id === selectedCamera?.id ? "active" : ""} ${cameraOrderEditing ? "ordering" : ""} ${dragConfigCameraTarget === camera.id ? (dragConfigCameraAfter ? "drag-after" : "drag-before") : ""}`}
+              onClick={() => { if (!cameraOrderEditing) { setSelectedId(camera.id); setProbe(null); } }}
+              onDragStart={(event) => {
+                if (!cameraOrderEditing) return;
+                setDragConfigCameraId(camera.id);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", camera.id);
+              }}
+              onDragOver={(event) => {
+                if (!dragConfigCameraId || dragConfigCameraId === camera.id) return;
+                event.preventDefault();
+                const bounds = event.currentTarget.getBoundingClientRect();
+                setDragConfigCameraTarget(camera.id);
+                setDragConfigCameraAfter(event.clientY > bounds.top + bounds.height / 2);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                const sourceId = event.dataTransfer.getData("text/plain") || dragConfigCameraId;
+                const bounds = event.currentTarget.getBoundingClientRect();
+                moveConfigCamera(sourceId, camera.id, event.clientY > bounds.top + bounds.height / 2);
+                setDragConfigCameraId("");
+                setDragConfigCameraTarget("");
+              }}
+              onDragEnd={() => {
+                setDragConfigCameraId("");
+                setDragConfigCameraTarget("");
+              }}
+            >
+              {cameraOrderEditing ? <GripVertical size={16} /> : <Camera size={16} />}
               <span>{camera.name || camera.id}</span>
             </button>
           ))}
@@ -2996,7 +3383,20 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       <section className="bento-card config-editor">
         <div className="section-head">
           <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json and reload camera workers</p></div>
-          <button className="primary" onClick={save}><Save size={16} /> Save</button>
+          {selectedCamera ? (
+            <div className="camera-command-area">
+              {cameraSaveStatus ? <span className={`camera-save-indicator ${cameraSaving ? "saving" : "saved"}`}>{cameraSaving ? <RefreshCcw size={14} /> : <CircleDot size={14} />}{cameraSaveStatus}</span> : null}
+              <div className="camera-command-bar">
+                <button type="button" onClick={() => cloneCamera(selectedCamera)} disabled={cameraSaving}><Copy size={16} /> Clone</button>
+                <button type="button" onClick={() => probeCamera(selectedCamera)} disabled={cameraSaving}><Radar size={16} /> Auto-detect</button>
+                <button type="button" className="danger" onClick={() => deleteCamera(selectedCamera)} disabled={cameraSaving}><Trash2 size={16} /> Remove</button>
+                <button type="button" className="primary camera-save-button" onClick={() => saveCamera(selectedCamera)} disabled={cameraSaving}>
+                  {cameraSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}
+                  {cameraSaving ? "Saving..." : "Save Camera"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="config-form">
@@ -3007,11 +3407,21 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 <label>Generated Camera ID<input value={slugify(selectedCamera.name || selectedCamera.id || "camera")} readOnly /></label>
                 <label>Detected Backend<input value={inferredBackendLabel(selectedCamera)} readOnly /></label>
               </div>
-              <div className="field-row">
-                <label>Main Stream URL<input value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} /></label>
-                <label>Live/Sub Stream URL<input value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} /></label>
-                <label className="check-field"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record main stream</label>
-                <label className="check-field"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record sub stream</label>
+              <div className="field-row stream-field-row">
+                <div className="stream-field">
+                  <div className="stream-field-head">
+                    <label htmlFor={`main-stream-${selectedCamera.id}`}>Main Stream URL</label>
+                    <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record} onChange={(event) => updateCamera(selectedCamera.id, ["record"], event.target.checked)} /> Record</label>
+                  </div>
+                  <input id={`main-stream-${selectedCamera.id}`} value={selectedCamera.stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["stream_url"], event.target.value)} />
+                </div>
+                <div className="stream-field">
+                  <div className="stream-field-head">
+                    <label htmlFor={`sub-stream-${selectedCamera.id}`}>Live/Sub Stream URL</label>
+                    <label className="stream-record-toggle"><input type="checkbox" checked={selectedCamera.record_sub || false} onChange={(event) => updateCamera(selectedCamera.id, ["record_sub"], event.target.checked)} /> Record</label>
+                  </div>
+                  <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
+                </div>
               </div>
 
               <div className="config-panels">
@@ -3029,13 +3439,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 camera={selectedCamera}
                 classOptions={zoneClassOptions}
                 onChange={(zones) => updateCamera(selectedCamera.id, ["zones"], zones)}
+                onSave={() => saveZones(selectedCamera)}
+                saving={zonesSaving}
+                saveStatus={zoneSaveStatus}
               />
 
-              <div className="actions">
-                <button onClick={() => cloneCamera(selectedCamera)}><Copy size={16} /> Clone Camera</button>
-                <button onClick={() => probeCamera(selectedCamera)}><Radar size={16} /> Auto-detect</button>
-                <button onClick={() => removeCamera(selectedCamera.id)}><Trash2 size={16} /> Remove</button>
-              </div>
               <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} />
               {probe ? <ProbeResult probe={probe} /> : null}
             </>
@@ -3051,7 +3459,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   );
 }
 
-function ZoneEditor({ camera, classOptions = [], onChange }) {
+function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = false, saveStatus = "" }) {
   const zones = camera.zones || [];
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
@@ -3119,6 +3527,7 @@ function ZoneEditor({ camera, classOptions = [], onChange }) {
         <div className="zone-settings-actions">
           <button type="button" onClick={undoPoint} disabled={!selectedZone?.points?.length} title="Remove last point"><Undo2 size={15} /> Undo Point</button>
           <button type="button" onClick={addZone}><Plus size={15} /> Add Zone</button>
+          <button type="button" className="primary" onClick={onSave} disabled={saving}><Save size={15} /> {saving ? "Saving..." : "Save Zones"}</button>
         </div>
       </div>
       <div className="zone-editor-layout">
@@ -3144,10 +3553,10 @@ function ZoneEditor({ camera, classOptions = [], onChange }) {
                       key={pointIndex}
                       cx={point.x * 100}
                       cy={point.y * 100}
-                      r="1.7"
+                      r="0.85"
                       fill="#fff"
                       stroke={zone.color || "#22c55e"}
-                      strokeWidth="0.7"
+                      strokeWidth="0.35"
                       vectorEffect="non-scaling-stroke"
                       onPointerDown={(event) => {
                         event.stopPropagation();
@@ -3214,6 +3623,7 @@ function ZoneEditor({ camera, classOptions = [], onChange }) {
           <button type="button" className="danger" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
         </div>
       ) : null}
+      {saveStatus ? <div className="save-status zone-save-status">{saveStatus}</div> : null}
     </div>
   );
 }
@@ -3222,13 +3632,6 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
   return (
     <div className="log-viewer">
       <div className="log-toolbar">
-        <label>Level<select value={level} onChange={(event) => setLevel(event.target.value)}>
-          <option value="DEBUG">Debug+</option>
-          <option value="INFO">Info+</option>
-          <option value="WARNING">Warning+</option>
-          <option value="ERROR">Error+</option>
-          <option value="CRITICAL">Critical</option>
-        </select></label>
         <label>Filter<input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="logger, text, error..." /></label>
       </div>
       <div className="log-lines" role="log" aria-live="polite">
@@ -3258,7 +3661,8 @@ function ProbeResult({ probe }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache }) {
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, section }) {
+  const [liveOrderReset, setLiveOrderReset] = useState(false);
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
   const detectorBackend = config.detector?.backend || "openvino";
@@ -3301,11 +3705,16 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     if (path.endsWith(".xml")) updateConfig(["detector", "labels_path"], "");
   }
 
+  function resetLiveCameraOrder() {
+    localStorage.removeItem("survng.liveCameraOrder.v1");
+    setLiveOrderReset(true);
+  }
+
   return (
-    <div className="config-form">
-      <div className="config-panels">
+    <div className="general-settings-content config-form">
+        {section === "general" ? (
         <div className="sub-panel">
-          <h3>Preferences</h3>
+          <h3>General</h3>
           <label>Timezone<select value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>
             {US_TIME_ZONES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
@@ -3313,8 +3722,15 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
           <label className="check-field"><input type="checkbox" checked={config.incident_thumbnail_annotations ?? true} onChange={(event) => updateConfig(["incident_thumbnail_annotations"], event.target.checked)} /> Show boxes on incident thumbnails</label>
+          <div className="preference-action">
+            <strong>Live Camera Order</strong>
+            <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
+          </div>
+          {liveOrderReset ? <span className="preference-status"><CircleDot size={13} /> Reset for this browser</span> : null}
         </div>
+        ) : null}
 
+        {section === "storage" ? (
         <div className="sub-panel">
           <h3>Storage</h3>
           <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
@@ -3333,8 +3749,27 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
           {recordingCache ? <div className="probe-result"><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span></div> : null}
         </div>
-      </div>
+        ) : null}
 
+        {section === "mqtt" ? (
+        <div className="sub-panel">
+          <h3>MQTT</h3>
+          <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>
+          <label>Broker Host<input value={config.mqtt?.host || ""} onChange={(event) => updateConfig(["mqtt", "host"], event.target.value)} placeholder="mqtt.local" /></label>
+          <label>Port<input type="number" min="1" max="65535" value={config.mqtt?.port || 1883} onChange={(event) => updateConfig(["mqtt", "port"], Number(event.target.value))} /></label>
+          <label>Username<input value={config.mqtt?.username || ""} onChange={(event) => updateConfig(["mqtt", "username"], event.target.value)} /></label>
+          <label>Password<input type="password" value={config.mqtt?.password || ""} onChange={(event) => updateConfig(["mqtt", "password"], event.target.value)} /></label>
+          <label>Client ID<input value={config.mqtt?.client_id || "survng"} onChange={(event) => updateConfig(["mqtt", "client_id"], event.target.value)} /></label>
+          <label>Topic Prefix<input value={config.mqtt?.topic_prefix || "survng"} onChange={(event) => updateConfig(["mqtt", "topic_prefix"], event.target.value)} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.mqtt?.discovery_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "discovery_enabled"], event.target.checked)} /> Home Assistant Discovery</label>
+          <label>Discovery Prefix<input value={config.mqtt?.discovery_prefix || "homeassistant"} onChange={(event) => updateConfig(["mqtt", "discovery_prefix"], event.target.value)} disabled={config.mqtt?.discovery_enabled === false} /></label>
+          <label>QoS<select value={config.mqtt?.qos ?? 0} onChange={(event) => updateConfig(["mqtt", "qos"], Number(event.target.value))}><option value={0}>0</option><option value={1}>1</option><option value={2}>2</option></select></label>
+          <label className="check-field"><input type="checkbox" checked={config.mqtt?.tls || false} onChange={(event) => updateConfig(["mqtt", "tls"], event.target.checked)} /> TLS</label>
+          {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>{mqttStatus.connected ? "Connected" : mqttStatus.enabled ? "Disconnected" : "Disabled"}</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published, {mqttStatus.commands_received || 0} commands</span>{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
+        </div>
+        ) : null}
+
+      {section === "detection" ? (
       <div className="sub-panel">
         <h3>Object Detection</h3>
         <div className="field-row">
@@ -3358,6 +3793,19 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Compiled Model Cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
           <label className="check-field"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /> Cache compiled model</label>
           <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
+          <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
+        </div>
+        <h3>Face Recognition</h3>
+        <div className="field-row">
+          <label className="check-field"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /> Enable recognition</label>
+          <label>Embedding Model<input value={config.detector?.face_embedding_model_path || ""} onChange={(event) => updateConfig(["detector", "face_embedding_model_path"], event.target.value)} placeholder="face_model/model.xml" /></label>
+          <label>Landmark Model<input value={config.detector?.face_landmark_model_path || ""} onChange={(event) => updateConfig(["detector", "face_landmark_model_path"], event.target.value)} placeholder="face_model/landmarks.xml" /></label>
+          <label>Recognition Device<select value={config.detector?.face_recognition_device || "AUTO"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
+            {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select></label>
+          <label>Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_match_threshold ?? 0.4} onChange={(event) => updateConfig(["detector", "face_match_threshold"], Number(event.target.value))} /></label>
+          <label>Minimum Face Size<input type="number" min="16" max="1024" step="8" value={config.detector?.face_min_size ?? 48} onChange={(event) => updateConfig(["detector", "face_min_size"], Number(event.target.value))} /></label>
+          <label>References Per Person<input type="number" min="1" max="200" step="1" value={config.detector?.face_max_references ?? 20} onChange={(event) => updateConfig(["detector", "face_max_references"], Number(event.target.value))} /></label>
         </div>
         {activeModel ? (
           <div className={`probe-result ${activeModel.valid ? "ok" : "bad"}`}>
@@ -3400,6 +3848,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           {accelerator?.openvino_error ? <span>{accelerator.openvino_error}</span> : null}
         </div>
       </div>
+      ) : null}
     </div>
   );
 }
@@ -3419,6 +3868,203 @@ function RuntimeStatus({ status, timeZone }) {
   );
 }
 
+function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated }) {
+  const [newName, setNewName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setNewName("");
+    setError("");
+  }, [observation.id]);
+
+  useEffect(() => {
+    function closeOnEscape(event) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  async function assignPerson(nextPersonId) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/faces/observations/${observation.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ person_id: nextPersonId ? Number(nextPersonId) : null }),
+      });
+      if (!response.ok) throw new Error("Could not update this face");
+      await onUpdated?.();
+    } catch (requestError) {
+      setError(requestError.message || "Could not update this face");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createPerson() {
+    const name = newName.trim();
+    if (!name) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/faces/people", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, observation_id: observation.id }),
+      });
+      if (!response.ok) throw new Error("Could not create this person");
+      await onUpdated?.(`${name} enrolled`);
+    } catch (requestError) {
+      setError(requestError.message || "Could not create this person");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="face-review-dialog" role="dialog" aria-modal="true" aria-label="Review face">
+        <button type="button" className="overlay-close" onClick={onClose} aria-label="Close"><X size={22} /></button>
+        <img src={`/api/faces/observations/${observation.id}/crop.jpg?padding=0.45`} alt="Selected face" />
+        <div className="face-review-form">
+          <div><strong>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
+          {observation.candidate_person_id ? <div className="face-enroll-row"><button type="button" disabled={busy} onClick={() => assignPerson(observation.candidate_person_id)}><ScanFace size={16} /> Confirm {observation.candidate_person_name} ({Math.round(Number(observation.candidate_confidence || 0) * 100)}%)</button><button type="button" className="subtle" disabled={busy} onClick={() => assignPerson(null)}><X size={16} /> Reject</button></div> : null}
+          <label>Assign to person<select value={observation.person_id || ""} disabled={busy} onChange={(event) => assignPerson(event.target.value)}><option value="">Unknown</option>{people.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select></label>
+          <div className="face-enroll-row"><input value={newName} disabled={busy} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createPerson(); }} placeholder="New person name" /><button type="button" onClick={createPerson} disabled={busy || !newName.trim()}><UserPlus size={16} /> Enroll</button></div>
+          {error ? <span className="save-status error">{error}</span> : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function FacesPage({ timeZone }) {
+  const [people, setPeople] = useState([]);
+  const [observations, setObservations] = useState([]);
+  const [cameras, setCameras] = useState([]);
+  const [status, setStatus] = useState(null);
+  const [filter, setFilter] = useState("unknown");
+  const [cameraId, setCameraId] = useState("");
+  const [personId, setPersonId] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(0);
+  const [totalObservations, setTotalObservations] = useState(0);
+  const pageSize = isMobileViewport() ? 24 : 48;
+  const pageCount = Math.max(1, Math.ceil(totalObservations / pageSize));
+
+  async function load() {
+    setLoading(true);
+    try {
+      const query = new URLSearchParams({ status: personId ? "all" : filter, limit: String(pageSize), offset: String(page * pageSize) });
+      if (cameraId) query.set("camera_id", cameraId);
+      if (personId) query.set("person_id", personId);
+      const countQuery = new URLSearchParams(query);
+      countQuery.delete("limit");
+      countQuery.delete("offset");
+      const [peopleResponse, observationResponse, countResponse, cameraResponse, statusResponse] = await Promise.all([
+        fetch("/api/faces/people"),
+        fetch(`/api/faces/observations?${query}`),
+        fetch(`/api/faces/observations/count?${countQuery}`),
+        fetch("/api/cameras"),
+        fetch("/api/faces/status"),
+      ]);
+      if (!peopleResponse.ok || !observationResponse.ok) throw new Error("Unable to load the face database");
+      setPeople(await peopleResponse.json());
+      setObservations(await observationResponse.json());
+      if (countResponse.ok) setTotalObservations(Number((await countResponse.json()).total || 0));
+      if (cameraResponse.ok) setCameras(await cameraResponse.json());
+      if (statusResponse.ok) setStatus(await statusResponse.json());
+    } catch (error) {
+      setNotice(error.message || "Unable to load faces");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, [filter, cameraId, personId, page]);
+  useEffect(() => { setPage(0); }, [filter, cameraId, personId]);
+  useEffect(() => { if (page >= pageCount) setPage(Math.max(0, pageCount - 1)); }, [page, pageCount]);
+
+  async function deletePerson(person) {
+    if (!window.confirm(`Delete ${person.name}? Their observations will return to Unknown.`)) return;
+    const response = await fetch(`/api/faces/people/${person.id}`, { method: "DELETE" });
+    if (!response.ok) return setNotice("Could not delete this person");
+    setPersonId("");
+    await load();
+  }
+
+  return (
+    <main className="faces-page">
+      <aside className="faces-people-panel">
+        <div className="faces-panel-heading">
+          <div><h2>People</h2><span>{people.length} enrolled</span></div>
+          <Users size={20} />
+        </div>
+        <button type="button" className={`face-person-row ${personId === "" ? "active" : ""}`} onClick={() => { setPersonId(""); setPage(0); }}>
+          <span className="face-avatar unknown"><ScanFace size={22} /></span>
+          <span><strong>All faces</strong><small>{status?.observations || 0} observations</small></span>
+        </button>
+        <div className="face-person-list">
+          {people.map((person) => (
+            <div className={`face-person-row ${String(person.id) === personId ? "active" : ""}`} key={person.id}>
+              <button type="button" className="face-person-select" onClick={() => { setPersonId(String(person.id)); setPage(0); }}>
+                <img src={`/api/faces/observations/${person.preview_observation_id}/crop.jpg`} alt="" />
+                <span><strong>{person.name}</strong><small>{person.observation_count} observations</small></span>
+              </button>
+              <button type="button" className="icon-button subtle" onClick={() => deletePerson(person)} title="Delete person" aria-label={`Delete ${person.name}`}><Trash2 size={15} /></button>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      <section className="faces-review-panel">
+        <div className="faces-toolbar">
+          <div className="faces-filter-group" role="group" aria-label="Face status">
+            {["unknown", "suggested", "known", "all"].map((value) => (
+              <button type="button" className={filter === value && !personId ? "active" : ""} key={value} onClick={() => { setPersonId(""); setFilter(value); setPage(0); }}>{value}</button>
+            ))}
+          </div>
+          <select value={cameraId} onChange={(event) => { setCameraId(event.target.value); setPage(0); }} aria-label="Filter by camera">
+            <option value="">All cameras</option>
+            {cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}
+          </select>
+          <span className="shown-bubble">{totalObservations} faces</span>
+        </div>
+        <div className="face-messages">
+          {!status?.recognition_ready ? <div className="face-readiness"><Activity size={16} /><span>{status?.recognition_message || "Automatic recognition is not configured."}</span></div> : null}
+          {notice ? <div className="save-status">{notice}</div> : null}
+        </div>
+        <div className="face-observation-grid">
+          {loading ? <div className="empty-state">Loading face observations...</div> : null}
+          {!loading && !observations.length ? <div className="empty-state">No faces match these filters.</div> : null}
+          {observations.map((observation) => (
+            <button type="button" className="face-observation-card" key={observation.id} onClick={() => setSelected(observation)}>
+              <img src={`/api/faces/observations/${observation.id}/crop.jpg`} alt={observation.person_name || "Unknown face"} loading="lazy" />
+              <span className="face-card-hud">
+                <strong>{observation.person_name || (observation.candidate_person_name ? `Suggested: ${observation.candidate_person_name}` : "Unknown")}</strong>
+                <small>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</small>
+              </span>
+              <span className="face-confidence">{observation.candidate_confidence != null ? `${Math.round(Number(observation.candidate_confidence) * 100)}% match` : `${Math.round(Number(observation.confidence || 0) * 100)}%`}</span>
+            </button>
+          ))}
+        </div>
+        <div className="faces-pagination">
+          <button type="button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loading}><ChevronLeft size={16} /> Previous</button>
+          <span>Page {Math.min(page + 1, pageCount)} of {pageCount}</span>
+          <button type="button" onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))} disabled={page >= pageCount - 1 || loading}>Next <ChevronRight size={16} /></button>
+        </div>
+      </section>
+
+      {selected ? <FaceReviewDialog observation={selected} people={people} timeZone={timeZone} onClose={() => setSelected(null)} onUpdated={async (message) => { setSelected(null); if (message) setNotice(message); await load(); }} /> : null}
+    </main>
+  );
+}
+
 function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "auto");
@@ -3428,6 +4074,8 @@ function App() {
       ? "recordings"
       : window.location.pathname.startsWith("/incidents")
         ? "incidents"
+        : window.location.pathname.startsWith("/faces")
+          ? "faces"
         : "live";
   useEffect(() => {
     document.documentElement.dataset.theme = THEMES.includes(theme) ? theme : "auto";
@@ -3440,6 +4088,8 @@ function App() {
           ? <RecordingsPage timeZone={timeZone} />
           : page === "incidents"
             ? <IncidentsPage timeZone={timeZone} />
+            : page === "faces"
+              ? <FacesPage timeZone={timeZone} />
             : <LivePage timeZone={timeZone} />}
     </Shell>
   );
