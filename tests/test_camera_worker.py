@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -15,8 +16,9 @@ from survng.app.config import CameraConfig
 class DummyDetector:
     def __init__(self) -> None:
         self.calls = 0
+        self.config = SimpleNamespace(confidence_threshold=0.5)
 
-    def detect(self, frame):
+    def detect(self, frame, confidence_threshold=None):
         self.calls += 1
         return [
             {
@@ -39,6 +41,22 @@ class DummyRecorder:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_disabled_detection_ignores_motion_event(self) -> None:
+        camera = CameraConfig(
+            id="back-middle",
+            name="Back Middle",
+            stream_url="rtsp://example.invalid/main",
+            live_stream_url="rtsp://example.invalid/sub",
+        )
+        detector = DummyDetector()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), detector, DummyEvents(), DummyRecorder())
+            worker.set_detection_enabled(False)
+            worker.handle_motion_event("onvif/motion", "motion")
+
+        self.assertEqual(worker.last_motion_at, "")
+        self.assertEqual(detector.calls, 0)
+
     def test_motion_event_runs_detection_on_live_fallback(self) -> None:
         camera = CameraConfig(
             id="back-middle",

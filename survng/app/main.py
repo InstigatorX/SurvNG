@@ -90,6 +90,10 @@ def install_memory_log_handler() -> None:
 install_memory_log_handler()
 
 
+class CameraFeatureState(BaseModel):
+    enabled: bool
+
+
 
 def _ffmpeg_sibling_tool(name: str) -> str:
     ffmpeg = Path(config.ffmpeg_path)
@@ -166,6 +170,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    return FileResponse("survng/static/favicon.ico", media_type="image/x-icon")
+
+
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+def apple_touch_icon() -> FileResponse:
+    return FileResponse("survng/static/apple-touch-icon.png", media_type="image/png")
 
 
 @app.get("/")
@@ -1493,17 +1508,30 @@ def motion_test(camera_id: str) -> dict:
 
 @app.post("/api/cameras/{camera_id}/recording/start")
 def start_recording(camera_id: str, source: str = "main") -> dict:
-    camera = next((item for item in config.cameras if item.id == camera_id), None)
-    if camera is None:
+    if not manager.set_recording(camera_id, True):
         raise HTTPException(status_code=404, detail="camera not found")
-    manager.recorder.start(camera, recording_source(source))
-    return {"ok": True}
+    return {"ok": True, "recording_enabled": True}
 
 
 @app.post("/api/cameras/{camera_id}/recording/stop")
 def stop_recording(camera_id: str, source: str | None = None) -> dict:
-    manager.recorder.stop(camera_id, recording_source(source) if source else None)
-    return {"ok": True}
+    if not manager.set_recording(camera_id, False):
+        raise HTTPException(status_code=404, detail="camera not found")
+    return {"ok": True, "recording_enabled": False}
+
+
+@app.put("/api/cameras/{camera_id}/recording")
+def set_camera_recording(camera_id: str, state: CameraFeatureState) -> dict:
+    if not manager.set_recording(camera_id, state.enabled):
+        raise HTTPException(status_code=404, detail="camera not found")
+    return {"ok": True, "recording_enabled": state.enabled}
+
+
+@app.put("/api/cameras/{camera_id}/detection")
+def set_camera_detection(camera_id: str, state: CameraFeatureState) -> dict:
+    if not manager.set_detection(camera_id, state.enabled):
+        raise HTTPException(status_code=404, detail="camera not found")
+    return {"ok": True, "detection_enabled": state.enabled}
 
 
 @app.get("/api/cameras/{camera_id}/recordings")

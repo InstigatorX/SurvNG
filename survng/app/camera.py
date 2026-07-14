@@ -59,6 +59,7 @@ class CameraWorker:
         self.last_error = ""
         self.last_frame_at = ""
         self.last_motion_at = ""
+        self._detection_enabled = True
         self.onvif = OnvifEventListener(camera, self.handle_motion_event)
 
     def start(self) -> None:
@@ -116,6 +117,7 @@ class CameraWorker:
             "onvif_connected": self.onvif.connected,
             "onvif_last_event_at": self.onvif.last_event_at,
             "last_motion_at": self.last_motion_at,
+            "detection_enabled": self._detection_enabled,
             "onvif_last_error": self.onvif.last_error,
             "onvif_last_connected_at": self.onvif.last_connected_at,
             "onvif_last_poll_success_at": self.onvif.last_poll_success_at,
@@ -134,6 +136,9 @@ class CameraWorker:
         next_zones = [zone.model_copy(deep=True) for zone in zones]
         with self._lifecycle_lock:
             self.camera.zones = next_zones
+
+    def set_detection_enabled(self, enabled: bool) -> None:
+        self._detection_enabled = bool(enabled)
 
     def snapshot(self, source: str = "live") -> bytes | None:
         frame = self._get_latest_frame(source)
@@ -165,6 +170,8 @@ class CameraWorker:
         message: str = "",
         event_at: datetime | None = None,
     ) -> None:
+        if not self._detection_enabled:
+            return
         self.last_motion_at = datetime.now(timezone.utc).isoformat()
         if event_at is None:
             event_at = datetime.now(timezone.utc)

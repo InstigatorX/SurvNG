@@ -27,6 +27,7 @@ class Recorder:
         self.index_path = storage_dir / "recordings.sqlite3"
         self.processes: dict[RecorderKey, ProcessItem] = {}
         self._starting: set[RecorderKey] = set()
+        self._disabled_cameras: set[str] = set()
         self.owner_token = f"survng-{os.getpid()}"
         self._lock = threading.Lock()
         self._watchdog_stop = threading.Event()
@@ -73,6 +74,8 @@ class Recorder:
         source = camera.normalized_source(source, default="main")
         key = (camera.id, source)
         with self._lock:
+            if camera.id in self._disabled_cameras:
+                return
             existing = self.processes.get(key)
             if existing is not None and existing[0].poll() is None:
                 return
@@ -160,17 +163,32 @@ class Recorder:
 
     def stop(self, camera_id: str, source: str | None = None) -> None:
         sources = ("main", "live") if source is None else (source,)
+        stopped_keys: set[RecorderKey] = set()
         for raw_source in sources:
             normalized = "main" if raw_source == "main" else "live"
             key = (camera_id, normalized)
+            stopped_keys.add(key)
             with self._lock:
                 item = self.processes.pop(key, None)
                 self._starting.discard(key)
             if item is not None:
                 self._stop_item(item)
-        for pids in self._owned_ffmpeg_recorders({(camera_id, "main"), (camera_id, "live")}).values():
+        for pids in self._owned_ffmpeg_recorders(stopped_keys).values():
             for pid in pids:
                 self._kill_pid(pid)
+
+    def set_camera_enabled(self, camera_id: str, enabled: bool) -> None:
+        with self._lock:
+            if enabled:
+                self._disabled_cameras.discard(camera_id)
+            else:
+                self._disabled_cameras.add(camera_id)
+        if not enabled:
+            self.stop(camera_id)
+
+    def camera_enabled(self, camera_id: str) -> bool:
+        with self._lock:
+            return camera_id not in self._disabled_cameras
 
     def _stop_item(self, item: ProcessItem) -> None:
         process, pipe, stop_event, keeper = item
@@ -247,7 +265,11 @@ class Recorder:
 
     def _wanted_keys(self, camera_map: dict[str, CameraConfig]) -> dict[RecorderKey, CameraConfig]:
         wanted: dict[RecorderKey, CameraConfig] = {}
+        with self._lock:
+            disabled_cameras = set(self._disabled_cameras)
         for camera_id, camera in camera_map.items():
+            if camera_id in disabled_cameras:
+                continue
             if camera.record:
                 wanted[(camera_id, "main")] = camera
             if camera.record_sub and camera.live_stream_url:

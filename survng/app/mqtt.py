@@ -17,10 +17,14 @@ class MqttService:
         self,
         config: MqttConfig,
         power_callback: Callable[[str, bool], bool],
+        recording_callback: Callable[[str, bool], bool],
+        detection_callback: Callable[[str, bool], bool],
         connected_callback: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self.power_callback = power_callback
+        self.recording_callback = recording_callback
+        self.detection_callback = detection_callback
         self.connected_callback = connected_callback
         self.client: Any = None
         self.connected = False
@@ -155,6 +159,30 @@ class MqttService:
                     "state_on": "ON",
                     "state_off": "OFF",
                     "icon": "mdi:cctv",
+                }),
+                ("switch", "recording", {
+                    "name": "Recording",
+                    "unique_id": f"survng_{camera_id}_recording",
+                    "state_topic": f"{state_topic}/recording/state",
+                    "value_template": "{{ value_json.state }}",
+                    "command_topic": f"{state_topic}/recording/set",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "state_on": "ON",
+                    "state_off": "OFF",
+                    "icon": "mdi:record-rec",
+                }),
+                ("switch", "detection", {
+                    "name": "Detection",
+                    "unique_id": f"survng_{camera_id}_detection",
+                    "state_topic": f"{state_topic}/detection/state",
+                    "value_template": "{{ value_json.state }}",
+                    "command_topic": f"{state_topic}/detection/set",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "state_on": "ON",
+                    "state_off": "OFF",
+                    "icon": "mdi:motion-sensor",
                 }),
                 ("binary_sensor", "motion", {
                     "name": "Motion",
@@ -351,6 +379,15 @@ class MqttService:
             retain=True,
         )
 
+    def publish_camera_feature_state(self, camera_id: str, feature: str, enabled: bool) -> None:
+        if feature not in {"recording", "detection"}:
+            return
+        self.publish(
+            f"camera/{camera_id}/{feature}/state",
+            {"camera_id": camera_id, "state": "ON" if enabled else "OFF", "enabled": enabled},
+            retain=True,
+        )
+
     def status(self) -> dict[str, Any]:
         return {
             "enabled": self.config.enabled,
@@ -374,6 +411,8 @@ class MqttService:
         self.last_error = ""
         self.last_connected_at = datetime.now(timezone.utc).isoformat()
         client.subscribe(f"{self.prefix}/camera/+/power/set", qos=self.config.qos)
+        client.subscribe(f"{self.prefix}/camera/+/recording/set", qos=self.config.qos)
+        client.subscribe(f"{self.prefix}/camera/+/detection/set", qos=self.config.qos)
         self.publish("status", {"online": True, "connected_at": self.last_connected_at}, retain=True)
         if self.connected_callback:
             threading.Thread(target=self.connected_callback, daemon=True).start()
@@ -391,30 +430,45 @@ class MqttService:
         expected_length = len(prefix_parts) + 4
         if len(parts) != expected_length or parts[:len(prefix_parts)] != prefix_parts:
             return
-        if parts[-2:] != ["power", "set"] or parts[-4] != "camera":
+        if parts[-1] != "set" or parts[-4] != "camera":
             return
         camera_id = parts[-3]
+        feature = parts[-2]
+        callbacks = {
+            "power": self.power_callback,
+            "recording": self.recording_callback,
+            "detection": self.detection_callback,
+        }
+        callback = callbacks.get(feature)
+        if callback is None:
+            return
         raw = message.payload.decode("utf-8", errors="replace").strip()
         try:
             decoded = json.loads(raw)
-            value = decoded.get("state", decoded.get("power", decoded)) if isinstance(decoded, dict) else decoded
+            value = decoded.get("state", decoded.get(feature, decoded)) if isinstance(decoded, dict) else decoded
         except json.JSONDecodeError:
             value = raw
         normalized = str(value).strip().upper()
         if normalized not in {"ON", "OFF", "TRUE", "FALSE", "1", "0"}:
-            LOGGER.warning("ignored invalid MQTT camera power command for %s: %s", camera_id, raw[:100])
+            LOGGER.warning("ignored invalid MQTT camera %s command for %s: %s", feature, camera_id, raw[:100])
             return
         turn_on = normalized in {"ON", "TRUE", "1"}
         with self._lock:
             self.commands_received += 1
-        threading.Thread(target=self._apply_power, args=(camera_id, turn_on), daemon=True).start()
+        threading.Thread(target=self._apply_control, args=(camera_id, feature, turn_on, callback), daemon=True).start()
 
-    def _apply_power(self, camera_id: str, turn_on: bool) -> None:
+    def _apply_control(
+        self,
+        camera_id: str,
+        feature: str,
+        turn_on: bool,
+        callback: Callable[[str, bool], bool],
+    ) -> None:
         try:
-            applied = self.power_callback(camera_id, turn_on)
+            applied = callback(camera_id, turn_on)
             if not applied:
                 self.publish(f"camera/{camera_id}/command/error", {"error": "camera not found"})
                 return
         except Exception as exc:
-            LOGGER.exception("MQTT camera power command failed for %s", camera_id)
+            LOGGER.exception("MQTT camera %s command failed for %s", feature, camera_id)
             self.publish(f"camera/{camera_id}/command/error", {"error": str(exc)})

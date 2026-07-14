@@ -757,6 +757,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   const [mjpegToken, setMjpegToken] = useState(() => String(Date.now()));
   const [snapshotToken, setSnapshotToken] = useState(() => String(Date.now()));
   const [streamReady, setStreamReady] = useState(false);
+  const [recordingBusy, setRecordingBusy] = useState(false);
+  const [recordingError, setRecordingError] = useState("");
+  const [detectionBusy, setDetectionBusy] = useState(false);
+  const [detectionError, setDetectionError] = useState("");
   const shouldUseWebRtc = camera.running && streamReady && activeTransport === "webrtc";
   const shouldUseMjpegStream = camera.running && streamReady && activeTransport === "mjpeg";
 
@@ -787,6 +791,44 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   async function post(action) {
     await fetch(`/api/cameras/${camera.id}/${action}`, { method: "POST" });
     refresh();
+  }
+
+  async function toggleRecording() {
+    if (recordingBusy || !camera.recording_configured) return;
+    setRecordingBusy(true);
+    setRecordingError("");
+    try {
+      const response = await fetch(`/api/cameras/${camera.id}/recording`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !camera.recording_enabled }),
+      });
+      if (!response.ok) throw new Error(`Recording control failed (${response.status})`);
+      await refresh();
+    } catch (error) {
+      setRecordingError(error instanceof Error ? error.message : "Recording control failed");
+    } finally {
+      setRecordingBusy(false);
+    }
+  }
+
+  async function toggleDetection() {
+    if (detectionBusy) return;
+    setDetectionBusy(true);
+    setDetectionError("");
+    try {
+      const response = await fetch(`/api/cameras/${camera.id}/detection`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !camera.detection_enabled }),
+      });
+      if (!response.ok) throw new Error(`Detection control failed (${response.status})`);
+      await refresh();
+    } catch (error) {
+      setDetectionError(error instanceof Error ? error.message : "Detection control failed");
+    } finally {
+      setDetectionBusy(false);
+    }
   }
 
   function cycleStreamMode() {
@@ -851,14 +893,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
             >
               <GripVertical size={16} />
             </button>
-            <span className={`status-pill ${camera.running ? "ok" : "bad"}`} title={camera.running ? "Online" : "Offline"}>
-              <CircleDot size={13} /> {camera.running ? "online" : "offline"}
-            </span>
-            <span className={`status-pill ${camera.recording ? "ok" : ""}`} title={camera.recording ? "Recording" : "Not recording"}>
-              {camera.recording ? "rec" : "idle"}
+            <span className={`status-pill hud-status ${camera.running ? "ok" : "bad"}`} title={camera.running ? "Online" : "Offline"}>
+              <CircleDot size={13} /> <span className="hud-full-label">{camera.running ? "online" : "offline"}</span>
             </span>
             <button type="button" className="tile-control-button" onClick={toggleSourceMode} title="Switch main/sub stream">
-              <Radio size={15} /> {sourceMode === "main" ? "Main" : "Sub"}
+              <Radio size={15} />
+              <span className="hud-full-label">{sourceMode === "main" ? "Main" : "Sub"}</span>
+              <span className="hud-short-label">{sourceMode === "main" ? "M" : "S"}</span>
             </button>
             <button
               type="button"
@@ -866,7 +907,32 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
               onClick={cycleStreamMode}
               title={normalizedStreamMode === "motion" ? `Automatic motion switching: ${activeTransport === "webrtc" ? "WebRTC active" : "snapshot idle"}` : "Cycle transport: Auto, MJPEG, WebRTC"}
             >
-              {normalizedStreamMode === "motion" ? `Auto ${activeTransport === "webrtc" ? "RTC" : "Snap"}` : STREAM_LABELS[normalizedStreamMode]}
+              <span className="hud-full-label">
+                {normalizedStreamMode === "motion" ? `Auto ${activeTransport === "webrtc" ? "RTC" : "Snap"}` : STREAM_LABELS[normalizedStreamMode]}
+              </span>
+              <span className="hud-short-label">
+                {normalizedStreamMode === "motion" ? (activeTransport === "webrtc" ? "RTC" : "Snap") : normalizedStreamMode === "mjpeg" ? "MJ" : "RTC"}
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`status-pill hud-toggle hud-icon ${camera.recording_enabled ? "ok" : ""} ${recordingError ? "bad" : ""}`}
+              onClick={toggleRecording}
+              disabled={recordingBusy || !camera.recording_configured}
+              title={recordingError || (!camera.recording_configured ? "Recording is not configured for this camera" : camera.recording_enabled ? "Stop recording" : "Start recording")}
+              aria-label={`${camera.recording_enabled ? "Stop" : "Start"} recording ${camera.name}`}
+            >
+              <Video size={13} /> <span className="hud-full-label">{recordingBusy ? "..." : "rec"}</span>
+            </button>
+            <button
+              type="button"
+              className={`status-pill hud-toggle hud-icon ${camera.detection_enabled ? "ok" : ""} ${detectionError ? "bad" : ""}`}
+              onClick={toggleDetection}
+              disabled={detectionBusy}
+              title={detectionError || (camera.detection_enabled ? "Stop motion and object detection" : "Start motion and object detection")}
+              aria-label={`${camera.detection_enabled ? "Stop" : "Start"} motion and object detection for ${camera.name}`}
+            >
+              <Radar size={13} /> <span className="hud-full-label">{detectionBusy ? "..." : "detect"}</span>
             </button>
             <button
               type="button"

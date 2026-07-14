@@ -3,11 +3,34 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from survng.app.recorder import Recorder
 
 
 class RecorderTest(unittest.TestCase):
+    def test_disabled_camera_is_excluded_from_watchdog_wanted_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = Mock(id="front-door", record=True, record_sub=True, live_stream_url="rtsp://camera/sub")
+            recorder.set_camera_enabled(camera.id, False)
+
+            self.assertEqual(recorder._wanted_keys({camera.id: camera}), {})
+
+            recorder.set_camera_enabled(camera.id, True)
+            self.assertEqual(
+                set(recorder._wanted_keys({camera.id: camera})),
+                {(camera.id, "main"), (camera.id, "live")},
+            )
+
+    @patch.object(Recorder, "_owned_ffmpeg_recorders", return_value={})
+    def test_stopping_one_source_does_not_target_the_other_source(self, owned_recorders) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder.stop("front-door", "main")
+
+        owned_recorders.assert_called_once_with({("front-door", "main")})
+
     def test_recording_rows_use_configured_segment_duration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

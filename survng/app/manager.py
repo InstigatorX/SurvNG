@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -34,8 +35,20 @@ class AppManager:
         )
         self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds, config.hardware_acceleration)
         self.hls = HlsStreamer(config.ffmpeg_path, self.storage_dir, config.hardware_acceleration)
-        self.mqtt = MqttService(config.mqtt, self._mqtt_power_command, self._mqtt_connected)
+        self.mqtt = MqttService(
+            config.mqtt,
+            self._mqtt_power_command,
+            self.set_recording,
+            self.set_detection,
+            self._mqtt_connected,
+        )
         self._lifecycle_lock = threading.Lock()
+        self._runtime_state_lock = threading.Lock()
+        self._runtime_state_path = self.storage_dir / "runtime_state.json"
+        runtime_state = self._load_runtime_state()
+        self._recording_enabled = self._boolean_preferences(runtime_state, "recording_enabled")
+        self._detection_enabled = self._boolean_preferences(runtime_state, "detection_enabled")
+        self._camera_enabled = {camera.id: True for camera in config.cameras}
         self._stopping = False
         self.workers = {
             camera.id: CameraWorker(camera, self.storage_dir, self.detector, self.events, self.recorder, self.publish_event)
@@ -50,10 +63,71 @@ class AppManager:
             seen.add(camera.id)
             yield camera
 
+    def _load_runtime_state(self) -> dict:
+        try:
+            payload = json.loads(self._runtime_state_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    @staticmethod
+    def _boolean_preferences(payload: dict, key: str) -> dict[str, bool]:
+        values = payload.get(key, {})
+        if not isinstance(values, dict):
+            return {}
+        return {str(camera_id): bool(enabled) for camera_id, enabled in values.items()}
+
+    def _save_runtime_state(self) -> None:
+        with self._runtime_state_lock:
+            payload = {
+                "recording_enabled": self._recording_enabled,
+                "detection_enabled": self._detection_enabled,
+            }
+            temporary = self._runtime_state_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(self._runtime_state_path)
+
+    def recording_enabled(self, camera_id: str) -> bool:
+        return self._recording_enabled.get(camera_id, True)
+
+    def detection_enabled(self, camera_id: str) -> bool:
+        return self._detection_enabled.get(camera_id, True)
+
+    def _recorder_should_run(self, camera_id: str) -> bool:
+        return self._camera_enabled.get(camera_id, True) and self.recording_enabled(camera_id)
+
+    def _start_configured_recorders(self, camera) -> None:
+        if camera.record:
+            self.recorder.start(camera, "main")
+        if camera.record_sub and camera.live_stream_url:
+            self.recorder.start(camera, "live")
+
+    def set_recording(self, camera_id: str, enabled: bool) -> bool:
+        camera = self.camera(camera_id)
+        if camera is None:
+            return False
+        self._recording_enabled[camera_id] = bool(enabled)
+        self._save_runtime_state()
+        should_run = self._recorder_should_run(camera_id)
+        self.recorder.set_camera_enabled(camera_id, should_run)
+        if should_run:
+            self._start_configured_recorders(camera)
+        self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
+        return True
+
+    def set_detection(self, camera_id: str, enabled: bool) -> bool:
+        worker = self.workers.get(camera_id)
+        if worker is None:
+            return False
+        self._detection_enabled[camera_id] = bool(enabled)
+        self._save_runtime_state()
+        worker.set_detection_enabled(enabled)
+        self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(enabled))
+        return True
+
     def start_all(self) -> None:
         with self._lifecycle_lock:
             self._stopping = False
-        self.mqtt.start()
         cameras = list(self._unique_cameras())
         recorder_keys = set()
         for camera in cameras:
@@ -63,14 +137,18 @@ class AppManager:
                 recorder_keys.add((camera.id, "live"))
         self.recorder.cleanup_stale_recorders(recorder_keys)
         for camera in cameras:
+            self._camera_enabled[camera.id] = True
+            self.recorder.set_camera_enabled(camera.id, self.recording_enabled(camera.id))
+            self.workers[camera.id].set_detection_enabled(self.detection_enabled(camera.id))
             self.workers[camera.id].start()
-            if camera.record:
-                self.recorder.start(camera, "main")
-            if camera.record_sub and camera.live_stream_url:
-                self.recorder.start(camera, "live")
+            if self.recording_enabled(camera.id):
+                self._start_configured_recorders(camera)
             self.mqtt.publish_camera_state(camera.id, True)
         self.recorder.start_indexer(cameras)
         self.recorder.start_watchdog(cameras)
+        # Publish discovery only after persisted recording/detection preferences
+        # have been applied to every worker.
+        self.mqtt.start()
 
     def stop_all(self) -> None:
         with self._lifecycle_lock:
@@ -120,11 +198,11 @@ class AppManager:
         worker = self.workers.get(camera_id)
         if camera is None or worker is None:
             return False
+        self._camera_enabled[camera_id] = True
+        self.recorder.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
         worker.start()
-        if camera.record:
-            self.recorder.start(camera, "main")
-        if camera.record_sub and camera.live_stream_url:
-            self.recorder.start(camera, "live")
+        if self.recording_enabled(camera_id):
+            self._start_configured_recorders(camera)
         self.mqtt.publish_camera_state(camera_id, True)
         return True
 
@@ -132,8 +210,9 @@ class AppManager:
         worker = self.workers.get(camera_id)
         if worker is None:
             return False
+        self._camera_enabled[camera_id] = False
+        self.recorder.set_camera_enabled(camera_id, False)
         worker.stop()
-        self.recorder.stop(camera_id)
         self.hls.stop_camera_sources(camera_id)
         self.mqtt.publish_camera_state(camera_id, False)
         return True
@@ -161,6 +240,7 @@ class AppManager:
                 "id": camera.id,
                 "name": camera.name,
                 "model_classes": self.detector.labels,
+                "recording_configured": bool(camera.record or camera.record_sub),
                 "zones": [
                     {
                         "name": zone.name,
@@ -173,7 +253,10 @@ class AppManager:
             for camera in self._unique_cameras()
         ])
         for status in self.statuses():
-            self.mqtt.publish_camera_state(str(status.get("id") or ""), bool(status.get("running")))
+            camera_id = str(status.get("id") or "")
+            self.mqtt.publish_camera_state(camera_id, bool(status.get("running")))
+            self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(status.get("recording_enabled")))
+            self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(status.get("detection_enabled")))
 
     def publish_event(self, event_type: str, payload: dict) -> None:
         camera_id = str(payload.get("camera_id") or "")
@@ -225,6 +308,11 @@ class AppManager:
                 **worker.status(),
                 "recording": recordings.get((camera_id, "main"), False),
                 "sub_recording": recordings.get((camera_id, "live"), False),
+                "recording_enabled": self.recording_enabled(camera_id),
+                "recording_configured": bool(
+                    camera_config.get(camera_id)
+                    and (camera_config[camera_id].record or camera_config[camera_id].record_sub)
+                ),
                 "record_sub_enabled": bool(camera_config.get(camera_id) and camera_config[camera_id].record_sub),
             }
             for camera_id, worker in self.workers.items()
