@@ -260,6 +260,40 @@ class MqttService:
                 topic = f"{discovery_prefix}/{component}/{object_id}/{entity_name}/config"
                 self.publish_topic(topic, payload, retain=True)
 
+    def remove_zone_discovery(
+        self,
+        camera_id: str,
+        zones: list[dict[str, Any]],
+        model_classes: list[str],
+    ) -> None:
+        if not self.config.discovery_enabled:
+            return
+        discovery_prefix = self.config.discovery_prefix.strip().strip("/") or "homeassistant"
+        camera_slug = self._slug(camera_id, "camera")
+        camera_object_id = f"survng_{camera_slug}"
+        for zone in zones:
+            zone_name = str(zone.get("name") or "").strip()
+            if not zone_name:
+                continue
+            zone_slug = self._slug(zone_name, "zone")
+            zone_object_id = f"survng_{camera_slug}_zone_{zone_slug}"
+            self.remove_retained_topic(
+                f"{discovery_prefix}/binary_sensor/{camera_object_id}/zone_{zone_slug}/config"
+            )
+            self.remove_retained_topic(
+                f"{discovery_prefix}/binary_sensor/{zone_object_id}/object/config"
+            )
+            class_names = {
+                str(value).strip()
+                for value in [*model_classes, *(zone.get("object_classes") or [])]
+                if str(value).strip()
+            }
+            for class_name in class_names:
+                class_slug = self._slug(class_name, "object")
+                self.remove_retained_topic(
+                    f"{discovery_prefix}/binary_sensor/{zone_object_id}/class_{class_slug}/config"
+                )
+
     def publish_zone_objects(
         self,
         camera_id: str,

@@ -11,7 +11,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from .config import CameraConfig
+from .config import CameraConfig, DetectionZone
 from .detector import OpenVinoDetector, objects_to_json
 from .events import EventStore
 from .ffmpeg_hw import recorded_frame_hw_args
@@ -129,6 +129,11 @@ class CameraWorker:
             "onvif_subscription_termination_time": self.onvif.subscription_termination_time,
             "onvif_subscription_lifetime_seconds": self.onvif.subscription_lifetime_seconds,
         }
+
+    def update_zones(self, zones: list[DetectionZone]) -> None:
+        next_zones = [zone.model_copy(deep=True) for zone in zones]
+        with self._lifecycle_lock:
+            self.camera.zones = next_zones
 
     def snapshot(self, source: str = "live") -> bytes | None:
         frame = self._get_latest_frame(source)

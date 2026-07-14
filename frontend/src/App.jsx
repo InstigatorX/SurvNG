@@ -3141,7 +3141,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   async function saveZones(camera) {
     if (!camera || zonesSaving) return;
     setZonesSaving(true);
-    setZoneSaveStatus("Saving zones and reloading cameras...");
+    setZoneSaveStatus("Saving zones...");
     try {
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}/zones`, {
         method: "PUT",
@@ -3154,7 +3154,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       }
       const payload = await response.json();
       updateCamera(camera.id, ["zones"], payload.zones || []);
-      setZoneSaveStatus("Zones saved. Camera workers reloaded.");
+      setZoneSaveStatus("Zones saved without restarting cameras.");
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
     } catch (error) {

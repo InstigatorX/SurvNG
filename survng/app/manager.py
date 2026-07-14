@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from .camera import CameraWorker
-from .config import AppConfig
+from .config import AppConfig, DetectionZone
 from .detector import OpenVinoDetector
 from .events import EventStore
 from .face_recognition import OpenVinoFaceRecognizer
@@ -136,6 +136,20 @@ class AppManager:
         self.recorder.stop(camera_id)
         self.hls.stop_camera_sources(camera_id)
         self.mqtt.publish_camera_state(camera_id, False)
+        return True
+
+    def update_camera_zones(
+        self,
+        camera_id: str,
+        zones: list[DetectionZone],
+        previous_zones: list[dict],
+    ) -> bool:
+        worker = self.workers.get(camera_id)
+        if worker is None:
+            return False
+        worker.update_zones(zones)
+        self.mqtt.remove_zone_discovery(camera_id, previous_zones, self.detector.labels)
+        self._mqtt_connected()
         return True
 
     def _mqtt_power_command(self, camera_id: str, turn_on: bool) -> bool:

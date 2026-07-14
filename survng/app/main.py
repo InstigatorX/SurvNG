@@ -799,17 +799,26 @@ def put_config(next_config: AppConfig) -> dict:
 
 @app.put("/api/config/cameras/{camera_id}/zones")
 def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:
+    global config
     next_config = config.model_copy(deep=True)
     camera = camera_by_id(next_config, camera_id)
     if camera is None:
         raise HTTPException(status_code=404, detail="camera not found")
+    worker = manager.workers.get(camera_id)
+    if worker is None:
+        raise HTTPException(status_code=404, detail="camera worker not found")
+    current_camera = camera_by_id(config, camera_id)
+    previous_zones = [zone.model_dump(mode="json") for zone in (current_camera.zones if current_camera else [])]
     camera.zones = zones
     save_config(next_config, assign_ids=False)
-    reload_manager(next_config)
+    config = next_config
+    manager.config = next_config
+    manager.update_camera_zones(camera_id, camera.zones, previous_zones)
     return {
         "ok": True,
         "camera_id": camera.id,
         "zones": [zone.model_dump(mode="json") for zone in camera.zones],
+        "workers_restarted": False,
     }
 
 
