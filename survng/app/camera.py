@@ -232,6 +232,13 @@ class CameraWorker:
             objects_json=objects_to_json(objects),
             created_at=event_at.isoformat(),
         )
+        if self.event_callback:
+            self.event_callback("incident", {
+                "event_id": event.get("id"),
+                "camera_id": self.camera.id,
+                "timestamp": event_at.isoformat(),
+                "kind": "motion",
+            })
         detected_objects = [
             detected for detected in objects
             if detected.get("label")

@@ -16,6 +16,7 @@ from .hls import HlsStreamer
 from .go2rtc import Go2RtcAdapter
 from .mqtt import MqttService
 from .recorder import Recorder
+from .state_events import StateEventBroker
 
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -37,6 +38,7 @@ class AppManager:
         self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds, config.hardware_acceleration)
         self.hls = HlsStreamer(config.ffmpeg_path, self.storage_dir, config.hardware_acceleration)
         self.go2rtc = Go2RtcAdapter()
+        self.state_events = StateEventBroker()
         self.mqtt = MqttService(
             config.mqtt,
             self._mqtt_power_command,
@@ -52,6 +54,8 @@ class AppManager:
         self._detection_enabled = self._boolean_preferences(runtime_state, "detection_enabled")
         self._camera_enabled = {camera.id: True for camera in config.cameras}
         self._stopping = False
+        self._state_monitor_stop = threading.Event()
+        self._state_monitor_thread: threading.Thread | None = None
         self.workers = {
             camera.id: CameraWorker(camera, self.storage_dir, self.detector, self.events, self.recorder, self.publish_event)
             for camera in config.cameras
@@ -115,6 +119,7 @@ class AppManager:
         if should_run:
             self._start_configured_recorders(camera)
         self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
+        self._publish_camera_status(camera_id)
         return True
 
     def set_detection(self, camera_id: str, enabled: bool) -> bool:
@@ -125,6 +130,7 @@ class AppManager:
         self._save_runtime_state()
         worker.set_detection_enabled(enabled)
         self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(enabled))
+        self._publish_camera_status(camera_id)
         return True
 
     def start_all(self) -> None:
@@ -151,12 +157,14 @@ class AppManager:
         # Publish discovery only after persisted recording/detection preferences
         # have been applied to every worker.
         self.mqtt.start()
+        self._start_state_monitor()
 
     def stop_all(self) -> None:
         with self._lifecycle_lock:
             if self._stopping:
                 return
             self._stopping = True
+        self._stop_state_monitor()
         started = time.monotonic()
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
         self.mqtt.stop()
@@ -187,6 +195,7 @@ class AppManager:
         for thread in media_shutdowns:
             thread.join()
         LOGGER.info("SurvNG shutdown complete in %.2fs", time.monotonic() - started)
+        self.state_events.close()
 
 
     def camera(self, camera_id: str):
@@ -206,6 +215,7 @@ class AppManager:
         if self.recording_enabled(camera_id):
             self._start_configured_recorders(camera)
         self.mqtt.publish_camera_state(camera_id, True)
+        self._publish_camera_status(camera_id)
         return True
 
     def stop_camera(self, camera_id: str) -> bool:
@@ -217,6 +227,7 @@ class AppManager:
         worker.stop()
         self.hls.stop_camera_sources(camera_id)
         self.mqtt.publish_camera_state(camera_id, False)
+        self._publish_camera_status(camera_id)
         return True
 
     def update_camera_zones(
@@ -277,6 +288,7 @@ class AppManager:
                 "zones": sorted({str(zone) for item in objects for zone in item.get("zones", []) if zone}),
             }
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
+        self.state_events.publish(event_type, payload)
         if event_type == "object":
             camera = self.camera(camera_id)
             if camera is not None:
@@ -292,6 +304,50 @@ class AppManager:
                     ],
                     payload,
                 )
+
+    @staticmethod
+    def _camera_state_fingerprint(status: dict) -> tuple:
+        keys = (
+            "running", "connected", "capture_running", "frame_fresh", "main_running",
+            "main_frame_fresh", "last_error", "main_last_error", "onvif_connected",
+            "onvif_last_event_at", "last_motion_at", "detection_enabled", "recording",
+            "sub_recording", "recording_enabled", "recording_configured",
+        )
+        return tuple(status.get(key) for key in keys)
+
+    def _publish_camera_status(self, camera_id: str) -> None:
+        status = next((item for item in self.statuses() if item.get("id") == camera_id), None)
+        if status is not None:
+            self.state_events.publish("camera_state", status)
+
+    def _start_state_monitor(self) -> None:
+        if self._state_monitor_thread is not None and self._state_monitor_thread.is_alive():
+            return
+        self._state_monitor_stop.clear()
+
+        def monitor() -> None:
+            previous: dict[str, tuple] = {}
+            while not self._state_monitor_stop.is_set():
+                try:
+                    for status in self.statuses():
+                        camera_id = str(status.get("id") or "")
+                        fingerprint = self._camera_state_fingerprint(status)
+                        if camera_id and previous.get(camera_id) != fingerprint:
+                            previous[camera_id] = fingerprint
+                            self.state_events.publish("camera_state", status)
+                except Exception:
+                    LOGGER.exception("camera state monitor failed")
+                self._state_monitor_stop.wait(1.0)
+
+        self._state_monitor_thread = threading.Thread(target=monitor, name="camera-state-monitor", daemon=False)
+        self._state_monitor_thread.start()
+
+    def _stop_state_monitor(self) -> None:
+        self._state_monitor_stop.set()
+        thread = self._state_monitor_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._state_monitor_thread = None
 
     def mqtt_status(self) -> dict:
         return self.mqtt.status()

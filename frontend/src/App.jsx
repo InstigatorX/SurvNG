@@ -653,6 +653,50 @@ function Shell({ page, theme, children }) {
   );
 }
 
+const APP_EVENT_TYPES = ["camera_state", "cameras_state", "motion", "object", "incident", "system_state"];
+const appEventListeners = new Set();
+let appEventSource = null;
+let appEventCloseTimer = null;
+
+function subscribeAppEvents(listener) {
+  appEventListeners.add(listener);
+  if (appEventCloseTimer) {
+    window.clearTimeout(appEventCloseTimer);
+    appEventCloseTimer = null;
+  }
+  if (!appEventSource) {
+    appEventSource = new EventSource("/api/events/stream");
+    APP_EVENT_TYPES.forEach((type) => {
+      appEventSource.addEventListener(type, (event) => {
+        let data = null;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        appEventListeners.forEach((current) => current({ type, data, id: event.lastEventId }));
+      });
+    });
+  }
+  return () => {
+    appEventListeners.delete(listener);
+    if (!appEventListeners.size && appEventSource) {
+      appEventCloseTimer = window.setTimeout(() => {
+        if (!appEventListeners.size && appEventSource) {
+          appEventSource.close();
+          appEventSource = null;
+        }
+      }, 1000);
+    }
+  };
+}
+
+function useAppEvents(handler) {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  useEffect(() => subscribeAppEvents((event) => handlerRef.current(event)), []);
+}
+
 function LiveHeaderStats() {
   const [stats, setStats] = useState({
     motion: "--",
@@ -661,27 +705,50 @@ function LiveHeaderStats() {
     detector: null,
     cameras: null,
   });
+  const eventRefreshTimer = useRef(null);
 
-  async function load() {
-    const [eventResponse, systemResponse] = await Promise.all([
-      fetch("/api/events?limit=50"),
-      fetch("/api/system/status"),
-    ]);
+  async function loadRecentEvents() {
+    const eventResponse = await fetch("/api/events?limit=50");
     const events = await eventResponse.json();
-    const system = systemResponse.ok ? await systemResponse.json() : {};
-    setStats({
+    setStats((current) => ({
+      ...current,
       motion: events.filter((event) => event.kind === "motion").length,
       objects: events.filter(hasDetectedObjects).length,
+    }));
+  }
+
+  async function loadSystem() {
+    const systemResponse = await fetch("/api/system/status");
+    const system = systemResponse.ok ? await systemResponse.json() : {};
+    setStats((current) => ({
+      ...current,
       storage: system.storage || null,
       detector: system.detector || null,
       cameras: system.cameras || null,
-    });
+    }));
   }
 
+  useAppEvents(({ type, data }) => {
+    if (type === "system_state") {
+      setStats((current) => ({
+        ...current,
+        storage: data.storage || null,
+        detector: data.detector || null,
+        cameras: data.cameras || null,
+      }));
+    } else if (type === "incident") {
+      window.clearTimeout(eventRefreshTimer.current);
+      eventRefreshTimer.current = window.setTimeout(loadRecentEvents, 250);
+    }
+  });
+
   useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 5000);
-    return () => window.clearInterval(timer);
+    Promise.all([loadRecentEvents(), loadSystem()]);
+    const timer = window.setInterval(() => Promise.all([loadRecentEvents(), loadSystem()]), 60_000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(eventRefreshTimer.current);
+    };
   }, []);
 
   const detector = stats.detector || {};
@@ -739,6 +806,13 @@ function usePollingData(includeIncidents = true) {
   const [incidents, setIncidents] = useState([]);
   const [appConfig, setAppConfig] = useState(null);
   const [loading, setLoading] = useState(true);
+  const incidentRefreshTimer = useRef(null);
+
+  async function loadIncidents() {
+    if (!includeIncidents) return;
+    const response = await fetch("/api/incidents?limit=120&gap_seconds=45");
+    if (response.ok) setIncidents(await response.json());
+  }
 
   async function load() {
     const [cameraResponse, incidentResponse, configResponse] = await Promise.all([
@@ -752,10 +826,31 @@ function usePollingData(includeIncidents = true) {
     setLoading(false);
   }
 
+  useAppEvents(({ type, data }) => {
+    if (type === "cameras_state" && Array.isArray(data)) {
+      setCameras(data);
+      setLoading(false);
+    } else if (type === "camera_state" && data?.id) {
+      setCameras((current) => {
+        const index = current.findIndex((camera) => camera.id === data.id);
+        if (index < 0) return [...current, data];
+        const next = [...current];
+        next[index] = data;
+        return next;
+      });
+    } else if (type === "incident" && includeIncidents) {
+      window.clearTimeout(incidentRefreshTimer.current);
+      incidentRefreshTimer.current = window.setTimeout(loadIncidents, 250);
+    }
+  });
+
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 5000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(load, 60_000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(incidentRefreshTimer.current);
+    };
   }, [includeIncidents]);
 
   return { cameras, incidents, appConfig, loading, refresh: load };
@@ -2086,6 +2181,10 @@ function IncidentsPage({ timeZone }) {
     setIncidentRefreshToken((value) => value + 1);
   }
 
+  useAppEvents(({ type }) => {
+    if (type === "incident") setIncidentRefreshToken((value) => value + 1);
+  });
+
   async function openFaceReview(face) {
     const observationId = Number(face?.observation_id);
     if (!Number.isFinite(observationId)) return;
@@ -2137,10 +2236,8 @@ function IncidentsPage({ timeZone }) {
       }
     }
     loadIncidentPage();
-    const timer = window.setInterval(loadIncidentPage, 15000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
   }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
 

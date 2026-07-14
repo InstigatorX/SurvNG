@@ -6,6 +6,7 @@ import logging
 import math
 import mimetypes
 import asyncio
+import queue
 import os
 import re
 import platform
@@ -182,6 +183,70 @@ def faces_page() -> FileResponse:
 @app.get("/api/cameras")
 def cameras() -> list[dict]:
     return manager.statuses()
+
+
+def _sse_message(event_type: str, payload: object, event_id: str | None = None) -> str:
+    lines = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event_type}")
+    lines.append(f"data: {json.dumps(payload, separators=(',', ':'), default=str)}")
+    return "\n".join(lines) + "\n\n"
+
+
+@app.get("/api/events/stream")
+async def application_event_stream(request: Request) -> StreamingResponse:
+    active_manager = manager
+    subscriber = active_manager.state_events.subscribe()
+
+    async def generate():
+        try:
+            yield "retry: 3000\n\n"
+            last_event_id = request.headers.get("last-event-id", "")
+            replay = active_manager.state_events.events_after(last_event_id)
+            replayed_ids: set[str] = set()
+            if replay is None:
+                yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
+                yield _sse_message("system_state", await asyncio.to_thread(system_status))
+                connection_cursor = active_manager.state_events.cursor
+            else:
+                for event in replay:
+                    replayed_ids.add(event.id)
+                    yield _sse_message(event.type, event.data, event.id)
+                connection_cursor = replay[-1].id if replay else last_event_id
+            yield _sse_message("connected", {"instance": active_manager.state_events.instance_id}, connection_cursor)
+            next_system_update = time.monotonic() + 5.0
+            stream_deadline = time.monotonic() + 6.0
+            while True:
+                if await request.is_disconnected():
+                    return
+                if time.monotonic() >= stream_deadline:
+                    return
+                try:
+                    event = subscriber.get_nowait()
+                except queue.Empty:
+                    if time.monotonic() >= next_system_update:
+                        yield _sse_message("system_state", await asyncio.to_thread(system_status))
+                        next_system_update = time.monotonic() + 5.0
+                    await asyncio.sleep(0.2)
+                    continue
+                if event is None:
+                    return
+                if event.id in replayed_ids:
+                    continue
+                yield _sse_message(event.type, event.data, event.id)
+        finally:
+            active_manager.state_events.unsubscribe(subscriber)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/config")
