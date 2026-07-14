@@ -94,3 +94,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+openvino_model/
+yolo26n-seg_openvino_model/
+yolo26s-seg_openvino_model/
+core*
+core.1326837
+openvino_model/metadata.yaml
