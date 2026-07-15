@@ -2710,6 +2710,15 @@ function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
   return `/api/cameras/${cameraId}/recordings/day?${params.toString()}`;
 }
 
+function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return `/api/cameras/${cameraId}/recordings/window?${params.toString()}`;
+}
+
 function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
@@ -2733,6 +2742,8 @@ function RecordingsPage({ timeZone }) {
   const [source, setSource] = useState(querySource === "live" || querySource === "main" ? querySource : preferredStreamSource());
   const [date, setDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(queryDate) && queryDate <= today ? queryDate : today);
   const [recordings, setRecordings] = useState([]);
+  const [playbackRows, setPlaybackRows] = useState([]);
+  const [loadedPlaybackWindow, setLoadedPlaybackWindow] = useState(null);
   const [events, setEvents] = useState([]);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -2761,22 +2772,24 @@ function RecordingsPage({ timeZone }) {
       });
   }, [recordings]);
   const playbackTimeline = useMemo(() => {
-    if (!playbackWindow) return [];
+    if (!loadedPlaybackWindow) return [];
     let mediaOffset = 0;
-    return timeline
-      .filter((item) => item.end_epoch > playbackWindow.start && item.start_epoch < playbackWindow.end)
+    return playbackRows
+      .map((item) => ({ ...item, start_epoch: Number(item.start_epoch), end_epoch: Number(item.end_epoch) }))
+      .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
+      .sort((a, b) => a.start_epoch - b.start_epoch)
       .map((item) => {
         const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
         const mapped = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
         mediaOffset += duration;
         return mapped;
       });
-  }, [timeline, playbackWindow]);
-  const manifestUrl = activeCameraId && playbackWindow && playbackTimeline.length
-    ? recordingDayHlsUrl(activeCameraId, playbackWindow.start, playbackWindow.end, source)
+  }, [playbackRows, loadedPlaybackWindow]);
+  const manifestUrl = activeCameraId && loadedPlaybackWindow && playbackTimeline.length
+    ? recordingDayHlsUrl(activeCameraId, loadedPlaybackWindow.start, loadedPlaybackWindow.end, source)
     : "";
   const manifestStartTime = useMemo(() => {
-    if (!timeline.length) return null;
+    if (!playbackTimeline.length) return null;
     const retainedEpoch = desiredEpochRef.current;
     const initialEpoch = Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd
       ? retainedEpoch
@@ -2848,12 +2861,13 @@ function RecordingsPage({ timeZone }) {
     setPlayhead(target);
     desiredEpochRef.current = target;
     const nextWindow = windowAround(target);
-    const inCurrentWindow = playbackWindow
-      && target >= playbackWindow.start
-      && target < playbackWindow.end;
+    const inCurrentWindow = loadedPlaybackWindow
+      && target >= loadedPlaybackWindow.start
+      && target < loadedPlaybackWindow.end;
     const video = videoRef.current;
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && video && Number.isFinite(mediaTime)) {
+      setPlaybackWindow(loadedPlaybackWindow);
       setPlaybackNotice("Seeking...");
       video.currentTime = mediaTime;
       if (autoplay) video.play().catch(() => {});
@@ -2877,6 +2891,8 @@ function RecordingsPage({ timeZone }) {
     setLoading(true);
     setPlaybackError("");
     setRecordings([]);
+    setPlaybackRows([]);
+    setLoadedPlaybackWindow(null);
     setEvents([]);
     setAvailableSources([]);
     setPlaybackWindow(null);
@@ -2894,14 +2910,15 @@ function RecordingsPage({ timeZone }) {
       })
       .then((payload) => {
         const nextAvailableSources = payload.available_sources || [];
+        const nextAvailability = payload.availability || payload.recordings || [];
         setAvailableSources(nextAvailableSources);
-        if (!(payload.recordings || []).length && source === "main" && nextAvailableSources.includes("live")) {
+        if (!nextAvailability.length && source === "main" && nextAvailableSources.includes("live")) {
           codecFallbackRef.current = true;
           setPlaybackNotice("No Main recording exists for this day; using Sub.");
           setSource("live");
           return;
         }
-        setRecordings(payload.recordings || []);
+        setRecordings(nextAvailability);
         setEvents(payload.events || []);
       })
       .catch((error) => {
@@ -2912,6 +2929,32 @@ function RecordingsPage({ timeZone }) {
       });
     return () => controller.abort();
   }, [activeCameraId, source, dayStart, dayEnd]);
+
+  useEffect(() => {
+    if (!activeCameraId || !playbackWindow) return undefined;
+    const controller = new AbortController();
+    fetch(
+      recordingWindowUrl(activeCameraId, playbackWindow.start, playbackWindow.end, source),
+      { signal: controller.signal },
+    )
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Recording window failed (${response.status})`);
+        return response.json();
+      })
+      .then((payload) => {
+        const rows = payload.recordings || [];
+        if (!rows.length) throw new Error("No recording segments exist in this window");
+        setPlaybackRows(rows);
+        setLoadedPlaybackWindow(playbackWindow);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") {
+          setPlaybackNotice("");
+          setPlaybackError(error.message || "Unable to load recording window");
+        }
+      });
+    return () => controller.abort();
+  }, [activeCameraId, source, playbackWindow?.start, playbackWindow?.end]);
 
   useEffect(() => {
     if (!timeline.length || Number.isFinite(playhead)) return;
@@ -2992,8 +3035,8 @@ function RecordingsPage({ timeZone }) {
               onTimeUpdate={handleRecordingTimeUpdate}
               onSeeked={() => setPlaybackNotice("")}
               onEnded={() => {
-                if (playbackWindow && playbackWindow.end < dayEnd - 0.01) {
-                  playAt(playbackWindow.end + 0.01, true);
+                if (loadedPlaybackWindow && loadedPlaybackWindow.end < dayEnd - 0.01) {
+                  playAt(loadedPlaybackWindow.end + 0.01, true);
                 }
               }}
               onPlay={() => { autoplayRef.current = true; }}
@@ -3119,7 +3162,7 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
       <div className="recordings-v2-track">
         {recordings.map((item) => (
           <span
-            key={item.path}
+            key={item.path || `${item.start_epoch}:${item.end_epoch}`}
             style={{
               left: `${((Math.max(startEpoch, item.start_epoch) - startEpoch) / duration) * 100}%`,
               width: `${((Math.min(endEpoch, item.end_epoch) - Math.max(startEpoch, item.start_epoch)) / duration) * 100}%`,

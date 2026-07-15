@@ -442,6 +442,76 @@ class Recorder:
         self._store_recording_rows(camera_id, source, rows)
         return rows
 
+    def recording_availability_between(
+        self,
+        camera_id: str,
+        start_epoch: float,
+        end_epoch: float,
+        source: str = "main",
+    ) -> dict:
+        source = "main" if source == "main" else "live"
+        with self._index_connection() as connection:
+            indexed = connection.execute(
+                """
+                SELECT start_epoch, end_epoch
+                FROM recordings
+                WHERE camera_id = ? AND source = ? AND playable = 1
+                  AND size_bytes > 1024 AND end_epoch > ? AND start_epoch < ?
+                ORDER BY start_epoch
+                """,
+                (camera_id, source, start_epoch, end_epoch),
+            ).fetchall()
+        rows = [dict(row) for row in indexed]
+        if not rows:
+            rows = [
+                row for row in self.recording_rows_between(
+                    camera_id,
+                    start_epoch,
+                    end_epoch,
+                    source,
+                )
+                if int(row.get("size_bytes") or 0) > 1024
+            ]
+        return {
+            "ranges": self._merge_availability_rows(
+                rows,
+                start_epoch,
+                end_epoch,
+                gap_tolerance=min(5.0, max(0.25, self.segment_seconds / 2)),
+            ),
+            "segment_count": len(rows),
+        }
+
+    @staticmethod
+    def _merge_availability_rows(
+        rows: list[dict],
+        start_epoch: float,
+        end_epoch: float,
+        gap_tolerance: float = 0.25,
+    ) -> list[dict]:
+        ranges: list[dict] = []
+        for row in rows:
+            try:
+                row_start = max(start_epoch, float(row["start_epoch"]))
+                row_end = min(end_epoch, float(row["end_epoch"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if row_end <= row_start:
+                continue
+            if ranges and row_start <= float(ranges[-1]["end_epoch"]) + gap_tolerance:
+                current = ranges[-1]
+                current["end_epoch"] = max(float(current["end_epoch"]), row_end)
+                current["duration_seconds"] = float(current["end_epoch"]) - float(current["start_epoch"])
+                current["segment_count"] = int(current["segment_count"]) + 1
+                continue
+            ranges.append({
+                "start_epoch": row_start,
+                "end_epoch": row_end,
+                "duration_seconds": row_end - row_start,
+                "segment_count": 1,
+            })
+        return ranges
+
     def _recording_rows_for_files(self, camera_id: str, source: str, files: list[Path]) -> list[dict]:
         files = list(set(files))
         files.sort(key=lambda path: self.recording_start_epoch(path) or path.stat().st_mtime)

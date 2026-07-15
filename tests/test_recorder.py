@@ -94,6 +94,52 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(indexed, 0)
 
+    def test_recording_availability_merges_segments_but_preserves_gaps(self) -> None:
+        rows = [
+            {"start_epoch": 100.0, "end_epoch": 110.0},
+            {"start_epoch": 110.1, "end_epoch": 120.0},
+            {"start_epoch": 140.0, "end_epoch": 150.0},
+        ]
+
+        ranges = Recorder._merge_availability_rows(rows, 105.0, 145.0)
+
+        self.assertEqual(ranges, [
+            {
+                "start_epoch": 105.0,
+                "end_epoch": 120.0,
+                "duration_seconds": 15.0,
+                "segment_count": 2,
+            },
+            {
+                "start_epoch": 140.0,
+                "end_epoch": 145.0,
+                "duration_seconds": 5.0,
+                "segment_count": 1,
+            },
+        ])
+
+    def test_recording_availability_returns_compact_index_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            rows = []
+            for index, start_epoch in enumerate((1_784_000_000.0, 1_784_000_012.0, 1_784_000_040.0)):
+                clip = Path(tmpdir) / f"clip-{index}.mp4"
+                clip.write_bytes(b"x" * 2048)
+                rows.append(self._row(clip, start_epoch=start_epoch))
+            recorder._store_recording_rows("front-door", "main", rows)
+
+            availability = recorder.recording_availability_between(
+                "front-door",
+                1_784_000_000.0,
+                1_784_000_060.0,
+            )
+
+        self.assertEqual(availability["segment_count"], 3)
+        self.assertEqual(len(availability["ranges"]), 2)
+        self.assertEqual(availability["ranges"][0]["segment_count"], 2)
+        self.assertEqual(availability["ranges"][1]["segment_count"], 1)
+        self.assertNotIn("path", availability["ranges"][0])
+
     def test_incremental_pruner_removes_missing_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

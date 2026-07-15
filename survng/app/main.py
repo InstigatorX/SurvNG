@@ -1523,10 +1523,16 @@ def recording_day(
     if end_epoch <= start_epoch or end_epoch - start_epoch > 90000:
         raise HTTPException(status_code=400, detail="invalid recording day range")
     selected_source = recording_source(source)
-    rows = _recording_day_rows(camera_id, start_epoch, end_epoch, selected_source)
+    source_availability = {
+        candidate: manager.recorder.recording_availability_between(
+            camera_id, start_epoch, end_epoch, candidate
+        )
+        for candidate in ("main", "live")
+    }
+    availability = source_availability[selected_source]
     available_sources = [
         candidate for candidate in ("main", "live")
-        if _recording_day_rows(camera_id, start_epoch, end_epoch, candidate)
+        if int(source_availability[candidate]["segment_count"]) > 0
     ]
     events = manager.events.for_camera_range(
         camera_id,
@@ -1539,9 +1545,31 @@ def recording_day(
         "source": selected_source,
         "start_epoch": start_epoch,
         "end_epoch": end_epoch,
-        "recordings": rows,
+        "recordings": availability["ranges"],
+        "availability": availability["ranges"],
+        "recording_count": availability["segment_count"],
         "events": [_event_row(event) for event in events],
         "available_sources": available_sources,
+    }
+
+
+@app.get("/api/cameras/{camera_id}/recordings/window")
+def recording_window(
+    camera_id: str,
+    start_epoch: float,
+    end_epoch: float,
+    source: str = "main",
+) -> dict:
+    if end_epoch <= start_epoch or end_epoch - start_epoch > 3600:
+        raise HTTPException(status_code=400, detail="invalid recording window range")
+    selected_source = recording_source(source)
+    rows = _recording_day_rows(camera_id, start_epoch, end_epoch, selected_source)
+    return {
+        "camera_id": camera_id,
+        "source": selected_source,
+        "start_epoch": start_epoch,
+        "end_epoch": end_epoch,
+        "recordings": rows,
     }
 
 
