@@ -1910,19 +1910,20 @@ def recording_day_hls_playlist(
     media_offset = 0.0
     previous_fingerprint: str | None = None
     fingerprints = resolve_stream_fingerprints([row.get("stream_fingerprint") for row in rows])
-    for index, (row, stream_fingerprint) in enumerate(zip(rows, fingerprints)):
+    for row, stream_fingerprint in zip(rows, fingerprints):
         row_start = float(row["start_epoch"])
+        segment_name = quote(str(row["name"]), safe="")
         segment_query = f"{query}&media_offset={media_offset:.3f}"
         map_lines, previous_fingerprint = hls_map_transition(
             previous_fingerprint,
             stream_fingerprint,
-            f"day/{index}/init.mp4?{segment_query}",
+            f"day/segment/{segment_name}/init.mp4?{segment_query}",
         )
         lines.extend(map_lines)
         lines.extend([
             f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
             f"#EXTINF:{float(row['duration_seconds']):.3f},",
-            f"day/{index}.m4s?{segment_query}",
+            f"day/segment/{segment_name}/media.m4s?{segment_query}",
         ])
         media_offset += float(row["duration_seconds"])
     lines.append("#EXT-X-ENDLIST")
@@ -1935,48 +1936,55 @@ def recording_day_hls_playlist(
 
 def _recording_day_fmp4_paths(
     camera_id: str,
-    segment_index: int,
+    segment_name: str,
     start_epoch: float,
     end_epoch: float,
     source: str = "main",
     media_offset: float = 0.0,
 ) -> tuple[Path, Path]:
     rows = _recording_day_rows(camera_id, start_epoch, end_epoch, source)
-    if segment_index < 0 or segment_index >= len(rows):
+    if not segment_name or Path(segment_name).name != segment_name:
         raise HTTPException(status_code=404, detail="recording segment not found")
-    path = Path(rows[segment_index]["path"])
+    segment_index = next(
+        (index for index, row in enumerate(rows) if str(row.get("name") or "") == segment_name),
+        None,
+    )
+    if segment_index is None:
+        raise HTTPException(status_code=404, detail="recording segment not found")
+    row = rows[segment_index]
+    path = Path(row["path"])
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="recording file not found")
-    segment_duration = max(0.1, min(float(rows[segment_index]["duration_seconds"]), 300.0))
+    segment_duration = max(0.1, min(float(row["duration_seconds"]), 300.0))
     expected_offset = sum(float(row["duration_seconds"]) for row in rows[:segment_index])
     if abs(media_offset - expected_offset) > 0.1:
         media_offset = expected_offset
     return _recording_fmp4_files(path, segment_duration, media_offset)
 
 
-@app.get("/api/cameras/{camera_id}/recordings/day/{segment_index}/init.mp4")
+@app.get("/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/init.mp4")
 def recording_day_hls_init(
     camera_id: str,
-    segment_index: int,
+    segment_name: str,
     start_epoch: float,
     end_epoch: float,
     source: str = "main",
     media_offset: float = 0.0,
 ) -> FileResponse:
-    init_path, _ = _recording_day_fmp4_paths(camera_id, segment_index, start_epoch, end_epoch, source, media_offset)
+    init_path, _ = _recording_day_fmp4_paths(camera_id, segment_name, start_epoch, end_epoch, source, media_offset)
     return FileResponse(init_path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=86400"})
 
 
-@app.get("/api/cameras/{camera_id}/recordings/day/{segment_index}.m4s")
+@app.get("/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/media.m4s")
 def recording_day_hls_segment(
     camera_id: str,
-    segment_index: int,
+    segment_name: str,
     start_epoch: float,
     end_epoch: float,
     source: str = "main",
     media_offset: float = 0.0,
 ) -> FileResponse:
-    _, media_path = _recording_day_fmp4_paths(camera_id, segment_index, start_epoch, end_epoch, source, media_offset)
+    _, media_path = _recording_day_fmp4_paths(camera_id, segment_name, start_epoch, end_epoch, source, media_offset)
     return FileResponse(media_path, media_type="video/iso.segment", headers={"Cache-Control": "private, max-age=86400"})
 
 
@@ -2038,11 +2046,12 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
     media_offset = 0.0
     previous_fingerprint: str | None = None
     fingerprints = resolve_stream_fingerprints([row.get("stream_fingerprint") for row in rows])
-    for index, (row, stream_fingerprint) in enumerate(zip(rows, fingerprints)):
+    for row, stream_fingerprint in zip(rows, fingerprints):
         row_start = float(row["start_epoch"])
+        segment_name = quote(str(row["name"]), safe="")
         segment_query = f"{query}&media_offset={media_offset:.3f}"
         map_uri = (
-            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/{index}/init.mp4?"
+            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/init.mp4?"
             f"{segment_query}"
         )
         map_lines, previous_fingerprint = hls_map_transition(
@@ -2054,7 +2063,7 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
         lines.extend([
             f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
             f"#EXTINF:{float(row['duration_seconds']):.3f},",
-            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/{index}.m4s?{segment_query}",
+            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/media.m4s?{segment_query}",
         ])
         media_offset += float(row["duration_seconds"])
     lines.append("#EXT-X-ENDLIST")
