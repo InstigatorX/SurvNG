@@ -2832,9 +2832,11 @@ function RecordingsPage({ timeZone }) {
   }
 
   function windowAround(epoch) {
+    const windowSeconds = 15 * 60;
+    const start = Math.max(dayStart, epoch);
     return {
-      start: Math.max(dayStart, epoch),
-      end: Math.min(dayEnd, epoch + 60),
+      start,
+      end: Math.min(dayEnd, start + windowSeconds),
     };
   }
 
@@ -2845,8 +2847,21 @@ function RecordingsPage({ timeZone }) {
     setPlaybackError("");
     setPlayhead(target);
     desiredEpochRef.current = target;
-    setPlaybackNotice("Seeking...");
-    setPlaybackWindow(windowAround(target));
+    const nextWindow = windowAround(target);
+    const inCurrentWindow = playbackWindow
+      && target >= playbackWindow.start
+      && target < playbackWindow.end;
+    const video = videoRef.current;
+    const mediaTime = epochToPlaybackMediaTime(target);
+    if (inCurrentWindow && video && Number.isFinite(mediaTime)) {
+      setPlaybackNotice("Seeking...");
+      video.currentTime = mediaTime;
+      if (autoplay) video.play().catch(() => {});
+      else setPlaybackNotice("");
+    } else {
+      setPlaybackNotice("Loading recording...");
+      setPlaybackWindow(nextWindow);
+    }
   }
 
   useEffect(() => {
@@ -2964,7 +2979,6 @@ function RecordingsPage({ timeZone }) {
         <div className="recordings-v2-player">
           {manifestUrl ? (
             <ShakaVideo
-              key={manifestUrl}
               ref={videoRef}
               src={manifestUrl}
               mimeType="application/vnd.apple.mpegurl"
@@ -2976,6 +2990,7 @@ function RecordingsPage({ timeZone }) {
               onReady={handleRecordingReady}
               onError={handleRecordingError}
               onTimeUpdate={handleRecordingTimeUpdate}
+              onSeeked={() => setPlaybackNotice("")}
               onEnded={() => {
                 if (playbackWindow && playbackWindow.end < dayEnd - 0.01) {
                   playAt(playbackWindow.end + 0.01, true);
