@@ -2733,6 +2733,7 @@ function RecordingsPage({ timeZone }) {
   const desiredEpochRef = useRef(null);
   const autoplayRef = useRef(false);
   const codecFallbackRef = useRef(false);
+  const playbackRequestRef = useRef(0);
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const queryDate = initialQuery.get("date") || today;
@@ -2742,8 +2743,7 @@ function RecordingsPage({ timeZone }) {
   const [source, setSource] = useState(querySource === "live" || querySource === "main" ? querySource : preferredStreamSource());
   const [date, setDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(queryDate) && queryDate <= today ? queryDate : today);
   const [recordings, setRecordings] = useState([]);
-  const [playbackRows, setPlaybackRows] = useState([]);
-  const [loadedPlaybackWindow, setLoadedPlaybackWindow] = useState(null);
+  const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
@@ -2772,9 +2772,9 @@ function RecordingsPage({ timeZone }) {
       });
   }, [recordings]);
   const playbackTimeline = useMemo(() => {
-    if (!loadedPlaybackWindow) return [];
+    if (!playbackDetail) return [];
     let mediaOffset = 0;
-    return playbackRows
+    return playbackDetail.rows
       .map((item) => ({ ...item, start_epoch: Number(item.start_epoch), end_epoch: Number(item.end_epoch) }))
       .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
       .sort((a, b) => a.start_epoch - b.start_epoch)
@@ -2784,9 +2784,10 @@ function RecordingsPage({ timeZone }) {
         mediaOffset += duration;
         return mapped;
       });
-  }, [playbackRows, loadedPlaybackWindow]);
-  const manifestUrl = activeCameraId && loadedPlaybackWindow && playbackTimeline.length
-    ? recordingDayHlsUrl(activeCameraId, loadedPlaybackWindow.start, loadedPlaybackWindow.end, source)
+  }, [playbackDetail]);
+  const loadedPlaybackWindow = playbackDetail;
+  const manifestUrl = activeCameraId && playbackDetail && playbackTimeline.length
+    ? recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)
     : "";
   const manifestStartTime = useMemo(() => {
     if (!playbackTimeline.length) return null;
@@ -2867,7 +2868,8 @@ function RecordingsPage({ timeZone }) {
     const video = videoRef.current;
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && video && Number.isFinite(mediaTime)) {
-      setPlaybackWindow(loadedPlaybackWindow);
+      playbackRequestRef.current += 1;
+      setPlaybackWindow(null);
       setPlaybackNotice("Seeking...");
       video.currentTime = mediaTime;
       if (autoplay) video.play().catch(() => {});
@@ -2891,8 +2893,8 @@ function RecordingsPage({ timeZone }) {
     setLoading(true);
     setPlaybackError("");
     setRecordings([]);
-    setPlaybackRows([]);
-    setLoadedPlaybackWindow(null);
+    playbackRequestRef.current += 1;
+    setPlaybackDetail(null);
     setEvents([]);
     setAvailableSources([]);
     setPlaybackWindow(null);
@@ -2933,8 +2935,10 @@ function RecordingsPage({ timeZone }) {
   useEffect(() => {
     if (!activeCameraId || !playbackWindow) return undefined;
     const controller = new AbortController();
+    const requestId = ++playbackRequestRef.current;
+    const requestedWindow = { ...playbackWindow };
     fetch(
-      recordingWindowUrl(activeCameraId, playbackWindow.start, playbackWindow.end, source),
+      recordingWindowUrl(activeCameraId, requestedWindow.start, requestedWindow.end, source),
       { signal: controller.signal },
     )
       .then(async (response) => {
@@ -2942,13 +2946,13 @@ function RecordingsPage({ timeZone }) {
         return response.json();
       })
       .then((payload) => {
+        if (controller.signal.aborted || requestId !== playbackRequestRef.current) return;
         const rows = payload.recordings || [];
         if (!rows.length) throw new Error("No recording segments exist in this window");
-        setPlaybackRows(rows);
-        setLoadedPlaybackWindow(playbackWindow);
+        setPlaybackDetail({ ...requestedWindow, rows });
       })
       .catch((error) => {
-        if (error.name !== "AbortError") {
+        if (error.name !== "AbortError" && requestId === playbackRequestRef.current) {
           setPlaybackNotice("");
           setPlaybackError(error.message || "Unable to load recording window");
         }

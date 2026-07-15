@@ -43,6 +43,41 @@ try {
     element.addEventListener("playing", () => { window.__recordingSoak.playing += 1; });
   });
 
+  const track = page.locator(".recordings-v2-track");
+  const trackBox = await track.boundingBox();
+  const ranges = await page.locator(".recordings-v2-track > span").evaluateAll((elements) => (
+    elements.map((element) => ({
+      left: Number.parseFloat(element.style.left),
+      width: Number.parseFloat(element.style.width),
+    })).filter((range) => Number.isFinite(range.left) && Number.isFinite(range.width) && range.width > 0)
+  ));
+  if (!trackBox || !ranges.length) throw new Error("recording timeline has no availability ranges");
+  const firstRange = ranges[0];
+  const lastRange = ranges[ranges.length - 1];
+  const earlyPercent = firstRange.left + Math.min(firstRange.width * 0.15, 0.5);
+  const latePercent = lastRange.left + Math.max(lastRange.width * 0.85, lastRange.width - 0.5);
+  if (latePercent - earlyPercent < 2) throw new Error("recording day is too short for cross-window scrubbing");
+
+  for (const [index, percent] of [earlyPercent, latePercent, earlyPercent].entries()) {
+    const manifestRequest = page.waitForRequest(
+      (request) => request.url().includes("/recordings/day.m3u8?"),
+      { timeout: 20_000 },
+    );
+    await page.mouse.click(trackBox.x + (trackBox.width * percent) / 100, trackBox.y + trackBox.height / 2);
+    await manifestRequest;
+    await page.waitForFunction(() => {
+      const element = document.querySelector(".recordings-v2-player video");
+      return element && !element.seeking && element.readyState >= 2 && element.videoWidth > 0;
+    }, null, { timeout: 30_000 });
+    const before = await video.evaluate(async (element) => {
+      await element.play();
+      return element.currentTime;
+    });
+    await page.waitForTimeout(1500);
+    const after = await video.evaluate((element) => element.currentTime);
+    if (after < before + 0.5) failures.push(`window scrub ${index + 1}: playback did not advance (${before.toFixed(2)} -> ${after.toFixed(2)})`);
+  }
+
   const duration = await video.evaluate((element) => element.duration);
   if (!Number.isFinite(duration) || duration < 30) throw new Error(`invalid media duration ${duration}`);
   const stride = Math.max(11, Math.floor(duration / (scrubCount + 2)));

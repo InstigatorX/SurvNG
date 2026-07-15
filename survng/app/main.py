@@ -37,7 +37,7 @@ from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_c
 from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
-from .recording_media import hls_map_transition, mp4_stream_fingerprint
+from .recording_media import hls_map_transition
 from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
@@ -1808,7 +1808,7 @@ def recording_day_hls_playlist(
         segment_query = f"{query}&media_offset={media_offset:.3f}"
         map_lines, previous_fingerprint = hls_map_transition(
             previous_fingerprint,
-            mp4_stream_fingerprint(Path(str(row["path"]))),
+            str(row.get("stream_fingerprint") or ""),
             f"day/{index}/init.mp4?{segment_query}",
         )
         lines.extend(map_lines)
@@ -1939,7 +1939,7 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
         )
         map_lines, previous_fingerprint = hls_map_transition(
             previous_fingerprint,
-            mp4_stream_fingerprint(Path(str(row["path"]))),
+            str(row.get("stream_fingerprint") or ""),
             map_uri,
         )
         lines.extend(map_lines)

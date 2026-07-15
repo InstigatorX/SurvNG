@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .baichuan_native import BaichuanFfmpegPipe, ffmpeg_input_args, is_native_baichuan, start_ffmpeg_pipe
 from .config import CameraConfig
+from .recording_media import mp4_stream_fingerprint
 
 
 ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event, threading.Thread]
@@ -59,7 +60,8 @@ class Recorder:
                     end_epoch REAL NOT NULL,
                     playable INTEGER NOT NULL DEFAULT 1,
                     health_error TEXT NOT NULL DEFAULT '',
-                    validated INTEGER NOT NULL DEFAULT 0
+                    validated INTEGER NOT NULL DEFAULT 0,
+                    stream_fingerprint TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -73,6 +75,8 @@ class Recorder:
                 connection.execute("ALTER TABLE recordings ADD COLUMN health_error TEXT NOT NULL DEFAULT ''")
             if "validated" not in columns:
                 connection.execute("ALTER TABLE recordings ADD COLUMN validated INTEGER NOT NULL DEFAULT 0")
+            if "stream_fingerprint" not in columns:
+                connection.execute("ALTER TABLE recordings ADD COLUMN stream_fingerprint TEXT NOT NULL DEFAULT ''")
 
     def start(self, camera: CameraConfig, source: str = "main") -> None:
         source = camera.normalized_source(source, default="main")
@@ -405,7 +409,8 @@ class Recorder:
         with self._index_connection() as connection:
             indexed = connection.execute(
                 """
-                SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source, playable, health_error
+                SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source,
+                       playable, health_error, stream_fingerprint
                 FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1 AND end_epoch > ? AND start_epoch < ?
                 ORDER BY start_epoch
@@ -568,6 +573,7 @@ class Recorder:
                     row["playable"] = not error
                     row["health_error"] = error
                     row["validated"] = True
+                    row["stream_fingerprint"] = mp4_stream_fingerprint(Path(row["path"]))
                     if duration is not None and row.get("start_epoch") is not None:
                         row["duration_seconds"] = duration
                         row["end_epoch"] = float(row["start_epoch"]) + duration
@@ -581,19 +587,25 @@ class Recorder:
                 row["start_epoch"], row["duration_seconds"], row["end_epoch"],
                 1 if row.get("playable", True) else 0, str(row.get("health_error") or ""),
                 1 if row.get("validated", False) else 0,
+                str(row.get("stream_fingerprint") or ""),
             )
             for row in rows
         ]
         with self._index_connection() as connection:
             connection.executemany(
                 """
-                INSERT INTO recordings(path, camera_id, source, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, playable, health_error, validated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO recordings(path, camera_id, source, name, size_bytes, modified_at, start_epoch,
+                                       duration_seconds, end_epoch, playable, health_error, validated, stream_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size_bytes=excluded.size_bytes,
                     modified_at=excluded.modified_at,
                     duration_seconds=excluded.duration_seconds,
-                    end_epoch=excluded.end_epoch
+                    end_epoch=excluded.end_epoch,
+                    stream_fingerprint=CASE
+                        WHEN excluded.stream_fingerprint != '' THEN excluded.stream_fingerprint
+                        ELSE recordings.stream_fingerprint
+                    END
                 """,
                 values,
             )
@@ -696,10 +708,14 @@ class Recorder:
                     connection.execute(
                         """
                         UPDATE recordings
-                        SET duration_seconds = ?, end_epoch = start_epoch + ?, playable = ?, health_error = ?, validated = 1
+                        SET duration_seconds = ?, end_epoch = start_epoch + ?, playable = ?, health_error = ?,
+                            validated = 1, stream_fingerprint = ?
                         WHERE path = ?
                         """,
-                        (duration, duration, 0 if error else 1, error, str(path)),
+                        (
+                            duration, duration, 0 if error else 1, error,
+                            mp4_stream_fingerprint(path), str(path),
+                        ),
                     )
                 else:
                     connection.execute(
