@@ -37,7 +37,13 @@ from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_c
 from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
-from .incident_utils import event_snapshot_path, stable_incident_id, stable_incident_key
+from .incident_utils import (
+    event_epoch,
+    event_snapshot_path,
+    incident_event_groups,
+    stable_incident_id,
+    stable_incident_key,
+)
 from .recording_media import hls_map_transition, resolve_stream_fingerprints
 from .zones import apply_detection_zones, detection_threshold
 
@@ -1028,10 +1034,10 @@ def event_snapshot(event_id: int) -> FileResponse:
 
 @app.get("/api/incidents")
 def incidents(limit: int = 200, gap_seconds: int = 45) -> list[dict]:
-    rows = [_event_row(row) for row in manager.events.recent(max(limit, 1))]
-    return _incidents_with_faces(
-        _incident_rows(rows, gap_seconds=max(5, min(gap_seconds, 300)))
-    )
+    bounded_limit = max(1, min(limit, 200))
+    bounded_gap = max(5, min(gap_seconds, 300))
+    summaries = _recent_incident_summaries(bounded_limit, bounded_gap)
+    return _incidents_with_faces(_hydrate_incidents(summaries))
 
 
 @app.get("/api/incidents/search")
@@ -1063,15 +1069,15 @@ def incident_search(
     bounded_gap = max(5, min(gap_seconds, 300))
     query_start = day_start.astimezone(timezone.utc) - timedelta(seconds=bounded_gap)
     query_end = day_end.astimezone(timezone.utc) + timedelta(seconds=bounded_gap)
-    rows = [
+    compact_rows = [
         _event_row(row)
-        for row in manager.events.between(query_start.isoformat(), query_end.isoformat())
+        for row in manager.events.between_compact(query_start.isoformat(), query_end.isoformat())
     ]
     day_start_epoch = day_start.timestamp()
     day_end_epoch = day_end.timestamp()
     day_incidents = [
         incident
-        for incident in _incident_rows(rows, gap_seconds=bounded_gap)
+        for incident in _incident_rows(compact_rows, gap_seconds=bounded_gap)
         if incident["last_epoch"] >= day_start_epoch and incident["start_epoch"] < day_end_epoch
     ]
     facets = {
@@ -1090,7 +1096,8 @@ def incident_search(
         filtered = [item for item in filtered if zone in item.get("zones", [])]
     bounded_limit = max(1, min(limit, 100))
     bounded_offset = max(0, offset)
-    page_items = filtered[bounded_offset:bounded_offset + bounded_limit]
+    page_summaries = filtered[bounded_offset:bounded_offset + bounded_limit]
+    page_items = _hydrate_incidents(page_summaries)
     return {
         "items": _incidents_with_faces(page_items),
         "total": len(filtered),
@@ -2043,9 +2050,9 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
     if not camera_id:
         raise HTTPException(status_code=400, detail="event is missing camera")
     before_seconds, after_seconds = _event_clip_window(before, after)
-    event_epoch = _event_epoch(enriched)
-    window_start = event_epoch - before_seconds
-    window_end = event_epoch + after_seconds
+    event_created_epoch = event_epoch(enriched)
+    window_start = event_created_epoch - before_seconds
+    window_end = event_created_epoch + after_seconds
     selected_source = recording_source(source)
     rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
     if not rows:
@@ -2124,10 +2131,6 @@ def _event_row(row: dict) -> dict:
     return event
 
 
-def _event_epoch(event: dict) -> float:
-    return datetime.fromisoformat(event["created_at"]).timestamp()
-
-
 def _best_incident_event(events: list[dict]) -> dict:
     object_events = [event for event in events if event.get("has_objects")]
     candidates = object_events or events
@@ -2141,27 +2144,52 @@ def _best_incident_event(events: list[dict]) -> dict:
 
 
 def _incident_rows(rows: list[dict], gap_seconds: int = 45) -> list[dict]:
-    by_camera: dict[str, list[dict]] = {}
-    for event in rows:
-        by_camera.setdefault(str(event.get("camera_id") or ""), []).append(event)
+    return [
+        _incident_row(camera_id, events)
+        for camera_id, events in incident_event_groups(rows, gap_seconds)
+    ]
 
-    incidents: list[dict] = []
-    for camera_id, camera_events in by_camera.items():
-        ordered = sorted(camera_events, key=_event_epoch)
-        current: list[dict] = []
-        current_end = 0.0
-        for event in ordered:
-            event_epoch = _event_epoch(event)
-            if current and event_epoch - current_end > gap_seconds:
-                incidents.append(_incident_row(camera_id, current))
-                current = []
-            current.append(event)
-            current_end = event_epoch
-        if current:
-            incidents.append(_incident_row(camera_id, current))
 
-    incidents.sort(key=lambda item: item["last_epoch"], reverse=True)
-    return incidents
+def _recent_incident_summaries(limit: int, gap_seconds: int) -> list[dict]:
+    batch_size = max(500, min(5000, limit * 8))
+    compact_rows: list[dict] = []
+    before_created_at: str | None = None
+    before_id: int | None = None
+
+    while True:
+        batch = manager.events.recent_compact(batch_size, before_created_at, before_id)
+        if not batch:
+            return _incident_rows(compact_rows, gap_seconds)[:limit]
+        compact_rows.extend(_event_row(row) for row in batch)
+        summaries = _incident_rows(compact_rows, gap_seconds)
+        if len(summaries) > limit or len(batch) < batch_size:
+            return summaries[:limit]
+        oldest = batch[-1]
+        before_created_at = str(oldest["created_at"])
+        before_id = int(oldest["id"])
+
+
+def _hydrate_incidents(summaries: list[dict]) -> list[dict]:
+    event_ids = [
+        int(event["id"])
+        for summary in summaries
+        for event in summary.get("events", [])
+        if str(event.get("id", "")).isdigit()
+    ]
+    full_events = {
+        int(event["id"]): _event_row(event)
+        for event in manager.events.get_many(event_ids)
+    }
+    hydrated: list[dict] = []
+    for summary in summaries:
+        events = [
+            full_events[int(event["id"])]
+            for event in summary.get("events", [])
+            if int(event.get("id") or 0) in full_events
+        ]
+        if events:
+            hydrated.append(_incident_row(str(summary.get("camera_id") or ""), events))
+    return hydrated
 
 
 def _incidents_with_faces(incidents: list[dict]) -> list[dict]:
@@ -2232,15 +2260,15 @@ def _incident_event_payload(event: dict) -> dict:
 
 
 def _incident_row(camera_id: str, events: list[dict]) -> dict:
-    ordered = sorted(events, key=_event_epoch)
+    ordered = sorted(events, key=event_epoch)
     first = ordered[0]
     last = ordered[-1]
     representative = _best_incident_event(ordered)
     representative_payload = _incident_event_payload(representative)
     labels = sorted({label for event in ordered for label in event.get("labels", [])})
     zones = sorted({zone for event in ordered for zone in event.get("zones", [])})
-    start_epoch = _event_epoch(first)
-    last_epoch = _event_epoch(last)
+    start_epoch = event_epoch(first)
+    last_epoch = event_epoch(last)
     object_count = sum(1 for event in ordered if event.get("has_objects"))
     incident = {
         **representative_payload,
@@ -2267,7 +2295,7 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
 
 def _recording_event_row(event: dict, recordings: list[dict]) -> dict:
     event = _event_row(event)
-    created_epoch = _event_epoch(event)
+    created_epoch = event_epoch(event)
     first_start = float(recordings[0]["start_epoch"])
     event["timeline_offset"] = max(0.0, created_epoch - first_start)
     return event
@@ -2298,11 +2326,11 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     if not camera_id:
         raise HTTPException(status_code=400, detail="event is missing camera")
 
-    event_epoch = _event_epoch(event)
+    event_created_epoch = event_epoch(event)
     window_before = max(0.0, min(float(before or 5.0), 3600.0))
     window_after = max(0.0, min(float(after or 5.0), 3600.0))
-    window_start = event_epoch - window_before
-    window_end = event_epoch + window_after
+    window_start = event_created_epoch - window_before
+    window_end = event_created_epoch + window_after
 
     rows = [
         row for row in _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT, source=recording_source(source))

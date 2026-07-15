@@ -8,6 +8,8 @@ from typing import Any
 
 
 class EventStore:
+    COMPACT_COLUMNS = "id, camera_id, kind, objects_json, created_at"
+
     def __init__(self, storage_dir: Path) -> None:
         self.db_path = storage_dir / "survng.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +135,59 @@ class EventStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def recent_compact(
+        self,
+        limit: int = 500,
+        before_created_at: str | None = None,
+        before_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 10000))
+        with self._connect() as conn:
+            if before_created_at is None or before_id is None:
+                rows = conn.execute(
+                    f"select {self.COMPACT_COLUMNS} from events order by created_at desc, id desc limit ?",
+                    (bounded_limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    select {self.COMPACT_COLUMNS} from events
+                    where created_at < ? or (created_at = ? and id < ?)
+                    order by created_at desc, id desc
+                    limit ?
+                    """,
+                    (before_created_at, before_created_at, int(before_id), bounded_limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def between_compact(self, start_at: str, end_at: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select {self.COMPACT_COLUMNS} from events
+                where created_at >= ? and created_at < ?
+                order by created_at desc, id desc
+                """,
+                (start_at, end_at),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_many(self, event_ids: list[int]) -> list[dict[str, Any]]:
+        unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+        if not unique_ids:
+            return []
+        events: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            for offset in range(0, len(unique_ids), 500):
+                chunk = unique_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"select * from events where id in ({placeholders})",
+                    chunk,
+                ).fetchall()
+                events.extend(dict(row) for row in rows)
+        return events
 
     def between(self, start_at: str, end_at: str, limit: int = 50000) -> list[dict[str, Any]]:
         with self._connect() as conn:

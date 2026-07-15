@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from survng.app.incident_utils import event_snapshot_path, stable_incident_id, stable_incident_key
+from survng.app.incident_utils import (
+    event_snapshot_path,
+    incident_event_groups,
+    stable_incident_id,
+    stable_incident_key,
+)
 
 
 class IncidentIdentityTest(unittest.TestCase):
@@ -21,6 +26,28 @@ class IncidentIdentityTest(unittest.TestCase):
     def test_incident_id_is_distinct_for_camera_and_first_event(self) -> None:
         self.assertNotEqual(stable_incident_id("front-door", 41), stable_incident_id("front-door", 42))
         self.assertNotEqual(stable_incident_id("front-door", 41), stable_incident_id("back-door", 41))
+
+    def test_grouping_keeps_noisy_camera_separate_from_other_recent_incidents(self) -> None:
+        rows = [
+            {
+                "id": index + 1,
+                "camera_id": "noisy-camera",
+                "created_at": f"2026-07-15T12:00:{index:02d}+00:00",
+            }
+            for index in range(30)
+        ]
+        rows.extend([
+            {"id": 101, "camera_id": "front-door", "created_at": "2026-07-15T12:01:00+00:00"},
+            {"id": 102, "camera_id": "front-door", "created_at": "2026-07-15T12:02:00+00:00"},
+            {"id": 103, "camera_id": "gate", "created_at": "2026-07-15T12:03:00+00:00"},
+        ])
+
+        groups = incident_event_groups(rows, gap_seconds=45)
+
+        self.assertEqual(len(groups), 4)
+        self.assertEqual([camera_id for camera_id, _ in groups], ["gate", "front-door", "front-door", "noisy-camera"])
+        noisy_group = next(events for camera_id, events in groups if camera_id == "noisy-camera")
+        self.assertEqual(len(noisy_group), 30)
 
 
 class EventSnapshotPathTest(unittest.TestCase):
