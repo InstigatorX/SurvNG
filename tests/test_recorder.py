@@ -173,6 +173,33 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["playable"], 1)
         self.assertEqual(indexed["validated"], 1)
 
+    def test_fingerprint_backfill_is_independent_of_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "already-validated.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            row["validated"] = True
+            recorder._store_recording_rows("front-door", "main", [row])
+            recorder.queue_stream_fingerprints(recorder.recording_rows_between(
+                "front-door",
+                row["start_epoch"] - 1,
+                row["end_epoch"] + 1,
+            ))
+
+            with patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v1"):
+                updated = recorder._backfill_stream_fingerprints(limit=1)
+            with recorder._index_connection() as connection:
+                indexed = dict(connection.execute(
+                    "SELECT stream_fingerprint, fingerprint_checked, validated FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(indexed["stream_fingerprint"], "stream-v1")
+        self.assertEqual(indexed["fingerprint_checked"], 1)
+        self.assertEqual(indexed["validated"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

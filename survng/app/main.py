@@ -37,7 +37,7 @@ from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_c
 from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
-from .recording_media import hls_map_transition
+from .recording_media import hls_map_transition, resolve_stream_fingerprints
 from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
@@ -1591,6 +1591,7 @@ def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, so
         )
         if int(row.get("size_bytes") or 0) > 1024
     ]
+    manager.recorder.queue_stream_fingerprints(rows)
     with RECORDING_DAY_CACHE_LOCK:
         RECORDING_DAY_CACHE[cache_key] = (now, rows)
         expired = [key for key, value in RECORDING_DAY_CACHE.items() if now - value[0] >= RECORDING_DAY_CACHE_SECONDS]
@@ -1803,12 +1804,13 @@ def recording_day_hls_playlist(
     ]
     media_offset = 0.0
     previous_fingerprint: str | None = None
-    for index, row in enumerate(rows):
+    fingerprints = resolve_stream_fingerprints([row.get("stream_fingerprint") for row in rows])
+    for index, (row, stream_fingerprint) in enumerate(zip(rows, fingerprints)):
         row_start = float(row["start_epoch"])
         segment_query = f"{query}&media_offset={media_offset:.3f}"
         map_lines, previous_fingerprint = hls_map_transition(
             previous_fingerprint,
-            str(row.get("stream_fingerprint") or ""),
+            stream_fingerprint,
             f"day/{index}/init.mp4?{segment_query}",
         )
         lines.extend(map_lines)
@@ -1930,7 +1932,8 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
     ]
     media_offset = 0.0
     previous_fingerprint: str | None = None
-    for index, row in enumerate(rows):
+    fingerprints = resolve_stream_fingerprints([row.get("stream_fingerprint") for row in rows])
+    for index, (row, stream_fingerprint) in enumerate(zip(rows, fingerprints)):
         row_start = float(row["start_epoch"])
         segment_query = f"{query}&media_offset={media_offset:.3f}"
         map_uri = (
@@ -1939,7 +1942,7 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
         )
         map_lines, previous_fingerprint = hls_map_transition(
             previous_fingerprint,
-            str(row.get("stream_fingerprint") or ""),
+            stream_fingerprint,
             map_uri,
         )
         lines.extend(map_lines)

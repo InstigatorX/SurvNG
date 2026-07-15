@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from survng.app.recording_media import hls_map_transition, mp4_stream_fingerprint
+from survng.app.recording_media import (
+    hls_map_transition,
+    mp4_stream_fingerprint,
+    resolve_stream_fingerprints,
+)
 
 
 def box(box_type: bytes, payload: bytes) -> bytes:
@@ -50,6 +54,15 @@ def recording_file(video_entry: bytes, audio_entry: bytes | None = None, noise: 
 
 
 class RecordingMediaTest(unittest.TestCase):
+    def test_unknown_fingerprints_do_not_create_false_transitions(self) -> None:
+        self.assertEqual(
+            resolve_stream_fingerprints(["", "h265", "", "h264", "", ""]),
+            ["h265", "h265", "h265", "h264", "h264", "h264"],
+        )
+
+    def test_all_unknown_fingerprints_remain_unknown(self) -> None:
+        self.assertEqual(resolve_stream_fingerprints(["", None, ""]), ["", "", ""])
+
     def test_fingerprint_uses_stream_metadata_not_unrelated_boxes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             first = Path(tmpdir) / "first.mp4"

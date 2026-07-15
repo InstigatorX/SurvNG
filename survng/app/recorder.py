@@ -6,6 +6,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,6 +37,9 @@ class Recorder:
         self._index_stop = threading.Event()
         self._index_thread: threading.Thread | None = None
         self._prune_cursor = 0
+        self._fingerprint_pending: deque[str] = deque()
+        self._fingerprint_pending_set: set[str] = set()
+        self._fingerprint_lock = threading.Lock()
         self._init_recording_index()
 
     def _index_connection(self) -> sqlite3.Connection:
@@ -61,7 +65,8 @@ class Recorder:
                     playable INTEGER NOT NULL DEFAULT 1,
                     health_error TEXT NOT NULL DEFAULT '',
                     validated INTEGER NOT NULL DEFAULT 0,
-                    stream_fingerprint TEXT NOT NULL DEFAULT ''
+                    stream_fingerprint TEXT NOT NULL DEFAULT '',
+                    fingerprint_checked INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -77,6 +82,22 @@ class Recorder:
                 connection.execute("ALTER TABLE recordings ADD COLUMN validated INTEGER NOT NULL DEFAULT 0")
             if "stream_fingerprint" not in columns:
                 connection.execute("ALTER TABLE recordings ADD COLUMN stream_fingerprint TEXT NOT NULL DEFAULT ''")
+            if "fingerprint_checked" not in columns:
+                connection.execute("ALTER TABLE recordings ADD COLUMN fingerprint_checked INTEGER NOT NULL DEFAULT 0")
+                connection.execute(
+                    """
+                    UPDATE recordings
+                    SET fingerprint_checked = 1
+                    WHERE stream_fingerprint != ''
+                    """
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS recordings_fingerprint_pending
+                ON recordings(start_epoch DESC)
+                WHERE fingerprint_checked = 0
+                """
+            )
 
     def start(self, camera: CameraConfig, source: str = "main") -> None:
         source = camera.normalized_source(source, default="main")
@@ -410,7 +431,7 @@ class Recorder:
             indexed = connection.execute(
                 """
                 SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source,
-                       playable, health_error, stream_fingerprint
+                       playable, health_error, stream_fingerprint, fingerprint_checked
                 FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1 AND end_epoch > ? AND start_epoch < ?
                 ORDER BY start_epoch
@@ -574,6 +595,7 @@ class Recorder:
                     row["health_error"] = error
                     row["validated"] = True
                     row["stream_fingerprint"] = mp4_stream_fingerprint(Path(row["path"]))
+                    row["fingerprint_checked"] = True
                     if duration is not None and row.get("start_epoch") is not None:
                         row["duration_seconds"] = duration
                         row["end_epoch"] = float(row["start_epoch"]) + duration
@@ -588,6 +610,7 @@ class Recorder:
                 1 if row.get("playable", True) else 0, str(row.get("health_error") or ""),
                 1 if row.get("validated", False) else 0,
                 str(row.get("stream_fingerprint") or ""),
+                1 if row.get("fingerprint_checked", False) else 0,
             )
             for row in rows
         ]
@@ -595,17 +618,19 @@ class Recorder:
             connection.executemany(
                 """
                 INSERT INTO recordings(path, camera_id, source, name, size_bytes, modified_at, start_epoch,
-                                       duration_seconds, end_epoch, playable, health_error, validated, stream_fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       duration_seconds, end_epoch, playable, health_error, validated,
+                                       stream_fingerprint, fingerprint_checked)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size_bytes=excluded.size_bytes,
                     modified_at=excluded.modified_at,
                     duration_seconds=excluded.duration_seconds,
                     end_epoch=excluded.end_epoch,
                     stream_fingerprint=CASE
-                        WHEN excluded.stream_fingerprint != '' THEN excluded.stream_fingerprint
+                        WHEN excluded.fingerprint_checked = 1 THEN excluded.stream_fingerprint
                         ELSE recordings.stream_fingerprint
-                    END
+                    END,
+                    fingerprint_checked=MAX(recordings.fingerprint_checked, excluded.fingerprint_checked)
                 """,
                 values,
             )
@@ -648,6 +673,62 @@ class Recorder:
                 self._prune_recording_index(camera_id, source, files)
         self._prune_missing_index_rows()
         self._validate_index_batch()
+        self._backfill_stream_fingerprints()
+
+    def queue_stream_fingerprints(self, rows: list[dict]) -> None:
+        with self._fingerprint_lock:
+            for row in rows:
+                if int(row.get("fingerprint_checked") or 0):
+                    continue
+                path = str(row.get("path") or "")
+                if path and path not in self._fingerprint_pending_set:
+                    self._fingerprint_pending.append(path)
+                    self._fingerprint_pending_set.add(path)
+
+    def _backfill_stream_fingerprints(self, limit: int = 20) -> int:
+        paths: list[str] = []
+        with self._fingerprint_lock:
+            while self._fingerprint_pending and len(paths) < max(1, limit):
+                path = self._fingerprint_pending.popleft()
+                self._fingerprint_pending_set.discard(path)
+                paths.append(path)
+        if len(paths) < max(1, limit):
+            with self._index_connection() as connection:
+                pending = connection.execute(
+                    """
+                    SELECT path
+                    FROM recordings
+                    WHERE fingerprint_checked = 0
+                    ORDER BY start_epoch DESC
+                    LIMIT ?
+                    """,
+                    (max(1, limit) - len(paths),),
+                ).fetchall()
+            for row in pending:
+                path = str(row["path"])
+                if path not in paths:
+                    paths.append(path)
+
+        updated = 0
+        for path_value in paths:
+            if self._index_stop.is_set():
+                break
+            path = Path(path_value)
+            if not path.is_file():
+                self._delete_index_paths([path_value])
+                continue
+            fingerprint = mp4_stream_fingerprint(path)
+            with self._index_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE recordings
+                    SET stream_fingerprint = ?, fingerprint_checked = 1
+                    WHERE path = ?
+                    """,
+                    (fingerprint, path_value),
+                )
+            updated += 1
+        return updated
 
     def _prune_recording_index(self, camera_id: str, source: str, files: list[Path]) -> None:
         existing_paths = {str(path) for path in files}
@@ -709,7 +790,7 @@ class Recorder:
                         """
                         UPDATE recordings
                         SET duration_seconds = ?, end_epoch = start_epoch + ?, playable = ?, health_error = ?,
-                            validated = 1, stream_fingerprint = ?
+                            validated = 1, stream_fingerprint = ?, fingerprint_checked = 1
                         WHERE path = ?
                         """,
                         (

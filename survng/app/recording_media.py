@@ -215,6 +215,21 @@ def mp4_stream_fingerprint(path: Path) -> str:
     return _cached_stream_fingerprint(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
 
 
+def resolve_stream_fingerprints(values: list[str | None]) -> list[str]:
+    fingerprints = [str(value or "") for value in values]
+    first_known = next((value for value in fingerprints if value), "")
+    if not first_known:
+        return fingerprints
+
+    current = first_known
+    resolved: list[str] = []
+    for value in fingerprints:
+        if value:
+            current = value
+        resolved.append(current)
+    return resolved
+
+
 def hls_map_transition(previous: str | None, current: str, map_uri: str) -> tuple[list[str], str]:
     if previous is not None and current == previous:
         return [], current
