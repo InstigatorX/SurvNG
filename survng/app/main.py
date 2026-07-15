@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import cv2
@@ -80,6 +80,33 @@ RECORDING_CACHE_METRICS = {
 RECORDING_PREWARM_STOP = threading.Event()
 RECORDING_PREWARM_THREAD: threading.Thread | None = None
 FACE_OBSERVATIONS_SYNCED = False
+
+
+class ConfiguredBasePathMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        base_path = config.base_path
+        path = scope.get("path", "")
+        if base_path and (path == base_path or path.startswith(f"{base_path}/")):
+            scope = dict(scope)
+            scope["path"] = path[len(base_path):] or "/"
+            scope["raw_path"] = scope["path"].encode("utf-8")
+        await self.app(scope, receive, send)
+
+
+def public_url(path: str) -> str:
+    normalized = path if path.startswith("/") else f"/{path}"
+    return f"{config.base_path}{normalized}"
+
+
+def frontend_response(filename: str) -> HTMLResponse:
+    html = Path("survng/static", filename).read_text(encoding="utf-8")
+    html = html.replace('="/static/', f'="{config.base_path}/static/')
+    runtime_config = f"<script>window.__SURVNG_BASE_PATH__={json.dumps(config.base_path)};</script>"
+    html = html.replace("</head>", f"  {runtime_config}\n  </head>")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 class MemoryLogHandler(logging.Handler):
@@ -163,6 +190,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
+app.add_middleware(ConfiguredBasePathMiddleware)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
 
 
@@ -178,28 +206,28 @@ def apple_touch_icon() -> FileResponse:
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse("survng/static/index.html", headers={"Cache-Control": "no-store"})
+def index() -> HTMLResponse:
+    return frontend_response("index.html")
 
 
 @app.get("/recordings")
-def recordings_page() -> FileResponse:
-    return FileResponse("survng/static/recordings.html", headers={"Cache-Control": "no-store"})
+def recordings_page() -> HTMLResponse:
+    return frontend_response("recordings.html")
 
 
 @app.get("/config")
-def config_page() -> FileResponse:
-    return FileResponse("survng/static/config.html", headers={"Cache-Control": "no-store"})
+def config_page() -> HTMLResponse:
+    return frontend_response("config.html")
 
 
 @app.get("/incidents")
-def incidents_page() -> FileResponse:
-    return FileResponse("survng/static/index.html", headers={"Cache-Control": "no-store"})
+def incidents_page() -> HTMLResponse:
+    return frontend_response("index.html")
 
 
 @app.get("/faces")
-def faces_page() -> FileResponse:
-    return FileResponse("survng/static/index.html", headers={"Cache-Control": "no-store"})
+def faces_page() -> HTMLResponse:
+    return frontend_response("index.html")
 
 
 @app.get("/api/cameras")
@@ -2098,7 +2126,7 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
         row_start = float(row["start_epoch"])
         segment_name = quote(str(row["name"]), safe="")
         segment_query = f"{query}&media_offset={media_offset:.3f}&trim_end=true"
-        map_uri = (
+        map_uri = public_url(
             f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/init.mp4?"
             f"{segment_query}"
         )
@@ -2111,7 +2139,7 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
         lines.extend([
             f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
             f"#EXTINF:{clip_duration:.3f},",
-            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/media.m4s?{segment_query}",
+            public_url(f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/media.m4s?{segment_query}"),
         ])
         media_offset += clip_duration
     lines.append("#EXT-X-ENDLIST")

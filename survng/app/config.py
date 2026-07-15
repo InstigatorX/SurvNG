@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class OnvifConfig(BaseModel):
@@ -115,6 +115,7 @@ class DetectorConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    base_path: str = "/survng"
     storage_dir: str = "survng/storage"
     ffmpeg_path: str = "ffmpeg"
     hardware_acceleration: str = "auto"
@@ -128,6 +129,16 @@ class AppConfig(BaseModel):
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
+
+    @field_validator("base_path", mode="before")
+    @classmethod
+    def normalize_base_path(cls, value: object) -> str:
+        path = str(value or "").strip()
+        if not path or path == "/":
+            return ""
+        if "?" in path or "#" in path:
+            raise ValueError("base_path must contain only a URL path")
+        return f"/{path.strip('/')}"
 
 
 

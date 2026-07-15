@@ -62,6 +62,25 @@ const THEME_META = {
   dark: { label: "Dark", icon: Moon },
 };
 
+const APP_BASE_PATH = String(window.__SURVNG_BASE_PATH__ || "").replace(/\/+$/, "");
+document.documentElement.dataset.embedded = window.self !== window.top ? "true" : "false";
+
+function appUrl(path = "/") {
+  if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) return path;
+  return `${APP_BASE_PATH}${path}`;
+}
+
+function appPathname() {
+  const pathname = window.location.pathname;
+  if (!APP_BASE_PATH || (!pathname.startsWith(`${APP_BASE_PATH}/`) && pathname !== APP_BASE_PATH)) return pathname;
+  return pathname.slice(APP_BASE_PATH.length) || "/";
+}
+
+const fetch = (resource, options) => window.fetch(
+  typeof resource === "string" ? appUrl(resource) : resource,
+  options,
+);
+
 let shakaImport;
 function loadShaka() {
   if (!shakaImport) shakaImport = import("shaka-player").then((module) => module.default || module);
@@ -264,7 +283,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           fallback();
         }
       });
-      socket = new WebSocket(`${protocol}//${location.host}/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(source)}&compat=${compatibility}`);
+      socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(source)}&compat=${compatibility}`)}`);
       socket.addEventListener("open", async () => {
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
@@ -321,7 +340,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     <div className="live-stack" data-stage={stage}>
       <img
         className="live-poster"
-        src={`/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`}
+        src={appUrl(`/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`)}
         alt=""
         onLoad={(event) => stage !== "webrtc" && onReady?.(event.currentTarget, "snapshot")}
       />
@@ -356,7 +375,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 
 function eventSnapshotUrl(event) {
   const eventId = Number(event?.representative_event_id || event?.id);
-  return Number.isFinite(eventId) ? `/api/events/${eventId}/snapshot.jpg` : "";
+  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
 }
 
 function useStoredState(key, initialValue) {
@@ -632,7 +651,7 @@ function Shell({ page, theme, children }) {
       <header className="topbar">
         <div className="brand-block">
           <div className="brand-mark">
-            <img src="/static/favicon.svg" alt="" aria-hidden="true" />
+            <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />
           </div>
           <div>
             <h1>{isConfig ? "Config" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : isFaces ? "Faces" : "SurvNG"}</h1>
@@ -642,11 +661,11 @@ function Shell({ page, theme, children }) {
         </div>
         <div className="top-actions">
           <nav className="topnav" aria-label="Primary">
-            <a className="nav-button" href="/"><Video size={16} /> Live</a>
-            <a className="nav-button incidents-nav" href="/incidents"><Siren size={16} /> Incidents</a>
-            <a className="nav-button" href="/faces"><ScanFace size={16} /> Faces</a>
-            <a className="nav-button" href="/recordings"><Film size={16} /> Recordings</a>
-            <a className="nav-button" href="/config"><Cog size={16} /> Config</a>
+            <a className="nav-button" href={appUrl("/")}><Video size={16} /> Live</a>
+            <a className="nav-button incidents-nav" href={appUrl("/incidents")}><Siren size={16} /> Incidents</a>
+            <a className="nav-button" href={appUrl("/faces")}><ScanFace size={16} /> Faces</a>
+            <a className="nav-button" href={appUrl("/recordings")}><Film size={16} /> Recordings</a>
+            <a className="nav-button" href={appUrl("/config")}><Cog size={16} /> Config</a>
           </nav>
         </div>
       </header>
@@ -667,7 +686,7 @@ function subscribeAppEvents(listener) {
     appEventCloseTimer = null;
   }
   if (!appEventSource) {
-    appEventSource = new EventSource("/api/events/stream");
+    appEventSource = new EventSource(appUrl("/api/events/stream"));
     APP_EVENT_TYPES.forEach((type) => {
       appEventSource.addEventListener(type, (event) => {
         let data = null;
@@ -970,9 +989,9 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   }
 
   const posterSource = activeTransport === "webrtc" && sourceMode === "main" ? "live" : sourceMode;
-  const imageUrl = shouldUseMjpegStream
+  const imageUrl = appUrl(shouldUseMjpegStream
     ? `/api/cameras/${camera.id}/stream.mjpg?source=${sourceMode}&t=${mjpegToken}`
-    : `/api/cameras/${camera.id}/snapshot.jpg?source=${posterSource}&t=${snapshotToken}`;
+    : `/api/cameras/${camera.id}/snapshot.jpg?source=${posterSource}&t=${snapshotToken}`);
 
   return (
     <article className={`bento-card camera-tile ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`} {...dropProps}>
@@ -1744,7 +1763,7 @@ function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats })
 function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
   const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
-  const gestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
+  const gestureRef = useRef({ mode: null, pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
   const [clipInfo, setClipInfo] = useState(null);
   const [clipLoading, setClipLoading] = useState(false);
   const [clipError, setClipError] = useState("");
@@ -1753,6 +1772,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const zoomRef = useRef(zoom);
   const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
   const [manualDetection, setManualDetection] = useState(null);
   const [manualLoading, setManualLoading] = useState(false);
@@ -1823,36 +1843,48 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   function clampZoom(nextZoom) {
     const scale = Math.max(1, Math.min(6, nextZoom.scale));
     if (scale === 1) return { scale: 1, x: 0, y: 0 };
-    const limit = 46 * scale;
+    const box = mediaRef.current?.getBoundingClientRect();
+    const limitX = box ? box.width * (scale - 1) / 2 : 0;
+    const limitY = box ? box.height * (scale - 1) / 2 : 0;
     return {
       scale,
-      x: Math.max(-limit, Math.min(limit, nextZoom.x || 0)),
-      y: Math.max(-limit, Math.min(limit, nextZoom.y || 0)),
+      x: Math.max(-limitX, Math.min(limitX, nextZoom.x || 0)),
+      y: Math.max(-limitY, Math.min(limitY, nextZoom.y || 0)),
     };
+  }
+
+  function updateZoom(updater) {
+    setZoom((current) => {
+      const candidate = typeof updater === "function" ? updater(current) : updater;
+      const next = clampZoom(candidate);
+      zoomRef.current = next;
+      return next;
+    });
   }
 
   function zoomAround(clientX, clientY, factor) {
     const box = mediaRef.current?.getBoundingClientRect();
     if (!box) return;
     setVideoActive(false);
-    setZoom((current) => {
+    updateZoom((current) => {
       const nextScale = Math.max(1, Math.min(6, current.scale * factor));
       if (nextScale === 1) return { scale: 1, x: 0, y: 0 };
       const anchorX = clientX - box.left - box.width / 2;
       const anchorY = clientY - box.top - box.height / 2;
       const scaleRatio = nextScale / current.scale;
-      return clampZoom({
+      return {
         scale: nextScale,
         x: anchorX - (anchorX - current.x) * scaleRatio,
         y: anchorY - (anchorY - current.y) * scaleRatio,
-      });
+      };
     });
   }
 
   function onMediaWheel(wheelEvent) {
     if (videoActive) return;
     wheelEvent.preventDefault();
-    zoomAround(wheelEvent.clientX, wheelEvent.clientY, wheelEvent.deltaY < 0 ? 1.16 : 0.86);
+    const delta = Math.max(-120, Math.min(120, wheelEvent.deltaY));
+    zoomAround(wheelEvent.clientX, wheelEvent.clientY, Math.exp(-delta * 0.0017));
   }
 
   function touchDistance(touches) {
@@ -1874,44 +1906,79 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     if (touchEvent.touches.length === 2) {
       touchEvent.preventDefault();
       const center = touchCenter(touchEvent.touches);
-      gestureRef.current = { ...gestureRef.current, pinchDistance: touchDistance(touchEvent.touches), scale: zoom.scale, startX: center.x, startY: center.y, panX: zoom.x, panY: zoom.y, moved: true };
+      const current = zoomRef.current;
+      gestureRef.current = { mode: "pinch", pointerId: null, pinchDistance: touchDistance(touchEvent.touches), scale: current.scale, startX: center.x, startY: center.y, panX: current.x, panY: current.y, moved: true };
+    } else if (touchEvent.touches.length === 1 && zoomRef.current.scale > 1) {
+      touchEvent.preventDefault();
+      const touch = touchEvent.touches[0];
+      const current = zoomRef.current;
+      gestureRef.current = { mode: "touch-pan", pointerId: null, pinchDistance: 0, scale: current.scale, startX: touch.clientX, startY: touch.clientY, panX: current.x, panY: current.y, moved: false };
     }
   }
 
   function onMediaTouchMove(touchEvent) {
-    if (videoActive || touchEvent.touches.length !== 2) return;
-    touchEvent.preventDefault();
-    const distance = touchDistance(touchEvent.touches);
-    const center = touchCenter(touchEvent.touches);
+    if (videoActive) return;
     const gesture = gestureRef.current;
-    if (!gesture.pinchDistance) return;
-    setZoom(clampZoom({
-      scale: gesture.scale * (distance / gesture.pinchDistance),
-      x: gesture.panX + center.x - gesture.startX,
-      y: gesture.panY + center.y - gesture.startY,
-    }));
+    if (touchEvent.touches.length === 2 && gesture.mode === "pinch" && gesture.pinchDistance) {
+      touchEvent.preventDefault();
+      const box = mediaRef.current?.getBoundingClientRect();
+      if (!box) return;
+      const distance = touchDistance(touchEvent.touches);
+      const center = touchCenter(touchEvent.touches);
+      const nextScale = Math.max(1, Math.min(6, gesture.scale * (distance / gesture.pinchDistance)));
+      const scaleRatio = nextScale / gesture.scale;
+      const anchorX = gesture.startX - box.left - box.width / 2;
+      const anchorY = gesture.startY - box.top - box.height / 2;
+      updateZoom({
+        scale: nextScale,
+        x: anchorX - (anchorX - gesture.panX) * scaleRatio + center.x - gesture.startX,
+        y: anchorY - (anchorY - gesture.panY) * scaleRatio + center.y - gesture.startY,
+      });
+      return;
+    }
+    if (touchEvent.touches.length === 1 && gesture.mode === "touch-pan" && zoomRef.current.scale > 1) {
+      touchEvent.preventDefault();
+      const touch = touchEvent.touches[0];
+      const dx = touch.clientX - gesture.startX;
+      const dy = touch.clientY - gesture.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
+      updateZoom({ scale: zoomRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
+    }
+  }
+
+  function onMediaTouchEnd(touchEvent) {
+    if (touchEvent.touches.length === 1 && zoomRef.current.scale > 1) {
+      const touch = touchEvent.touches[0];
+      const current = zoomRef.current;
+      gestureRef.current = { mode: "touch-pan", pointerId: null, pinchDistance: 0, scale: current.scale, startX: touch.clientX, startY: touch.clientY, panX: current.x, panY: current.y, moved: true };
+      return;
+    }
+    gestureRef.current.mode = null;
+    gestureRef.current.pinchDistance = 0;
   }
 
   function onMediaPointerDown(pointerEvent) {
-    if (videoActive || pointerEvent.pointerType === "touch" || zoom.scale <= 1) return;
+    if (videoActive || pointerEvent.pointerType === "touch" || zoomRef.current.scale <= 1) return;
     pointerEvent.preventDefault();
     pointerEvent.currentTarget.setPointerCapture(pointerEvent.pointerId);
-    gestureRef.current = { pointerId: pointerEvent.pointerId, startX: pointerEvent.clientX, startY: pointerEvent.clientY, panX: zoom.x, panY: zoom.y, moved: false };
+    const current = zoomRef.current;
+    gestureRef.current = { mode: "pointer-pan", pointerId: pointerEvent.pointerId, startX: pointerEvent.clientX, startY: pointerEvent.clientY, panX: current.x, panY: current.y, moved: false, pinchDistance: 0, scale: current.scale };
   }
 
   function onMediaPointerMove(pointerEvent) {
     const gesture = gestureRef.current;
-    if (gesture.pointerId !== pointerEvent.pointerId || zoom.scale <= 1) return;
+    if (gesture.pointerId !== pointerEvent.pointerId || zoomRef.current.scale <= 1) return;
     pointerEvent.preventDefault();
     const dx = pointerEvent.clientX - gesture.startX;
     const dy = pointerEvent.clientY - gesture.startY;
     if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
-    setZoom((current) => clampZoom({ scale: current.scale, x: gesture.panX + dx, y: gesture.panY + dy }));
+    updateZoom({ scale: zoomRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
   }
 
   function onMediaPointerUp(pointerEvent) {
     if (gestureRef.current.pointerId === pointerEvent.pointerId) {
       gestureRef.current.pointerId = null;
+      gestureRef.current.mode = null;
     }
   }
 
@@ -1925,7 +1992,9 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   }
 
   function resetZoom() {
-    setZoom({ scale: 1, x: 0, y: 0 });
+    const reset = { scale: 1, x: 0, y: 0 };
+    zoomRef.current = reset;
+    setZoom(reset);
   }
 
   useEffect(() => {
@@ -2026,6 +2095,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
           onWheel={onMediaWheel}
           onTouchStart={onMediaTouchStart}
           onTouchMove={onMediaTouchMove}
+          onTouchEnd={onMediaTouchEnd}
+          onTouchCancel={onMediaTouchEnd}
           onPointerDown={onMediaPointerDown}
           onPointerMove={onMediaPointerMove}
           onPointerUp={onMediaPointerUp}
@@ -2278,11 +2349,12 @@ function IncidentsPage({ timeZone }) {
   }, [expandedIncidentId, selectedEvent]);
 
   function toggleIncident(incidentId) {
-    if (!mobileView) {
-      setExpandedIncidentId(incidentId);
+    if (mobileView) {
+      const incident = visibleIncidents.find((candidate) => candidate.id === incidentId);
+      if (incident) setSelectedEvent(incident);
       return;
     }
-    setExpandedIncidentId((current) => current === incidentId ? null : incidentId);
+    setExpandedIncidentId(incidentId);
   }
 
   const focusedIndex = focusedIncident ? visibleIncidents.findIndex((incident) => incident.id === focusedIncident.id) : -1;
@@ -2421,18 +2493,6 @@ function IncidentsPage({ timeZone }) {
             </label>
           </div>
         </div>
-        {focusedIncident ? (
-          <div className="incident-focus">
-            <IncidentCard
-              incident={focusedIncident}
-              timeZone={timeZone}
-              expanded
-              thumbnailAnnotations={thumbnailAnnotations}
-              onToggle={toggleIncident}
-              onSelect={setSelectedEvent}
-            />
-          </div>
-        ) : null}
         <div className="incident-gallery">
           {incidentLoading ? <div className="empty-state">Loading incidents...</div> : null}
           {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
@@ -2443,7 +2503,6 @@ function IncidentsPage({ timeZone }) {
                 incident={incident}
                 timeZone={timeZone}
                 expanded={false}
-                selected={incident.id === focusedIncident?.id}
                 thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
                 onSelect={setSelectedEvent}
@@ -2693,12 +2752,12 @@ function LivePage({ timeZone }) {
 
 function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
   const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
-  return `/api/events/${eventId}/clip.mp4?${params.toString()}`;
+  return appUrl(`/api/events/${eventId}/clip.mp4?${params.toString()}`);
 }
 
 function eventStreamUrl(eventId, before = 5, after = 5, source = "main") {
   const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
-  return `/api/events/${eventId}/stream.m3u8?${params.toString()}`;
+  return appUrl(`/api/events/${eventId}/stream.m3u8?${params.toString()}`);
 }
 
 function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
@@ -2707,7 +2766,7 @@ function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
     end_epoch: endEpoch.toFixed(3),
     source,
   });
-  return `/api/cameras/${cameraId}/recordings/day?${params.toString()}`;
+  return appUrl(`/api/cameras/${cameraId}/recordings/day?${params.toString()}`);
 }
 
 function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
@@ -2716,7 +2775,7 @@ function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
     end_epoch: endEpoch.toFixed(3),
     source,
   });
-  return `/api/cameras/${cameraId}/recordings/window?${params.toString()}`;
+  return appUrl(`/api/cameras/${cameraId}/recordings/window?${params.toString()}`);
 }
 
 function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source) {
@@ -2726,7 +2785,7 @@ function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source)
     after_epoch: afterEpoch.toFixed(3),
     source,
   });
-  return `/api/cameras/${cameraId}/recordings/updates?${params.toString()}`;
+  return appUrl(`/api/cameras/${cameraId}/recordings/updates?${params.toString()}`);
 }
 
 function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
@@ -2735,7 +2794,7 @@ function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
     end_epoch: endEpoch.toFixed(3),
     source,
   });
-  return `/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`;
+  return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
 }
 
 function mergeRecordingAvailability(current, updates) {
@@ -3082,7 +3141,7 @@ function RecordingsPage({ timeZone }) {
   useEffect(() => {
     if (!activeCameraId) return;
     const params = new URLSearchParams({ camera: activeCameraId, date, source });
-    window.history.replaceState(null, "", `/recordings?${params.toString()}`);
+    window.history.replaceState(null, "", appUrl(`/recordings?${params.toString()}`));
   }, [activeCameraId, date, source]);
 
   function handleRecordingReady(_player, video) {
@@ -3867,7 +3926,7 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
   const zones = camera.zones || [];
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
-  const snapshotUrl = useMemo(() => `/api/cameras/${camera.id}/zone-snapshot.jpg?source=live&t=${Date.now()}`, [camera.id]);
+  const snapshotUrl = useMemo(() => appUrl(`/api/cameras/${camera.id}/zone-snapshot.jpg?source=live&t=${Date.now()}`), [camera.id]);
   const selectedZone = zones[selectedIndex] || null;
 
   useEffect(() => {
@@ -4125,6 +4184,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Theme<select value={theme} onChange={(event) => setTheme(event.target.value)}>
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
+          <label>Web Base Path<input value={config.base_path ?? "/survng"} onChange={(event) => updateConfig(["base_path"], event.target.value)} placeholder="/survng" /></label>
           <label className="check-field"><input type="checkbox" checked={config.incident_thumbnail_annotations ?? true} onChange={(event) => updateConfig(["incident_thumbnail_annotations"], event.target.checked)} /> Show boxes on incident thumbnails</label>
           <div className="preference-action">
             <strong>Live Camera Order</strong>
@@ -4332,7 +4392,7 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
     <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="face-review-dialog" role="dialog" aria-modal="true" aria-label="Review face">
         <button type="button" className="overlay-close" onClick={onClose} aria-label="Close"><X size={22} /></button>
-        <img src={`/api/faces/observations/${observation.id}/crop.jpg?padding=0.45`} alt="Selected face" />
+        <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg?padding=0.45`)} alt="Selected face" />
         <div className="face-review-form">
           <div><strong>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
           {observation.candidate_person_id ? <div className="face-enroll-row"><button type="button" disabled={busy} onClick={() => assignPerson(observation.candidate_person_id)}><ScanFace size={16} /> Confirm {observation.candidate_person_name} ({Math.round(Number(observation.candidate_confidence || 0) * 100)}%)</button><button type="button" className="subtle" disabled={busy} onClick={() => assignPerson(null)}><X size={16} /> Reject</button></div> : null}
@@ -4417,7 +4477,7 @@ function FacesPage({ timeZone }) {
           {people.map((person) => (
             <div className={`face-person-row ${String(person.id) === personId ? "active" : ""}`} key={person.id}>
               <button type="button" className="face-person-select" onClick={() => { setPersonId(String(person.id)); setPage(0); }}>
-                <img src={`/api/faces/observations/${person.preview_observation_id}/crop.jpg`} alt="" />
+                <img src={appUrl(`/api/faces/observations/${person.preview_observation_id}/crop.jpg`)} alt="" />
                 <span><strong>{person.name}</strong><small>{person.observation_count} observations</small></span>
               </button>
               <button type="button" className="icon-button subtle" onClick={() => deletePerson(person)} title="Delete person" aria-label={`Delete ${person.name}`}><Trash2 size={15} /></button>
@@ -4448,7 +4508,7 @@ function FacesPage({ timeZone }) {
           {!loading && !observations.length ? <div className="empty-state">No faces match these filters.</div> : null}
           {observations.map((observation) => (
             <button type="button" className="face-observation-card" key={observation.id} onClick={() => setSelected(observation)}>
-              <img src={`/api/faces/observations/${observation.id}/crop.jpg`} alt={observation.person_name || "Unknown face"} loading="lazy" />
+              <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg`)} alt={observation.person_name || "Unknown face"} loading="lazy" />
               <span className="face-card-hud">
                 <strong>{observation.person_name || (observation.candidate_person_name ? `Suggested: ${observation.candidate_person_name}` : "Unknown")}</strong>
                 <small>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</small>
@@ -4472,13 +4532,14 @@ function FacesPage({ timeZone }) {
 function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "auto");
-  const page = window.location.pathname.startsWith("/config")
+  const pathname = appPathname();
+  const page = pathname.startsWith("/config")
     ? "config"
-    : window.location.pathname.startsWith("/recordings")
+    : pathname.startsWith("/recordings")
       ? "recordings"
-      : window.location.pathname.startsWith("/incidents")
+      : pathname.startsWith("/incidents")
         ? "incidents"
-        : window.location.pathname.startsWith("/faces")
+        : pathname.startsWith("/faces")
           ? "faces"
         : "live";
   useEffect(() => {

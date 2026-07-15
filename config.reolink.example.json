@@ -1,4 +1,5 @@
 {
+  "base_path": "/survng",
   "storage_dir": "survng/storage",
   "ffmpeg_path": "ffmpeg",
   "recording_segment_seconds": 10.0,

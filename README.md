@@ -42,7 +42,35 @@ The React frontend in `frontend/` is the default interface. Its production build
 uvicorn survng.app.main:app --reload --host 0.0.0.0 --port 8088
 ```
 
-Open http://127.0.0.1:8088/ on this machine, or use the Mac's LAN address from another device, for example `http://192.168.82.12:8088/`.
+Open http://127.0.0.1:8088/survng/ on this machine, or use the server's LAN address from another device, for example `http://192.168.82.12:8088/survng/`.
+
+### Reverse proxy subpath
+
+`base_path` controls the browser-visible path and defaults to `/survng`. Set it to an empty string to serve browser URLs from `/` instead. SurvNG continues to accept unprefixed backend routes for local API clients.
+
+An nginx proxy only needs to preserve the configured prefix:
+
+```nginx
+location = /survng {
+    return 301 /survng/;
+}
+
+location /survng/ {
+    proxy_pass http://127.0.0.1:8088;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+```
+
+The `proxy_pass` URL intentionally has no trailing slash so nginx forwards `/survng`. SurvNG strips the configured prefix internally for HTTP, SSE, HLS, and WebSocket routes.
 
 Pages:
 
