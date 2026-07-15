@@ -2719,6 +2719,16 @@ function recordingWindowUrl(cameraId, startEpoch, endEpoch, source) {
   return `/api/cameras/${cameraId}/recordings/window?${params.toString()}`;
 }
 
+function recordingUpdatesUrl(cameraId, startEpoch, endEpoch, afterEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    after_epoch: afterEpoch.toFixed(3),
+    source,
+  });
+  return `/api/cameras/${cameraId}/recordings/updates?${params.toString()}`;
+}
+
 function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   const params = new URLSearchParams({
     start_epoch: startEpoch.toFixed(3),
@@ -2728,12 +2738,47 @@ function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   return `/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`;
 }
 
+function mergeRecordingAvailability(current, updates) {
+  const ranges = [...current, ...updates]
+    .map((item) => ({
+      ...item,
+      start_epoch: Number(item.start_epoch),
+      end_epoch: Number(item.end_epoch),
+    }))
+    .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
+    .sort((a, b) => a.start_epoch - b.start_epoch);
+  const merged = [];
+  ranges.forEach((item) => {
+    const previous = merged[merged.length - 1];
+    if (previous && item.start_epoch <= previous.end_epoch + 5) {
+      previous.end_epoch = Math.max(previous.end_epoch, item.end_epoch);
+      previous.duration_seconds = previous.end_epoch - previous.start_epoch;
+      previous.segment_count = Math.max(
+        Number(previous.segment_count) || 0,
+        Number(item.segment_count) || 0,
+      );
+      return;
+    }
+    merged.push({ ...item });
+  });
+  return merged;
+}
+
+function mergeRecordingEvents(current, updates) {
+  const byId = new Map(current.map((event) => [event.id, event]));
+  updates.forEach((event) => byId.set(event.id, event));
+  return [...byId.values()]
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .slice(-5000);
+}
+
 function RecordingsPage({ timeZone }) {
   const videoRef = useRef(null);
   const desiredEpochRef = useRef(null);
   const autoplayRef = useRef(false);
   const codecFallbackRef = useRef(false);
   const playbackRequestRef = useRef(0);
+  const latestAvailabilityRef = useRef(null);
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const queryDate = initialQuery.get("date") || today;
@@ -2751,6 +2796,7 @@ function RecordingsPage({ timeZone }) {
   const [playbackError, setPlaybackError] = useState("");
   const [playbackNotice, setPlaybackNotice] = useState("");
   const [playbackWindow, setPlaybackWindow] = useState(null);
+  const [followTarget, setFollowTarget] = useState(null);
 
   const activeCameraId = cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
@@ -2771,6 +2817,7 @@ function RecordingsPage({ timeZone }) {
         return mapped;
       });
   }, [recordings]);
+  latestAvailabilityRef.current = timeline[timeline.length - 1]?.end_epoch ?? null;
   const playbackTimeline = useMemo(() => {
     if (!playbackDetail) return [];
     let mediaOffset = 0;
@@ -2811,7 +2858,7 @@ function RecordingsPage({ timeZone }) {
     if (!timeline.length) return null;
     const bounded = Math.max(dayStart, Math.min(dayEnd - 0.01, epoch));
     const latest = timeline[timeline.length - 1];
-    if (bounded >= latest.end_epoch) return latest.start_epoch;
+    if (bounded >= latest.end_epoch) return latest.end_epoch - 0.01;
     const containing = timeline.find((item) => item.start_epoch <= bounded && bounded < item.end_epoch);
     if (containing) return bounded;
     let nearest = timeline[0].start_epoch;
@@ -2858,6 +2905,7 @@ function RecordingsPage({ timeZone }) {
     const target = snapToRecording(epoch);
     if (target === null || !activeCameraId) return;
     autoplayRef.current = autoplay;
+    setFollowTarget(null);
     setPlaybackError("");
     setPlayhead(target);
     desiredEpochRef.current = target;
@@ -2898,6 +2946,7 @@ function RecordingsPage({ timeZone }) {
     setEvents([]);
     setAvailableSources([]);
     setPlaybackWindow(null);
+    setFollowTarget(null);
     if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
     setPlayhead(null);
     const video = videoRef.current;
@@ -2931,6 +2980,44 @@ function RecordingsPage({ timeZone }) {
       });
     return () => controller.abort();
   }, [activeCameraId, source, dayStart, dayEnd]);
+
+  useEffect(() => {
+    if (!activeCameraId || date !== today) return undefined;
+    let stopped = false;
+    let inFlight = false;
+    const refresh = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const afterEpoch = Number.isFinite(latestAvailabilityRef.current)
+          ? latestAvailabilityRef.current
+          : dayStart;
+        const response = await fetch(
+          recordingUpdatesUrl(activeCameraId, dayStart, dayEnd, afterEpoch, source),
+        );
+        if (!response.ok) throw new Error(`Recording update failed (${response.status})`);
+        const payload = await response.json();
+        if (stopped) return;
+        const additions = payload.availability || [];
+        if (additions.length) {
+          setRecordings((current) => mergeRecordingAvailability(current, additions));
+        }
+        const eventUpdates = payload.events || [];
+        if (eventUpdates.length) {
+          setEvents((current) => mergeRecordingEvents(current, eventUpdates));
+        }
+      } catch {
+        // The next poll retries without disrupting active playback.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(refresh, 10_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [activeCameraId, source, date, today, dayStart, dayEnd]);
 
   useEffect(() => {
     if (!activeCameraId || !playbackWindow) return undefined;
@@ -2970,6 +3057,14 @@ function RecordingsPage({ timeZone }) {
   }, [timeline, playhead]);
 
   useEffect(() => {
+    if (!Number.isFinite(followTarget) || !timeline.length) return;
+    const nextRange = timeline.find((item) => item.end_epoch > followTarget);
+    if (!nextRange) return;
+    const nextEpoch = Math.max(followTarget, nextRange.start_epoch);
+    playAt(nextEpoch, true);
+  }, [followTarget, timeline]);
+
+  useEffect(() => {
     if (!activeCameraId) return;
     const params = new URLSearchParams({ camera: activeCameraId, date, source });
     window.history.replaceState(null, "", `/recordings?${params.toString()}`);
@@ -3006,6 +3101,23 @@ function RecordingsPage({ timeZone }) {
     setPlaybackError("This browser could not play the selected recording stream");
   }
 
+  function continueRecordingPlayback() {
+    const lastSegment = playbackTimeline[playbackTimeline.length - 1];
+    if (!lastSegment) return;
+    const nextEpoch = lastSegment.end_epoch + 0.01;
+    const nextRange = timeline.find((item) => item.end_epoch > nextEpoch);
+    if (nextRange) {
+      playAt(Math.max(nextEpoch, nextRange.start_epoch), true);
+      return;
+    }
+    if (date === today) {
+      desiredEpochRef.current = nextEpoch;
+      autoplayRef.current = true;
+      setFollowTarget(nextEpoch);
+      setPlaybackNotice("Waiting for the next recording...");
+    }
+  }
+
   function changeDate(next) {
     setDate(next > today ? today : next);
   }
@@ -3038,11 +3150,7 @@ function RecordingsPage({ timeZone }) {
               onError={handleRecordingError}
               onTimeUpdate={handleRecordingTimeUpdate}
               onSeeked={() => setPlaybackNotice("")}
-              onEnded={() => {
-                if (loadedPlaybackWindow && loadedPlaybackWindow.end < dayEnd - 0.01) {
-                  playAt(loadedPlaybackWindow.end + 0.01, true);
-                }
-              }}
+              onEnded={continueRecordingPlayback}
               onPlay={() => { autoplayRef.current = true; }}
               onPause={(event) => { if (!event.currentTarget.ended) autoplayRef.current = false; }}
             />

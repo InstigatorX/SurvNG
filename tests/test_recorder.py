@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -139,6 +140,38 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(availability["ranges"][0]["segment_count"], 2)
         self.assertEqual(availability["ranges"][1]["segment_count"], 1)
         self.assertNotIn("path", availability["ranges"][0])
+
+    def test_refresh_recording_edge_indexes_only_completed_recent_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now = datetime.now()
+            hour_dir = (
+                Path(tmpdir) / "recordings" / "front-door" / "main"
+                / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            )
+            hour_dir.mkdir(parents=True)
+            starts = [now.timestamp() - 40, now.timestamp() - 20, now.timestamp() - 10]
+            for start_epoch in starts:
+                clip = hour_dir / datetime.fromtimestamp(start_epoch).strftime("%Y%m%d-%H%M%S.mp4")
+                clip.write_bytes(b"x" * 2048)
+            process = Mock()
+            process.poll.return_value = None
+            recorder.processes[("front-door", "main")] = (process, None, Mock(), Mock())
+
+            indexed = recorder.refresh_recording_edge(
+                "front-door",
+                "main",
+                now.timestamp() - 20,
+            )
+            availability = recorder.recording_availability_between(
+                "front-door",
+                now.timestamp() - 30,
+                now.timestamp(),
+            )
+
+        self.assertEqual(indexed, 1)
+        self.assertEqual(availability["segment_count"], 1)
+        self.assertLessEqual(availability["ranges"][0]["end_epoch"], starts[-1])
 
     def test_incremental_pruner_removes_missing_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1574,6 +1574,42 @@ def recording_window(
     }
 
 
+@app.get("/api/cameras/{camera_id}/recordings/updates")
+def recording_updates(
+    camera_id: str,
+    start_epoch: float,
+    end_epoch: float,
+    after_epoch: float,
+    source: str = "main",
+) -> dict:
+    if end_epoch <= start_epoch or end_epoch - start_epoch > 90000:
+        raise HTTPException(status_code=400, detail="invalid recording day range")
+    selected_source = recording_source(source)
+    overlap_seconds = max(5.0, float(config.recording_segment_seconds) * 2)
+    update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
+    manager.recorder.refresh_recording_edge(camera_id, selected_source, after_epoch)
+    availability = manager.recorder.recording_availability_between(
+        camera_id,
+        update_start,
+        end_epoch,
+        selected_source,
+    )
+    events = manager.events.for_camera_range(
+        camera_id,
+        datetime.fromtimestamp(update_start, timezone.utc).isoformat(),
+        datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
+        limit=1000,
+    )
+    return {
+        "camera_id": camera_id,
+        "source": selected_source,
+        "start_epoch": update_start,
+        "end_epoch": end_epoch,
+        "availability": availability["ranges"],
+        "events": [_event_row(event) for event in events],
+    }
+
+
 def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, source: str) -> list[dict]:
     selected_source = recording_source(source)
     cache_key = (camera_id, selected_source, int(start_epoch), int(end_epoch))

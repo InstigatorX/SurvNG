@@ -5,6 +5,7 @@ const camera = process.env.CAMERA || "front-door";
 const source = process.env.SOURCE || "main";
 const soakSeconds = Math.max(10, Number(process.env.SOAK_SECONDS || 90));
 const scrubCount = Math.max(4, Number(process.env.SCRUBS || 12));
+const checkGrowth = process.env.CHECK_GROWTH === "1";
 const today = new Intl.DateTimeFormat("en-CA", {
   timeZone: process.env.TZ_NAME || "America/New_York",
   year: "numeric",
@@ -44,6 +45,31 @@ try {
   });
 
   const track = page.locator(".recordings-v2-track");
+  if (checkGrowth) {
+    const initial = await page.evaluate(() => {
+      const ranges = [...document.querySelectorAll(".recordings-v2-track > span")];
+      const last = ranges[ranges.length - 1];
+      const slider = document.querySelector(".recordings-v2-track input");
+      if (!last || !slider) return null;
+      return {
+        endPercent: Number.parseFloat(last.style.left) + Number.parseFloat(last.style.width),
+        playheadSeconds: Number(slider.value),
+      };
+    });
+    if (!initial) throw new Error("recording growth controls are unavailable");
+    const latestSeconds = (initial.endPercent / 100) * 24 * 60 * 60;
+    if (latestSeconds - initial.playheadSeconds > 60) {
+      failures.push(`initial playhead trails latest recording by ${(latestSeconds - initial.playheadSeconds).toFixed(1)}s`);
+    }
+    await page.waitForFunction((previousEnd) => {
+      const ranges = [...document.querySelectorAll(".recordings-v2-track > span")];
+      const last = ranges[ranges.length - 1];
+      if (!last) return false;
+      const nextEnd = Number.parseFloat(last.style.left) + Number.parseFloat(last.style.width);
+      return nextEnd > previousEnd + 0.0001;
+    }, initial.endPercent, { timeout: 45_000 });
+  }
+
   const trackBox = await track.boundingBox();
   const ranges = await page.locator(".recordings-v2-track > span").evaluateAll((elements) => (
     elements.map((element) => ({

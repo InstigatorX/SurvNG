@@ -508,6 +508,30 @@ class Recorder:
             "segment_count": len(rows),
         }
 
+    def refresh_recording_edge(
+        self,
+        camera_id: str,
+        source: str,
+        after_epoch: float,
+    ) -> int:
+        """Index completed segments near a live playback edge without probing them."""
+        source = "main" if source == "main" else "live"
+        cutoff = after_epoch - max(5.0, self.segment_seconds * 2)
+        camera_dir = self._camera_dir(camera_id, source)
+        files: list[Path] = []
+        now = datetime.now()
+        for hours_back in (1, 0):
+            target = now - timedelta(hours=hours_back)
+            hour_dir = camera_dir / target.strftime("%Y-%m-%d") / target.strftime("%H")
+            if hour_dir.exists():
+                files.extend(
+                    path for path in hour_dir.glob("*.mp4")
+                    if (self.recording_start_epoch(path) or 0.0) >= cutoff
+                )
+        rows = self._recording_rows_for_files(camera_id, source, files)
+        self._store_recording_rows(camera_id, source, rows)
+        return len(rows)
+
     @staticmethod
     def _merge_availability_rows(
         rows: list[dict],
