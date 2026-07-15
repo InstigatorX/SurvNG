@@ -34,6 +34,7 @@ class Recorder:
         self._watchdog_thread: threading.Thread | None = None
         self._index_stop = threading.Event()
         self._index_thread: threading.Thread | None = None
+        self._prune_cursor = 0
         self._init_recording_index()
 
     def _index_connection(self) -> sqlite3.Connection:
@@ -57,7 +58,8 @@ class Recorder:
                     duration_seconds REAL NOT NULL,
                     end_epoch REAL NOT NULL,
                     playable INTEGER NOT NULL DEFAULT 1,
-                    health_error TEXT NOT NULL DEFAULT ''
+                    health_error TEXT NOT NULL DEFAULT '',
+                    validated INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -69,6 +71,8 @@ class Recorder:
                 connection.execute("ALTER TABLE recordings ADD COLUMN playable INTEGER NOT NULL DEFAULT 1")
             if "health_error" not in columns:
                 connection.execute("ALTER TABLE recordings ADD COLUMN health_error TEXT NOT NULL DEFAULT ''")
+            if "validated" not in columns:
+                connection.execute("ALTER TABLE recordings ADD COLUMN validated INTEGER NOT NULL DEFAULT 0")
 
     def start(self, camera: CameraConfig, source: str = "main") -> None:
         source = camera.normalized_source(source, default="main")
@@ -232,7 +236,7 @@ class Recorder:
     def stop_all(self) -> None:
         self._index_stop.set()
         if self._index_thread is not None:
-            self._index_thread.join(timeout=3)
+            self._index_thread.join(timeout=10)
             self._index_thread = None
         self._watchdog_stop.set()
         if self._watchdog_thread is not None:
@@ -409,6 +413,10 @@ class Recorder:
                 (camera_id, source, start_epoch, end_epoch),
             ).fetchall()
         rows = [dict(row) for row in indexed]
+        stale_paths = {str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()}
+        if stale_paths:
+            self._delete_index_paths(list(stale_paths))
+            rows = [row for row in rows if str(row["path"]) not in stale_paths]
         if rows:
             for row in rows:
                 row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
@@ -489,6 +497,7 @@ class Recorder:
                         continue
                     row["playable"] = not error
                     row["health_error"] = error
+                    row["validated"] = True
                     if duration is not None and row.get("start_epoch") is not None:
                         row["duration_seconds"] = duration
                         row["end_epoch"] = float(row["start_epoch"]) + duration
@@ -501,14 +510,15 @@ class Recorder:
                 row["path"], camera_id, source, row["name"], row["size_bytes"], row["modified_at"],
                 row["start_epoch"], row["duration_seconds"], row["end_epoch"],
                 1 if row.get("playable", True) else 0, str(row.get("health_error") or ""),
+                1 if row.get("validated", False) else 0,
             )
             for row in rows
         ]
         with self._index_connection() as connection:
             connection.executemany(
                 """
-                INSERT INTO recordings(path, camera_id, source, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, playable, health_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO recordings(path, camera_id, source, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, playable, health_error, validated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size_bytes=excluded.size_bytes,
                     modified_at=excluded.modified_at,
@@ -554,6 +564,8 @@ class Recorder:
             self._store_recording_rows(camera_id, source, rows, validate_new=not full)
             if full:
                 self._prune_recording_index(camera_id, source, files)
+        self._prune_missing_index_rows()
+        self._validate_index_batch()
 
     def _prune_recording_index(self, camera_id: str, source: str, files: list[Path]) -> None:
         existing_paths = {str(path) for path in files}
@@ -568,6 +580,64 @@ class Recorder:
             stale = [(path,) for path in indexed_paths if path not in existing_paths]
             if stale:
                 connection.executemany("DELETE FROM recordings WHERE path = ?", stale)
+
+    def _delete_index_paths(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        with self._index_connection() as connection:
+            connection.executemany("DELETE FROM recordings WHERE path = ?", [(path,) for path in paths])
+
+    def _prune_missing_index_rows(self, limit: int = 500) -> int:
+        with self._index_connection() as connection:
+            rows = connection.execute(
+                "SELECT rowid, path FROM recordings WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (self._prune_cursor, max(1, limit)),
+            ).fetchall()
+            if not rows and self._prune_cursor:
+                self._prune_cursor = 0
+                rows = connection.execute(
+                    "SELECT rowid, path FROM recordings ORDER BY rowid LIMIT ?",
+                    (max(1, limit),),
+                ).fetchall()
+        if not rows:
+            return 0
+        self._prune_cursor = int(rows[-1]["rowid"])
+        stale_paths = [str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()]
+        self._delete_index_paths(stale_paths)
+        return len(stale_paths)
+
+    def _validate_index_batch(self, limit: int = 20) -> int:
+        with self._index_connection() as connection:
+            rows = connection.execute(
+                "SELECT path, start_epoch FROM recordings WHERE validated = 0 ORDER BY start_epoch DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+        validated = 0
+        for row in rows:
+            if self._index_stop.is_set():
+                break
+            path = Path(str(row["path"]))
+            if not path.is_file():
+                self._delete_index_paths([str(path)])
+                continue
+            duration, error = self._probe_recording(path)
+            with self._index_connection() as connection:
+                if duration is not None:
+                    connection.execute(
+                        """
+                        UPDATE recordings
+                        SET duration_seconds = ?, end_epoch = start_epoch + ?, playable = ?, health_error = ?, validated = 1
+                        WHERE path = ?
+                        """,
+                        (duration, duration, 0 if error else 1, error, str(path)),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE recordings SET playable = 0, health_error = ?, validated = 1 WHERE path = ?",
+                        (error or "recording validation failed", str(path)),
+                    )
+            validated += 1
+        return validated
 
     def _probe_recording(self, path: Path) -> tuple[float | None, str]:
         ffprobe = str(Path(self.ffmpeg_path).with_name("ffprobe")) if Path(self.ffmpeg_path).name == "ffmpeg" else "ffprobe"
@@ -601,7 +671,7 @@ class Recorder:
     def mark_unplayable(self, path: Path, error: str) -> None:
         with self._index_connection() as connection:
             connection.execute(
-                "UPDATE recordings SET playable = 0, health_error = ? WHERE path = ?",
+                "UPDATE recordings SET playable = 0, health_error = ?, validated = 1 WHERE path = ?",
                 (str(error)[-500:], str(path)),
             )
 
