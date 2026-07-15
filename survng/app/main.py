@@ -37,6 +37,7 @@ from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_c
 from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
+from .recording_media import hls_map_transition, mp4_stream_fingerprint
 from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
@@ -1801,16 +1802,21 @@ def recording_day_hls_playlist(
         "#EXT-X-PLAYLIST-TYPE:VOD",
     ]
     media_offset = 0.0
+    previous_fingerprint: str | None = None
     for index, row in enumerate(rows):
         row_start = float(row["start_epoch"])
         segment_query = f"{query}&media_offset={media_offset:.3f}"
+        map_lines, previous_fingerprint = hls_map_transition(
+            previous_fingerprint,
+            mp4_stream_fingerprint(Path(str(row["path"]))),
+            f"day/{index}/init.mp4?{segment_query}",
+        )
+        lines.extend(map_lines)
         lines.extend([
             f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
             f"#EXTINF:{float(row['duration_seconds']):.3f},",
             f"day/{index}.m4s?{segment_query}",
         ])
-        if index == 0:
-            lines.insert(5, f'#EXT-X-MAP:URI="day/0/init.mp4?{segment_query}"')
         media_offset += float(row["duration_seconds"])
     lines.append("#EXT-X-ENDLIST")
     return Response(
@@ -1923,13 +1929,20 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
         f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
     ]
     media_offset = 0.0
+    previous_fingerprint: str | None = None
     for index, row in enumerate(rows):
         row_start = float(row["start_epoch"])
         segment_query = f"{query}&media_offset={media_offset:.3f}"
-        if index == 0:
-            lines.append(
-                f'#EXT-X-MAP:URI="/api/cameras/{quote(camera_id, safe="")}/recordings/day/0/init.mp4?{segment_query}"'
-            )
+        map_uri = (
+            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/{index}/init.mp4?"
+            f"{segment_query}"
+        )
+        map_lines, previous_fingerprint = hls_map_transition(
+            previous_fingerprint,
+            mp4_stream_fingerprint(Path(str(row["path"]))),
+            map_uri,
+        )
+        lines.extend(map_lines)
         lines.extend([
             f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
             f"#EXTINF:{float(row['duration_seconds']):.3f},",
