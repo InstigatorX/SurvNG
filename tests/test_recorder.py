@@ -173,6 +173,72 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(availability["segment_count"], 1)
         self.assertLessEqual(availability["ranges"][0]["end_epoch"], starts[-1])
 
+    def test_index_loop_starts_with_recent_discovery_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder._index_stop.set()
+            with patch.object(recorder, "refresh_recording_index") as refresh:
+                recorder._recording_index_loop({})
+
+        refresh.assert_called_once_with({}, full=False, run_maintenance=False)
+
+    def test_recent_index_discovery_defers_media_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now = datetime.now()
+            hour_dir = (
+                Path(tmpdir) / "recordings" / "front-door" / "main"
+                / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            )
+            hour_dir.mkdir(parents=True)
+            clip = hour_dir / now.strftime("%Y%m%d-%H%M%S.mp4")
+            clip.write_bytes(b"x" * 2048)
+            camera = Mock(id="front-door", record=True, record_sub=False, live_stream_url="")
+
+            with patch.object(recorder, "_probe_recording") as probe:
+                recorder.refresh_recording_index(
+                    {camera.id: camera},
+                    full=False,
+                    run_maintenance=False,
+                )
+            with recorder._index_connection() as connection:
+                indexed = dict(connection.execute(
+                    "SELECT path, validated FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        probe.assert_not_called()
+        self.assertEqual(indexed["path"], str(clip))
+        self.assertEqual(indexed["validated"], 0)
+
+    def test_source_reconciliation_discovers_history_and_prunes_stale_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour_dir = Path(tmpdir) / "recordings" / "front-door" / "main" / "2026-01-02" / "03"
+            hour_dir.mkdir(parents=True)
+            clips = [
+                hour_dir / "20260102-030000.mp4",
+                hour_dir / "20260102-030010.mp4",
+            ]
+            for clip in clips:
+                clip.write_bytes(b"x" * 2048)
+            stale = Path(tmpdir) / "stale.mp4"
+            stale.write_bytes(b"stale")
+            recorder._store_recording_rows("front-door", "main", [self._row(stale)])
+            stale.unlink()
+
+            recorder._reconcile_recording_source("front-door", "main")
+            with recorder._index_connection() as connection:
+                paths = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT path FROM recordings WHERE camera_id = ? AND source = ?",
+                        ("front-door", "main"),
+                    )
+                }
+
+        self.assertEqual(paths, {str(clip) for clip in clips})
+
     def test_incremental_pruner_removes_missing_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -190,7 +256,9 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "startup.mp4"
             clip.write_bytes(b"recording")
-            recorder._store_recording_rows("front-door", "main", [self._row(clip)])
+            row = self._row(clip)
+            recorder._store_recording_rows("front-door", "main", [row])
+            recorder.queue_recording_validation([row])
 
             with patch.object(recorder, "_probe_recording", return_value=(9.5, "")) as probe:
                 validated = recorder._validate_index_batch()

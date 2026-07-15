@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import signal
 import sqlite3
 import subprocess
 import threading
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +19,7 @@ from .recording_media import mp4_stream_fingerprint
 
 ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event, threading.Thread]
 RecorderKey = tuple[str, str]
+LOGGER = logging.getLogger(__name__)
 
 
 class Recorder:
@@ -36,10 +39,15 @@ class Recorder:
         self._watchdog_thread: threading.Thread | None = None
         self._index_stop = threading.Event()
         self._index_thread: threading.Thread | None = None
+        self._index_maintenance_thread: threading.Thread | None = None
+        self._reconcile_cursor = 0
         self._prune_cursor = 0
         self._fingerprint_pending: deque[str] = deque()
         self._fingerprint_pending_set: set[str] = set()
         self._fingerprint_lock = threading.Lock()
+        self._validation_pending: deque[str] = deque()
+        self._validation_pending_set: set[str] = set()
+        self._validation_lock = threading.Lock()
         self._init_recording_index()
 
     def _index_connection(self) -> sqlite3.Connection:
@@ -260,9 +268,11 @@ class Recorder:
 
     def stop_all(self) -> None:
         self._index_stop.set()
-        if self._index_thread is not None:
-            self._index_thread.join(timeout=10)
-            self._index_thread = None
+        for thread_name in ("_index_thread", "_index_maintenance_thread"):
+            thread = getattr(self, thread_name)
+            if thread is not None:
+                thread.join(timeout=10)
+                setattr(self, thread_name, None)
         self._watchdog_stop.set()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=2)
@@ -671,13 +681,58 @@ class Recorder:
             daemon=True,
         )
         self._index_thread.start()
+        self._index_maintenance_thread = threading.Thread(
+            target=self._recording_index_maintenance_loop,
+            args=(camera_map,),
+            name="recording-index-maintenance",
+            daemon=True,
+        )
+        self._index_maintenance_thread.start()
 
     def _recording_index_loop(self, camera_map: dict[str, CameraConfig]) -> None:
-        self.refresh_recording_index(camera_map, full=True)
+        try:
+            self.refresh_recording_index(camera_map, full=False, run_maintenance=False)
+        except Exception:
+            LOGGER.exception("Initial recording index discovery failed")
         while not self._index_stop.wait(10):
-            self.refresh_recording_index(camera_map, full=False)
+            try:
+                self.refresh_recording_index(camera_map, full=False, run_maintenance=False)
+            except Exception:
+                LOGGER.exception("Recording index discovery failed")
 
-    def refresh_recording_index(self, camera_map: dict[str, CameraConfig], full: bool = False) -> None:
+    def _recording_index_maintenance_loop(self, camera_map: dict[str, CameraConfig]) -> None:
+        if self._index_stop.wait(30):
+            return
+        wanted_keys = sorted(self._wanted_keys(camera_map))
+        next_reconcile = time.monotonic()
+        while not self._index_stop.is_set():
+            try:
+                self._prune_missing_index_rows(limit=200)
+                self._validate_index_batch(limit=20)
+                self._backfill_stream_fingerprints(limit=20)
+                if wanted_keys and time.monotonic() >= next_reconcile:
+                    camera_id, source = wanted_keys[self._reconcile_cursor % len(wanted_keys)]
+                    self._reconcile_cursor += 1
+                    self._reconcile_recording_source(camera_id, source)
+                    next_reconcile = time.monotonic() + 30
+            except Exception:
+                LOGGER.exception("Recording index maintenance failed")
+            if self._index_stop.wait(5):
+                return
+
+    def _reconcile_recording_source(self, camera_id: str, source: str) -> None:
+        camera_dir = self._camera_dir(camera_id, source)
+        files = list(camera_dir.glob("????-??-??/??/*.mp4")) if camera_dir.exists() else []
+        rows = self._recording_rows_for_files(camera_id, source, files)
+        self._store_recording_rows(camera_id, source, rows)
+        self._prune_recording_index(camera_id, source, files)
+
+    def refresh_recording_index(
+        self,
+        camera_map: dict[str, CameraConfig],
+        full: bool = False,
+        run_maintenance: bool = True,
+    ) -> None:
         now = datetime.now()
         wanted = self._wanted_keys(camera_map)
         for camera_id, source in wanted:
@@ -692,12 +747,15 @@ class Recorder:
                     if hour_dir.exists():
                         files.extend(hour_dir.glob("*.mp4"))
             rows = self._recording_rows_for_files(camera_id, source, files)
-            self._store_recording_rows(camera_id, source, rows, validate_new=not full)
+            self._store_recording_rows(camera_id, source, rows)
+            if rows:
+                self.queue_recording_validation([rows[-1]])
             if full:
                 self._prune_recording_index(camera_id, source, files)
-        self._prune_missing_index_rows()
-        self._validate_index_batch()
-        self._backfill_stream_fingerprints()
+        if run_maintenance:
+            self._prune_missing_index_rows()
+            self._validate_index_batch()
+            self._backfill_stream_fingerprints()
 
     def queue_stream_fingerprints(self, rows: list[dict]) -> None:
         with self._fingerprint_lock:
@@ -709,6 +767,29 @@ class Recorder:
                     self._fingerprint_pending.append(path)
                     self._fingerprint_pending_set.add(path)
 
+    def queue_recording_validation(self, rows: list[dict]) -> None:
+        candidates = [str(row.get("path") or "") for row in rows if not int(row.get("validated") or 0)]
+        candidates = [path for path in candidates if path]
+        if not candidates:
+            return
+        eligible: set[str] = set()
+        with self._index_connection() as connection:
+            for offset in range(0, len(candidates), 500):
+                batch = candidates[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                eligible.update(
+                    str(row[0])
+                    for row in connection.execute(
+                        f"SELECT path FROM recordings WHERE validated = 0 AND path IN ({placeholders})",
+                        batch,
+                    )
+                )
+        with self._validation_lock:
+            for path in candidates:
+                if path in eligible and path not in self._validation_pending_set:
+                    self._validation_pending.append(path)
+                    self._validation_pending_set.add(path)
+
     def _backfill_stream_fingerprints(self, limit: int = 20) -> int:
         paths: list[str] = []
         with self._fingerprint_lock:
@@ -716,23 +797,6 @@ class Recorder:
                 path = self._fingerprint_pending.popleft()
                 self._fingerprint_pending_set.discard(path)
                 paths.append(path)
-        if len(paths) < max(1, limit):
-            with self._index_connection() as connection:
-                pending = connection.execute(
-                    """
-                    SELECT path
-                    FROM recordings
-                    WHERE fingerprint_checked = 0
-                    ORDER BY start_epoch DESC
-                    LIMIT ?
-                    """,
-                    (max(1, limit) - len(paths),),
-                ).fetchall()
-            for row in pending:
-                path = str(row["path"])
-                if path not in paths:
-                    paths.append(path)
-
         updated = 0
         for path_value in paths:
             if self._index_stop.is_set():
@@ -794,16 +858,17 @@ class Recorder:
         return len(stale_paths)
 
     def _validate_index_batch(self, limit: int = 20) -> int:
-        with self._index_connection() as connection:
-            rows = connection.execute(
-                "SELECT path, start_epoch FROM recordings WHERE validated = 0 ORDER BY start_epoch DESC LIMIT ?",
-                (max(1, limit),),
-            ).fetchall()
+        paths: list[str] = []
+        with self._validation_lock:
+            while self._validation_pending and len(paths) < max(1, limit):
+                path = self._validation_pending.popleft()
+                self._validation_pending_set.discard(path)
+                paths.append(path)
         validated = 0
-        for row in rows:
+        for path_value in paths:
             if self._index_stop.is_set():
                 break
-            path = Path(str(row["path"]))
+            path = Path(path_value)
             if not path.is_file():
                 self._delete_index_paths([str(path)])
                 continue

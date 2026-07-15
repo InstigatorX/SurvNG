@@ -18,7 +18,11 @@ const url = `${baseUrl}/recordings?camera=${encodeURIComponent(camera)}&date=${r
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const failures = [];
+const fragmentUrls = [];
 page.on("pageerror", (error) => failures.push(`page: ${error.message}`));
+page.on("request", (request) => {
+  if (/\/recordings\/day\/.*(?:init\.mp4|media\.m4s)/.test(request.url())) fragmentUrls.push(request.url());
+});
 page.on("requestfailed", (request) => {
   if (/recordings|\.m4s|\.mp4|\.m3u8/.test(request.url())) {
     const errorText = request.failure()?.errorText || "failed";
@@ -141,8 +145,12 @@ try {
     failures.push(`continuous playback advanced only ${(endedAt - startedAt).toFixed(1)}s of ${soakSeconds}s`);
   }
   if (stats.errors) failures.push(`video element errors: ${stats.errors}`);
+  if (!fragmentUrls.length) failures.push("no recording fragments were requested");
+  if (fragmentUrls.some((fragmentUrl) => !/\/recordings\/day\/segment\/[^/]+\/(?:init\.mp4|media\.m4s)/.test(fragmentUrl))) {
+    failures.push("recording playback used an unstable positional fragment route");
+  }
 
-  console.log(JSON.stringify({ camera, source, recordingDate, duration, scrubCount, soakSeconds, startedAt, endedAt, stats, failures }, null, 2));
+  console.log(JSON.stringify({ camera, source, recordingDate, duration, scrubCount, soakSeconds, startedAt, endedAt, fragmentRequests: fragmentUrls.length, stats, failures }, null, 2));
   if (failures.length) process.exitCode = 1;
 } finally {
   await browser.close();

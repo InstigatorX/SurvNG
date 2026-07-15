@@ -156,6 +156,13 @@ DATE=2026-07-11 CAMERA=front-door SOURCE=main SOAK_SECONDS=90 SCRUBS=12 \
   npm --prefix frontend run test:recordings-soak
 ```
 
-The test fails on media errors, stalled playback, failed segment requests, or inadequate timeline advancement. Expected request cancellation caused by moving between scrub positions is ignored.
+The test fails on media errors, stalled playback, failed segment requests, unstable positional fragment URLs, scrubber/video misalignment, or inadequate timeline advancement. Expected request cancellation caused by moving between scrub positions is ignored.
+
+To also verify that today's timeline discovers newly finalized segments while the page remains open:
+
+```bash
+CHECK_GROWTH=1 CAMERA=front-door SOURCE=main SOAK_SECONDS=30 SCRUBS=8 \
+  npm --prefix frontend run test:recordings-soak
+```
 
 Real Safari validation must run on a Mac because Linux Chromium does not provide Safari's HEVC pipeline. Open the same camera/day in Safari, play through several segment boundaries, scrub to widely separated times, and confirm playback resumes without a black frame. Use an H.265 camera such as Upper Garage to exercise `hvc1` playback.
