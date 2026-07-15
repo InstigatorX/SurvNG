@@ -6,6 +6,18 @@ from functools import lru_cache
 from pathlib import Path
 
 
+def playback_segment_duration(
+    row_start: float,
+    row_duration: float,
+    window_end: float,
+    trim_end: bool = False,
+) -> float:
+    duration = max(0.1, min(float(row_duration), 300.0))
+    if not trim_end:
+        return duration
+    return max(0.1, min(duration, float(window_end) - float(row_start)))
+
+
 def _boxes(data: bytes, start: int = 0, end: int | None = None):
     limit = len(data) if end is None else min(end, len(data))
     cursor = start

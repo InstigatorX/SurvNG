@@ -8,6 +8,7 @@ from pathlib import Path
 from survng.app.recording_media import (
     hls_map_transition,
     mp4_stream_fingerprint,
+    playback_segment_duration,
     resolve_stream_fingerprints,
 )
 
@@ -54,6 +55,13 @@ def recording_file(video_entry: bytes, audio_entry: bytes | None = None, noise: 
 
 
 class RecordingMediaTest(unittest.TestCase):
+    def test_event_fragment_duration_trims_only_at_window_end(self) -> None:
+        self.assertEqual(playback_segment_duration(100.0, 10.0, 107.25, True), 7.25)
+        self.assertEqual(playback_segment_duration(100.0, 10.0, 115.0, True), 10.0)
+
+    def test_recording_fragment_duration_remains_full_without_trim_flag(self) -> None:
+        self.assertEqual(playback_segment_duration(100.0, 10.0, 104.0, False), 10.0)
+
     def test_unknown_fingerprints_do_not_create_false_transitions(self) -> None:
         self.assertEqual(
             resolve_stream_fingerprints(["", "h265", "", "h264", "", ""]),

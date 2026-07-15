@@ -1949,7 +1949,6 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Manual detection failed");
       setManualDetection(payload);
-      if (payload.event) onSelect(payload.event);
       if (onRefresh) onRefresh();
       setVideoActive(false);
       resetZoom();
