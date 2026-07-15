@@ -2894,7 +2894,8 @@ function RecordingsPage({ timeZone }) {
 
   function windowAround(epoch) {
     const windowSeconds = 15 * 60;
-    const start = Math.max(dayStart, epoch);
+    const bucket = Math.floor(Math.max(0, epoch - dayStart) / windowSeconds);
+    const start = dayStart + bucket * windowSeconds;
     return {
       start,
       end: Math.min(dayEnd, start + windowSeconds),
@@ -3036,7 +3037,11 @@ function RecordingsPage({ timeZone }) {
         if (controller.signal.aborted || requestId !== playbackRequestRef.current) return;
         const rows = payload.recordings || [];
         if (!rows.length) throw new Error("No recording segments exist in this window");
-        setPlaybackDetail({ ...requestedWindow, rows });
+        setPlaybackDetail({
+          start: Number(payload.start_epoch),
+          end: Number(payload.end_epoch),
+          rows,
+        });
       })
       .catch((error) => {
         if (error.name !== "AbortError" && requestId === playbackRequestRef.current) {

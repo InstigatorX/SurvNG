@@ -52,6 +52,7 @@ EVENT_CLIP_LOCKS_GUARD = threading.Lock()
 RECORDING_DAY_CACHE: dict[tuple[str, str, int, int], tuple[float, list[dict]]] = {}
 RECORDING_DAY_CACHE_LOCK = threading.Lock()
 RECORDING_DAY_CACHE_SECONDS = 30.0
+RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
 RECORDING_CACHE_MAINTENANCE_LOCK = threading.Lock()
 RECORDING_CACHE_LAST_MAINTENANCE = 0.0
 RECORDING_PREWARM_STOP = threading.Event()
@@ -1564,12 +1565,14 @@ def recording_window(
     if end_epoch <= start_epoch or end_epoch - start_epoch > 3600:
         raise HTTPException(status_code=400, detail="invalid recording window range")
     selected_source = recording_source(source)
-    rows = _recording_day_rows(camera_id, start_epoch, end_epoch, selected_source)
+    window_start = math.floor(start_epoch / RECORDING_PLAYBACK_WINDOW_SECONDS) * RECORDING_PLAYBACK_WINDOW_SECONDS
+    window_end = window_start + RECORDING_PLAYBACK_WINDOW_SECONDS
+    rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
     return {
         "camera_id": camera_id,
         "source": selected_source,
-        "start_epoch": start_epoch,
-        "end_epoch": end_epoch,
+        "start_epoch": window_start,
+        "end_epoch": window_end,
         "recordings": rows,
     }
 
