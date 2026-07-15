@@ -90,11 +90,16 @@ try {
       { timeout: 20_000 },
     );
     await page.mouse.click(trackBox.x + (trackBox.width * percent) / 100, trackBox.y + trackBox.height / 2);
+    const expectedSeconds = await page.locator(".recordings-v2-track input").inputValue().then(Number);
     await manifestRequest;
     await page.waitForFunction(() => {
       const element = document.querySelector(".recordings-v2-player video");
       return element && !element.seeking && element.readyState >= 2 && element.videoWidth > 0;
     }, null, { timeout: 30_000 });
+    const alignedSeconds = await page.locator(".recordings-v2-track input").inputValue().then(Number);
+    if (Math.abs(alignedSeconds - expectedSeconds) > 1) {
+      failures.push(`window scrub ${index + 1}: timeline is misaligned by ${Math.abs(alignedSeconds - expectedSeconds).toFixed(1)}s`);
+    }
     const before = await video.evaluate(async (element) => {
       await element.play();
       return element.currentTime;

@@ -2779,6 +2779,8 @@ function RecordingsPage({ timeZone }) {
   const codecFallbackRef = useRef(false);
   const playbackRequestRef = useRef(0);
   const latestAvailabilityRef = useRef(null);
+  const pendingSeekEpochRef = useRef(null);
+  const pendingSeekModeRef = useRef(null);
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const queryDate = initialQuery.get("date") || today;
@@ -2917,6 +2919,8 @@ function RecordingsPage({ timeZone }) {
     const video = videoRef.current;
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && video && Number.isFinite(mediaTime)) {
+      pendingSeekEpochRef.current = target;
+      pendingSeekModeRef.current = "local";
       playbackRequestRef.current += 1;
       setPlaybackWindow(null);
       setPlaybackNotice("Seeking...");
@@ -2924,6 +2928,8 @@ function RecordingsPage({ timeZone }) {
       if (autoplay) video.play().catch(() => {});
       else setPlaybackNotice("");
     } else {
+      pendingSeekEpochRef.current = target;
+      pendingSeekModeRef.current = "window";
       setPlaybackNotice("Loading recording...");
       setPlaybackWindow(nextWindow);
     }
@@ -2948,6 +2954,8 @@ function RecordingsPage({ timeZone }) {
     setAvailableSources([]);
     setPlaybackWindow(null);
     setFollowTarget(null);
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
     if (Number.isFinite(playhead)) desiredEpochRef.current = playhead;
     setPlayhead(null);
     const video = videoRef.current;
@@ -3045,6 +3053,8 @@ function RecordingsPage({ timeZone }) {
       })
       .catch((error) => {
         if (error.name !== "AbortError" && requestId === playbackRequestRef.current) {
+          pendingSeekEpochRef.current = null;
+          pendingSeekModeRef.current = null;
           setPlaybackNotice("");
           setPlaybackError(error.message || "Unable to load recording window");
         }
@@ -3076,7 +3086,9 @@ function RecordingsPage({ timeZone }) {
   }, [activeCameraId, date, source]);
 
   function handleRecordingReady(_player, video) {
-    const retained = desiredEpochRef.current;
+    const retained = Number.isFinite(pendingSeekEpochRef.current)
+      ? pendingSeekEpochRef.current
+      : desiredEpochRef.current;
     const target = Number.isFinite(retained) ? snapToRecording(retained) : snapToRecording(Date.now() / 1000);
     const mediaTime = epochToPlaybackMediaTime(target);
     if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;
@@ -3084,16 +3096,32 @@ function RecordingsPage({ timeZone }) {
       desiredEpochRef.current = target;
       setPlayhead(target);
     }
+    pendingSeekEpochRef.current = null;
+    pendingSeekModeRef.current = null;
     setPlaybackError("");
     setPlaybackNotice("");
     if (autoplayRef.current) video.play().catch(() => {});
   }
 
   function handleRecordingTimeUpdate(event) {
+    if (Number.isFinite(pendingSeekEpochRef.current)) return;
     const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
     if (!Number.isFinite(epoch)) return;
     desiredEpochRef.current = epoch;
     setPlayhead(epoch);
+  }
+
+  function handleRecordingSeeked(event) {
+    if (pendingSeekModeRef.current === "local") {
+      const epoch = mediaTimeToEpoch(event.currentTarget.currentTime);
+      if (Number.isFinite(epoch)) {
+        desiredEpochRef.current = epoch;
+        setPlayhead(epoch);
+      }
+      pendingSeekEpochRef.current = null;
+      pendingSeekModeRef.current = null;
+    }
+    setPlaybackNotice("");
   }
 
   function handleRecordingError() {
@@ -3154,7 +3182,7 @@ function RecordingsPage({ timeZone }) {
               onReady={handleRecordingReady}
               onError={handleRecordingError}
               onTimeUpdate={handleRecordingTimeUpdate}
-              onSeeked={() => setPlaybackNotice("")}
+              onSeeked={handleRecordingSeeked}
               onEnded={continueRecordingPlayback}
               onPlay={() => { autoplayRef.current = true; }}
               onPause={(event) => { if (!event.currentTarget.ended) autoplayRef.current = false; }}
