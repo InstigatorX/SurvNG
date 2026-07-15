@@ -55,6 +55,21 @@ RECORDING_DAY_CACHE_SECONDS = 30.0
 RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
 RECORDING_CACHE_MAINTENANCE_LOCK = threading.Lock()
 RECORDING_CACHE_LAST_MAINTENANCE = 0.0
+RECORDING_CACHE_METRICS_LOCK = threading.Lock()
+RECORDING_CACHE_METRICS = {
+    "playback_hits": 0,
+    "playback_misses": 0,
+    "playback_remuxes": 0,
+    "playback_failures": 0,
+    "playback_remux_ms": 0.0,
+    "playback_last_remux_ms": 0.0,
+    "prewarm_hits": 0,
+    "prewarm_misses": 0,
+    "prewarm_remuxes": 0,
+    "prewarm_failures": 0,
+    "prewarm_remux_ms": 0.0,
+    "prewarm_last_remux_ms": 0.0,
+}
 RECORDING_PREWARM_STOP = threading.Event()
 RECORDING_PREWARM_THREAD: threading.Thread | None = None
 FACE_OBSERVATIONS_SYNCED = False
@@ -806,6 +821,16 @@ def recording_cache_status() -> dict:
             existing_files.append(path)
         except FileNotFoundError:
             continue
+    with RECORDING_CACHE_METRICS_LOCK:
+        metrics = dict(RECORDING_CACHE_METRICS)
+    for origin in ("playback", "prewarm"):
+        remuxes = int(metrics[f"{origin}_remuxes"])
+        metrics[f"{origin}_avg_remux_ms"] = round(
+            float(metrics[f"{origin}_remux_ms"]) / remuxes,
+            1,
+        ) if remuxes else 0.0
+        metrics[f"{origin}_last_remux_ms"] = round(float(metrics[f"{origin}_last_remux_ms"]), 1)
+        metrics.pop(f"{origin}_remux_ms", None)
     return {
         "path": str(root),
         "entries": len({path.parent for path in existing_files}),
@@ -813,6 +838,7 @@ def recording_cache_status() -> dict:
         "max_bytes": int(float(config.recording_cache_max_gb) * 1024 * 1024 * 1024),
         "max_days": int(config.recording_cache_max_days),
         "prewarm": bool(config.recording_cache_prewarm),
+        "metrics": metrics,
     }
 
 
@@ -1565,8 +1591,7 @@ def recording_window(
     if end_epoch <= start_epoch or end_epoch - start_epoch > 3600:
         raise HTTPException(status_code=400, detail="invalid recording window range")
     selected_source = recording_source(source)
-    window_start = math.floor(start_epoch / RECORDING_PLAYBACK_WINDOW_SECONDS) * RECORDING_PLAYBACK_WINDOW_SECONDS
-    window_end = window_start + RECORDING_PLAYBACK_WINDOW_SECONDS
+    window_start, window_end = _recording_playback_window(start_epoch)
     rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
     return {
         "camera_id": camera_id,
@@ -1639,7 +1664,23 @@ def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, so
     return rows
 
 
-def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> tuple[Path, Path]:
+def _recording_playback_window(epoch: float) -> tuple[float, float]:
+    start = math.floor(epoch / RECORDING_PLAYBACK_WINDOW_SECONDS) * RECORDING_PLAYBACK_WINDOW_SECONDS
+    return start, start + RECORDING_PLAYBACK_WINDOW_SECONDS
+
+
+def _recording_cache_metric(origin: str, metric: str, value: float = 1.0) -> None:
+    key = f"{origin}_{metric}"
+    with RECORDING_CACHE_METRICS_LOCK:
+        RECORDING_CACHE_METRICS[key] = float(RECORDING_CACHE_METRICS.get(key, 0.0)) + value
+
+
+def _recording_fmp4_files(
+    path: Path,
+    duration: float,
+    media_offset: float,
+    origin: str = "playback",
+) -> tuple[Path, Path]:
     stat = path.stat()
     fingerprint = f"v3:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}"
     cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
@@ -1652,6 +1693,7 @@ def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> t
         and media_path.exists()
         and media_path.stat().st_size > 0
     ):
+        _recording_cache_metric(origin, "hits")
         return init_path, media_path
 
     with RECORDING_FMP4_LOCKS_GUARD:
@@ -1663,7 +1705,10 @@ def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> t
             and media_path.exists()
             and media_path.stat().st_size > 0
         ):
+            _recording_cache_metric(origin, "hits")
             return init_path, media_path
+        _recording_cache_metric(origin, "misses")
+        remux_started = time.monotonic()
         cache_dir.mkdir(parents=True, exist_ok=True)
         temp_dir = Path(tempfile.mkdtemp(prefix="fmp4-", dir=cache_dir))
         codec = _probe_video_codec(path)
@@ -1706,6 +1751,7 @@ def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> t
         generated_init = temp_dir / "init.mp4"
         generated_media = temp_dir / "media_0.m4s"
         if result.returncode != 0 or not generated_init.exists() or not generated_media.exists():
+            _recording_cache_metric(origin, "failures")
             error = (result.stderr or b"").decode("utf-8", errors="replace").strip()
             shutil.rmtree(temp_dir, ignore_errors=True)
             if time.time() - stat.st_mtime >= float(config.recording_segment_seconds) * 2:
@@ -1716,10 +1762,16 @@ def _recording_fmp4_files(path: Path, duration: float, media_offset: float) -> t
         try:
             _offset_fmp4_timestamps(generated_init, generated_media, media_offset)
         except Exception as exc:
+            _recording_cache_metric(origin, "failures")
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise HTTPException(status_code=500, detail=f"recording fragment timestamp repair failed: {exc}") from exc
         os.replace(generated_init, init_path)
         os.replace(generated_media, media_path)
+        remux_ms = (time.monotonic() - remux_started) * 1000
+        _recording_cache_metric(origin, "remuxes")
+        _recording_cache_metric(origin, "remux_ms", remux_ms)
+        with RECORDING_CACHE_METRICS_LOCK:
+            RECORDING_CACHE_METRICS[f"{origin}_last_remux_ms"] = remux_ms
         shutil.rmtree(temp_dir, ignore_errors=True)
         _maintain_recording_cache(cache_dir)
         return init_path, media_path
@@ -1805,16 +1857,30 @@ def _recording_prewarm_loop() -> None:
                     path = Path(row["path"])
                     if not path.exists() or time.time() - path.stat().st_mtime < float(config.recording_segment_seconds) * 2:
                         continue
-                    start_epoch = float(row["start_epoch"])
-                    local_day = datetime.fromtimestamp(start_epoch).replace(hour=0, minute=0, second=0, microsecond=0)
-                    day_start = local_day.timestamp()
-                    day_end = (local_day + timedelta(days=1)).timestamp()
-                    rows = manager.recorder.recording_rows_between(camera.id, day_start, day_end, source)
-                    index = next((i for i, item in enumerate(rows) if item["path"] == row["path"]), None)
-                    if index is None:
-                        continue
-                    media_offset = sum(float(item["duration_seconds"]) for item in rows[:index])
-                    _recording_fmp4_files(path, float(row["duration_seconds"]), media_offset)
+                    window_start, window_end = _recording_playback_window(float(row["start_epoch"]))
+                    rows = manager.recorder.recording_rows_between(
+                        camera.id,
+                        window_start,
+                        window_end,
+                        source,
+                    )
+                    targets = [rows[0], row] if rows else []
+                    warmed: set[str] = set()
+                    for target in targets:
+                        target_path = str(target["path"])
+                        if target_path in warmed:
+                            continue
+                        index = next((i for i, item in enumerate(rows) if item["path"] == target_path), None)
+                        if index is None:
+                            continue
+                        warmed.add(target_path)
+                        media_offset = sum(float(item["duration_seconds"]) for item in rows[:index])
+                        _recording_fmp4_files(
+                            Path(target_path),
+                            float(target["duration_seconds"]),
+                            media_offset,
+                            origin="prewarm",
+                        )
                 except Exception:
                     logging.getLogger(__name__).exception("Recording prewarm failed for %s/%s", camera.id, source)
 
