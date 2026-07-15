@@ -354,8 +354,9 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   );
 });
 
-function apiFile(path) {
-  return `/api/files?path=${encodeURIComponent(path)}`;
+function eventSnapshotUrl(event) {
+  const eventId = Number(event?.representative_event_id || event?.id);
+  return Number.isFinite(eventId) ? `/api/events/${eventId}/snapshot.jpg` : "";
 }
 
 function useStoredState(key, initialValue) {
@@ -1294,7 +1295,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   return (
     <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
-        {event?.snapshot_path ? <img src={apiFile(event.snapshot_path)} alt={alt} onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
+        {event?.snapshot_path && eventSnapshotUrl(event) ? <img src={eventSnapshotUrl(event)} alt={alt} onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {showAnnotations && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
@@ -1604,7 +1605,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
       </section>
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
-        {incident.snapshot_path ? <a href={apiFile(incident.snapshot_path)} download><Download size={15} /> Snapshot</a> : null}
+        {incident.snapshot_path && eventSnapshotUrl(incident) ? <a href={eventSnapshotUrl(incident)} download><Download size={15} /> Snapshot</a> : null}
         <button type="button" onClick={() => onOpen(incident)}><Cpu size={15} /> Manual detect</button>
       </div>
     </aside>

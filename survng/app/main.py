@@ -37,6 +37,7 @@ from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_c
 from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
+from .incident_utils import event_snapshot_path, stable_incident_id, stable_incident_key
 from .recording_media import hls_map_transition, resolve_stream_fingerprints
 from .zones import apply_detection_zones, detection_threshold
 
@@ -1004,6 +1005,25 @@ def probe_config(payload: dict) -> dict:
 @app.get("/api/events")
 def events(limit: int = 100) -> list[dict]:
     return [_event_row(row) for row in manager.events.recent(limit)]
+
+
+@app.get("/api/events/{event_id}/snapshot.jpg")
+def event_snapshot(event_id: int) -> FileResponse:
+    event = manager.events.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    try:
+        snapshot_path = event_snapshot_path(manager.storage_dir, event)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    media_type = mimetypes.guess_type(snapshot_path.name)[0] or "image/jpeg"
+    return FileResponse(
+        snapshot_path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.get("/api/incidents")
@@ -2224,8 +2244,8 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
     object_count = sum(1 for event in ordered if event.get("has_objects"))
     incident = {
         **representative_payload,
-        "id": f"incident-{camera_id}-{first.get('id')}-{last.get('id')}",
-        "incident_id": f"{camera_id}-{first.get('id')}-{last.get('id')}",
+        "id": stable_incident_id(camera_id, first.get("id")),
+        "incident_id": stable_incident_key(camera_id, first.get("id")),
         "representative_event_id": representative.get("id"),
         "camera_id": camera_id,
         "kind": "motion",
@@ -2371,15 +2391,3 @@ def _write_concat_file(rows: list[dict]) -> Path:
 
 def _recording_start_epoch(path: Path) -> float | None:
     return manager.recorder.recording_start_epoch(path)
-
-
-@app.get("/api/files")
-def file(path: str) -> FileResponse:
-    requested = Path(path).resolve()
-    storage_root = manager.storage_dir.resolve()
-    if storage_root not in requested.parents and requested != storage_root:
-        raise HTTPException(status_code=403, detail="file outside storage dir")
-    if not requested.exists():
-        raise HTTPException(status_code=404, detail="file not found")
-    media_type = mimetypes.guess_type(requested.name)[0] or "application/octet-stream"
-    return FileResponse(requested, media_type=media_type)
