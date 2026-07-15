@@ -8,7 +8,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/root/SurvNG
-ExecStart=/root/SurvNG/.venv/bin/uvicorn survng.app.main:app --host 0.0.0.0 --port 8088 --timeout-graceful-shutdown 30
+ExecStart=/root/SurvNG/.venv/bin/uvicorn survng.app.main:app --host 0.0.0.0 --port 8088 --loop asyncio --timeout-graceful-shutdown 30
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONFAULTHANDLER=1
 
