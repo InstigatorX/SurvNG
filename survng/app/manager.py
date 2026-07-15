@@ -12,7 +12,6 @@ from .detector import OpenVinoDetector
 from .events import EventStore
 from .face_recognition import OpenVinoFaceRecognizer
 from .faces import FaceStore
-from .hls import HlsStreamer
 from .go2rtc import Go2RtcAdapter
 from .mqtt import MqttService
 from .recorder import Recorder
@@ -36,7 +35,6 @@ class AppManager:
             self.face_recognizer,
         )
         self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds, config.hardware_acceleration)
-        self.hls = HlsStreamer(config.ffmpeg_path, self.storage_dir, config.hardware_acceleration)
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()
         self.mqtt = MqttService(
@@ -185,15 +183,8 @@ class AppManager:
         LOGGER.info("SurvNG shutdown: stopping face recognition")
         self.faces.close()
 
-        LOGGER.info("SurvNG shutdown: stopping HLS and recorder processes")
-        media_shutdowns = [
-            threading.Thread(target=self.hls.stop_all, name="stop-hls", daemon=False),
-            threading.Thread(target=self.recorder.stop_all, name="stop-recorder", daemon=False),
-        ]
-        for thread in media_shutdowns:
-            thread.start()
-        for thread in media_shutdowns:
-            thread.join()
+        LOGGER.info("SurvNG shutdown: stopping recorder processes")
+        self.recorder.stop_all()
         LOGGER.info("SurvNG shutdown complete in %.2fs", time.monotonic() - started)
         self.state_events.close()
 
@@ -225,7 +216,6 @@ class AppManager:
         self._camera_enabled[camera_id] = False
         self.recorder.set_camera_enabled(camera_id, False)
         worker.stop()
-        self.hls.stop_camera_sources(camera_id)
         self.mqtt.publish_camera_state(camera_id, False)
         self._publish_camera_status(camera_id)
         return True

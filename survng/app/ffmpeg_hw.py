@@ -25,20 +25,6 @@ def vaapi_enabled(value: str | None) -> bool:
     return hardware_mode(value) == "vaapi"
 
 
-def qsv_device_args(value: str | None) -> list[str]:
-    if not qsv_enabled(value):
-        return []
-    return ["-qsv_device", dri_render_device()]
-
-
-def encoder_device_args(value: str | None) -> list[str]:
-    if qsv_enabled(value):
-        return qsv_device_args(value)
-    if vaapi_enabled(value):
-        return ["-vaapi_device", dri_render_device()]
-    return []
-
-
 def qsv_decode_args(value: str | None) -> list[str]:
     if not qsv_enabled(value):
         return []
@@ -49,57 +35,6 @@ def qsv_decode_args(value: str | None) -> list[str]:
         "qsv",
         "-hwaccel_output_format",
         "qsv",
-    ]
-
-
-def hls_video_args(value: str | None) -> list[str]:
-    if qsv_enabled(value):
-        return [
-            "-vf",
-            "scale='min(1280,iw)':-2,format=nv12",
-            "-c:v",
-            "h264_qsv",
-            "-preset",
-            "veryfast",
-            "-global_quality",
-            "23",
-            "-profile:v",
-            "baseline",
-            "-level",
-            "3.1",
-            "-bf",
-            "0",
-        ]
-    if vaapi_enabled(value):
-        return [
-            "-vf",
-            "scale='min(1280,iw)':-2,format=nv12,hwupload",
-            "-c:v",
-            "h264_vaapi",
-            "-qp",
-            "23",
-            "-profile:v",
-            "baseline",
-            "-level",
-            "3.1",
-            "-bf",
-            "0",
-        ]
-    return [
-        "-vf",
-        "scale='min(1280,iw)':-2",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-tune",
-        "zerolatency",
-        "-profile:v",
-        "baseline",
-        "-level",
-        "3.1",
-        "-pix_fmt",
-        "yuv420p",
     ]
 
 

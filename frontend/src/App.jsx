@@ -30,7 +30,6 @@ import {
   RotateCcw,
   Save,
   ScanFace,
-  ShieldCheck,
   Siren,
   SkipBack,
   SkipForward,
@@ -631,7 +630,9 @@ function Shell({ page, theme, children }) {
     <div className={`app-shell page-${page}`}>
       <header className="topbar">
         <div className="brand-block">
-          <div className="brand-mark"><ShieldCheck size={22} /></div>
+          <div className="brand-mark">
+            <img src="/static/favicon.svg" alt="" aria-hidden="true" />
+          </div>
           <div>
             <h1>{isConfig ? "Config" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : isFaces ? "Faces" : "SurvNG"}</h1>
             <p>{isConfig ? "Camera inventory, cloning, and capability detection" : isRecordings ? "Continuous review of saved camera history" : isIncidents ? "Motion and object incident review" : isFaces ? "Face enrollment and observation review" : "Streams, events, recordings, and object detections"}</p>

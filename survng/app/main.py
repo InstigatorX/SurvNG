@@ -33,7 +33,6 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 
-from .baichuan_native import ffmpeg_input_args, is_native_baichuan, start_ffmpeg_pipe
 from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
 from .detector import objects_to_json
 from .manager import AppManager
@@ -42,7 +41,6 @@ from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
 manager = AppManager(config)
-active_mse_streams: set[str] = set()
 LOG_LINES: deque[dict] = deque(maxlen=1000)
 SECRET_URL_RE = re.compile(r"(\b(?:rtsp|rtmp|http|https|reolink)://)([^:/@\s]+):([^@\s]+)@", re.IGNORECASE)
 RECORDING_LOOKUP_LIMIT = 20000
@@ -1439,120 +1437,6 @@ async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
             await websocket.close()
         except RuntimeError:
             pass
-
-
-@app.get("/api/cameras/{camera_id}/hls/index.m3u8")
-def hls_playlist_default(camera_id: str) -> FileResponse:
-    return hls_playlist(camera_id, "live")
-
-
-@app.get("/api/cameras/{camera_id}/hls/{source}/index.m3u8")
-def hls_playlist(camera_id: str, source: str) -> FileResponse:
-    source = normalize_source(source)
-    camera = next((item for item in config.cameras if item.id == camera_id), None)
-    if camera is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    manager.hls.start(camera, source)
-    playlist = manager.hls.wait_for_playlist(camera_id, source)
-    if playlist is None or not playlist.exists():
-        raise HTTPException(status_code=503, detail="HLS stream is starting")
-    return FileResponse(
-        playlist,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-@app.get("/api/cameras/{camera_id}/hls/{filename}")
-def hls_file_default(camera_id: str, filename: str) -> FileResponse:
-    return hls_file(camera_id, "live", filename)
-
-
-@app.get("/api/cameras/{camera_id}/hls/{source}/{filename}")
-def hls_file(camera_id: str, source: str, filename: str) -> FileResponse:
-    source = normalize_source(source)
-    if "/" in filename or "\\" in filename or filename.startswith("."):
-        raise HTTPException(status_code=400, detail="invalid filename")
-    path = manager.hls.file_path(camera_id, source, filename)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="HLS segment not found")
-    manager.hls.touch(camera_id, source)
-    media_type = "video/mp2t" if path.suffix == ".ts" else "application/octet-stream"
-    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-store"})
-
-
-@app.websocket("/api/cameras/{camera_id}/mse")
-async def mse_stream(websocket: WebSocket, camera_id: str) -> None:
-    source = normalize_source(websocket.query_params.get("source", "live"))
-    stream_key = f"{camera_id}:{source}"
-    camera = next((item for item in config.cameras if item.id == camera_id), None)
-    if camera is None:
-        await websocket.close(code=1008)
-        return
-    if stream_key in active_mse_streams:
-        await websocket.close(code=1013)
-        return
-
-    await websocket.accept()
-    active_mse_streams.add(stream_key)
-    command = [
-        config.ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        *ffmpeg_input_args(camera, source),
-        "-an",
-        "-sn",
-        "-c:v",
-        "copy",
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof",
-        "-f",
-        "mp4",
-        "pipe:1",
-    ]
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE if is_native_baichuan(camera) else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        bufsize=0,
-    )
-    pipe = start_ffmpeg_pipe(camera, source, process)
-
-    try:
-        init_buffer = bytearray()
-        sent_init = False
-        while process.poll() is None:
-            if process.stdout is None:
-                break
-            chunk = await asyncio.to_thread(process.stdout.read, 64 * 1024)
-            if not chunk:
-                await asyncio.sleep(0.02)
-                continue
-            if not sent_init:
-                init_buffer.extend(chunk)
-                if b"moov" not in init_buffer and len(init_buffer) < 512 * 1024:
-                    continue
-                await websocket.send_bytes(bytes(init_buffer))
-                init_buffer.clear()
-                sent_init = True
-                continue
-            await websocket.send_bytes(chunk)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        active_mse_streams.discard(stream_key)
-        if pipe is not None:
-            pipe.stop()
-        try:
-            if process.poll() is None:
-                process.terminate()
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=3)
-
 
 
 @app.post("/api/cameras/{camera_id}/camera/start")

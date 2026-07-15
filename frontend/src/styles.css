@@ -391,6 +391,16 @@ p {
 .brand-mark {
   width: 42px;
   height: 42px;
+  flex: 0 0 42px;
+  overflow: hidden;
+  background: #0e1517;
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 199, 0.18);
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .topbar h1 {
@@ -4116,7 +4126,7 @@ button.status-pill.hud-toggle:disabled {
   .brand-mark {
     width: 28px;
     height: 28px;
-    flex: 0 0 auto;
+    flex-basis: 28px;
     border-radius: 8px;
   }
 
