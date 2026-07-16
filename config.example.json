@@ -5,6 +5,14 @@
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
   "recording_segment_seconds": 10.0,
+  "motion_qualification": {
+    "mode": "audit",
+    "sensitivity": "balanced",
+    "sample_fps": 5.0,
+    "window_seconds": 1.6,
+    "burst_quiet_seconds": 0.5,
+    "rejected_sample_rate": 0.05
+  },
   "detector": {
     "enabled": false,
     "model_path": "best.onnx",

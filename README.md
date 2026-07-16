@@ -2,6 +2,10 @@
 
 Local-first surveillance app for RTSP/RTMP/ONVIF cameras with recording, camera motion-event ingestion, OpenVINO object detection, and a browser GUI.
 
+For the end-to-end ingest, motion qualification, inference, incident, recording,
+and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that
+document synchronized with changes to any video-processing stage.
+
 ## What This MVP Does
 
 - Connects to RTSP, RTMP, HTTP, or file streams through OpenCV/FFmpeg.
@@ -134,6 +138,12 @@ The detector supports YOLO-style ONNX output shaped like `[1, 4 + classes, ancho
 On macOS, the detector can also use Core ML. Set `detector.backend` to `coreml` and `coreml_model_path` to a `.mlmodel` or `.mlpackage` detection model. If Core ML is unavailable or the Core ML model cannot load, the detector falls back to the configured OpenVINO/ONNX model.
 
 The detector is optional. If OpenVINO or the model is missing, the app records a motion event and reports `detector_unavailable` instead of failing the camera loop.
+
+### Motion Qualification
+
+SurvNG can qualify noisy ONVIF motion before starting the recorded-frame OpenVINO cycle. It reuses a small grayscale ring from the existing live/substream connection, coalesces bursts of ONVIF messages, and scores temporal persistence, component continuity, area stability, edge position, fragmentation, and global image changes.
+
+Set `motion_qualification.mode` to `off`, `audit`, or `enforce`. Audit mode is the default: it records pass/suppress telemetry but never suppresses a coalesced motion burst. Enforce mode suppresses only rejected motion bursts; semantic ONVIF topics such as person, vehicle, animal, and manual triggers bypass the filter. Each camera can inherit or override the global mode and sensitivity.
 
 ## Face Recognition
 

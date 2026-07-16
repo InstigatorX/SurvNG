@@ -626,6 +626,10 @@ function defaultCamera(cameras, seed = {}) {
     live_stream_url: seed.live_stream_url || "",
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
+    motion_qualification: {
+      mode: seed.motion_qualification?.mode || "inherit",
+      sensitivity: seed.motion_qualification?.sensitivity || "inherit",
+    },
     zones: structuredClone(seed.zones || []),
     onvif: {
       enabled: seed.onvif?.enabled || false,
@@ -3929,6 +3933,21 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   <label>Username<input value={selectedCamera.onvif?.username || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "username"], event.target.value)} /></label>
                   <label>Password<input type="password" value={selectedCamera.onvif?.password || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
                 </div>
+                <div className="sub-panel">
+                  <h3>Motion Qualification</h3>
+                  <label>Mode<select value={selectedCamera.motion_qualification?.mode || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], event.target.value)}>
+                    <option value="inherit">Use global setting</option>
+                    <option value="off">Off</option>
+                    <option value="audit">Audit</option>
+                    <option value="enforce">Enforce</option>
+                  </select></label>
+                  <label>Sensitivity<select value={selectedCamera.motion_qualification?.sensitivity || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "sensitivity"], event.target.value)}>
+                    <option value="inherit">Use global setting</option>
+                    <option value="high">High</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="low">Low</option>
+                  </select></label>
+                </div>
               </div>
 
               <ZoneEditor
@@ -4292,6 +4311,15 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
           <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
         </div>
+        <h3>Motion Qualification</h3>
+        <div className="field-row">
+          <label>Mode<select value={config.motion_qualification?.mode || "audit"} onChange={(event) => updateConfig(["motion_qualification", "mode"], event.target.value)}><option value="off">Off</option><option value="audit">Audit</option><option value="enforce">Enforce</option></select></label>
+          <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
+          <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
+          <label>Window Seconds<input type="number" min="0.8" max="4" step="0.1" value={config.motion_qualification?.window_seconds ?? 1.6} onChange={(event) => updateConfig(["motion_qualification", "window_seconds"], Number(event.target.value))} /></label>
+          <label>Burst Quiet Seconds<input type="number" min="0.1" max="2" step="0.1" value={config.motion_qualification?.burst_quiet_seconds ?? 0.5} onChange={(event) => updateConfig(["motion_qualification", "burst_quiet_seconds"], Number(event.target.value))} /></label>
+          <label>Rejected Sample Rate<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.rejected_sample_rate ?? 0.05} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))} /></label>
+        </div>
         <h3>Face Recognition</h3>
         <div className="field-row">
           <label className="check-field"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /> Enable recognition</label>
@@ -4361,6 +4389,7 @@ function RuntimeStatus({ status, timeZone }) {
       <span>Recording: {status.recording ? "running" : "stopped"}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF message: {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
+      {status.motion_qualification ? <span>Motion qualification: {status.motion_qualification.mode} / {status.motion_qualification.sensitivity} · {status.motion_qualification.passed || 0} passed · {status.motion_qualification.audit_rejected || 0} audit rejects · {status.motion_qualification.suppressed || 0} suppressed</span> : null}
     </div>
   );
 }

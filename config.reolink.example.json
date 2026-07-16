@@ -3,6 +3,14 @@
   "storage_dir": "survng/storage",
   "ffmpeg_path": "ffmpeg",
   "recording_segment_seconds": 10.0,
+  "motion_qualification": {
+    "mode": "audit",
+    "sensitivity": "balanced",
+    "sample_fps": 5.0,
+    "window_seconds": 1.6,
+    "burst_quiet_seconds": 0.5,
+    "rejected_sample_rate": 0.05
+  },
   "detector": {
     "enabled": false,
     "model_path": "best.onnx",
@@ -21,6 +29,10 @@
       "stream_url": "rtsp://USER:PASSWORD@CAMERA_IP:554/h264Preview_01_main",
       "live_stream_url": "rtsp://USER:PASSWORD@CAMERA_IP:554/h264Preview_01_sub",
       "record": true,
+      "motion_qualification": {
+        "mode": "inherit",
+        "sensitivity": "inherit"
+      },
       "baichuan": {
         "enabled": true,
         "host": "CAMERA_IP",

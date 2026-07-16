@@ -55,6 +55,20 @@ class MqttConfig(BaseModel):
     discovery_prefix: str = "homeassistant"
 
 
+class MotionQualificationConfig(BaseModel):
+    mode: Literal["off", "audit", "enforce"] = "audit"
+    sensitivity: Literal["low", "balanced", "high"] = "balanced"
+    sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
+    window_seconds: float = Field(default=1.6, ge=0.8, le=4.0)
+    burst_quiet_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
+    rejected_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
+class CameraMotionQualificationConfig(BaseModel):
+    mode: Literal["inherit", "off", "audit", "enforce"] = "inherit"
+    sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
+
+
 class CameraConfig(BaseModel):
     id: str
     name: str
@@ -63,6 +77,7 @@ class CameraConfig(BaseModel):
     live_stream_url: str | None = None
     record: bool = True
     record_sub: bool = False
+    motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     baichuan: BaichuanConfig = Field(default_factory=BaichuanConfig)
     zones: list[DetectionZone] = Field(default_factory=list)
@@ -126,6 +141,7 @@ class AppConfig(BaseModel):
     recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
+    motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)

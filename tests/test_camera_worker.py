@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from survng.app.camera import CameraWorker
-from survng.app.config import CameraConfig
+from survng.app.config import CameraConfig, MotionQualificationConfig
 
 
 class DummyDetector:
@@ -106,6 +106,49 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual(worker.last_motion_at, "")
         self.assertEqual(detector.calls, 0)
+
+    def test_motion_handler_enqueues_without_running_detection_inline(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            with patch.object(worker, "_recorded_motion_frame") as recorded_frame:
+                worker.handle_motion_event("onvif/motion", "motion")
+
+            self.assertEqual(worker._motion_queue.qsize(), 1)
+            recorded_frame.assert_not_called()
+
+    def test_motion_worker_coalesces_a_trigger_burst(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1, window_seconds=0.8)
+        published = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(
+                camera,
+                Path(tmpdir),
+                DummyDetector(),
+                DummyEvents(),
+                DummyRecorder(),
+                config,
+                lambda event_type, payload: published.append((event_type, payload)),
+            )
+            worker._stop.clear()
+            with patch.object(worker, "_process_motion_event", return_value=False) as process_event:
+                thread = worker._motion_thread = __import__("threading").Thread(target=worker._run_motion_events)
+                thread.start()
+                now = datetime.now(timezone.utc)
+                worker.handle_motion_event("onvif/motion", "first", now)
+                worker.handle_motion_event("onvif/motion", "second", now)
+                deadline = time.monotonic() + 2
+                while process_event.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                worker._stop.set()
+                worker._motion_queue.put_nowait(None)
+                thread.join(timeout=2)
+
+            self.assertEqual(process_event.call_count, 1)
+            qualifications = [payload for event_type, payload in published if event_type == "motion_qualification"]
+            self.assertEqual(len(qualifications), 1)
+            self.assertEqual(qualifications[0]["trigger_count"], 2)
 
     def test_motion_event_runs_detection_on_live_fallback(self) -> None:
         camera = CameraConfig(

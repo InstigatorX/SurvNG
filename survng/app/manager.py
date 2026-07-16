@@ -55,7 +55,15 @@ class AppManager:
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None
         self.workers = {
-            camera.id: CameraWorker(camera, self.storage_dir, self.detector, self.events, self.recorder, self.publish_event)
+            camera.id: CameraWorker(
+                camera,
+                self.storage_dir,
+                self.detector,
+                self.events,
+                self.recorder,
+                config.motion_qualification,
+                self.publish_event,
+            )
             for camera in config.cameras
         }
 
@@ -303,7 +311,13 @@ class AppManager:
             "onvif_last_event_at", "last_motion_at", "detection_enabled", "recording",
             "sub_recording", "recording_enabled", "recording_configured",
         )
-        return tuple(status.get(key) for key in keys)
+        motion = status.get("motion_qualification") or {}
+        return tuple(status.get(key) for key in keys) + (
+            motion.get("passed"),
+            motion.get("audit_rejected"),
+            motion.get("suppressed"),
+            motion.get("last_decision_at"),
+        )
 
     def _publish_camera_status(self, camera_id: str) -> None:
         status = next((item for item in self.statuses() if item.get("id") == camera_id), None)
