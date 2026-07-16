@@ -32,6 +32,7 @@ class Recorder:
         self.index_path = storage_dir / "recordings.sqlite3"
         self.processes: dict[RecorderKey, ProcessItem] = {}
         self._starting: set[RecorderKey] = set()
+        self._retry_after: dict[RecorderKey, float] = {}
         self._disabled_cameras: set[str] = set()
         self.owner_token = f"survng-{os.getpid()}"
         self._lock = threading.Lock()
@@ -113,6 +114,8 @@ class Recorder:
         with self._lock:
             if camera.id in self._disabled_cameras:
                 return
+            if time.monotonic() < self._retry_after.get(key, 0):
+                return
             existing = self.processes.get(key)
             if existing is not None and existing[0].poll() is None:
                 return
@@ -169,7 +172,8 @@ class Recorder:
             pipe = start_ffmpeg_pipe(camera, source, process)
             with self._lock:
                 self.processes[key] = (process, pipe, stop_event, keeper)
-        except Exception:
+                self._retry_after.pop(key, None)
+        except Exception as error:
             stop_event.set()
             if pipe is not None:
                 pipe.stop()
@@ -177,7 +181,10 @@ class Recorder:
                 self._kill_pid(process.pid)
             if keeper is not None:
                 keeper.join(timeout=1)
-            raise
+            with self._lock:
+                self._retry_after[key] = time.monotonic() + 60
+            LOGGER.error("Recorder start failed for %s/%s: %s", camera.id, source, error)
+            return
         finally:
             with self._lock:
                 self._starting.discard(key)
@@ -189,7 +196,10 @@ class Recorder:
 
     def _keep_recording_dirs(self, camera_dir: Path, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
-            self._ensure_recording_dirs(camera_dir)
+            try:
+                self._ensure_recording_dirs(camera_dir)
+            except OSError as error:
+                LOGGER.warning("Recording directory maintenance failed for %s: %s", camera_dir, error)
             stop_event.wait(60)
 
     def _ensure_recording_dirs(self, camera_dir: Path) -> None:

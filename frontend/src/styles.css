@@ -3672,6 +3672,30 @@ button.status-pill.hud-toggle:disabled {
   padding: 7px 9px;
 }
 
+.recordings-v2-play {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(255, 255, 255, .24);
+  border-radius: 6px;
+  background: rgba(8, 17, 18, .9);
+  color: #fff;
+  font: inherit;
+  font-weight: 800;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.recordings-v2-play:hover {
+  background: rgba(17, 65, 61, .94);
+}
+
 .recordings-v2-error {
   inset: auto 10px 10px;
   display: block;

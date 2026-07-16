@@ -22,6 +22,7 @@ import {
   ListTree,
   Monitor,
   Moon,
+  Play,
   Plus,
   Power,
   Radar,
@@ -63,10 +64,13 @@ const THEME_META = {
 };
 
 const APP_BASE_PATH = String(window.__SURVNG_BASE_PATH__ || "").replace(/\/+$/, "");
+const PREFER_NATIVE_HLS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 document.documentElement.dataset.embedded = window.self !== window.top ? "true" : "false";
 
 function appUrl(path = "/") {
   if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) return path;
+  if (APP_BASE_PATH && (path === APP_BASE_PATH || path.startsWith(`${APP_BASE_PATH}/`))) return path;
   return `${APP_BASE_PATH}${path}`;
 }
 
@@ -125,7 +129,7 @@ const ShakaVideo = forwardRef(function ShakaVideo({
       nextPlayer.addEventListener("error", handleError);
       nextPlayer.configure({
         streaming: {
-          preferNativeHls: false,
+          preferNativeHls: PREFER_NATIVE_HLS,
           bufferingGoal,
           rebufferingGoal: 1,
         },
@@ -2856,6 +2860,7 @@ function RecordingsPage({ timeZone }) {
   const [loading, setLoading] = useState(true);
   const [playbackError, setPlaybackError] = useState("");
   const [playbackNotice, setPlaybackNotice] = useState("");
+  const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [playbackWindow, setPlaybackWindow] = useState(null);
   const [followTarget, setFollowTarget] = useState(null);
 
@@ -2963,6 +2968,18 @@ function RecordingsPage({ timeZone }) {
     };
   }
 
+  function requestRecordingPlay(video, showBlocked = true) {
+    if (!video) return;
+    video.play().then(() => {
+      setPlaybackBlocked(false);
+    }).catch((error) => {
+      if (showBlocked && error?.name === "NotAllowedError") {
+        setPlaybackBlocked(true);
+        setPlaybackNotice("Tap to play recording");
+      }
+    });
+  }
+
   function playAt(epoch, autoplay = true) {
     const target = snapToRecording(epoch);
     if (target === null || !activeCameraId) return;
@@ -2976,6 +2993,7 @@ function RecordingsPage({ timeZone }) {
       && target >= loadedPlaybackWindow.start
       && target < loadedPlaybackWindow.end;
     const video = videoRef.current;
+    if (autoplay && video) requestRecordingPlay(video, false);
     const mediaTime = epochToPlaybackMediaTime(target);
     if (inCurrentWindow && video && Number.isFinite(mediaTime)) {
       pendingSeekEpochRef.current = target;
@@ -2984,7 +3002,7 @@ function RecordingsPage({ timeZone }) {
       setPlaybackWindow(null);
       setPlaybackNotice("Seeking...");
       video.currentTime = mediaTime;
-      if (autoplay) video.play().catch(() => {});
+      if (autoplay) requestRecordingPlay(video);
       else setPlaybackNotice("");
     } else {
       pendingSeekEpochRef.current = target;
@@ -3006,6 +3024,7 @@ function RecordingsPage({ timeZone }) {
     const controller = new AbortController();
     setLoading(true);
     setPlaybackError("");
+    setPlaybackBlocked(false);
     setRecordings([]);
     playbackRequestRef.current += 1;
     setPlaybackDetail(null);
@@ -3159,7 +3178,7 @@ function RecordingsPage({ timeZone }) {
     pendingSeekModeRef.current = null;
     setPlaybackError("");
     setPlaybackNotice("");
-    if (autoplayRef.current) video.play().catch(() => {});
+    if (autoplayRef.current) requestRecordingPlay(video);
   }
 
   function handleRecordingTimeUpdate(event) {
@@ -3243,14 +3262,28 @@ function RecordingsPage({ timeZone }) {
               onTimeUpdate={handleRecordingTimeUpdate}
               onSeeked={handleRecordingSeeked}
               onEnded={continueRecordingPlayback}
-              onPlay={() => { autoplayRef.current = true; }}
-              onPause={(event) => { if (!event.currentTarget.ended) autoplayRef.current = false; }}
+              onPlay={() => {
+                autoplayRef.current = true;
+                setPlaybackBlocked(false);
+                setPlaybackNotice("");
+              }}
+              onPause={(event) => {
+                if (!event.currentTarget.ended && !Number.isFinite(pendingSeekEpochRef.current)) {
+                  autoplayRef.current = false;
+                }
+              }}
             />
           ) : null}
           {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
           {playbackError ? <div className="recordings-v2-error">{playbackError}</div> : null}
           {playbackNotice && !playbackError ? <div className="recordings-v2-notice">{playbackNotice}</div> : null}
+          {playbackBlocked && !playbackError ? (
+            <button type="button" className="recordings-v2-play" onClick={() => requestRecordingPlay(videoRef.current)}>
+              <Play size={22} fill="currentColor" />
+              Play recording
+            </button>
+          ) : null}
         </div>
 
         <div className="recordings-v2-controls">

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from survng.app.config import CameraConfig
 from survng.app.recorder import Recorder
 
 
@@ -36,6 +37,23 @@ class RecorderTest(unittest.TestCase):
                 set(recorder._wanted_keys({camera.id: camera})),
                 {(camera.id, "main"), (camera.id, "live")},
             )
+
+    def test_start_failure_is_nonfatal_and_backed_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://camera/main",
+            )
+            with patch.object(recorder, "_ensure_recording_dirs", side_effect=OSError(28, "No space left")) as ensure_dirs:
+                with patch("survng.app.recorder.subprocess.Popen") as popen:
+                    recorder.start(camera, "main")
+                    recorder.start(camera, "main")
+
+            self.assertEqual(ensure_dirs.call_count, 1)
+            popen.assert_not_called()
+            self.assertNotIn((camera.id, "main"), recorder.processes)
 
     @patch.object(Recorder, "_owned_ffmpeg_recorders", return_value={})
     def test_stopping_one_source_does_not_target_the_other_source(self, owned_recorders) -> None:
