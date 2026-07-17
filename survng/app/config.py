@@ -55,18 +55,35 @@ class MqttConfig(BaseModel):
     discovery_prefix: str = "homeassistant"
 
 
+class AuditAiConfig(BaseModel):
+    enabled: bool = False
+    provider: Literal["openai", "gemini", "openai_compatible"] = "openai"
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    timeout_seconds: float = Field(default=45.0, ge=5.0, le=120.0)
+    allow_apply_recommendations: bool = False
+
+
 class MotionQualificationConfig(BaseModel):
     mode: Literal["off", "audit", "enforce"] = "audit"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
+    frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
     window_seconds: float = Field(default=1.6, ge=0.8, le=4.0)
+    post_trigger_seconds: float = Field(default=2.5, ge=0.5, le=6.0)
     burst_quiet_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
     rejected_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    borderline_rescue_enabled: bool = True
+    borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
 
 
 class CameraMotionQualificationConfig(BaseModel):
     mode: Literal["inherit", "off", "audit", "enforce"] = "inherit"
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
+    frame_width: int | None = Field(default=None, ge=240, le=960)
+    borderline_rescue_enabled: bool | None = None
+    borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
 
 
 class CameraConfig(BaseModel):
@@ -142,6 +159,7 @@ class AppConfig(BaseModel):
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
+    audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)

@@ -91,6 +91,66 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(objects[0]["label"], "car")
             self.assertEqual(objects[0]["detection_source"], "manual_openvino")
 
+    def test_motion_audits_filter_and_backfill_rejected_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                snapshot_path=f"{tmpdir}/snapshots/gate/rejected.jpg",
+                objects_json=json.dumps([
+                    {"label": "car", "confidence": 0.82, "incident_eligible": True},
+                    {
+                        "status": "motion_qualification",
+                        "motion_qualification": {
+                            "mode": "audit",
+                            "sensitivity": "balanced",
+                            "score": 0.41,
+                            "threshold": 0.48,
+                            "reason": "edge_motion",
+                            "trigger_count": 3,
+                            "would_suppress": True,
+                            "features": {"persistence": 0.75, "interior": 0.0},
+                        },
+                    },
+                ], separators=(",", ":")),
+                created_at="2026-07-16T12:00:00+00:00",
+            )
+
+            reloaded = EventStore(Path(tmpdir))
+            object_rows, object_total = reloaded.motion_audits(outcome="object")
+            clear_rows, clear_total = reloaded.motion_audits(outcome="clear")
+
+            self.assertEqual(object_total, 1)
+            self.assertEqual(clear_total, 0)
+            self.assertEqual(object_rows[0]["event_id"], event["id"])
+            self.assertEqual(object_rows[0]["reason"], "edge_motion")
+            self.assertEqual(json.loads(object_rows[0]["features_json"])["persistence"], 0.75)
+            self.assertEqual(clear_rows, [])
+
+    def test_motion_audits_preserve_skipped_detector_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            audit = store.add_motion_audit(
+                camera_id="front-door",
+                snapshot_path="",
+                created_at="2026-07-16T12:00:00+00:00",
+                mode="enforce",
+                sensitivity="balanced",
+                score=0.22,
+                threshold=0.48,
+                reason="low_persistence",
+                object_detected=None,
+                trigger_count=2,
+                features={"persistence": 0.2},
+            )
+
+            rows, total = store.motion_audits(camera_id="front-door", outcome="not_run")
+
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["id"], audit["id"])
+            self.assertIsNone(rows[0]["object_detected"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,10 +6,23 @@
   "motion_qualification": {
     "mode": "audit",
     "sensitivity": "balanced",
+    "frame_width": 320,
     "sample_fps": 5.0,
     "window_seconds": 1.6,
+    "post_trigger_seconds": 2.5,
     "burst_quiet_seconds": 0.5,
-    "rejected_sample_rate": 0.05
+    "rejected_sample_rate": 0.05,
+    "borderline_rescue_enabled": true,
+    "borderline_margin": 0.03
+  },
+  "audit_ai": {
+    "enabled": false,
+    "provider": "openai",
+    "api_key": "",
+    "base_url": "",
+    "model": "",
+    "timeout_seconds": 45.0,
+    "allow_apply_recommendations": false
   },
   "detector": {
     "enabled": false,
@@ -31,7 +44,10 @@
       "record": true,
       "motion_qualification": {
         "mode": "inherit",
-        "sensitivity": "inherit"
+        "sensitivity": "inherit",
+        "frame_width": null,
+        "borderline_rescue_enabled": null,
+        "borderline_margin": null
       },
       "baichuan": {
         "enabled": true,

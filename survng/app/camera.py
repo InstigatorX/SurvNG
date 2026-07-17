@@ -33,7 +33,6 @@ CAPTURE_READ_TIMEOUT_MS = 5000
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
 FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
-MOTION_RING_WIDTH = 320
 MOTION_QUEUE_SIZE = 32
 
 
@@ -70,7 +69,13 @@ class CameraWorker:
         self._source_frame_monotonic: dict[str, float] = {}
         self._source_last_access: dict[str, float] = {}
         self._source_errors: dict[str, str] = {}
-        ring_size = max(12, round(self.motion_config.sample_fps * (self.motion_config.window_seconds + 3.0)))
+        ring_size = max(
+            12,
+            round(
+                self.motion_config.sample_fps
+                * (self.motion_config.window_seconds + self.motion_config.post_trigger_seconds + 3.0)
+            ),
+        )
         self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self._motion_last_sample = 0.0
         self._motion_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=MOTION_QUEUE_SIZE)
@@ -84,6 +89,7 @@ class CameraWorker:
             "suppressed": 0,
             "priority_bypasses": 0,
             "insufficient_frames": 0,
+            "inconclusive": 0,
             "dropped_triggers": 0,
             "audit_object_matches": 0,
             "last_result": None,
@@ -169,11 +175,14 @@ class CameraWorker:
             live_frame_clock = self._source_frame_monotonic.get("live")
             main_frame_clock = self._source_frame_monotonic.get("main")
             main_error = self._source_errors.get("main", "")
+            motion_buffered_frames = len(self._motion_frames)
+            motion_frame_shape = list(self._motion_frames[-1][1].shape) if self._motion_frames else None
         now = time.monotonic()
         live_age = max(0.0, now - live_frame_clock) if live_frame_clock is not None else None
         main_age = max(0.0, now - main_frame_clock) if main_frame_clock is not None else None
         connected = bool(enabled and live_age is not None and live_age <= FRAME_STALE_SECONDS)
-        mode, sensitivity = self._motion_settings()
+        mode, sensitivity, frame_width = self._motion_settings()
+        rescue_enabled, rescue_margin = self._motion_rescue_settings()
         with self._motion_stats_lock:
             motion_stats = dict(self._motion_stats)
         return {
@@ -212,8 +221,12 @@ class CameraWorker:
                 **motion_stats,
                 "mode": mode,
                 "sensitivity": sensitivity,
+                "frame_width": frame_width,
+                "borderline_rescue_enabled": rescue_enabled,
+                "borderline_margin": rescue_margin,
                 "queue_depth": self._motion_queue.qsize(),
-                "buffered_frames": len(self._motion_frames),
+                "buffered_frames": motion_buffered_frames,
+                "frame_shape": motion_frame_shape,
             },
         }
 
@@ -257,6 +270,7 @@ class CameraWorker:
     ) -> None:
         if not self._detection_enabled:
             return
+        received_at = time.time()
         self.last_motion_at = datetime.now(timezone.utc).isoformat()
         if event_at is None:
             event_at = datetime.now(timezone.utc)
@@ -272,7 +286,12 @@ class CameraWorker:
                 "source": "manual" if topic.startswith("manual") else "onvif",
             })
 
-        trigger = {"topic": topic, "message": message, "event_at": event_at}
+        trigger = {
+            "topic": topic,
+            "message": message,
+            "event_at": event_at,
+            "received_at": received_at,
+        }
         with self._motion_stats_lock:
             self._motion_stats["triggers"] += 1
         try:
@@ -299,24 +318,40 @@ class CameraWorker:
     def _remember_motion_frame(self, frame: np.ndarray, frame_clock: float) -> None:
         interval = 1.0 / max(1.0, self.motion_config.sample_fps)
         with self._frame_lock:
-            if frame_clock - self._motion_last_sample < interval:
+            if frame_clock - self._motion_last_sample < interval * 0.85:
                 return
             self._motion_last_sample = frame_clock
         try:
             height, width = frame.shape[:2]
-            target_height = max(90, round(height * MOTION_RING_WIDTH / max(1, width)))
-            resized = cv2.resize(frame, (MOTION_RING_WIDTH, target_height), interpolation=cv2.INTER_AREA)
+            frame_width = self._motion_settings()[2]
+            target_height = max(90, round(height * frame_width / max(1, width)))
+            resized = cv2.resize(frame, (frame_width, target_height), interpolation=cv2.INTER_AREA)
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         except (cv2.error, ValueError):
             return
         with self._frame_lock:
             self._motion_frames.append((time.time(), gray))
 
-    def _motion_settings(self) -> tuple[str, str]:
+    def _motion_settings(self) -> tuple[str, str, int]:
         override = self.camera.motion_qualification
         mode = self.motion_config.mode if override.mode == "inherit" else override.mode
         sensitivity = self.motion_config.sensitivity if override.sensitivity == "inherit" else override.sensitivity
-        return mode, sensitivity
+        frame_width = int(override.frame_width or self.motion_config.frame_width)
+        return mode, sensitivity, frame_width
+
+    def _motion_rescue_settings(self) -> tuple[bool, float]:
+        override = self.camera.motion_qualification
+        enabled = (
+            self.motion_config.borderline_rescue_enabled
+            if override.borderline_rescue_enabled is None
+            else override.borderline_rescue_enabled
+        )
+        margin = (
+            self.motion_config.borderline_margin
+            if override.borderline_margin is None
+            else override.borderline_margin
+        )
+        return bool(enabled), float(margin)
 
     @staticmethod
     def _priority_motion_topic(topic: str) -> bool:
@@ -325,12 +360,77 @@ class CameraWorker:
             word in searchable for word in ("person", "people", "human", "vehicle", "animal", "face")
         )
 
-    def _motion_frames_for_event(self, event_at: datetime) -> list[np.ndarray]:
-        half_window = self.motion_config.window_seconds / 2.0
-        start = event_at.timestamp() - half_window
-        end = event_at.timestamp() + half_window
-        with self._frame_lock:
-            return [frame.copy() for captured_at, frame in self._motion_frames if start <= captured_at <= end]
+    def _qualify_motion_burst(
+        self,
+        event_at: datetime,
+        received_at: float,
+        sensitivity: str,
+    ) -> tuple[MotionQualificationResult, dict[str, Any]]:
+        event_epoch = event_at.timestamp()
+        anchor = min(event_epoch, received_at) if abs(event_epoch - received_at) <= 10.0 else received_at
+        deadline = received_at + self.motion_config.post_trigger_seconds
+        best_result: MotionQualificationResult | None = None
+        evaluated_windows: set[tuple[float, ...]] = set()
+        samples: list[tuple[float, np.ndarray]] = []
+
+        while not self._stop.is_set():
+            with self._frame_lock:
+                samples = [
+                    (captured_at, frame.copy())
+                    for captured_at, frame in self._motion_frames
+                    if captured_at >= anchor - self.motion_config.window_seconds
+                ]
+
+            for end_index in range(3, len(samples)):
+                window_end = samples[end_index][0]
+                if window_end < received_at:
+                    continue
+                window_start = window_end - self.motion_config.window_seconds
+                window = [item for item in samples[:end_index + 1] if item[0] >= window_start]
+                if len(window) < 4 or window[-1][0] - window[0][0] < self.motion_config.window_seconds * 0.45:
+                    continue
+                key = tuple(round(item[0], 3) for item in window)
+                if key in evaluated_windows:
+                    continue
+                evaluated_windows.add(key)
+                result = qualify_motion([item[1] for item in window], sensitivity)
+                if best_result is None or result.score > best_result.score:
+                    best_result = result
+                if result.accepted:
+                    return result, {
+                        "windows_evaluated": len(evaluated_windows),
+                        "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
+                    }
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            if self._stop.wait(min(0.2, remaining)):
+                break
+
+        diagnostics = {
+            "windows_evaluated": len(evaluated_windows),
+            "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
+        }
+        if best_result is None:
+            return MotionQualificationResult(
+                True,
+                1.0,
+                0.0,
+                "insufficient_frames",
+                len(samples),
+                {},
+            ), diagnostics
+        if best_result.score == 0.0 and not best_result.features.get("global_change"):
+            return MotionQualificationResult(
+                True,
+                0.0,
+                best_result.threshold,
+                "no_temporal_signal",
+                best_result.frame_count,
+                best_result.features,
+            ), diagnostics
+        return best_result, diagnostics
 
     def _run_motion_events(self) -> None:
         while not self._stop.is_set():
@@ -362,27 +462,40 @@ class CameraWorker:
 
             representative = min(triggers, key=lambda item: item["event_at"])
             event_at = representative["event_at"]
-            settle_until = event_at.timestamp() + self.motion_config.window_seconds / 2.0
-            if self._stop.wait(max(0.0, min(2.0, settle_until - time.time()))):
-                return
+            received_at = min(float(item.get("received_at") or time.time()) for item in triggers)
 
-            mode, sensitivity = self._motion_settings()
+            mode, sensitivity, frame_width = self._motion_settings()
+            rescue_enabled, rescue_margin = self._motion_rescue_settings()
             priority = any(self._priority_motion_topic(str(item["topic"])) for item in triggers)
+            diagnostics: dict[str, Any] = {
+                "windows_evaluated": 0,
+                "event_receipt_delta_seconds": round(received_at - event_at.timestamp(), 3),
+            }
             if mode == "off":
                 result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
             elif priority:
                 result = MotionQualificationResult(True, 1.0, 0.0, "priority_topic", 0, {})
             else:
-                result = qualify_motion(self._motion_frames_for_event(event_at), sensitivity)
+                result, diagnostics = self._qualify_motion_burst(event_at, received_at, sensitivity)
 
+            borderline_candidate = bool(
+                rescue_enabled
+                and not result.accepted
+                and result.score >= max(0.0, result.threshold - rescue_margin)
+            )
             qualification = {
                 **result.as_dict(),
+                **diagnostics,
                 "mode": mode,
                 "sensitivity": sensitivity,
+                "frame_width": frame_width,
+                "borderline_rescue_enabled": rescue_enabled,
+                "borderline_margin": rescue_margin,
+                "borderline_candidate": borderline_candidate,
                 "trigger_count": len(triggers),
                 "would_suppress": bool(mode == "audit" and not result.accepted),
             }
-            effective_accepted = mode != "enforce" or result.accepted
+            effective_accepted = mode != "enforce" or result.accepted or borderline_candidate
             qualification["effective_accepted"] = effective_accepted
             with self._motion_stats_lock:
                 self._motion_stats["bursts"] += 1
@@ -390,9 +503,11 @@ class CameraWorker:
                     self._motion_stats["priority_bypasses"] += 1
                 if result.reason == "insufficient_frames":
                     self._motion_stats["insufficient_frames"] += 1
+                if result.reason == "no_temporal_signal":
+                    self._motion_stats["inconclusive"] += 1
                 if result.accepted:
                     self._motion_stats["passed"] += 1
-                elif mode == "enforce":
+                elif mode == "enforce" and not borderline_candidate:
                     self._motion_stats["suppressed"] += 1
                 elif mode == "audit":
                     self._motion_stats["audit_rejected"] += 1
@@ -405,25 +520,64 @@ class CameraWorker:
                     **qualification,
                 })
             if not effective_accepted:
-                self._sample_rejected_motion(event_at, result)
+                snapshot_path = self._sample_rejected_motion(event_at, result)
+                audit = self.events.add_motion_audit(
+                    camera_id=self.camera.id,
+                    snapshot_path=snapshot_path,
+                    created_at=event_at.isoformat(),
+                    mode=mode,
+                    sensitivity=sensitivity,
+                    score=result.score,
+                    threshold=result.threshold,
+                    reason=result.reason,
+                    object_detected=None,
+                    trigger_count=len(triggers),
+                    features=result.features,
+                )
+                if self.event_callback:
+                    self.event_callback("motion_audit", audit)
                 continue
 
-            found_object = self._process_motion_event(
+            outcome = self._process_motion_event(
                 str(representative["topic"]),
                 str(representative["message"]),
                 event_at,
                 qualification,
             )
+            found_object = bool(outcome.get("object_detected"))
+            if borderline_candidate and found_object:
+                with self._motion_stats_lock:
+                    self._motion_stats["borderline_rescues"] = self._motion_stats.get("borderline_rescues", 0) + 1
+            elif mode == "enforce" and borderline_candidate:
+                with self._motion_stats_lock:
+                    self._motion_stats["suppressed"] += 1
             if mode == "audit" and not result.accepted and found_object:
                 with self._motion_stats_lock:
                     self._motion_stats["audit_object_matches"] += 1
+            if mode in {"audit", "enforce"} and not result.accepted:
+                audit = self.events.add_motion_audit(
+                    event_id=int(outcome["event_id"]),
+                    camera_id=self.camera.id,
+                    snapshot_path=str(outcome.get("snapshot_path") or ""),
+                    created_at=event_at.isoformat(),
+                    mode=mode,
+                    sensitivity=sensitivity,
+                    score=result.score,
+                    threshold=result.threshold,
+                    reason=result.reason,
+                    object_detected=found_object,
+                    trigger_count=len(triggers),
+                    features=result.features,
+                )
+                if self.event_callback:
+                    self.event_callback("motion_audit", audit)
 
-    def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> None:
+    def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
         if self.motion_config.rejected_sample_rate <= 0 or random.random() > self.motion_config.rejected_sample_rate:
-            return
+            return ""
         frame = self._get_latest_frame("live")
         if frame is None:
-            return
+            return ""
         directory = self.storage_dir / "motion_samples" / self.camera.id
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -433,8 +587,10 @@ class CameraWorker:
                 samples = sorted(directory.glob("*.jpg"), key=lambda item: item.stat().st_mtime)
                 for stale in samples[:-100]:
                     stale.unlink(missing_ok=True)
+                return str(path)
         except OSError as error:
             LOGGER.debug("failed to save rejected motion sample for %s: %s", self.camera.id, error)
+        return ""
 
     def _process_motion_event(
         self,
@@ -442,13 +598,21 @@ class CameraWorker:
         message: str,
         event_at: datetime,
         qualification: dict[str, Any],
-    ) -> bool:
+    ) -> dict[str, Any]:
         frame, objects, recording_path = self._recorded_motion_frame(event_at)
         snapshot_path = ""
         if frame is not None:
             snapshot_path = self._write_snapshot(frame)
         else:
             objects = [{"status": "no_recorded_frame"}]
+        eligible_objects = [
+            detected for detected in objects
+            if detected.get("label") and detected.get("incident_eligible") is not False
+        ]
+        if qualification.get("borderline_candidate"):
+            qualification["rescued_by_object"] = bool(eligible_objects)
+            qualification["effective_accepted"] = bool(eligible_objects)
+            qualification["would_suppress"] = not bool(eligible_objects)
         objects.append({"status": "motion_qualification", "motion_qualification": qualification})
         event = self.events.add_event(
             camera_id=self.camera.id,
@@ -468,10 +632,6 @@ class CameraWorker:
                 "kind": "motion",
             })
         detected_objects = [detected for detected in objects if detected.get("label")]
-        eligible_objects = [
-            detected for detected in objects
-            if detected.get("label") and detected.get("incident_eligible") is not False
-        ]
         if self.event_callback and detected_objects:
             self.event_callback("object", {
                 "event_id": event.get("id"),
@@ -482,7 +642,11 @@ class CameraWorker:
                 "objects": detected_objects,
                 "incident_objects": eligible_objects,
             })
-        return bool(eligible_objects)
+        return {
+            "event_id": int(event["id"]),
+            "snapshot_path": snapshot_path,
+            "object_detected": bool(eligible_objects),
+        }
 
     def _start_source(self, source: str) -> bool:
         source = self.camera.normalized_source(source)

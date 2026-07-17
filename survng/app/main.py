@@ -9,6 +9,7 @@ import asyncio
 import queue
 import os
 import re
+import signal
 import platform
 import shutil
 import time
@@ -34,6 +35,7 @@ import cv2
 import numpy as np
 
 from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
+from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
 from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
@@ -79,7 +81,13 @@ RECORDING_CACHE_METRICS = {
 }
 RECORDING_PREWARM_STOP = threading.Event()
 RECORDING_PREWARM_THREAD: threading.Thread | None = None
+RECORDING_PREWARM_PROCESS_LOCK = threading.Lock()
+RECORDING_PREWARM_PROCESS: subprocess.Popen | None = None
 FACE_OBSERVATIONS_SYNCED = False
+
+
+class RecordingPrewarmCancelled(Exception):
+    pass
 
 
 class ConfiguredBasePathMiddleware:
@@ -1041,6 +1049,210 @@ def events(limit: int = 100) -> list[dict]:
     return [_event_row(row) for row in manager.events.recent(limit)]
 
 
+def _motion_audit_row(row: dict) -> dict:
+    audit = dict(row)
+    try:
+        audit["features"] = json.loads(str(audit.pop("features_json", "{}") or "{}"))
+    except json.JSONDecodeError:
+        audit["features"] = {}
+    snapshot_path = str(audit.pop("snapshot_path", "") or "")
+    audit["has_snapshot"] = bool(snapshot_path and Path(snapshot_path).is_file())
+    raw_outcome = audit.get("object_detected")
+    audit["object_detected"] = None if raw_outcome is None else bool(raw_outcome)
+    return audit
+
+
+class AuditAiApplyRequest(BaseModel):
+    changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
+
+
+def _audit_ai_context(audit: dict) -> dict:
+    camera_id = str(audit.get("camera_id") or "")
+    camera = camera_by_id(config, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="audit camera not found")
+    try:
+        features = json.loads(str(audit.get("features_json") or "{}"))
+    except json.JSONDecodeError:
+        features = {}
+    event = manager.events.get(int(audit["event_id"])) if audit.get("event_id") else None
+    detected_objects: list[dict] = []
+    qualification: dict = {}
+    if event:
+        try:
+            entries = json.loads(str(event.get("objects_json") or "[]"))
+        except json.JSONDecodeError:
+            entries = []
+        for entry in entries:
+            if entry.get("label"):
+                detected_objects.append({
+                    "label": entry.get("label"),
+                    "confidence": entry.get("confidence"),
+                    "box": entry.get("box"),
+                    "zones": entry.get("zones") or entry.get("zone_matches") or [],
+                    "incident_eligible": entry.get("incident_eligible", True),
+                })
+            if entry.get("status") == "motion_qualification":
+                qualification = entry.get("motion_qualification") or {}
+    override = camera.motion_qualification
+    effective = {
+        "mode": config.motion_qualification.mode if override.mode == "inherit" else override.mode,
+        "sensitivity": config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
+        "frame_width": override.frame_width or config.motion_qualification.frame_width,
+        "borderline_rescue_enabled": (
+            config.motion_qualification.borderline_rescue_enabled
+            if override.borderline_rescue_enabled is None
+            else override.borderline_rescue_enabled
+        ),
+        "borderline_margin": (
+            config.motion_qualification.borderline_margin
+            if override.borderline_margin is None
+            else override.borderline_margin
+        ),
+        "sample_fps": config.motion_qualification.sample_fps,
+        "window_seconds": config.motion_qualification.window_seconds,
+        "post_trigger_seconds": config.motion_qualification.post_trigger_seconds,
+        "burst_quiet_seconds": config.motion_qualification.burst_quiet_seconds,
+    }
+    recent, _ = manager.events.motion_audits(limit=50, camera_id=camera_id)
+    reason_counts: dict[str, int] = {}
+    object_matches = 0
+    for row in recent:
+        reason = str(row.get("reason") or "unknown")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        object_matches += int(row.get("object_detected") == 1)
+    return {
+        "audit": {
+            "id": audit.get("id"),
+            "camera_id": camera_id,
+            "created_at": audit.get("created_at"),
+            "score": audit.get("score"),
+            "threshold": audit.get("threshold"),
+            "reason": audit.get("reason"),
+            "features": features,
+            "trigger_count": audit.get("trigger_count"),
+            "object_detected": None if audit.get("object_detected") is None else bool(audit.get("object_detected")),
+            "qualification": qualification,
+        },
+        "detected_objects": detected_objects,
+        "effective_settings": effective,
+        "recent_camera_audits": {
+            "sample_size": len(recent),
+            "object_matches": object_matches,
+            "reason_counts": reason_counts,
+        },
+        "setting_bounds": {
+            "frame_width": [240, 960],
+            "sample_fps": [2, 10],
+            "window_seconds": [0.8, 4],
+            "post_trigger_seconds": [0.5, 6],
+            "burst_quiet_seconds": [0.1, 2],
+            "borderline_margin": [0, 0.10],
+            "sensitivity": ["high", "balanced", "low"],
+        },
+    }
+
+
+@app.get("/api/motion-audit")
+def motion_audit(
+    limit: int = 24,
+    offset: int = 0,
+    camera_id: str = "",
+    outcome: str = "all",
+) -> dict:
+    if outcome not in {"all", "object", "clear", "not_run"}:
+        raise HTTPException(status_code=400, detail="invalid motion audit outcome")
+    rows, total = manager.events.motion_audits(
+        limit=limit,
+        offset=offset,
+        camera_id=camera_id,
+        outcome=outcome,
+    )
+    return {
+        "items": [_motion_audit_row(row) for row in rows],
+        "total": total,
+        "limit": max(1, min(int(limit), 100)),
+        "offset": max(0, int(offset)),
+    }
+
+
+@app.get("/api/motion-audit/{audit_id}/snapshot.jpg")
+def motion_audit_snapshot(audit_id: int) -> FileResponse:
+    audit = manager.events.get_motion_audit(audit_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail="motion audit entry not found")
+    try:
+        snapshot_path = event_snapshot_path(manager.storage_dir, audit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    media_type = mimetypes.guess_type(snapshot_path.name)[0] or "image/jpeg"
+    return FileResponse(
+        snapshot_path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@app.post("/api/motion-audit/{audit_id}/ai-analyze")
+async def motion_audit_ai_analyze(audit_id: int) -> dict:
+    audit = manager.events.get_motion_audit(audit_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail="motion audit entry not found")
+    try:
+        snapshot_path = event_snapshot_path(manager.storage_dir, audit)
+        advice = await asyncio.to_thread(
+            AuditAiAdvisor(config.audit_ai).analyze,
+            snapshot_path,
+            _audit_ai_context(audit),
+        )
+    except AuditAiError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "audit_id": audit_id,
+        "camera_id": audit.get("camera_id"),
+        "provider": config.audit_ai.provider,
+        "model": config.audit_ai.model or "",
+        "advice": advice.model_dump(mode="json"),
+    }
+
+
+@app.post("/api/motion-audit/{audit_id}/ai-apply")
+def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
+    if not config.audit_ai.allow_apply_recommendations:
+        raise HTTPException(status_code=403, detail="applying AI recommendations is disabled")
+    audit = manager.events.get_motion_audit(audit_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail="motion audit entry not found")
+    if not request.changes:
+        raise HTTPException(status_code=400, detail="no recommendation changes supplied")
+    next_config = config.model_copy(deep=True)
+    camera = camera_by_id(next_config, str(audit.get("camera_id") or ""))
+    if camera is None:
+        raise HTTPException(status_code=404, detail="audit camera not found")
+    applied: list[dict] = []
+    for change in request.changes:
+        value = validate_tuning_value(change.setting, change.value)
+        if change.scope == "global":
+            setattr(next_config.motion_qualification, change.setting, value)
+        else:
+            setattr(camera.motion_qualification, change.setting, value)
+        applied.append({**change.model_dump(mode="json"), "value": value})
+    next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
+    save_config(next_config, assign_ids=False)
+    reload_manager(next_config)
+    return {
+        "ok": True,
+        "audit_id": audit_id,
+        "camera_id": camera.id,
+        "applied": applied,
+        "workers_restarted": True,
+    }
+
+
 @app.get("/api/events/{event_id}/snapshot.jpg")
 def event_snapshot(event_id: int) -> FileResponse:
     event = manager.events.get(event_id)
@@ -1730,6 +1942,59 @@ def _recording_cache_metric(origin: str, metric: str, value: float = 1.0) -> Non
         RECORDING_CACHE_METRICS[key] = float(RECORDING_CACHE_METRICS.get(key, 0.0)) + value
 
 
+def _signal_recording_prewarm_process(process: subprocess.Popen, sig: signal.Signals) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _run_recording_remux(command: list[str], origin: str) -> subprocess.CompletedProcess:
+    global RECORDING_PREWARM_PROCESS
+    if origin != "prewarm":
+        return subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    with RECORDING_PREWARM_PROCESS_LOCK:
+        RECORDING_PREWARM_PROCESS = process
+    terminate_at: float | None = None
+    timeout_at = time.monotonic() + 30.0
+    try:
+        while True:
+            if not RECORDING_PREWARM_STOP.is_set() and time.monotonic() >= timeout_at:
+                _signal_recording_prewarm_process(process, signal.SIGTERM)
+                try:
+                    _stdout, stderr = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    _signal_recording_prewarm_process(process, signal.SIGKILL)
+                    _stdout, stderr = process.communicate()
+                raise subprocess.TimeoutExpired(command, 30, stderr=stderr)
+            if RECORDING_PREWARM_STOP.is_set() and process.poll() is None:
+                if terminate_at is None:
+                    _signal_recording_prewarm_process(process, signal.SIGTERM)
+                    terminate_at = time.monotonic() + 3.0
+                elif time.monotonic() >= terminate_at:
+                    _signal_recording_prewarm_process(process, signal.SIGKILL)
+            try:
+                _stdout, stderr = process.communicate(timeout=0.25)
+                if RECORDING_PREWARM_STOP.is_set():
+                    raise RecordingPrewarmCancelled
+                return subprocess.CompletedProcess(command, process.returncode, None, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        with RECORDING_PREWARM_PROCESS_LOCK:
+            if RECORDING_PREWARM_PROCESS is process:
+                RECORDING_PREWARM_PROCESS = None
+
+
 def _recording_fmp4_files(
     path: Path,
     duration: float,
@@ -1802,7 +2067,11 @@ def _recording_fmp4_files(
             str(temp_dir / "media_%d.m4s"),
             str(temp_dir / "index.m3u8"),
         ])
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+        try:
+            result = _run_recording_remux(command, origin)
+        except RecordingPrewarmCancelled:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
         generated_init = temp_dir / "init.mp4"
         generated_media = temp_dir / "media_0.m4s"
         if result.returncode != 0 or not generated_init.exists() or not generated_media.exists():
@@ -1883,11 +2152,22 @@ def _start_recording_prewarmer() -> None:
 
 def _stop_recording_prewarmer() -> None:
     global RECORDING_PREWARM_THREAD
+    logger = logging.getLogger(__name__)
     RECORDING_PREWARM_STOP.set()
+    with RECORDING_PREWARM_PROCESS_LOCK:
+        process = RECORDING_PREWARM_PROCESS
+    if process is not None:
+        _signal_recording_prewarm_process(process, signal.SIGTERM)
     if RECORDING_PREWARM_THREAD is not None:
-        RECORDING_PREWARM_THREAD.join(timeout=35)
+        RECORDING_PREWARM_THREAD.join(timeout=5)
         if RECORDING_PREWARM_THREAD.is_alive():
-            logging.getLogger(__name__).error("recording prewarmer did not stop")
+            with RECORDING_PREWARM_PROCESS_LOCK:
+                process = RECORDING_PREWARM_PROCESS
+            if process is not None:
+                _signal_recording_prewarm_process(process, signal.SIGKILL)
+            RECORDING_PREWARM_THREAD.join(timeout=3)
+        if RECORDING_PREWARM_THREAD.is_alive():
+            logger.error("recording prewarmer did not stop after cancellation")
         else:
             RECORDING_PREWARM_THREAD = None
 
@@ -1936,6 +2216,8 @@ def _recording_prewarm_loop() -> None:
                             media_offset,
                             origin="prewarm",
                         )
+                except RecordingPrewarmCancelled:
+                    return
                 except Exception:
                     logging.getLogger(__name__).exception("Recording prewarm failed for %s/%s", camera.id, source)
 

@@ -42,6 +42,69 @@ class DummyRecorder:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_borderline_candidate_is_rescued_by_eligible_object(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        events = Mock()
+        events.add_event.return_value = {"id": 42}
+        qualification = {
+            "borderline_candidate": True,
+            "effective_accepted": True,
+            "would_suppress": True,
+        }
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+        objects = [{"label": "dog", "confidence": 0.8, "incident_eligible": True}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), events, DummyRecorder())
+            with (
+                patch.object(worker, "_recorded_motion_frame", return_value=(frame, objects, "recording.mp4")),
+                patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
+            ):
+                outcome = worker._process_motion_event("motion", "message", datetime.now(timezone.utc), qualification)
+
+        self.assertTrue(outcome["object_detected"])
+        self.assertTrue(qualification["rescued_by_object"])
+        self.assertTrue(qualification["effective_accepted"])
+        self.assertFalse(qualification["would_suppress"])
+
+    def test_borderline_candidate_without_object_remains_suppressed(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        events = Mock()
+        events.add_event.return_value = {"id": 43}
+        qualification = {
+            "borderline_candidate": True,
+            "effective_accepted": True,
+            "would_suppress": False,
+        }
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), events, DummyRecorder())
+            with (
+                patch.object(worker, "_recorded_motion_frame", return_value=(frame, [], "recording.mp4")),
+                patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
+            ):
+                outcome = worker._process_motion_event("motion", "message", datetime.now(timezone.utc), qualification)
+
+        self.assertFalse(outcome["object_detected"])
+        self.assertFalse(qualification["rescued_by_object"])
+        self.assertFalse(qualification["effective_accepted"])
+        self.assertTrue(qualification["would_suppress"])
+
+    def test_motion_ring_uses_per_camera_analysis_width(self) -> None:
+        camera = CameraConfig.model_validate({
+            "id": "back-middle",
+            "name": "Back Middle",
+            "stream_url": "rtsp://example.invalid/main",
+            "motion_qualification": {"frame_width": 480},
+        })
+        config = MotionQualificationConfig(frame_width=320, sample_fps=5)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder(), config)
+            worker._remember_motion_frame(np.zeros((720, 1280, 3), dtype=np.uint8), time.monotonic())
+
+            self.assertEqual(worker._motion_settings(), ("audit", "balanced", 480))
+            self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
+            self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
+
     def test_powered_off_worker_does_not_start_snapshot_source(self) -> None:
         camera = CameraConfig(
             id="back-middle",
@@ -132,7 +195,11 @@ class CameraWorkerTest(unittest.TestCase):
                 lambda event_type, payload: published.append((event_type, payload)),
             )
             worker._stop.clear()
-            with patch.object(worker, "_process_motion_event", return_value=False) as process_event:
+            with patch.object(
+                worker,
+                "_process_motion_event",
+                return_value={"event_id": 1, "snapshot_path": "", "object_detected": False},
+            ) as process_event:
                 thread = worker._motion_thread = __import__("threading").Thread(target=worker._run_motion_events)
                 thread.start()
                 now = datetime.now(timezone.utc)
@@ -149,6 +216,26 @@ class CameraWorkerTest(unittest.TestCase):
             qualifications = [payload for event_type, payload in published if event_type == "motion_qualification"]
             self.assertEqual(len(qualifications), 1)
             self.assertEqual(qualifications[0]["trigger_count"], 2)
+
+    def test_all_zero_rolling_windows_fail_open_as_inconclusive(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(post_trigger_seconds=0.5, window_seconds=0.8)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder(), config)
+            worker._stop.clear()
+            received_at = time.time() - 1.0
+            for index in range(5):
+                worker._motion_frames.append((received_at - 0.8 + index * 0.2, np.zeros((90, 160), dtype=np.uint8)))
+
+            result, diagnostics = worker._qualify_motion_burst(
+                datetime.fromtimestamp(received_at, timezone.utc),
+                received_at,
+                "balanced",
+            )
+
+            self.assertTrue(result.accepted)
+            self.assertEqual(result.reason, "no_temporal_signal")
+            self.assertGreater(diagnostics["windows_evaluated"], 0)
 
     def test_motion_event_runs_detection_on_live_fallback(self) -> None:
         camera = CameraConfig(

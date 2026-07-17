@@ -31,6 +31,7 @@ import {
   RotateCcw,
   Save,
   ScanFace,
+  Sparkles,
   Siren,
   SkipBack,
   SkipForward,
@@ -629,6 +630,9 @@ function defaultCamera(cameras, seed = {}) {
     motion_qualification: {
       mode: seed.motion_qualification?.mode || "inherit",
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
+      frame_width: seed.motion_qualification?.frame_width ?? null,
+      borderline_rescue_enabled: seed.motion_qualification?.borderline_rescue_enabled ?? null,
+      borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
     },
     zones: structuredClone(seed.zones || []),
     onvif: {
@@ -1234,7 +1238,7 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, incidentEligibleOnly = false, children }) {
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, incidentEligibleOnly = false, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
@@ -1257,6 +1261,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
 
   useEffect(() => {
     setObjectFocused(false);
+    setImageSize(null);
   }, [event?.id, event?.snapshot_path]);
 
   useEffect(() => {
@@ -1275,7 +1280,9 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   function onImageLoad(loadEvent) {
     const image = loadEvent.currentTarget;
     if (image.naturalWidth && image.naturalHeight) {
-      setImageSize({ width: image.naturalWidth, height: image.naturalHeight });
+      const size = { width: image.naturalWidth, height: image.naturalHeight };
+      setImageSize(size);
+      onImageSize?.(size);
     }
   }
 
@@ -1780,6 +1787,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const [mediaSize, setMediaSize] = useState(null);
   const zoomRef = useRef(zoom);
   const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
   const [manualDetection, setManualDetection] = useState(null);
@@ -2007,12 +2015,24 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 
   useEffect(() => {
     resetZoom();
+    setMediaSize(null);
     setDetectionDebug(false);
     setDetectionDebugStats(null);
     setManualDetection(null);
     setManualError("");
     setManualLoading(false);
   }, [event.id]);
+
+  const mediaStyle = useMemo(() => {
+    if (!mediaSize?.width || !mediaSize?.height) return undefined;
+    const ratio = mediaSize.width / mediaSize.height;
+    return {
+      "--snapshot-aspect": `${mediaSize.width} / ${mediaSize.height}`,
+      "--event-media-fit-width": `${ratio * 72}vh`,
+      "--event-media-mobile-fit-width": `${ratio * 70}dvh`,
+      "--event-panel-fit-width": `calc(${ratio * 72}vh + 24px)`,
+    };
+  }, [mediaSize]);
 
   async function runManualDetection() {
     if (!Number.isFinite(manualEventId)) {
@@ -2059,7 +2079,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   return (
     <div className="event-overlay" role="dialog" aria-modal="true" aria-label="Event image">
       <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close event image" />
-      <section className="event-overlay-panel">
+      <section className="event-overlay-panel" style={mediaStyle}>
         <div className="event-detail-head">
           <div>
             <h2>{event.camera_id}</h2>
@@ -2126,6 +2146,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             layerStyle={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }}
             allowObjectFocus={zoom.scale === 1 && !videoActive}
             showAnnotations
+            onImageSize={setMediaSize}
           />
           {videoActive && clipInfo && playback && !clipError ? (
             <>
@@ -3443,10 +3464,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
   const [selectedId, setSelectedId] = useState("");
-  const [status, setStatus] = useState("");
-  const [zoneSaveStatus, setZoneSaveStatus] = useState("");
+  const [saveNotice, setSaveNotice] = useState(null);
+  const [generalSaving, setGeneralSaving] = useState(false);
   const [zonesSaving, setZonesSaving] = useState(false);
-  const [cameraSaveStatus, setCameraSaveStatus] = useState("");
   const [cameraSaving, setCameraSaving] = useState(false);
   const [cameraOrderEditing, setCameraOrderEditing] = useState(false);
   const [cameraOrderSaving, setCameraOrderSaving] = useState(false);
@@ -3458,6 +3478,15 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [logLines, setLogLines] = useState([]);
   const [logFilter, setLogFilter] = useStoredState("survng.logFilter.v1", "");
   const [logLevel, setLogLevel] = useStoredState("survng.logLevel.v1", "INFO");
+  const [auditItems, setAuditItems] = useState([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditPage, setAuditPage] = useState(0);
+  const [auditCamera, setAuditCamera] = useStoredState("survng.motionAuditCamera.v1", "");
+  const [auditOutcome, setAuditOutcome] = useStoredState("survng.motionAuditOutcome.v1", "all");
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState("");
+  const [selectedAuditId, setSelectedAuditId] = useState(null);
+  const auditPageSize = 24;
 
   async function load() {
     const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse, systemResponse] = await Promise.all([
@@ -3499,9 +3528,40 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     return () => window.clearInterval(timer);
   }, [settingsTab, logLevel, logFilter]);
 
+  async function loadMotionAudit(page = auditPage) {
+    setAuditLoading(true);
+    setAuditError("");
+    try {
+      const params = new URLSearchParams({
+        limit: String(auditPageSize),
+        offset: String(page * auditPageSize),
+        outcome: auditOutcome,
+      });
+      if (auditCamera) params.set("camera_id", auditCamera);
+      const response = await fetch(`/api/motion-audit?${params.toString()}`);
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
+      setAuditItems(payload.items || []);
+      setAuditTotal(Number(payload.total) || 0);
+    } catch (error) {
+      setAuditError(error.message || "Unable to load motion audit entries.");
+    } finally {
+      setAuditLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (settingsTab !== "audit") return undefined;
+    loadMotionAudit(auditPage);
+    if (auditPage !== 0) return undefined;
+    const timer = window.setInterval(() => loadMotionAudit(0), 10000);
+    return () => window.clearInterval(timer);
+  }, [settingsTab, auditPage, auditCamera, auditOutcome]);
+
   const cameras = config?.cameras || [];
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
+  const selectedAudit = auditItems.find((item) => item.id === selectedAuditId) || null;
   const activeDetectorPath = config?.detector?.model_path || config?.detector?.model_xml || "";
   const activeDetectorModel = detectorModels.find((model) => model.path === activeDetectorPath);
   const zoneClassOptions = activeDetectorModel?.classes?.length
@@ -3515,6 +3575,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   }
 
   function updateConfig(path, value) {
+    setSaveNotice(null);
     setConfig((current) => {
       const next = structuredClone(current);
       let target = next;
@@ -3525,6 +3586,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   }
 
   function updateCamera(cameraId, path, value) {
+    setSaveNotice(null);
     setConfig((current) => {
       const next = structuredClone(current);
       const camera = next.cameras.find((item) => item.id === cameraId);
@@ -3558,7 +3620,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   function startCameraOrderEdit() {
     cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
     setCameraOrderEditing(true);
-    setCameraSaveStatus("");
+    setSaveNotice(null);
   }
 
   function cancelCameraOrderEdit() {
@@ -3591,7 +3653,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   async function saveCameraOrder() {
     if (cameraOrderSaving) return;
     setCameraOrderSaving(true);
-    setCameraSaveStatus("Saving default camera order...");
+    setSaveNotice({ state: "saving", text: "Saving default camera order..." });
     try {
       const response = await fetch("/api/config/cameras/order", {
         method: "PUT",
@@ -3601,9 +3663,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       if (!response.ok) throw new Error(await response.text());
       cameraOrderOriginalRef.current = cameras.map((camera) => camera.id);
       setCameraOrderEditing(false);
-      setCameraSaveStatus("Default live-view order saved.");
+      setSaveNotice({ state: "saved", text: "Default live-view order saved." });
     } catch (error) {
-      setCameraSaveStatus(error.message || "Unable to save camera order.");
+      setSaveNotice({ state: "error", text: error.message || "Unable to save camera order." });
     } finally {
       setCameraOrderSaving(false);
       setDragConfigCameraId("");
@@ -3612,6 +3674,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   }
 
   async function save() {
+    if (generalSaving) return;
     const ids = new Set();
     const configToSave = {
       ...config,
@@ -3619,46 +3682,47 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     };
     for (const camera of configToSave.cameras || []) {
       if (ids.has(camera.id)) {
-        setStatus(`Duplicate camera ID "${camera.id}". Fix duplicates before saving.`);
+        setSaveNotice({ state: "error", text: `Duplicate camera ID "${camera.id}". Fix duplicates before saving.` });
         return;
       }
       ids.add(camera.id);
     }
-    setStatus("Saving and reloading cameras...");
-    const response = await fetch("/api/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(configToSave),
-    });
-    if (!response.ok) {
-      setStatus(await response.text());
-      return;
+    setGeneralSaving(true);
+    setSaveNotice({ state: "saving", text: "Saving and reloading cameras..." });
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(configToSave),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setSaveNotice({ state: "saved", text: "Saved. Camera workers reloaded." });
+      await load();
+    } catch (error) {
+      setSaveNotice({ state: "error", text: error.message || "Unable to save general settings." });
+    } finally {
+      setGeneralSaving(false);
     }
-    setStatus("Saved. Camera workers reloaded.");
-    await load();
   }
 
   async function saveZones(camera) {
     if (!camera || zonesSaving) return;
     setZonesSaving(true);
-    setZoneSaveStatus("Saving zones...");
+    setSaveNotice({ state: "saving", text: "Saving zones..." });
     try {
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}/zones`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(camera.zones || []),
       });
-      if (!response.ok) {
-        setZoneSaveStatus(await response.text());
-        return;
-      }
+      if (!response.ok) throw new Error(await response.text());
       const payload = await response.json();
       updateCamera(camera.id, ["zones"], payload.zones || []);
-      setZoneSaveStatus("Zones saved without restarting cameras.");
+      setSaveNotice({ state: "saved", text: "Zones saved without restarting cameras." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
     } catch (error) {
-      setZoneSaveStatus(error.message || "Unable to save zones.");
+      setSaveNotice({ state: "error", text: error.message || "Unable to save zones." });
     } finally {
       setZonesSaving(false);
     }
@@ -3667,17 +3731,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   async function saveCamera(camera) {
     if (!camera || cameraSaving) return;
     setCameraSaving(true);
-    setCameraSaveStatus("Saving camera settings...");
+    setSaveNotice({ state: "saving", text: "Saving camera settings..." });
     try {
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(camera),
       });
-      if (!response.ok) {
-        setCameraSaveStatus(await response.text());
-        return;
-      }
+      if (!response.ok) throw new Error(await response.text());
       const payload = await response.json();
       const savedCamera = payload.camera;
       setConfig((current) => ({
@@ -3687,11 +3748,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           : item),
       }));
       setSelectedId(savedCamera.id);
-      setCameraSaveStatus("Camera settings saved. Workers reloaded.");
+      setSaveNotice({ state: "saved", text: "Camera settings saved. Workers reloaded." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
     } catch (error) {
-      setCameraSaveStatus(error.message || "Unable to save camera settings.");
+      setSaveNotice({ state: "error", text: error.message || "Unable to save camera settings." });
     } finally {
       setCameraSaving(false);
     }
@@ -3702,23 +3763,20 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     const isPersisted = runtimeStatus.some((item) => item.id === camera.id);
     if (!isPersisted) {
       removeCamera(camera.id);
-      setCameraSaveStatus("Unsaved camera removed.");
+      setSaveNotice({ state: "saved", text: "Unsaved camera removed." });
       return;
     }
     setCameraSaving(true);
-    setCameraSaveStatus("Removing camera...");
+    setSaveNotice({ state: "saving", text: "Removing camera..." });
     try {
       const response = await fetch(`/api/config/cameras/${encodeURIComponent(camera.id)}`, { method: "DELETE" });
-      if (!response.ok) {
-        setCameraSaveStatus(await response.text());
-        return;
-      }
+      if (!response.ok) throw new Error(await response.text());
       removeCamera(camera.id);
-      setCameraSaveStatus("Camera removed. Workers reloaded.");
+      setSaveNotice({ state: "saved", text: "Camera removed. Workers reloaded." });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
     } catch (error) {
-      setCameraSaveStatus(error.message || "Unable to remove camera.");
+      setSaveNotice({ state: "error", text: error.message || "Unable to remove camera." });
     } finally {
       setCameraSaving(false);
     }
@@ -3758,10 +3816,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
 
   return (
     <main className="bento-grid config-grid settings-grid">
-      <div className="settings-tabs" role="tablist" aria-label="Config sections">
-        <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")} role="tab" aria-selected={settingsTab === "general"}><Cog size={16} /> General</button>
-        <button className={settingsTab === "cameras" ? "active" : ""} onClick={() => setSettingsTab("cameras")} role="tab" aria-selected={settingsTab === "cameras"}><Camera size={16} /> Camera Settings</button>
-        <button className={settingsTab === "logs" ? "active" : ""} onClick={() => setSettingsTab("logs")} role="tab" aria-selected={settingsTab === "logs"}><ListTree size={16} /> Logs</button>
+      <div className="settings-tabs">
+        <div className="settings-tab-list" role="tablist" aria-label="Config sections">
+          <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")} role="tab" aria-selected={settingsTab === "general"}><Cog size={16} /> General</button>
+          <button className={settingsTab === "cameras" ? "active" : ""} onClick={() => setSettingsTab("cameras")} role="tab" aria-selected={settingsTab === "cameras"}><Camera size={16} /> Camera Settings</button>
+          <button className={settingsTab === "audit" ? "active" : ""} onClick={() => setSettingsTab("audit")} role="tab" aria-selected={settingsTab === "audit"}><Activity size={16} /> Motion Audit</button>
+          <button className={settingsTab === "logs" ? "active" : ""} onClick={() => setSettingsTab("logs")} role="tab" aria-selected={settingsTab === "logs"}><ListTree size={16} /> Logs</button>
+        </div>
+        {saveNotice ? <span className={`camera-save-indicator settings-header-status ${saveNotice.state}`} role="status">{saveNotice.state === "saving" ? <RefreshCcw size={14} /> : saveNotice.state === "error" ? <CircleAlert size={14} /> : <CircleDot size={14} />}{saveNotice.text}</span> : null}
       </div>
 
       {settingsTab === "general" ? (
@@ -3778,7 +3840,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         <section className="bento-card config-editor settings-panel">
           <div className="section-head">
             <div><h2>General</h2><p>Application preferences and detector settings</p></div>
-            <button className="primary" onClick={save}><Save size={16} /> Save</button>
+            <div className="camera-command-area">
+              <button className="primary camera-save-button" onClick={save} disabled={generalSaving}>
+                {generalSaving ? <RefreshCcw className="spin" size={16} /> : <Save size={16} />}
+                {generalSaving ? "Saving..." : "Save"}
+              </button>
+            </div>
           </div>
           <GeneralSettings
             config={config}
@@ -3793,7 +3860,45 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             mqttStatus={mqttStatus}
             section={generalSection}
           />
-          {status ? <div className="save-status settings-status">{status}</div> : null}
+        </section>
+        </>
+      ) : settingsTab === "audit" ? (
+        <>
+        <section className="bento-card camera-tree config-tree settings-section-tree motion-audit-filters">
+          <div className="section-head compact"><div><h2>Motion Audit</h2><p>{auditTotal.toLocaleString()} rejected bursts</p></div></div>
+          <div className="motion-audit-filter-fields">
+            <label>Camera<select value={auditCamera} onChange={(event) => { setAuditCamera(event.target.value); setAuditPage(0); }}>
+              <option value="">All cameras</option>
+              {cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}
+            </select></label>
+          </div>
+          <div className="tree-list">
+            {[
+              ["all", "All outcomes"],
+              ["object", "Object found"],
+              ["clear", "No object"],
+              ["not_run", "Detection skipped"],
+            ].map(([value, label]) => (
+              <button type="button" className={auditOutcome === value ? "active" : ""} key={value} onClick={() => { setAuditOutcome(value); setAuditPage(0); }}><Activity size={16} /><span>{label}</span></button>
+            ))}
+          </div>
+        </section>
+        <section className="bento-card config-editor settings-panel motion-audit-panel">
+          <div className="section-head">
+            <div><h2>Rejected Motion</h2><p>Qualifier decisions and detector outcomes</p></div>
+            <button onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>
+          </div>
+          <MotionAuditViewer
+            items={auditItems}
+            total={auditTotal}
+            page={auditPage}
+            pageSize={auditPageSize}
+            setPage={setAuditPage}
+            loading={auditLoading}
+            error={auditError}
+            timeZone={timeZone}
+            onOpen={(item) => setSelectedAuditId(item.id)}
+          />
         </section>
         </>
       ) : settingsTab === "logs" ? (
@@ -3885,7 +3990,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json and reload camera workers</p></div>
           {selectedCamera ? (
             <div className="camera-command-area">
-              {cameraSaveStatus ? <span className={`camera-save-indicator ${cameraSaving ? "saving" : "saved"}`}>{cameraSaving ? <RefreshCcw size={14} /> : <CircleDot size={14} />}{cameraSaveStatus}</span> : null}
               <div className="camera-command-bar">
                 <button type="button" onClick={() => cloneCamera(selectedCamera)} disabled={cameraSaving}><Copy size={16} /> Clone</button>
                 <button type="button" onClick={() => probeCamera(selectedCamera)} disabled={cameraSaving}><Radar size={16} /> Auto-detect</button>
@@ -3947,6 +4051,20 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                     <option value="balanced">Balanced</option>
                     <option value="low">Low</option>
                   </select></label>
+                  <label>Analysis Width<select value={selectedCamera.motion_qualification?.frame_width ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "frame_width"], event.target.value ? Number(event.target.value) : null)}>
+                    <option value="">Use global setting</option>
+                    <option value="320">320 px</option>
+                    <option value="480">480 px</option>
+                    <option value="640">640 px</option>
+                    <option value="720">720 px</option>
+                    <option value="800">800 px</option>
+                  </select></label>
+                  <label>Borderline Rescue<select value={selectedCamera.motion_qualification?.borderline_rescue_enabled == null ? "" : String(selectedCamera.motion_qualification.borderline_rescue_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_rescue_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
+                    <option value="">Use global setting</option>
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select></label>
+                  <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" placeholder="Global" value={selectedCamera.motion_qualification?.borderline_margin ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_margin"], event.target.value === "" ? null : Number(event.target.value))} /></label>
                 </div>
               </div>
 
@@ -3956,7 +4074,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 onChange={(zones) => updateCamera(selectedCamera.id, ["zones"], zones)}
                 onSave={() => saveZones(selectedCamera)}
                 saving={zonesSaving}
-                saveStatus={zoneSaveStatus}
               />
 
               <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} />
@@ -3965,16 +4082,24 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           ) : (
             <div className="empty-state">Add a camera to begin.</div>
           )}
-          {status ? <div className="save-status">{status}</div> : null}
         </div>
       </section>
         </>
       )}
+      {selectedAudit ? (
+        <MotionAuditOverlay
+          item={selectedAudit}
+          items={auditItems}
+          timeZone={timeZone}
+          onClose={() => setSelectedAuditId(null)}
+          onSelect={(item) => setSelectedAuditId(item.id)}
+        />
+      ) : null}
     </main>
   );
 }
 
-function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = false, saveStatus = "" }) {
+function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = false }) {
   const zones = camera.zones || [];
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
@@ -4138,7 +4263,6 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
           <button type="button" className="danger" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
         </div>
       ) : null}
-      {saveStatus ? <div className="save-status zone-save-status">{saveStatus}</div> : null}
     </div>
   );
 }
@@ -4159,6 +4283,198 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
           </div>
         )) : <div className="empty-state">No log lines match the current filters.</div>}
       </div>
+    </div>
+  );
+}
+
+function motionAuditOutcome(item) {
+  if (item.object_detected === true) return { label: "Object found", className: "object" };
+  if (item.object_detected === false) return { label: "No object", className: "clear" };
+  return { label: "Not run", className: "not-run" };
+}
+
+function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, error, timeZone, onOpen }) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  return (
+    <div className="motion-audit-viewer">
+      {error ? <div className="save-status motion-audit-error">{error}</div> : null}
+      <div className="motion-audit-grid">
+        {items.map((item) => {
+          const outcome = motionAuditOutcome(item);
+          const features = Object.entries(item.features || {});
+          return (
+            <article className="motion-audit-card" key={item.id}>
+              <button type="button" className="motion-audit-media" onClick={() => onOpen(item)} aria-label={`Open ${item.camera_id} motion audit image`}>
+                {item.has_snapshot
+                  ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} loading="lazy" />
+                  : <div className="empty-thumb"><Camera size={28} /><span>No sampled frame</span></div>}
+                <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
+              </button>
+              <div className="motion-audit-body">
+                <div className="motion-audit-title"><strong>{item.camera_id}</strong><time>{formatDateTime(item.created_at, timeZone)}</time></div>
+                <div className="motion-audit-decision">
+                  <span>{String(item.reason || "rejected").replaceAll("_", " ")}</span>
+                  <strong>{Number(item.score || 0).toFixed(3)} / {Number(item.threshold || 0).toFixed(3)}</strong>
+                </div>
+                <div className="motion-audit-meter" aria-label={`Score ${item.score}, threshold ${item.threshold}`}>
+                  <i style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0) * 100))}%` }} />
+                  <b style={{ left: `${Math.max(0, Math.min(100, Number(item.threshold || 0) * 100))}%` }} />
+                </div>
+                <div className="motion-audit-features">
+                  {features.map(([name, value]) => <span key={name}>{name.replaceAll("_", " ")} <strong>{Number(value).toFixed(2)}</strong></span>)}
+                </div>
+                <div className="motion-audit-meta"><span>{item.mode} / {item.sensitivity}</span><span>{item.trigger_count} trigger{item.trigger_count === 1 ? "" : "s"}</span></div>
+              </div>
+            </article>
+          );
+        })}
+        {!items.length && !loading ? <div className="empty-state">No rejected motion matches these filters.</div> : null}
+      </div>
+      <div className="motion-audit-pagination">
+        <button type="button" aria-label="Previous audit page" onClick={() => setPage(Math.max(0, page - 1))} disabled={page <= 0 || loading}><ChevronLeft size={16} /></button>
+        <span>{total ? `${page * pageSize + 1}-${Math.min(total, (page + 1) * pageSize)} of ${total}` : "0 entries"}</span>
+        <button type="button" aria-label="Next audit page" onClick={() => setPage(Math.min(pageCount - 1, page + 1))} disabled={page >= pageCount - 1 || loading}><ChevronRight size={16} /></button>
+      </div>
+    </div>
+  );
+}
+
+function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
+  const outcome = motionAuditOutcome(item);
+  const currentIndex = items.findIndex((candidate) => candidate.id === item.id);
+  const [aiAdvice, setAiAdvice] = useState(null);
+  const [aiError, setAiError] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiApplying, setAiApplying] = useState(false);
+  const [imageSize, setImageSize] = useState(null);
+
+  useEffect(() => {
+    setAiAdvice(null);
+    setAiError("");
+    setAiLoading(false);
+    setAiApplying(false);
+    setImageSize(null);
+  }, [item.id]);
+
+  const overlayStyle = useMemo(() => {
+    if (!imageSize?.width || !imageSize?.height) return undefined;
+    const ratio = imageSize.width / imageSize.height;
+    return { "--motion-audit-panel-fit-width": `calc(${ratio * 88}dvh + 316px)` };
+  }, [imageSize]);
+
+  async function analyzeWithAi() {
+    if (aiLoading) return;
+    setAiLoading(true);
+    setAiError("");
+    try {
+      const response = await fetch(`/api/motion-audit/${item.id}/ai-analyze`, { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      setAiAdvice(await response.json());
+    } catch (error) {
+      setAiError(error.message || "Unable to analyze this audit image.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  async function applyAiChanges() {
+    const changes = aiAdvice?.advice?.changes || [];
+    if (!changes.length || aiApplying) return;
+    if (!window.confirm(`Apply ${changes.length} AI-recommended motion setting${changes.length === 1 ? "" : "s"}? Camera workers will restart.`)) return;
+    setAiApplying(true);
+    setAiError("");
+    try {
+      const response = await fetch(`/api/motion-audit/${item.id}/ai-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changes }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json();
+      setAiAdvice((current) => ({ ...current, applied: result.applied || [] }));
+    } catch (error) {
+      setAiError(error.message || "Unable to apply AI recommendations.");
+    } finally {
+      setAiApplying(false);
+    }
+  }
+
+  function move(direction) {
+    if (currentIndex < 0 || items.length < 2) return;
+    onSelect(items[(currentIndex + direction + items.length) % items.length]);
+  }
+
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        move(-1);
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        move(1);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [currentIndex, item.id, items, onClose, onSelect]);
+
+  return (
+    <div className="motion-audit-overlay" role="dialog" aria-modal="true" aria-label="Motion audit image">
+      <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close motion audit image" />
+      <section className="motion-audit-overlay-panel" style={overlayStyle}>
+        <header className="motion-audit-overlay-head">
+          <div><h2>{item.camera_id}</h2><time>{formatDateTime(item.created_at, timeZone)}</time></div>
+          <div className="overlay-actions">
+            <button type="button" className="icon-only" onClick={() => move(-1)} disabled={items.length < 2} aria-label="Previous audit image"><ChevronLeft size={19} /></button>
+            <span>{currentIndex + 1} / {items.length}</span>
+            <button type="button" className="icon-only" onClick={() => move(1)} disabled={items.length < 2} aria-label="Next audit image"><ChevronRight size={19} /></button>
+            <button type="button" className="icon-only" onClick={onClose} aria-label="Close motion audit image"><X size={19} /></button>
+          </div>
+        </header>
+        <div className="motion-audit-overlay-content">
+          <div className="motion-audit-overlay-media">
+            {item.has_snapshot
+              ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+              : <div className="empty-thumb"><Camera size={42} /><span>No sampled frame</span></div>}
+          </div>
+          <aside className="motion-audit-overlay-details">
+            <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
+            <div className="motion-audit-overlay-score"><span>{String(item.reason || "rejected").replaceAll("_", " ")}</span><strong>{Number(item.score || 0).toFixed(3)} / {Number(item.threshold || 0).toFixed(3)}</strong></div>
+            <div className="motion-audit-meter"><i style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0) * 100))}%` }} /><b style={{ left: `${Math.max(0, Math.min(100, Number(item.threshold || 0) * 100))}%` }} /></div>
+            <dl>
+              {Object.entries(item.features || {}).map(([name, value]) => <div key={name}><dt>{name.replaceAll("_", " ")}</dt><dd>{Number(value).toFixed(3)}</dd></div>)}
+              <div><dt>Mode</dt><dd>{item.mode}</dd></div>
+              <div><dt>Sensitivity</dt><dd>{item.sensitivity}</dd></div>
+              <div><dt>Triggers</dt><dd>{item.trigger_count}</dd></div>
+            </dl>
+            <div className="motion-audit-ai">
+              <div className="motion-audit-ai-head">
+                <strong><Sparkles size={15} /> AI Advisor</strong>
+                <button type="button" onClick={analyzeWithAi} disabled={aiLoading || aiApplying}><Sparkles size={15} /> {aiLoading ? "Analyzing..." : "Analyze"}</button>
+              </div>
+              {aiError ? <div className="motion-audit-ai-error">{aiError}</div> : null}
+              {aiAdvice?.advice ? (
+                <div className="motion-audit-ai-result">
+                  <div className="motion-audit-ai-verdict"><span>{aiAdvice.advice.verdict.replaceAll("_", " ")}</span><strong>{Math.round(Number(aiAdvice.advice.confidence || 0) * 100)}%</strong></div>
+                  <p>{aiAdvice.advice.summary}</p>
+                  {aiAdvice.advice.visible_subjects?.length ? <div className="motion-audit-ai-subjects">{aiAdvice.advice.visible_subjects.map((subject) => <span key={subject}>{subject}</span>)}</div> : null}
+                  {aiAdvice.advice.explanation?.length ? <ul>{aiAdvice.advice.explanation.map((line) => <li key={line}>{line}</li>)}</ul> : null}
+                  {aiAdvice.advice.changes?.length ? (
+                    <>
+                      <div className="motion-audit-ai-changes">
+                        {aiAdvice.advice.changes.map((change, index) => <div key={`${change.scope}-${change.setting}-${index}`}><strong>{change.scope} · {change.setting.replaceAll("_", " ")}</strong><code>{String(change.value)}</code><small>{change.reason}</small></div>)}
+                      </div>
+                      <button type="button" className="primary" onClick={applyAiChanges} disabled={aiApplying || Boolean(aiAdvice.applied)}><Save size={15} /> {aiAdvice.applied ? "Applied" : aiApplying ? "Applying..." : "Apply Recommendations"}</button>
+                    </>
+                  ) : <span className="motion-audit-ai-none">No setting changes recommended.</span>}
+                </div>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      </section>
     </div>
   );
 }
@@ -4315,10 +4631,28 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <div className="field-row">
           <label>Mode<select value={config.motion_qualification?.mode || "audit"} onChange={(event) => updateConfig(["motion_qualification", "mode"], event.target.value)}><option value="off">Off</option><option value="audit">Audit</option><option value="enforce">Enforce</option></select></label>
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
+          <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
           <label>Window Seconds<input type="number" min="0.8" max="4" step="0.1" value={config.motion_qualification?.window_seconds ?? 1.6} onChange={(event) => updateConfig(["motion_qualification", "window_seconds"], Number(event.target.value))} /></label>
+          <label>Post-trigger Seconds<input type="number" min="0.5" max="6" step="0.1" value={config.motion_qualification?.post_trigger_seconds ?? 2.5} onChange={(event) => updateConfig(["motion_qualification", "post_trigger_seconds"], Number(event.target.value))} /></label>
           <label>Burst Quiet Seconds<input type="number" min="0.1" max="2" step="0.1" value={config.motion_qualification?.burst_quiet_seconds ?? 0.5} onChange={(event) => updateConfig(["motion_qualification", "burst_quiet_seconds"], Number(event.target.value))} /></label>
           <label>Rejected Sample Rate<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.rejected_sample_rate ?? 0.05} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
+          <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
+        </div>
+        <h3>AI Audit Advisor</h3>
+        <div className="field-row">
+          <label className="check-field"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /> Enable AI advisor</label>
+          <label>Provider<select value={config.audit_ai?.provider || "openai"} onChange={(event) => updateConfig(["audit_ai", "provider"], event.target.value)}>
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="openai_compatible">OpenAI compatible</option>
+          </select></label>
+          <label>Model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /></label>
+          <label>API Key<input type="password" value={config.audit_ai?.api_key || ""} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
+          <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
+          <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /> Allow confirmed recommendation apply</label>
         </div>
         <h3>Face Recognition</h3>
         <div className="field-row">
@@ -4389,7 +4723,7 @@ function RuntimeStatus({ status, timeZone }) {
       <span>Recording: {status.recording ? "running" : "stopped"}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF message: {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
-      {status.motion_qualification ? <span>Motion qualification: {status.motion_qualification.mode} / {status.motion_qualification.sensitivity} · {status.motion_qualification.passed || 0} passed · {status.motion_qualification.audit_rejected || 0} audit rejects · {status.motion_qualification.suppressed || 0} suppressed</span> : null}
+      {status.motion_qualification ? <span>Motion qualification: {status.motion_qualification.mode} / {status.motion_qualification.sensitivity} · {status.motion_qualification.frame_width || 320}px · {status.motion_qualification.passed || 0} passed · {status.motion_qualification.audit_rejected || 0} audit rejects · {status.motion_qualification.suppressed || 0} suppressed</span> : null}
     </div>
   );
 }

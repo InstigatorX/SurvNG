@@ -34,6 +34,33 @@ class MotionQualificationTest(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.reason, "edge_motion")
 
+    def test_coherent_motion_entering_from_edge_is_accepted(self) -> None:
+        frames = []
+        for index in range(9):
+            frame = np.zeros((180, 320), dtype=np.uint8)
+            bottom = 195 - index * 9
+            cv2.rectangle(frame, (145, bottom - 55), (180, bottom), 255, -1)
+            frames.append(frame)
+
+        result = qualify_motion(frames, "balanced")
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.reason, "qualified")
+        self.assertGreater(result.features["inward_progress"], 0.4)
+
+    def test_stable_track_along_edge_receives_coherence_relief(self) -> None:
+        frames = []
+        for index in range(9):
+            frame = np.zeros((270, 480), dtype=np.uint8)
+            cv2.rectangle(frame, (390 - index * 10, 225), (430 - index * 10, 260), 255, -1)
+            frames.append(frame)
+
+        result = qualify_motion(frames, "balanced")
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.reason, "coherent_edge_track")
+        self.assertGreater(result.features["coherent_edge_track"], 0.4)
+
     def test_global_brightness_change_is_rejected(self) -> None:
         frames = [np.full((180, 320), index * 20, dtype=np.uint8) for index in range(9)]
 

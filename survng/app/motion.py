@@ -55,6 +55,7 @@ def qualify_motion(frames: list[np.ndarray], sensitivity: str = "balanced") -> M
     active: list[bool] = []
     areas: list[float] = []
     centroids: list[tuple[float, float]] = []
+    edge_distances: list[float] = []
     interior: list[float] = []
     fragmentation: list[float] = []
     global_changes = 0
@@ -99,6 +100,7 @@ def qualify_motion(frames: list[np.ndarray], sensitivity: str = "balanced") -> M
         )
         areas.append(area_ratio)
         centroids.append((center_x, center_y))
+        edge_distances.append(min(center_x, center_y, 1.0 - center_x, 1.0 - center_y))
         interior.append(0.0 if touches_edge else 1.0)
         fragmentation.append(min(1.0, largest_area / max(1.0, changed_pixels)))
 
@@ -128,19 +130,31 @@ def qualify_motion(frames: list[np.ndarray], sensitivity: str = "balanced") -> M
 
     interior_score = float(np.mean(interior)) if interior else 0.0
     fragmentation_score = float(np.mean(fragmentation)) if fragmentation else 0.0
+    inward_progress = 0.0
+    if len(edge_distances) >= 2:
+        inward_progress = max(0.0, min(1.0, (edge_distances[-1] - edge_distances[0]) / 0.08))
+    coherent_entry = inward_progress * continuity * fragmentation_score
+    coherent_edge_track = continuity * area_stability * fragmentation_score
     global_change_ratio = global_changes / transition_count
+    edge_relief = max(coherent_entry, coherent_edge_track)
+    edge_penalty = (1.0 - interior_score) * 0.18 * (1.0 - edge_relief)
     score = (
         persistence * 0.35
         + continuity * 0.20
         + area_stability * 0.15
         + interior_score * 0.12
         + fragmentation_score * 0.18
+        + coherent_entry * 0.30
         - global_change_ratio * 0.35
-        - (1.0 - interior_score) * 0.18
+        - edge_penalty
     )
     score = max(0.0, min(1.0, score))
     accepted = score >= threshold
-    if global_change_ratio >= 0.5:
+    if accepted and interior_score < 0.25 and max(coherent_entry, coherent_edge_track) >= 0.35:
+        reason = "coherent_edge_track"
+    elif accepted:
+        reason = "qualified"
+    elif global_change_ratio >= 0.5:
         reason = "global_change"
     elif persistence < 0.35:
         reason = "low_persistence"
@@ -151,7 +165,7 @@ def qualify_motion(frames: list[np.ndarray], sensitivity: str = "balanced") -> M
     elif fragmentation_score < 0.25:
         reason = "fragmented_motion"
     else:
-        reason = "qualified" if accepted else "low_score"
+        reason = "low_score"
 
     return MotionQualificationResult(
         accepted=accepted,
@@ -165,6 +179,9 @@ def qualify_motion(frames: list[np.ndarray], sensitivity: str = "balanced") -> M
             "area_stability": round(area_stability, 4),
             "interior": round(interior_score, 4),
             "fragmentation": round(fragmentation_score, 4),
+            "inward_progress": round(inward_progress, 4),
+            "coherent_entry": round(coherent_entry, 4),
+            "coherent_edge_track": round(coherent_edge_track, 4),
             "global_change": round(global_change_ratio, 4),
         },
     )

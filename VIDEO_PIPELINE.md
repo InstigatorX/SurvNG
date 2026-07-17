@@ -145,16 +145,32 @@ triggers before the high-resolution OpenVINO cycle.
 
 ### Frame ring
 
-The existing live/substream capture is downscaled to 320 pixels wide, converted
-to grayscale, and sampled at `motion_qualification.sample_fps`. This does not
-open another camera connection. The ring is sized from the configured sample
-rate and analysis window with additional history for timestamp jitter.
+The existing live/substream capture is downscaled to the configured
+`motion_qualification.frame_width`, converted to grayscale, and sampled at
+`motion_qualification.sample_fps`. The global default is 320 pixels; cameras
+with small or distant objects can override it independently. This does not open
+another camera connection. The ring is sized from the configured sample rate,
+analysis window, and post-trigger horizon with additional history for timestamp
+jitter.
 
 ### Burst coalescing
 
 ONVIF cameras often emit many messages for one physical event. The per-camera
 worker collects triggers until `burst_quiet_seconds` elapses, subject to a hard
 deadline, and processes the group as one motion burst.
+
+### Timing And Rolling Windows
+
+Each ONVIF trigger retains both the camera-provided event time and SurvNG's
+local receipt time. Because decoded RTSP frames can arrive later than the ONVIF
+message, the qualifier evaluates overlapping windows until
+`post_trigger_seconds` has elapsed and keeps the strongest result. This avoids
+assuming that camera event timestamps and OpenCV frame-receipt timestamps share
+the same media latency.
+
+If every usable window has an all-zero foreground score, the result is marked
+`no_temporal_signal` and fails open. An apparently static window is treated as
+inconclusive rather than proof that the ONVIF trigger was false.
 
 ### Scoring
 
@@ -164,7 +180,8 @@ differences, morphology, and connected contours. Its score combines:
 - Persistence across the temporal window.
 - Centroid direction and velocity consistency.
 - Foreground-area stability.
-- Distance from image edges.
+- Distance from image edges, with relief for coherent inward trajectories and
+  stable tracks that travel along an edge.
 - Concentration versus fragmentation of changed pixels.
 - A penalty for global image changes such as exposure or lighting shifts.
 
@@ -192,6 +209,14 @@ face bypass suppression. Manual test triggers also bypass it. If fewer than
 four usable frames surround the event timestamp, qualification fails open so a
 capture outage cannot silently suppress a real event.
 
+### Borderline object rescue
+
+When enabled, a rejected score within `borderline_margin` of the active
+threshold is allowed through the high-resolution detector. The motion burst is
+accepted only when that detector finds an incident-eligible object. The default
+margin is `0.03`; clearly weak motion does not incur inference. Global rescue
+settings can be inherited or overridden per camera.
+
 Each camera can inherit or override the global mode and sensitivity. A sampled
 percentage of enforced rejections is saved under:
 
@@ -201,6 +226,23 @@ STORAGE_DIR/motion_samples/CAMERA_ID/
 
 The sample filename records timestamp, score, and rejection reason. Retention
 is capped at 100 samples per camera.
+
+### AI audit advisor
+
+The optional audit advisor supports OpenAI, Google Gemini, and
+OpenAI-compatible multimodal APIs. A manual Analyze action sends the selected
+audit image plus its motion features, linked object detections, effective
+settings, and aggregated recent audit outcomes. Stream credentials, camera
+URLs, recordings, and unrelated events are not included.
+
+Provider output is constrained to a typed recommendation schema. SurvNG accepts
+changes only for documented motion settings and validates their bounds on the
+server. Applying recommendations is disabled by default and always requires an
+explicit UI confirmation. Enabling apply writes the selected changes to
+`config.json` and reloads camera workers.
+
+API keys are stored in local `config.json`; keep that file out of source
+control and restrict its filesystem permissions.
 
 ## 6. High-Resolution Object Detection
 
@@ -319,12 +361,27 @@ passes, audit rejects, enforced suppressions, priority bypasses, insufficient
 frame decisions, dropped triggers, queue depth, ring depth, and the last
 decision details.
 
+Rejected decisions are also indexed in the `motion_audits` table inside
+`survng.sqlite3` and displayed under Config > Motion Audit. Audit-mode entries
+reuse the clean event snapshot and report whether OpenVINO subsequently found
+an eligible object. Enforced entries report that detection was skipped and use
+the configured rejected-frame sampling rate to attach an image. The viewer is
+paginated and filterable by camera and detector outcome. Its card grid uses the
+remaining browser height; selecting a thumbnail opens a full-viewport image
+overlay with decision details and keyboard previous/next navigation.
+
 ## 11. Lifecycle And Failure Behavior
 
 SurvNG runs camera capture, motion qualification, ONVIF, recording, indexing,
 and maintenance as managed workers. Shutdown order stops command intake,
 camera/ONVIF workers, face recognition, and recorder processes before process
 exit. Systemd then provides boot startup and crash recovery.
+
+Recording-cache prewarming is stopped before the other workers. An active
+prewarm remux runs in its own process group, receives `SIGTERM` immediately,
+and is force-killed and reaped if it does not exit within the grace period.
+Partial cache output is removed. This prevents a blocking prewarm FFmpeg child
+from surviving into native runtime teardown or the next service generation.
 
 Important failure behavior:
 
@@ -348,10 +405,14 @@ Global motion qualification:
   "motion_qualification": {
     "mode": "audit",
     "sensitivity": "balanced",
+    "frame_width": 320,
     "sample_fps": 5.0,
     "window_seconds": 1.6,
+    "post_trigger_seconds": 2.5,
     "burst_quiet_seconds": 0.5,
-    "rejected_sample_rate": 0.05
+    "rejected_sample_rate": 0.05,
+    "borderline_rescue_enabled": true,
+    "borderline_margin": 0.03
   }
 }
 ```
@@ -363,7 +424,26 @@ Per-camera override:
   "id": "front-door",
   "motion_qualification": {
     "mode": "inherit",
-    "sensitivity": "inherit"
+    "sensitivity": "inherit",
+    "frame_width": null,
+    "borderline_rescue_enabled": null,
+    "borderline_margin": null
+  }
+}
+```
+
+AI audit advisor:
+
+```json
+{
+  "audit_ai": {
+    "enabled": false,
+    "provider": "openai",
+    "api_key": "",
+    "base_url": "",
+    "model": "",
+    "timeout_seconds": 45.0,
+    "allow_apply_recommendations": false
   }
 }
 ```
