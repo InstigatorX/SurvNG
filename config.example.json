@@ -15,7 +15,9 @@
     "burst_quiet_seconds": 0.5,
     "rejected_sample_rate": 0.05,
     "borderline_rescue_enabled": true,
-    "borderline_margin": 0.03
+    "borderline_margin": 0.03,
+    "mog2_audit_enabled": true,
+    "mog2_history_seconds": 30.0
   },
   "audit_ai": {
     "enabled": false,

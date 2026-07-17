@@ -153,6 +153,28 @@ another camera connection. The ring is sized from the configured sample rate,
 analysis window, and post-trigger horizon with additional history for timestamp
 jitter.
 
+### MOG2 background audit and blob tracking
+
+When `mog2_audit_enabled` is active and the effective camera mode is `audit`,
+the same grayscale frame samples also feed a per-camera OpenCV MOG2 background
+model. No additional stream or camera connection is opened. The model warms for
+approximately two seconds, separates foreground from its learned background,
+and applies morphology before extracting connected blobs.
+
+Blobs are associated across samples using normalized centroid distance and
+bounding-box overlap. Tracks survive short detection gaps and report
+persistence, age, hit count, area stability, direction coherence, edge
+occupancy, foreground ratio, and a separate `mog2_score`. The strongest track
+within an ONVIF event window is stored with the normal qualification features
+using the `mog2_` prefix.
+
+MOG2 evidence is observational only. It does not alter the existing motion
+score, acceptance decision, suppression behavior, borderline rescue, or
+OpenVINO execution. This allows real daytime, nighttime, weather, and insect
+events to establish whether background modeling is reliable before it becomes
+part of enforcement. The model history is globally configurable; collection
+can be disabled globally or overridden per camera.
+
 ### Burst coalescing
 
 ONVIF cameras often emit many messages for one physical event. The per-camera
@@ -412,7 +434,9 @@ Global motion qualification:
     "burst_quiet_seconds": 0.5,
     "rejected_sample_rate": 0.05,
     "borderline_rescue_enabled": true,
-    "borderline_margin": 0.03
+    "borderline_margin": 0.03,
+    "mog2_audit_enabled": true,
+    "mog2_history_seconds": 30.0
   }
 }
 ```
@@ -427,7 +451,8 @@ Per-camera override:
     "sensitivity": "inherit",
     "frame_width": null,
     "borderline_rescue_enabled": null,
-    "borderline_margin": null
+    "borderline_margin": null,
+    "mog2_audit_enabled": null
   }
 }
 ```
@@ -458,6 +483,8 @@ Relevant automated coverage includes:
 
 - Motion scoring for coherent movement, erratic edge movement, global
   brightness changes, and insufficient-frame fail-open behavior.
+- MOG2 warmup, persistent slow-blob tracking, evidence aggregation, and
+  audit-only configuration inheritance.
 - Non-blocking event enqueue and ONVIF burst coalescing.
 - Recorder ownership, failure isolation, indexing, media validation, recording
   range selection, and playback continuity helpers.
@@ -475,11 +502,12 @@ Chrome across repeated seeks and many segment boundaries.
 
 ## 14. Current Boundaries And Future Work
 
-The motion qualifier deliberately remains lightweight. It does not currently
-maintain persistent object tracks, calculate dense/sparse optical flow, use a
-long-lived MOG2/KNN background model, or consume vendor motion bounding boxes.
-Those are possible later stages if audit data shows that the current temporal
-score cannot separate scene motion from insects reliably enough.
+The motion qualifier now maintains audit-only MOG2 foreground tracks, but those
+tracks do not participate in suppression. It does not calculate dense/sparse
+optical flow, maintain semantic object tracks, use a KNN background model, or
+consume vendor motion bounding boxes. Those remain possible later stages if
+audit data shows that frame differences plus MOG2 cannot separate scene motion
+from insects reliably enough.
 
 The next evidence-driven progression is:
 
@@ -487,8 +515,10 @@ The next evidence-driven progression is:
 2. Review rejected samples and any audit rejects that still produced objects.
 3. Tune per-camera sensitivity before changing global behavior.
 4. Enable enforcement for stable cameras.
-5. Add component tracking or optical flow only where measured failures justify
-   the additional CPU and complexity.
+5. Compare `mog2_*` evidence with object-found and no-object audits before
+   defining any consensus suppression rule.
+6. Add optical flow only where measured failures justify the additional CPU
+   and complexity.
 
 ## Documentation Update Checklist
 

@@ -633,6 +633,7 @@ function defaultCamera(cameras, seed = {}) {
       frame_width: seed.motion_qualification?.frame_width ?? null,
       borderline_rescue_enabled: seed.motion_qualification?.borderline_rescue_enabled ?? null,
       borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
+      mog2_audit_enabled: seed.motion_qualification?.mog2_audit_enabled ?? null,
     },
     zones: structuredClone(seed.zones || []),
     onvif: {
@@ -4065,6 +4066,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                     <option value="false">Disabled</option>
                   </select></label>
                   <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" placeholder="Global" value={selectedCamera.motion_qualification?.borderline_margin ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_margin"], event.target.value === "" ? null : Number(event.target.value))} /></label>
+                  <label>MOG2 Audit<select value={selectedCamera.motion_qualification?.mog2_audit_enabled == null ? "" : String(selectedCamera.motion_qualification.mog2_audit_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
+                    <option value="">Use global setting</option>
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select></label>
                 </div>
               </div>
 
@@ -4301,7 +4307,7 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
       <div className="motion-audit-grid">
         {items.map((item) => {
           const outcome = motionAuditOutcome(item);
-          const features = Object.entries(item.features || {});
+          const features = Object.entries(item.features || {}).filter(([name]) => !name.startsWith("mog2_") || ["mog2_score", "mog2_track_persistence"].includes(name));
           return (
             <article className="motion-audit-card" key={item.id}>
               <button type="button" className="motion-audit-media" onClick={() => onOpen(item)} aria-label={`Open ${item.camera_id} motion audit image`}>
@@ -4639,6 +4645,8 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Rejected Sample Rate<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.rejected_sample_rate ?? 0.05} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))} /></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
           <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> MOG2 + blob tracking audit</label>
+          <label>MOG2 History Seconds<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} /></label>
         </div>
         <h3>AI Audit Advisor</h3>
         <div className="field-row">

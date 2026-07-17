@@ -1109,6 +1109,12 @@ def _audit_ai_context(audit: dict) -> dict:
             if override.borderline_margin is None
             else override.borderline_margin
         ),
+        "mog2_audit_enabled": (
+            config.motion_qualification.mog2_audit_enabled
+            if override.mog2_audit_enabled is None
+            else override.mog2_audit_enabled
+        ),
+        "mog2_history_seconds": config.motion_qualification.mog2_history_seconds,
         "sample_fps": config.motion_qualification.sample_fps,
         "window_seconds": config.motion_qualification.window_seconds,
         "post_trigger_seconds": config.motion_qualification.post_trigger_seconds,
@@ -1148,6 +1154,7 @@ def _audit_ai_context(audit: dict) -> dict:
             "post_trigger_seconds": [0.5, 6],
             "burst_quiet_seconds": [0.1, 2],
             "borderline_margin": [0, 0.10],
+            "mog2_history_seconds": [5, 300],
             "sensitivity": ["high", "balanced", "low"],
         },
     }

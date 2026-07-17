@@ -97,6 +97,18 @@ class AuditAiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_tuning_value("borderline_margin", 0.25)
 
+    def test_mog2_tuning_is_bounded_and_camera_enable_is_supported(self) -> None:
+        self.assertEqual(validate_tuning_value("mog2_history_seconds", 45), 45.0)
+        change = AuditAiChange(
+            scope="camera",
+            setting="mog2_audit_enabled",
+            value=False,
+            reason="Disable background audit for this camera.",
+        )
+        self.assertFalse(change.value)
+        with self.assertRaises(ValueError):
+            validate_tuning_value("mog2_history_seconds", 301)
+
 
 if __name__ == "__main__":
     unittest.main()

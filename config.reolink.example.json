@@ -13,7 +13,9 @@
     "burst_quiet_seconds": 0.5,
     "rejected_sample_rate": 0.05,
     "borderline_rescue_enabled": true,
-    "borderline_margin": 0.03
+    "borderline_margin": 0.03,
+    "mog2_audit_enabled": true,
+    "mog2_history_seconds": 30.0
   },
   "audit_ai": {
     "enabled": false,
@@ -47,7 +49,8 @@
         "sensitivity": "inherit",
         "frame_width": null,
         "borderline_rescue_enabled": null,
-        "borderline_margin": null
+        "borderline_margin": null,
+        "mog2_audit_enabled": null
       },
       "baichuan": {
         "enabled": true,

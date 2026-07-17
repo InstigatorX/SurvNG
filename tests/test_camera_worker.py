@@ -104,6 +104,8 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(worker._motion_settings(), ("audit", "balanced", 480))
             self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
             self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
+            self.assertTrue(worker.status()["motion_qualification"]["mog2_audit_enabled"])
+            self.assertIsNotNone(worker.status()["motion_qualification"]["mog2_last"])
 
     def test_powered_off_worker_does_not_start_snapshot_source(self) -> None:
         camera = CameraConfig(
@@ -236,6 +238,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(result.accepted)
             self.assertEqual(result.reason, "no_temporal_signal")
             self.assertGreater(diagnostics["windows_evaluated"], 0)
+            self.assertEqual(result.features["mog2_warmed"], 0.0)
 
     def test_motion_event_runs_detection_on_live_fallback(self) -> None:
         camera = CameraConfig(

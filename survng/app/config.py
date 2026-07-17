@@ -76,6 +76,8 @@ class MotionQualificationConfig(BaseModel):
     rejected_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     borderline_rescue_enabled: bool = True
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
+    mog2_audit_enabled: bool = True
+    mog2_history_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
 
 
 class CameraMotionQualificationConfig(BaseModel):
@@ -84,6 +86,7 @@ class CameraMotionQualificationConfig(BaseModel):
     frame_width: int | None = Field(default=None, ge=240, le=960)
     borderline_rescue_enabled: bool | None = None
     borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
+    mog2_audit_enabled: bool | None = None
 
 
 class CameraConfig(BaseModel):

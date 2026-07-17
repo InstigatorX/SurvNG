@@ -24,12 +24,15 @@ ALLOWED_GLOBAL_SETTINGS = {
     "burst_quiet_seconds",
     "borderline_rescue_enabled",
     "borderline_margin",
+    "mog2_audit_enabled",
+    "mog2_history_seconds",
 }
 ALLOWED_CAMERA_SETTINGS = {
     "sensitivity",
     "frame_width",
     "borderline_rescue_enabled",
     "borderline_margin",
+    "mog2_audit_enabled",
 }
 
 
@@ -58,6 +61,8 @@ class AuditAiChange(BaseModel):
         "burst_quiet_seconds",
         "borderline_rescue_enabled",
         "borderline_margin",
+        "mog2_audit_enabled",
+        "mog2_history_seconds",
     ]
     value: str | int | float | bool
     reason: str = Field(min_length=1, max_length=500)
@@ -86,9 +91,9 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         if normalized not in {"high", "balanced", "low"}:
             raise ValueError("sensitivity must be high, balanced, or low")
         return normalized
-    if setting == "borderline_rescue_enabled":
+    if setting in {"borderline_rescue_enabled", "mog2_audit_enabled"}:
         if not isinstance(value, bool):
-            raise ValueError("borderline_rescue_enabled must be boolean")
+            raise ValueError(f"{setting} must be boolean")
         return value
     number = float(value)
     bounds = {
@@ -98,6 +103,7 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         "post_trigger_seconds": (0.5, 6.0),
         "burst_quiet_seconds": (0.1, 2.0),
         "borderline_margin": (0.0, 0.10),
+        "mog2_history_seconds": (5.0, 300.0),
     }
     low, high = bounds[setting]
     if not low <= number <= high:

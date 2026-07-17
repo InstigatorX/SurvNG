@@ -36,6 +36,9 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.cameras[0].motion_qualification.frame_width, 480)
         self.assertTrue(config.motion_qualification.borderline_rescue_enabled)
         self.assertEqual(config.motion_qualification.borderline_margin, 0.03)
+        self.assertTrue(config.motion_qualification.mog2_audit_enabled)
+        self.assertEqual(config.motion_qualification.mog2_history_seconds, 30.0)
+        self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
 
 
 if __name__ == "__main__":

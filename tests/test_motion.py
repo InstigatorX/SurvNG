@@ -5,10 +5,36 @@ import unittest
 import cv2
 import numpy as np
 
-from survng.app.motion import qualify_motion
+from survng.app.motion import BackgroundMotionTracker, aggregate_mog2_evidence, qualify_motion
 
 
 class MotionQualificationTest(unittest.TestCase):
+    def test_mog2_tracker_persists_slow_foreground_blob(self) -> None:
+        tracker = BackgroundMotionTracker(sample_fps=5, history_seconds=20)
+        background = np.zeros((180, 320), dtype=np.uint8)
+        for _ in range(12):
+            tracker.update(background)
+
+        evidence = []
+        for index in range(9):
+            frame = background.copy()
+            cv2.rectangle(frame, (35 + index * 3, 55), (80 + index * 3, 145), 255, -1)
+            evidence.append(tracker.update(frame))
+
+        aggregate = aggregate_mog2_evidence(evidence)
+        self.assertEqual(aggregate["mog2_warmed"], 1.0)
+        self.assertGreater(aggregate["mog2_track_persistence"], 0.7)
+        self.assertGreater(aggregate["mog2_track_hits"], 5)
+        self.assertGreater(aggregate["mog2_score"], 0.7)
+
+    def test_mog2_tracker_reports_warmup_without_motion_decision(self) -> None:
+        tracker = BackgroundMotionTracker(sample_fps=5, history_seconds=20)
+        evidence = [tracker.update(np.zeros((90, 160), dtype=np.uint8)) for _ in range(3)]
+
+        aggregate = aggregate_mog2_evidence(evidence)
+        self.assertEqual(aggregate["mog2_warmed"], 0.0)
+        self.assertNotIn("mog2_score", aggregate)
+
     def test_coherent_interior_motion_is_accepted(self) -> None:
         frames = []
         for index in range(9):
