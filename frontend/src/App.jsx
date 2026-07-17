@@ -81,6 +81,22 @@ function appPathname() {
   return pathname.slice(APP_BASE_PATH.length) || "/";
 }
 
+function incidentRecordingContext(item) {
+  if (!item?.camera_id || !item?.created_at) return null;
+  const epoch = new Date(item.created_at).getTime() / 1000;
+  if (!Number.isFinite(epoch)) return null;
+  return { cameraId: item.camera_id, epoch };
+}
+
+function recordingsHref(context) {
+  if (!context?.cameraId || !Number.isFinite(context?.epoch)) return appUrl("/recordings");
+  const params = new URLSearchParams({
+    camera: context.cameraId,
+    at: String(Math.round(context.epoch * 1000) / 1000),
+  });
+  return appUrl(`/recordings?${params.toString()}`);
+}
+
 const fetch = (resource, options) => window.fetch(
   typeof resource === "string" ? appUrl(resource) : resource,
   options,
@@ -654,7 +670,7 @@ function defaultCamera(cameras, seed = {}) {
   };
 }
 
-function Shell({ page, theme, children }) {
+function Shell({ page, theme, recordingContext, children }) {
   const isRecordings = page === "recordings";
   const isConfig = page === "config";
   const isIncidents = page === "incidents";
@@ -677,7 +693,7 @@ function Shell({ page, theme, children }) {
             <a className="nav-button" href={appUrl("/")}><Video size={16} /> Live</a>
             <a className="nav-button incidents-nav" href={appUrl("/incidents")}><Siren size={16} /> Incidents</a>
             <a className="nav-button" href={appUrl("/faces")}><ScanFace size={16} /> Faces</a>
-            <a className="nav-button" href={appUrl("/recordings")}><Film size={16} /> Recordings</a>
+            <a className="nav-button" href={recordingsHref(recordingContext)}><Film size={16} /> Recordings</a>
             <a className="nav-button" href={appUrl("/config")}><Cog size={16} /> Config</a>
           </nav>
         </div>
@@ -2239,7 +2255,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   );
 }
 
-function IncidentsPage({ timeZone }) {
+function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData(false);
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
@@ -2354,6 +2370,11 @@ function IncidentsPage({ timeZone }) {
   useEffect(() => {
     setFocusedFaceEventId(null);
   }, [focusedIncident?.id]);
+
+  useEffect(() => {
+    const context = incidentRecordingContext(selectedEvent || focusedEvent);
+    if (context) onRecordingContextChange(context);
+  }, [selectedEvent?.id, focusedEvent?.id, focusedEvent?.created_at, focusedEvent?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
     if (selectedEvent && !visibleIncidents.some((incident) => {
@@ -2554,7 +2575,7 @@ function IncidentsPage({ timeZone }) {
   );
 }
 
-function LivePage({ timeZone }) {
+function LivePage({ timeZone, onRecordingContextChange }) {
   const { cameras, incidents, appConfig, refresh } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
@@ -2626,6 +2647,11 @@ function LivePage({ timeZone }) {
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
   }, [incidentPage, incidentPageCount]);
+
+  useEffect(() => {
+    const context = incidentRecordingContext(selectedEvent || focusedIncident);
+    if (context) onRecordingContextChange(context);
+  }, [selectedEvent?.id, focusedIncident?.id, focusedIncident?.created_at, focusedIncident?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
     if (selectedEvent && !visibleIncidents.some((incident) => {
@@ -2862,17 +2888,19 @@ function mergeRecordingEvents(current, updates) {
 }
 
 function RecordingsPage({ timeZone }) {
+  const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
+  const queryAt = Number(initialQuery.get("at"));
+  const initialEpoch = Number.isFinite(queryAt) && queryAt > 0 ? queryAt : null;
   const videoRef = useRef(null);
-  const desiredEpochRef = useRef(null);
+  const desiredEpochRef = useRef(initialEpoch);
   const autoplayRef = useRef(false);
   const codecFallbackRef = useRef(false);
   const playbackRequestRef = useRef(0);
   const latestAvailabilityRef = useRef(null);
   const pendingSeekEpochRef = useRef(null);
   const pendingSeekModeRef = useRef(null);
-  const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const today = dateKeyForTimeZone(Date.now(), timeZone);
-  const queryDate = initialQuery.get("date") || today;
+  const queryDate = initialQuery.get("date") || (initialEpoch ? dateKeyForTimeZone(initialEpoch * 1000, timeZone) : today);
   const querySource = initialQuery.get("source");
   const [cameras, setCameras] = useState([]);
   const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
@@ -3186,8 +3214,12 @@ function RecordingsPage({ timeZone }) {
   useEffect(() => {
     if (!activeCameraId) return;
     const params = new URLSearchParams({ camera: activeCameraId, date, source });
+    const retainedEpoch = desiredEpochRef.current;
+    if (Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd) {
+      params.set("at", String(Math.round(retainedEpoch * 1000) / 1000));
+    }
     window.history.replaceState(null, "", appUrl(`/recordings?${params.toString()}`));
-  }, [activeCameraId, date, source]);
+  }, [activeCameraId, date, source, dayStart, dayEnd]);
 
   function handleRecordingReady(_player, video) {
     const retained = Number.isFinite(pendingSeekEpochRef.current)
@@ -4996,6 +5028,7 @@ function FacesPage({ timeZone }) {
 function App() {
   const [timeZone, setTimeZone] = useStoredState("survng.timeZone", DEFAULT_TIME_ZONE);
   const [theme, setTheme] = useStoredState("survng.theme", "auto");
+  const [recordingContext, setRecordingContext] = useState(null);
   const pathname = appPathname();
   const page = pathname.startsWith("/config")
     ? "config"
@@ -5010,16 +5043,16 @@ function App() {
     document.documentElement.dataset.theme = THEMES.includes(theme) ? theme : "auto";
   }, [theme]);
   return (
-    <Shell page={page} theme={theme}>
+    <Shell page={page} theme={theme} recordingContext={recordingContext}>
       {page === "config"
         ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} />
         : page === "recordings"
           ? <RecordingsPage timeZone={timeZone} />
           : page === "incidents"
-            ? <IncidentsPage timeZone={timeZone} />
+            ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} />
             : page === "faces"
               ? <FacesPage timeZone={timeZone} />
-            : <LivePage timeZone={timeZone} />}
+            : <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} />}
     </Shell>
   );
 }
