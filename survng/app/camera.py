@@ -77,7 +77,7 @@ class CameraWorker:
             ),
         )
         self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
-        self._mog2_samples: deque[tuple[float, dict[str, float]]] = deque(maxlen=ring_size)
+        self._mog2_samples: deque[tuple[float, dict[str, Any]]] = deque(maxlen=ring_size)
         self._mog2_lock = threading.Lock()
         self._mog2_tracker = BackgroundMotionTracker(
             sample_fps=self.motion_config.sample_fps,

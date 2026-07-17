@@ -3767,6 +3767,7 @@ button.status-pill.hud-toggle:disabled {
 }
 
 .motion-audit-overlay-media {
+  position: relative;
   display: grid;
   width: 100%;
   height: 100%;
@@ -3778,6 +3779,64 @@ button.status-pill.hud-toggle:disabled {
   overflow: hidden;
   border-radius: 7px;
   background: var(--video-bg);
+}
+
+.mog2-track-overlay {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.mog2-track-overlay svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.mog2-track-trail {
+  fill: none;
+  stroke: var(--mog2-track-color);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 2 6;
+  opacity: .9;
+}
+
+.mog2-track-box {
+  fill: var(--mog2-track-color);
+  fill-opacity: .08;
+  stroke: var(--mog2-track-color);
+  stroke-width: 2;
+}
+
+.mog2-track-label {
+  position: absolute;
+  min-width: 24px;
+  transform: translateY(-100%);
+  border-radius: 4px 4px 4px 0;
+  background: var(--mog2-track-color);
+  color: #071011;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 18px;
+  text-align: center;
+  padding: 0 5px;
+}
+
+.mog2-track-color-0 { --mog2-track-color: #22d3a6; }
+.mog2-track-color-1 { --mog2-track-color: #38bdf8; }
+.mog2-track-color-2 { --mog2-track-color: #facc15; }
+.mog2-track-color-3 { --mog2-track-color: #fb7185; }
+.mog2-track-color-4 { --mog2-track-color: #c084fc; }
+.mog2-track-color-5 { --mog2-track-color: #fb923c; }
+
+.mog2-track-toggle.active {
+  border-color: rgba(34, 211, 166, .55);
+  background: rgba(34, 211, 166, .16);
+  color: var(--accent);
 }
 
 .motion-audit-overlay-media img {

@@ -168,6 +168,10 @@ occupancy, foreground ratio, and a separate `mog2_score`. The strongest track
 within an ONVIF event window is stored with the normal qualification features
 using the `mog2_` prefix.
 
+Audit entries also retain up to six active tracks as normalized bounding boxes
+and the last 30 centroid positions. The browser draws stable track IDs,
+outlines, and trails over the clean audit image; no annotated image is written.
+
 MOG2 evidence is observational only. It does not alter the existing motion
 score, acceptance decision, suppression behavior, borderline rescue, or
 OpenVINO execution. This allows real daytime, nighttime, weather, and insect

@@ -142,7 +142,16 @@ class EventStoreTest(unittest.TestCase):
                 reason="low_persistence",
                 object_detected=None,
                 trigger_count=2,
-                features={"persistence": 0.2},
+                features={
+                    "persistence": 0.2,
+                    "mog2_tracks": [{
+                        "id": 3,
+                        "score": 0.71,
+                        "persistence": 0.8,
+                        "box": [0.1, 0.2, 0.3, 0.5],
+                        "path": [[0.15, 0.25], [0.2, 0.3]],
+                    }],
+                },
             )
 
             rows, total = store.motion_audits(camera_id="front-door", outcome="not_run")
@@ -150,6 +159,9 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(total, 1)
             self.assertEqual(rows[0]["id"], audit["id"])
             self.assertIsNone(rows[0]["object_detected"])
+            tracks = json.loads(rows[0]["features_json"])["mog2_tracks"]
+            self.assertEqual(tracks[0]["id"], 3)
+            self.assertEqual(tracks[0]["path"][-1], [0.2, 0.3])
 
 
 if __name__ == "__main__":

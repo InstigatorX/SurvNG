@@ -26,6 +26,12 @@ class MotionQualificationTest(unittest.TestCase):
         self.assertGreater(aggregate["mog2_track_persistence"], 0.7)
         self.assertGreater(aggregate["mog2_track_hits"], 5)
         self.assertGreater(aggregate["mog2_score"], 0.7)
+        self.assertEqual(len(aggregate["mog2_tracks"]), 1)
+        track = aggregate["mog2_tracks"][0]
+        self.assertEqual(track["id"], 1)
+        self.assertEqual(len(track["box"]), 4)
+        self.assertGreater(len(track["path"]), 5)
+        self.assertTrue(all(0.0 <= coordinate <= 1.0 for point in track["path"] for coordinate in point))
 
     def test_mog2_tracker_reports_warmup_without_motion_decision(self) -> None:
         tracker = BackgroundMotionTracker(sample_fps=5, history_seconds=20)

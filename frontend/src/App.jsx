@@ -4345,6 +4345,33 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
   );
 }
 
+function Mog2TrackOverlay({ tracks, bounds }) {
+  if (!bounds || !Array.isArray(tracks) || !tracks.length) return null;
+  return (
+    <div className="mog2-track-overlay" style={bounds} aria-hidden="true">
+      <svg viewBox="0 0 1000 1000" preserveAspectRatio="none">
+        {tracks.map((track, index) => {
+          const box = Array.isArray(track.box) ? track.box : [];
+          const path = Array.isArray(track.path) ? track.path : [];
+          const points = path.map(([x, y]) => `${Number(x) * 1000},${Number(y) * 1000}`).join(" ");
+          if (box.length !== 4) return null;
+          return (
+            <g className={`mog2-track-color-${index % 6}`} key={track.id ?? index}>
+              {points ? <polyline className="mog2-track-trail" points={points} vectorEffect="non-scaling-stroke" /> : null}
+              <rect className="mog2-track-box" x={Number(box[0]) * 1000} y={Number(box[1]) * 1000} width={(Number(box[2]) - Number(box[0])) * 1000} height={(Number(box[3]) - Number(box[1])) * 1000} vectorEffect="non-scaling-stroke" />
+            </g>
+          );
+        })}
+      </svg>
+      {tracks.map((track, index) => {
+        const box = Array.isArray(track.box) ? track.box : [];
+        if (box.length !== 4) return null;
+        return <span className={`mog2-track-label mog2-track-color-${index % 6}`} style={{ left: `${Number(box[0]) * 100}%`, top: `${Number(box[1]) * 100}%` }} key={track.id ?? index}>M{track.id}</span>;
+      })}
+    </div>
+  );
+}
+
 function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   const outcome = motionAuditOutcome(item);
   const currentIndex = items.findIndex((candidate) => candidate.id === item.id);
@@ -4353,6 +4380,11 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiApplying, setAiApplying] = useState(false);
   const [imageSize, setImageSize] = useState(null);
+  const [showMog2Tracks, setShowMog2Tracks] = useState(true);
+  const [trackBounds, setTrackBounds] = useState(null);
+  const mediaRef = useRef(null);
+  const imageRef = useRef(null);
+  const mog2Tracks = Array.isArray(item.features?.mog2_tracks) ? item.features.mog2_tracks : [];
 
   useEffect(() => {
     setAiAdvice(null);
@@ -4360,7 +4392,33 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
     setAiLoading(false);
     setAiApplying(false);
     setImageSize(null);
+    setShowMog2Tracks(true);
+    setTrackBounds(null);
   }, [item.id]);
+
+  useEffect(() => {
+    const media = mediaRef.current;
+    const image = imageRef.current;
+    if (!media || !image) return undefined;
+    function updateBounds() {
+      const mediaRect = media.getBoundingClientRect();
+      const imageRect = image.getBoundingClientRect();
+      setTrackBounds({
+        left: `${imageRect.left - mediaRect.left}px`,
+        top: `${imageRect.top - mediaRect.top}px`,
+        width: `${imageRect.width}px`,
+        height: `${imageRect.height}px`,
+      });
+    }
+    const observer = new ResizeObserver(updateBounds);
+    observer.observe(media);
+    observer.observe(image);
+    const frame = window.requestAnimationFrame(updateBounds);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [item.id, imageSize]);
 
   const overlayStyle = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height) return undefined;
@@ -4433,6 +4491,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
         <header className="motion-audit-overlay-head">
           <div><h2>{item.camera_id}</h2><time>{formatDateTime(item.created_at, timeZone)}</time></div>
           <div className="overlay-actions">
+            {mog2Tracks.length ? <button type="button" className={`icon-only mog2-track-toggle ${showMog2Tracks ? "active" : ""}`} onClick={() => setShowMog2Tracks((visible) => !visible)} aria-label={`${showMog2Tracks ? "Hide" : "Show"} MOG2 tracks`} title={`${showMog2Tracks ? "Hide" : "Show"} ${mog2Tracks.length} MOG2 track${mog2Tracks.length === 1 ? "" : "s"}`}><Radar size={19} /></button> : null}
             <button type="button" className="icon-only" onClick={() => move(-1)} disabled={items.length < 2} aria-label="Previous audit image"><ChevronLeft size={19} /></button>
             <span>{currentIndex + 1} / {items.length}</span>
             <button type="button" className="icon-only" onClick={() => move(1)} disabled={items.length < 2} aria-label="Next audit image"><ChevronRight size={19} /></button>
@@ -4440,9 +4499,9 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
           </div>
         </header>
         <div className="motion-audit-overlay-content">
-          <div className="motion-audit-overlay-media">
+          <div className="motion-audit-overlay-media" ref={mediaRef}>
             {item.has_snapshot
-              ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+              ? <><img ref={imageRef} src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{showMog2Tracks ? <Mog2TrackOverlay tracks={mog2Tracks} bounds={trackBounds} /> : null}</>
               : <div className="empty-thumb"><Camera size={42} /><span>No sampled frame</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
@@ -4450,7 +4509,8 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
             <div className="motion-audit-overlay-score"><span>{String(item.reason || "rejected").replaceAll("_", " ")}</span><strong>{Number(item.score || 0).toFixed(3)} / {Number(item.threshold || 0).toFixed(3)}</strong></div>
             <div className="motion-audit-meter"><i style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0) * 100))}%` }} /><b style={{ left: `${Math.max(0, Math.min(100, Number(item.threshold || 0) * 100))}%` }} /></div>
             <dl>
-              {Object.entries(item.features || {}).map(([name, value]) => <div key={name}><dt>{name.replaceAll("_", " ")}</dt><dd>{Number(value).toFixed(3)}</dd></div>)}
+              {Object.entries(item.features || {}).filter(([, value]) => typeof value === "number").map(([name, value]) => <div key={name}><dt>{name.replaceAll("_", " ")}</dt><dd>{Number(value).toFixed(3)}</dd></div>)}
+              {mog2Tracks.length ? <div><dt>MOG2 tracks</dt><dd>{mog2Tracks.length}</dd></div> : null}
               <div><dt>Mode</dt><dd>{item.mode}</dd></div>
               <div><dt>Sensitivity</dt><dd>{item.sensitivity}</dd></div>
               <div><dt>Triggers</dt><dd>{item.trigger_count}</dd></div>

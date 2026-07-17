@@ -21,7 +21,7 @@ class MotionQualificationResult:
     threshold: float
     reason: str
     frame_count: int
-    features: dict[str, float]
+    features: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -131,7 +131,21 @@ class BackgroundMotionTracker:
             "largest_blob_ratio": largest_area,
         }
 
-    def update(self, frame: np.ndarray) -> dict[str, float]:
+    @classmethod
+    def _track_geometry(cls, track: _BlobTrack, sample_fps: float) -> dict[str, Any]:
+        metrics = cls._track_metrics(track, sample_fps)
+        return {
+            "id": int(track.track_id),
+            "score": round(metrics["score"], 4),
+            "persistence": round(metrics["track_persistence"], 4),
+            "box": [round(value, 4) for value in track.box],
+            "path": [
+                [round(x, 4), round(y, 4)]
+                for x, y in track.centers[-30:]
+            ],
+        }
+
+    def update(self, frame: np.ndarray) -> dict[str, Any]:
         if frame.ndim == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if frame.shape[:2] != self._shape:
@@ -231,15 +245,21 @@ class BackgroundMotionTracker:
             }
         best = max(active, key=lambda track: (track.hits, max(track.areas)))
         metrics = self._track_metrics(best, self.sample_fps)
+        visible_tracks = sorted(
+            active,
+            key=lambda track: self._track_metrics(track, self.sample_fps)["score"],
+            reverse=True,
+        )[:6]
         return {
             "warmed": 1.0,
             "foreground_ratio": foreground_ratio,
             "blob_count": float(len(active)),
             **{name: round(value, 4) for name, value in metrics.items()},
+            "tracks": [self._track_geometry(track, self.sample_fps) for track in visible_tracks],
         }
 
 
-def aggregate_mog2_evidence(samples: list[dict[str, float]]) -> dict[str, float]:
+def aggregate_mog2_evidence(samples: list[dict[str, Any]]) -> dict[str, Any]:
     if not samples:
         return {"mog2_warmed": 0.0}
     warmed = [sample for sample in samples if sample.get("warmed", 0.0) >= 1.0]
@@ -249,7 +269,7 @@ def aggregate_mog2_evidence(samples: list[dict[str, float]]) -> dict[str, float]
             "mog2_foreground_ratio": round(max(sample.get("foreground_ratio", 0.0) for sample in samples), 4),
         }
     best = max(warmed, key=lambda sample: sample.get("score", 0.0))
-    return {
+    result: dict[str, Any] = {
         "mog2_warmed": 1.0,
         "mog2_score": round(best.get("score", 0.0), 4),
         "mog2_track_persistence": round(best.get("track_persistence", 0.0), 4),
@@ -262,6 +282,10 @@ def aggregate_mog2_evidence(samples: list[dict[str, float]]) -> dict[str, float]
         "mog2_foreground_ratio": round(max(sample.get("foreground_ratio", 0.0) for sample in warmed), 4),
         "mog2_blob_count": round(max(sample.get("blob_count", 0.0) for sample in warmed), 4),
     }
+    tracks = best.get("tracks")
+    if isinstance(tracks, list) and tracks:
+        result["mog2_tracks"] = tracks
+    return result
 
 
 def _gray_frame(frame: np.ndarray) -> np.ndarray:
