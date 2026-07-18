@@ -290,6 +290,14 @@ For each available target:
 4. Run the configured OpenVINO/Core ML detector.
 5. Apply camera detection zones and per-zone eligibility.
 
+Object detection and face embedding execute in a dedicated spawned inference
+process. Uvicorn writes one frame at a time into a reusable 64 MB shared-memory
+buffer and sends only request metadata and compact results over a duplex IPC
+connection. This preserves source-coordinate boxes without serializing full
+NumPy frames through a process queue. Detector calls remain intentionally
+serialized, matching the single-stream latency configuration used before
+process isolation.
+
 The frame with the strongest eligible object confidence is selected. If all
 sampled frames contain no eligible object, the frame nearest the event time is
 preferred. SurvNG retries briefly while newly written recording segments are
@@ -400,8 +408,22 @@ overlay with decision details and keyboard previous/next navigation.
 
 SurvNG runs camera capture, motion qualification, ONVIF, recording, indexing,
 and maintenance as managed workers. Shutdown order stops command intake,
-camera/ONVIF workers, face recognition, and recorder processes before process
-exit. Systemd then provides boot startup and crash recovery.
+camera/ONVIF workers, face recognition, the isolated inference process, and
+recorder processes before process exit. Systemd then provides boot startup and
+crash recovery.
+
+The inference process owns the OpenVINO `Core`, compiled object model, face
+embedding and landmark models, and Intel GPU context. Uvicorn does not perform
+OpenVINO device or model probes directly. A native OpenVINO, OpenCL, or IGC
+fault therefore terminates only the inference child; live view, recording,
+ONVIF, MQTT, and the HTTP control plane remain in the parent process.
+
+The parent detects a closed IPC connection or dead child and restarts inference
+after a short backoff. Three crashes inside ten minutes activate a 30-minute CPU
+fallback for both object and face inference. Worker PID, generation, restart
+count, last exit, fallback state, queue depth, and model timings are included in
+detector status. The inference child disables core dumps so a native failure
+cannot produce another multi-gigabyte Uvicorn memory image.
 
 Recording-cache prewarming is stopped before the other workers. An active
 prewarm remux runs in its own process group, receives `SIGTERM` immediately,

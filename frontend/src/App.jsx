@@ -804,6 +804,7 @@ function LiveHeaderStats() {
   const detector = stats.detector || {};
   const runtime = detector.runtime || {};
   const inferenceStages = runtime.stages || {};
+  const isolation = detector.isolation || {};
   const lastStages = inferenceStages.last_ms || {};
   const averageStages = inferenceStages.average_ms || {};
   const detectorLoaded = detector.coreml_loaded || detector.openvino_loaded || detector.opencv_loaded;
@@ -832,6 +833,7 @@ function LiveHeaderStats() {
             <span className="infer-tooltip-row" key={key}><span>{label}</span><strong>{formatMilliseconds(lastStages[key])}</strong><strong>{formatMilliseconds(averageStages[key])}</strong></span>
           ))}
           <span className="infer-tooltip-foot">1 stream · mmap {detector.mmap_enabled ? "on" : "off"} · cache {detector.cache_enabled ? "on" : "off"} · warm-up {formatMilliseconds(detector.warmup_ms)}</span>
+          <span className="infer-tooltip-foot">worker {isolation.worker_alive ? `#${isolation.worker_pid}` : "offline"} · gen {isolation.generation ?? "--"} · restarts {isolation.restart_count ?? 0}{isolation.fallback_active ? " · CPU fallback" : ""}</span>
         </span>
       </span>
       <span className={runtime.queue_depth > 0 ? "header-stat warn" : "header-stat"}><ListTree size={15} /><small>Queue</small><strong>{Number.isFinite(runtime.queue_depth) ? runtime.queue_depth : "--"}</strong></span>

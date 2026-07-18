@@ -742,15 +742,9 @@ def accelerator() -> dict:
     openvino_error = ""
     coreml_available = False
     coreml_error = ""
-    try:
-        try:
-            from openvino import Core
-        except ImportError:
-            from openvino.runtime import Core
-
-        openvino_devices = list(Core().available_devices)
-    except Exception as exc:
-        openvino_error = str(exc) or "OpenVINO device probe failed"
+    openvino_probe = manager.detector.probe_devices()
+    openvino_devices = list(openvino_probe.get("devices") or [])
+    openvino_error = str(openvino_probe.get("error") or "")
 
     if is_macos:
         try:
@@ -831,18 +825,13 @@ def detector_models() -> dict:
                     item["task"] = str(metadata.get("task") or "")
                 except Exception as exc:
                     item["error"] = f"Metadata: {exc}"
-            try:
-                try:
-                    from openvino import Core
-                except ImportError:
-                    from openvino.runtime import Core
-
-                model = Core().read_model(model=str(xml_path))
-                item["input_shape"] = [int(value) for value in model.input(0).shape]
-                item["output_shapes"] = [[int(value) for value in output.shape] for output in model.outputs]
+            inspection = manager.detector.inspect_model(str(xml_path))
+            item["input_shape"] = list(inspection.get("input_shape") or [])
+            item["output_shapes"] = list(inspection.get("output_shapes") or [])
+            if inspection.get("error"):
+                item["error"] = str(inspection["error"])
+            else:
                 item["valid"] = bin_path.exists()
-            except Exception as exc:
-                item["error"] = str(exc)
             models.append(item)
     return {"models": models, "active_path": config.detector.resolved_model_path()}
 

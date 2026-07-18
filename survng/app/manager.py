@@ -8,11 +8,10 @@ from pathlib import Path
 
 from .camera import CameraWorker
 from .config import AppConfig, DetectionZone
-from .detector import OpenVinoDetector
 from .events import EventStore
-from .face_recognition import OpenVinoFaceRecognizer
 from .faces import FaceStore
 from .go2rtc import Go2RtcAdapter
+from .inference import InferenceSupervisor, IsolatedFaceRecognizer
 from .mqtt import MqttService
 from .recorder import Recorder
 from .state_events import StateEventBroker
@@ -27,12 +26,13 @@ class AppManager:
         self.storage_dir = Path(config.storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.events = EventStore(self.storage_dir)
-        self.detector = OpenVinoDetector(config.detector)
-        self.face_recognizer = OpenVinoFaceRecognizer(config.detector)
+        self.detector = InferenceSupervisor(config.detector)
+        self.face_recognizer = IsolatedFaceRecognizer(self.detector)
         self.faces = FaceStore(
             self.storage_dir,
             config.detector.face_max_observations,
             self.face_recognizer,
+            start_recognition=False,
         )
         self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds, config.hardware_acceleration)
         self.go2rtc = Go2RtcAdapter()
@@ -142,6 +142,8 @@ class AppManager:
     def start_all(self) -> None:
         with self._lifecycle_lock:
             self._stopping = False
+        self.detector.start()
+        self.faces.start()
         cameras = list(self._unique_cameras())
         recorder_keys = set()
         for camera in cameras:
@@ -190,6 +192,9 @@ class AppManager:
 
         LOGGER.info("SurvNG shutdown: stopping face recognition")
         self.faces.close()
+
+        LOGGER.info("SurvNG shutdown: stopping isolated inference worker")
+        self.detector.stop()
 
         LOGGER.info("SurvNG shutdown: stopping recorder processes")
         self.recorder.stop_all()

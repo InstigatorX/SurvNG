@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from .face_recognition import OpenVinoFaceRecognizer
+from .inference import InferenceUnavailable
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ class FaceStore:
         storage_dir: Path,
         max_observations: int = 1000,
         recognizer: OpenVinoFaceRecognizer | None = None,
+        start_recognition: bool = True,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.db_path = self.storage_dir / "survng.sqlite3"
@@ -34,14 +36,22 @@ class FaceStore:
         self._recognition_stop = threading.Event()
         self._recognition_thread: threading.Thread | None = None
         self._init_db()
-        if recognizer is not None and recognizer.ready:
-            self._recognition_thread = threading.Thread(
-                target=self._recognition_loop,
-                name="survng-face-recognition",
-                daemon=False,
-            )
-            self._recognition_thread.start()
-            self._queue_pending_recognition()
+        if start_recognition:
+            self.start()
+
+    def start(self) -> None:
+        if self._recognition_thread is not None and self._recognition_thread.is_alive():
+            return
+        if self.recognizer is None or not self.recognizer.ready:
+            return
+        self._recognition_stop.clear()
+        self._recognition_thread = threading.Thread(
+            target=self._recognition_loop,
+            name="survng-face-recognition",
+            daemon=False,
+        )
+        self._recognition_thread.start()
+        self._queue_pending_recognition()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=10)
@@ -157,6 +167,8 @@ class FaceStore:
             self._recognition_thread.join(timeout=5)
             if self._recognition_thread.is_alive():
                 LOGGER.error("face recognition worker did not stop")
+            else:
+                self._recognition_thread = None
 
     def recognition_status(self) -> dict[str, Any]:
         recognizer_status = self.recognizer.status() if self.recognizer is not None else {
@@ -223,6 +235,11 @@ class FaceStore:
                 break
             try:
                 self._recognize_observation(observation_id)
+            except InferenceUnavailable as exc:
+                if not self._recognition_stop.is_set():
+                    self._recognition_queue.put(observation_id)
+                    LOGGER.warning("Face recognition deferred while inference recovers: %s", exc)
+                    self._recognition_stop.wait(1.0)
             except Exception:
                 LOGGER.exception("Face recognition failed for observation %s", observation_id)
             finally:
@@ -280,6 +297,8 @@ class FaceStore:
                         observation_id,
                     ),
                 )
+        except InferenceUnavailable:
+            raise
         except Exception as exc:
             with self._lock, self._connect() as connection:
                 connection.execute(
