@@ -524,6 +524,31 @@ The next evidence-driven progression is:
 6. Add optical flow only where measured failures justify the additional CPU
    and complexity.
 
+## 15. MQTT Incident Lifecycle
+
+When MQTT and incident publication are enabled, SurvNG publishes non-retained
+JSON messages to `<topic_prefix>/events/incidents`. The publisher uses the same
+45-second per-camera grouping rule and stable first-event identity as the
+Incidents UI.
+
+Each incident emits:
+
+- `new` when its first persisted event arrives.
+- `updated` when another event joins the same incident.
+- `complete` after 45 seconds without another event, or during a clean shutdown.
+
+Consumers that require exactly one notification per incident should process
+only `state == "complete"`. Consumers that favor immediate notification can
+use `new` and update or deduplicate by `incident_id` as `updated` messages
+arrive. Messages use the configured MQTT QoS and are never retained.
+
+The schema includes `schema_version`, stable `incident_id`, camera identity,
+start/end timestamps, event IDs/counts, summarized object classes with maximum
+confidence and zones, the representative event, and base-path-aware snapshot
+and Incidents URLs. This is intended as the stable Node-RED/Home Assistant
+notification boundary; presentation rules, quiet hours, and target devices
+remain outside SurvNG.
+
 ## Documentation Update Checklist
 
 When changing this pipeline, update this file in the same commit if the change

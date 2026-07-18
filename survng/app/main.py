@@ -40,6 +40,7 @@ from .detector import objects_to_json
 from .manager import AppManager
 from .go2rtc import Go2RtcError
 from .incident_utils import (
+    DEFAULT_INCIDENT_GAP_SECONDS,
     event_epoch,
     event_snapshot_path,
     incident_event_groups,
@@ -1280,7 +1281,7 @@ def event_snapshot(event_id: int) -> FileResponse:
 
 
 @app.get("/api/incidents")
-def incidents(limit: int = 200, gap_seconds: int = 45) -> list[dict]:
+def incidents(limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
     bounded_limit = max(1, min(limit, 200))
     bounded_gap = max(5, min(gap_seconds, 300))
     summaries = _recent_incident_summaries(bounded_limit, bounded_gap)
@@ -1297,7 +1298,7 @@ def incident_search(
     zone: str = "",
     limit: int = 18,
     offset: int = 0,
-    gap_seconds: int = 45,
+    gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
 ) -> dict:
     try:
         selected_zone = ZoneInfo(time_zone)
@@ -2481,7 +2482,7 @@ def _best_incident_event(events: list[dict]) -> dict:
     return max(candidates, key=score)
 
 
-def _incident_rows(rows: list[dict], gap_seconds: int = 45) -> list[dict]:
+def _incident_rows(rows: list[dict], gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
     return [
         _incident_row(camera_id, events)
         for camera_id, events in incident_event_groups(rows, gap_seconds)

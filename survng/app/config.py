@@ -53,6 +53,7 @@ class MqttConfig(BaseModel):
     tls: bool = False
     discovery_enabled: bool = True
     discovery_prefix: str = "homeassistant"
+    incident_events_enabled: bool = True
 
 
 class AuditAiConfig(BaseModel):

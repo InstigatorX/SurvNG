@@ -6,6 +6,7 @@ from typing import Any
 
 
 SNAPSHOT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+DEFAULT_INCIDENT_GAP_SECONDS = 45
 
 
 def stable_incident_key(camera_id: str, first_event_id: Any) -> str:
@@ -22,7 +23,7 @@ def event_epoch(event: dict[str, Any]) -> float:
 
 def incident_event_groups(
     rows: list[dict[str, Any]],
-    gap_seconds: int = 45,
+    gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     by_camera: dict[str, list[dict[str, Any]]] = {}
     for event in rows:

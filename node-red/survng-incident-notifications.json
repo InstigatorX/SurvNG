@@ -1,0 +1,287 @@
+[
+  {
+    "id": "4b5aa3eef3c64e11",
+    "type": "tab",
+    "label": "SurvNG incident notifications",
+    "disabled": false,
+    "info": "Receives SurvNG incident lifecycle messages, caches snapshots in Home Assistant media, and updates one Companion notification per incident."
+  },
+  {
+    "id": "712ba870f0914ca1",
+    "type": "comment",
+    "z": "4b5aa3eef3c64e11",
+    "name": "SETUP: MQTT credentials, HA server, and notify action",
+    "info": "1. Open the SurvNG MQTT broker node and add the same credentials used by SurvNG.\n2. Open the final Home Assistant Action node and select your existing HA server.\n3. In the Prepare HA notification function, replace notify.mobile_app_CHANGE_ME or set SURVNG_NOTIFY_ACTION in Node-RED.\n4. The flow writes to /media/survng-notifications. If Node-RED is not the HA add-on, mount HA's media directory at /media.\n5. Override SURVNG_INTERNAL_URL if SurvNG is not reachable at http://192.168.86.243:8088.",
+    "x": 310,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "073ab4df18444553",
+    "type": "mqtt in",
+    "z": "4b5aa3eef3c64e11",
+    "name": "SurvNG incident lifecycle",
+    "topic": "survng/events/incidents",
+    "qos": "0",
+    "datatype": "auto-detect",
+    "broker": "ebc34ac315db497d",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 150,
+    "y": 140,
+    "wires": [
+      [
+        "d9c49f32317943b1"
+      ]
+    ]
+  },
+  {
+    "id": "d9c49f32317943b1",
+    "type": "function",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Validate + prepare snapshot",
+    "func": "let incident = msg.payload;\ntry {\n    if (Buffer.isBuffer(incident)) incident = JSON.parse(incident.toString('utf8'));\n    if (typeof incident === 'string') incident = JSON.parse(incident);\n} catch (error) {\n    node.warn(`Invalid SurvNG incident JSON: ${error.message}`);\n    return null;\n}\n\nif (!incident || incident.type !== 'incident' || Number(incident.schema_version) !== 1) return null;\nif (!['new', 'updated', 'complete'].includes(incident.state)) return null;\nif (!incident.incident_id || !incident.camera_id || !incident.representative_event_id) return null;\n\nconst internalOrigin = (env.get('SURVNG_INTERNAL_URL') || 'http://192.168.86.243:8088').replace(/\\/$/, '');\nconst safeIncident = String(incident.incident_id).replace(/[^a-zA-Z0-9_-]/g, '_');\nconst representative = Number(incident.representative_event_id);\nconst revisionKey = `survng_notification_revision_${safeIncident}`;\nconst revision = Number(flow.get(revisionKey) || 0) + 1;\nflow.set(revisionKey, revision);\n\nmsg.incident = incident;\nmsg.incidentRevision = revision;\nmsg.revisionKey = revisionKey;\nmsg.method = 'GET';\nmsg.url = internalOrigin + incident.snapshot_url;\nmsg.headers = { Accept: 'image/jpeg,image/*;q=0.9' };\nmsg.filename = `/media/survng-notifications/${safeIncident}-${representative}.jpg`;\nmsg.notificationImage = `/media/local/survng-notifications/${safeIncident}-${representative}.jpg?v=${incident.event_count || 1}`;\ndelete msg.payload;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 410,
+    "y": 140,
+    "wires": [
+      [
+        "87fd47fc9f9d4ef1"
+      ]
+    ]
+  },
+  {
+    "id": "87fd47fc9f9d4ef1",
+    "type": "http request",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Fetch clean incident snapshot",
+    "method": "use",
+    "ret": "bin",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 690,
+    "y": 140,
+    "wires": [
+      [
+        "d70f96ca5b8244c0"
+      ]
+    ]
+  },
+  {
+    "id": "d70f96ca5b8244c0",
+    "type": "switch",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Snapshot available?",
+    "property": "statusCode",
+    "propertyType": "msg",
+    "rules": [
+      {
+        "t": "btwn",
+        "v": "200",
+        "vt": "num",
+        "v2": "299",
+        "v2t": "num"
+      },
+      {
+        "t": "else"
+      }
+    ],
+    "checkall": "true",
+    "repair": false,
+    "outputs": 2,
+    "x": 930,
+    "y": 140,
+    "wires": [
+      [
+        "8494a5209aef4184"
+      ],
+      [
+        "3a0bbcc030d04bb6"
+      ]
+    ]
+  },
+  {
+    "id": "8494a5209aef4184",
+    "type": "file",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Cache in HA media",
+    "filename": "filename",
+    "filenameType": "msg",
+    "appendNewline": false,
+    "createDir": true,
+    "overwriteFile": "true",
+    "encoding": "none",
+    "x": 1170,
+    "y": 120,
+    "wires": [
+      [
+        "3a0bbcc030d04bb6"
+      ]
+    ]
+  },
+  {
+    "id": "3a0bbcc030d04bb6",
+    "type": "function",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Prepare HA notification",
+    "func": "const incident = msg.incident;\nif (!incident) return null;\n\n// A slower snapshot request from an older lifecycle message must never replace a newer update.\nif (Number(flow.get(msg.revisionKey) || 0) !== Number(msg.incidentRevision)) return null;\n\nconst notifyAction = env.get('SURVNG_NOTIFY_ACTION') || 'notify.mobile_app_CHANGE_ME';\nconst basePath = String(incident.incidents_url || '/survng/incidents').replace(/\\/incidents\\/?$/, '');\nconst startedMs = Date.parse(incident.started_at);\nconst at = Number.isFinite(startedMs) ? Math.floor(startedMs / 1000) : Math.floor(Date.now() / 1000);\nconst recordingUrl = `${basePath}/recordings?camera=${encodeURIComponent(incident.camera_id)}&at=${at}&source=main`;\nconst incidentsUrl = incident.incidents_url || `${basePath}/incidents`;\nconst camera = incident.camera_name || incident.camera_id;\nconst objects = Array.isArray(incident.objects) ? incident.objects : [];\nconst objectText = objects.length\n    ? objects.map((item) => {\n        const confidence = Number(item.confidence);\n        const count = Number(item.count || 1);\n        return `${count > 1 ? `${count}x ` : ''}${item.label}${confidence > 0 ? ` ${Math.round(confidence * 100)}%` : ''}`;\n      }).join(', ')\n    : 'motion';\nconst zones = Array.isArray(incident.zones) && incident.zones.length\n    ? ` in ${incident.zones.join(', ')}`\n    : '';\nconst eventCount = Number(incident.event_count || 1);\nconst duration = Math.max(0, Math.round(Number(incident.duration_seconds || 0)));\nconst phase = { new: 'Detected', updated: 'Updated', complete: 'Complete' }[incident.state] || 'Incident';\nconst timing = eventCount > 1\n    ? `${eventCount} events${duration ? ` over ${duration}s` : ''}`\n    : '1 event';\n\nconst notificationData = {\n    tag: incident.incident_id,\n    group: `survng_${incident.camera_id}`,\n    alert_once: true,\n    channel: 'SurvNG Incidents',\n    color: '#0f9f8f',\n    url: recordingUrl,\n    clickAction: recordingUrl,\n    actions: [\n        { action: 'URI', title: 'View recording', uri: recordingUrl },\n        { action: 'URI', title: 'All incidents', uri: incidentsUrl }\n    ]\n};\nif (Number(msg.statusCode) >= 200 && Number(msg.statusCode) < 300 && msg.notificationImage) {\n    notificationData.image = msg.notificationImage;\n}\n\nmsg.payload = {\n    action: notifyAction,\n    data: {\n        title: `${camera}: ${objectText}`,\n        message: `${phase} ${objectText}${zones} · ${timing}`,\n        data: notificationData\n    }\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1400,
+    "y": 140,
+    "wires": [
+      [
+        "5c53644dcd1448ee"
+      ]
+    ]
+  },
+  {
+    "id": "5c53644dcd1448ee",
+    "type": "api-call-service",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Send/update Companion notification",
+    "server": "",
+    "version": 7,
+    "debugenabled": false,
+    "action": "",
+    "floorId": [],
+    "areaId": [],
+    "deviceId": [],
+    "entityId": [],
+    "labelId": [],
+    "data": "",
+    "dataType": "json",
+    "mergeContext": "",
+    "mustacheAltTags": false,
+    "outputProperties": [],
+    "queue": "all",
+    "blockInputOverrides": false,
+    "domain": "notify",
+    "x": 1690,
+    "y": 140,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "87738a9ed4c74cdf",
+    "type": "catch",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Notification flow errors",
+    "scope": [
+      "d9c49f32317943b1",
+      "87fd47fc9f9d4ef1",
+      "8494a5209aef4184",
+      "3a0bbcc030d04bb6",
+      "5c53644dcd1448ee"
+    ],
+    "uncaught": false,
+    "x": 180,
+    "y": 220,
+    "wires": [
+      [
+        "57e0c2d942d248e3"
+      ]
+    ]
+  },
+  {
+    "id": "57e0c2d942d248e3",
+    "type": "debug",
+    "z": "4b5aa3eef3c64e11",
+    "name": "SurvNG notification error",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": true,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "error.message",
+    "statusType": "msg",
+    "x": 440,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "9972b14ea8dd4bea",
+    "type": "inject",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Daily thumbnail cleanup",
+    "props": [],
+    "repeat": "",
+    "crontab": "17 3 * * *",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "x": 190,
+    "y": 300,
+    "wires": [
+      [
+        "5db33dcc92d3483d"
+      ]
+    ]
+  },
+  {
+    "id": "5db33dcc92d3483d",
+    "type": "exec",
+    "z": "4b5aa3eef3c64e11",
+    "command": "find /media/survng-notifications -type f -mtime +7 -delete",
+    "addpay": "",
+    "append": "",
+    "useSpawn": "false",
+    "timer": "20",
+    "winHide": false,
+    "oldrc": false,
+    "name": "Delete thumbnails older than 7 days",
+    "x": 500,
+    "y": 300,
+    "wires": [
+      [],
+      [],
+      []
+    ]
+  },
+  {
+    "id": "ebc34ac315db497d",
+    "type": "mqtt-broker",
+    "name": "SurvNG MQTT",
+    "broker": "192.168.86.252",
+    "port": "1883",
+    "clientid": "nodered-survng-incidents",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {}
+  }
+]

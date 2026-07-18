@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .config import MqttConfig
+from .incident_utils import (
+    DEFAULT_INCIDENT_GAP_SECONDS,
+    event_epoch,
+    stable_incident_id,
+    stable_incident_key,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,12 +39,16 @@ class MqttService:
         self.messages_published = 0
         self.commands_received = 0
         self._lock = threading.Lock()
+        self._incident_lock = threading.RLock()
+        self._pending_incidents: dict[str, dict[str, Any]] = {}
+        self._accept_incidents = True
 
     @property
     def prefix(self) -> str:
         return self.config.topic_prefix.strip().strip("/") or "survng"
 
     def start(self) -> None:
+        self._accept_incidents = True
         if not self.config.enabled or not self.config.host.strip() or self.client is not None:
             return
         try:
@@ -72,6 +82,10 @@ class MqttService:
 
     def stop(self) -> None:
         client = self.client
+        self._accept_incidents = False
+        if client is not None and self.connected:
+            self.flush_incidents()
+        self._cancel_incident_timers()
         if client is None:
             return
         try:
@@ -388,7 +402,195 @@ class MqttService:
             retain=True,
         )
 
+    @staticmethod
+    def _event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = event.get("objects")
+        if raw is None:
+            try:
+                raw = json.loads(str(event.get("objects_json") or "[]"))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raw = []
+        if not isinstance(raw, list):
+            return []
+        detected: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict) or not item.get("label") or item.get("incident_eligible") is False:
+                continue
+            try:
+                confidence = float(item.get("confidence") or 0)
+            except (TypeError, ValueError):
+                continue
+            if confidence > 0:
+                detected.append(item)
+        return detected
+
+    @classmethod
+    def _incident_payload(cls, pending: dict[str, Any], state: str) -> dict[str, Any]:
+        events = sorted(pending["events"].values(), key=event_epoch)
+        first = events[0]
+        last = events[-1]
+
+        def representative_score(event: dict[str, Any]) -> tuple[int, float, int, int]:
+            objects = cls._event_objects(event)
+            return (
+                int(bool(objects)),
+                max((float(item.get("confidence") or 0) for item in objects), default=0.0),
+                int(bool(event.get("snapshot_path"))),
+                int(event.get("id") or 0),
+            )
+
+        representative = max(events, key=representative_score)
+        object_summaries: dict[str, dict[str, Any]] = {}
+        for event in events:
+            for item in cls._event_objects(event):
+                label = str(item.get("label") or "").strip()
+                key = label.lower()
+                current = object_summaries.setdefault(key, {
+                    "label": label,
+                    "confidence": 0.0,
+                    "zones": set(),
+                    "count": 0,
+                })
+                current["confidence"] = max(current["confidence"], float(item.get("confidence") or 0))
+                current["zones"].update(str(zone) for zone in item.get("zones", []) if zone)
+                current["count"] += 1
+        objects = [
+            {
+                **summary,
+                "confidence": round(float(summary["confidence"]), 4),
+                "zones": sorted(summary["zones"]),
+            }
+            for summary in sorted(object_summaries.values(), key=lambda item: str(item["label"]).lower())
+        ]
+        first_id = first.get("id")
+        incident_id = stable_incident_id(str(pending["camera_id"]), first_id)
+        base_path = str(pending.get("base_path") or "").rstrip("/")
+        representative_id = int(representative.get("id") or 0)
+        return {
+            "schema_version": 1,
+            "type": "incident",
+            "state": state,
+            "incident_id": incident_id,
+            "incident_key": stable_incident_key(str(pending["camera_id"]), first_id),
+            "camera_id": pending["camera_id"],
+            "camera_name": pending["camera_name"],
+            "started_at": first.get("created_at"),
+            "ended_at": last.get("created_at"),
+            "duration_seconds": round(max(0.0, event_epoch(last) - event_epoch(first)), 3),
+            "event_count": len(events),
+            "event_ids": [int(event.get("id") or 0) for event in events],
+            "object_event_count": sum(bool(cls._event_objects(event)) for event in events),
+            "has_objects": bool(objects),
+            "classes": [item["label"] for item in objects],
+            "zones": sorted({zone for item in objects for zone in item["zones"]}),
+            "objects": objects,
+            "representative_event_id": representative_id,
+            "snapshot_url": f"{base_path}/api/events/{representative_id}/snapshot.jpg",
+            "incidents_url": f"{base_path}/incidents",
+        }
+
+    def track_incident(
+        self,
+        event: dict[str, Any],
+        camera_name: str,
+        base_path: str = "",
+        allow_new: bool = True,
+    ) -> None:
+        if not self.config.enabled or not self.config.incident_events_enabled or not self._accept_incidents:
+            return
+        camera_id = str(event.get("camera_id") or "")
+        event_id = int(event.get("id") or 0)
+        if not camera_id or event_id <= 0 or not event.get("created_at"):
+            return
+
+        publish_payloads: list[dict[str, Any]] = []
+        with self._incident_lock:
+            pending = self._pending_incidents.get(camera_id)
+            if not allow_new and (pending is None or event_id not in pending["events"]):
+                return
+            if pending and event_epoch(event) - float(pending["last_epoch"]) > DEFAULT_INCIDENT_GAP_SECONDS:
+                timer = pending.get("timer")
+                if timer is not None:
+                    timer.cancel()
+                publish_payloads.append(self._incident_payload(pending, "complete"))
+                self._pending_incidents.pop(camera_id, None)
+                pending = None
+
+            state = "updated"
+            if pending is None:
+                if not allow_new:
+                    return
+                pending = {
+                    "camera_id": camera_id,
+                    "camera_name": camera_name or camera_id,
+                    "base_path": base_path,
+                    "events": {},
+                    "last_epoch": event_epoch(event),
+                    "generation": 0,
+                    "timer": None,
+                }
+                self._pending_incidents[camera_id] = pending
+                state = "new"
+            pending["camera_name"] = camera_name or camera_id
+            pending["base_path"] = base_path
+            pending["events"][event_id] = dict(event)
+            pending["last_epoch"] = max(float(pending["last_epoch"]), event_epoch(event))
+            pending["generation"] += 1
+            timer = pending.get("timer")
+            if timer is not None:
+                timer.cancel()
+            timer = threading.Timer(
+                DEFAULT_INCIDENT_GAP_SECONDS,
+                self._settle_incident,
+                args=(camera_id, int(pending["generation"])),
+            )
+            timer.daemon = True
+            pending["timer"] = timer
+            timer.start()
+            publish_payloads.append(self._incident_payload(pending, state))
+
+        for payload in publish_payloads:
+            self.publish("events/incidents", payload, retain=False)
+
+    def _settle_incident(self, camera_id: str, generation: int) -> None:
+        payload: dict[str, Any] | None = None
+        with self._incident_lock:
+            pending = self._pending_incidents.get(camera_id)
+            if pending is None or int(pending["generation"]) != generation:
+                return
+            if not self.connected:
+                timer = threading.Timer(5.0, self._settle_incident, args=(camera_id, generation))
+                timer.daemon = True
+                pending["timer"] = timer
+                timer.start()
+                return
+            self._pending_incidents.pop(camera_id, None)
+            payload = self._incident_payload(pending, "complete")
+        self.publish("events/incidents", payload, retain=False)
+
+    def flush_incidents(self) -> None:
+        with self._incident_lock:
+            pending_incidents = list(self._pending_incidents.values())
+            self._pending_incidents.clear()
+            for pending in pending_incidents:
+                timer = pending.get("timer")
+                if timer is not None:
+                    timer.cancel()
+        for pending in pending_incidents:
+            self.publish("events/incidents", self._incident_payload(pending, "complete"), retain=False)
+
+    def _cancel_incident_timers(self) -> None:
+        with self._incident_lock:
+            pending_incidents = list(self._pending_incidents.values())
+            self._pending_incidents.clear()
+        for pending in pending_incidents:
+            timer = pending.get("timer")
+            if timer is not None:
+                timer.cancel()
+
     def status(self) -> dict[str, Any]:
+        with self._incident_lock:
+            pending_incidents = len(self._pending_incidents)
         return {
             "enabled": self.config.enabled,
             "configured": bool(self.config.host.strip()),
@@ -400,6 +602,9 @@ class MqttService:
             "last_error": self.last_error,
             "messages_published": self.messages_published,
             "commands_received": self.commands_received,
+            "incident_events_enabled": self.config.incident_events_enabled,
+            "incident_topic": f"{self.prefix}/events/incidents",
+            "pending_incidents": pending_incidents,
         }
 
     def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any) -> None:

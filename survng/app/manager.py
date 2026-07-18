@@ -273,6 +273,17 @@ class AppManager:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
             return
+        if event_type == "incident" or (event_type == "object" and payload.get("source") == "manual_openvino"):
+            event_id = int(payload.get("event_id") or 0)
+            event = self.events.get(event_id) if event_id else None
+            camera = self.camera(camera_id)
+            if event is not None:
+                self.mqtt.track_incident(
+                    event,
+                    camera.name if camera is not None else camera_id,
+                    self.config.base_path,
+                    allow_new=event_type == "incident",
+                )
         if event_type == "object":
             objects = payload.get("objects") or []
             event_id = payload.get("event_id")

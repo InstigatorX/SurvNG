@@ -79,6 +79,86 @@ class MqttServiceTest(unittest.TestCase):
             ("detection", "gate", True),
         ])
 
+    def test_incident_lifecycle_uses_stable_id_and_non_retained_topic(self) -> None:
+        service = self.service()
+        service.track_incident({
+            "id": 41,
+            "camera_id": "front-door",
+            "created_at": "2026-07-17T12:00:00+00:00",
+            "snapshot_path": "/storage/front-door.jpg",
+            "objects_json": json.dumps([{
+                "label": "person",
+                "confidence": 0.82,
+                "zones": ["Porch"],
+                "incident_eligible": True,
+            }]),
+        }, "Front Door", "/survng")
+        service.track_incident({
+            "id": 42,
+            "camera_id": "front-door",
+            "created_at": "2026-07-17T12:00:10+00:00",
+            "snapshot_path": "/storage/front-door-2.jpg",
+            "objects_json": json.dumps([{
+                "label": "person",
+                "confidence": 0.91,
+                "zones": ["Porch", "Walkway"],
+                "incident_eligible": True,
+            }, {
+                "label": "dog",
+                "confidence": 0.73,
+                "zones": ["Walkway"],
+                "incident_eligible": True,
+            }]),
+        }, "Front Door", "/survng")
+        service.flush_incidents()
+
+        publications = [
+            (topic, json.loads(payload), retained)
+            for topic, payload, _qos, retained in service.client.published
+            if topic == "survng/events/incidents"
+        ]
+        self.assertEqual([payload["state"] for _, payload, _ in publications], ["new", "updated", "complete"])
+        self.assertEqual({payload["incident_id"] for _, payload, _ in publications}, {"incident-front-door-41"})
+        complete = publications[-1][1]
+        self.assertEqual(complete["event_ids"], [41, 42])
+        self.assertEqual(complete["event_count"], 2)
+        self.assertEqual(complete["classes"], ["dog", "person"])
+        self.assertEqual(complete["zones"], ["Porch", "Walkway"])
+        self.assertEqual(complete["representative_event_id"], 42)
+        self.assertEqual(complete["snapshot_url"], "/survng/api/events/42/snapshot.jpg")
+        self.assertTrue(all(retained is False for _, _, retained in publications))
+
+    def test_incident_events_can_be_disabled(self) -> None:
+        service = self.service()
+        service.config.incident_events_enabled = False
+        service.track_incident({
+            "id": 41,
+            "camera_id": "front-door",
+            "created_at": "2026-07-17T12:00:00+00:00",
+        }, "Front Door")
+
+        self.assertEqual(service.client.published, [])
+
+    def test_manual_update_only_changes_an_incident_that_is_still_pending(self) -> None:
+        service = self.service()
+        event = {
+            "id": 41,
+            "camera_id": "front-door",
+            "created_at": "2026-07-17T12:00:00+00:00",
+            "objects_json": "[]",
+        }
+        service.track_incident(event, "Front Door")
+        service.track_incident({
+            **event,
+            "objects_json": json.dumps([{"label": "car", "confidence": 0.9}]),
+        }, "Front Door", allow_new=False)
+        service.flush_incidents()
+        complete = json.loads(service.client.published[-1][1])
+        self.assertEqual(complete["classes"], ["car"])
+
+        service.track_incident(event, "Front Door", allow_new=False)
+        self.assertEqual(len(service.client.published), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
