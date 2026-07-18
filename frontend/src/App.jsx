@@ -805,6 +805,9 @@ function LiveHeaderStats() {
   const runtime = detector.runtime || {};
   const inferenceStages = runtime.stages || {};
   const isolation = detector.isolation || {};
+  const inferenceWorkers = detector.workers || {};
+  const objectWorker = inferenceWorkers.object || isolation;
+  const faceWorker = inferenceWorkers.face || {};
   const lastStages = inferenceStages.last_ms || {};
   const averageStages = inferenceStages.average_ms || {};
   const detectorLoaded = detector.coreml_loaded || detector.openvino_loaded || detector.opencv_loaded;
@@ -833,7 +836,8 @@ function LiveHeaderStats() {
             <span className="infer-tooltip-row" key={key}><span>{label}</span><strong>{formatMilliseconds(lastStages[key])}</strong><strong>{formatMilliseconds(averageStages[key])}</strong></span>
           ))}
           <span className="infer-tooltip-foot">1 stream · mmap {detector.mmap_enabled ? "on" : "off"} · cache {detector.cache_enabled ? "on" : "off"} · warm-up {formatMilliseconds(detector.warmup_ms)}</span>
-          <span className="infer-tooltip-foot">worker {isolation.worker_alive ? `#${isolation.worker_pid}` : "offline"} · gen {isolation.generation ?? "--"} · restarts {isolation.restart_count ?? 0}{isolation.fallback_active ? " · CPU fallback" : ""}</span>
+          <span className="infer-tooltip-foot">object {objectWorker.worker_alive ? `#${objectWorker.worker_pid}` : "offline"} · {objectWorker.configured_device || detector.configured_device || "device"} · gen {objectWorker.generation ?? "--"} · restarts {objectWorker.restart_count ?? 0}{objectWorker.fallback_active ? " · CPU fallback" : ""}</span>
+          <span className="infer-tooltip-foot">face {faceWorker.enabled ? (faceWorker.worker_alive ? `#${faceWorker.worker_pid}` : "offline") : "disabled"} · {faceWorker.configured_device || "AUTO"} · gen {faceWorker.generation ?? "--"} · restarts {faceWorker.restart_count ?? 0}{faceWorker.fallback_active ? " · CPU fallback" : ""}</span>
         </span>
       </span>
       <span className={runtime.queue_depth > 0 ? "header-stat warn" : "header-stat"}><ListTree size={15} /><small>Queue</small><strong>{Number.isFinite(runtime.queue_depth) ? runtime.queue_depth : "--"}</strong></span>

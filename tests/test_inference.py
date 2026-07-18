@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import signal
 import time
 import unittest
@@ -24,6 +25,11 @@ class InferenceSupervisorTest(unittest.TestCase):
 
         self.assertTrue(status["isolation"]["worker_alive"])
         self.assertIsNotNone(status["isolation"]["worker_pid"])
+        comm_path = Path(f"/proc/{status['isolation']['worker_pid']}/comm")
+        if comm_path.exists():
+            self.assertEqual(comm_path.read_text(encoding="utf-8"), "survng-object\n")
+        self.assertEqual(status["workers"]["object"]["role"], "object")
+        self.assertFalse(status["workers"]["face"]["enabled"])
         self.assertFalse(status["enabled"])
 
         result = self.supervisor.detect(np.zeros((24, 32, 3), dtype=np.uint8))
@@ -35,7 +41,7 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertIsNotNone(first_pid)
 
         os.kill(int(first_pid), signal.SIGKILL)
-        process = self.supervisor._process
+        process = self.supervisor._object._process
         self.assertIsNotNone(process)
         process.join(timeout=3.0)
 
@@ -57,16 +63,57 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(proxy.ready)
         self.assertFalse(proxy.enabled)
         self.assertEqual(proxy.status()["device"], "AUTO")
+        self.assertFalse(proxy.status()["isolation"]["enabled"])
 
-    def test_stop_reaps_worker(self) -> None:
-        self.assertTrue(self.supervisor.start())
-        process = self.supervisor._process
-        self.assertIsNotNone(process)
+    def test_face_worker_crash_does_not_restart_object_worker(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, face_recognition_enabled=True)
+        )
+        self.addCleanup(supervisor.stop)
+        self.assertTrue(supervisor.start())
+        workers = supervisor.worker_status()
+        object_pid = workers["object"]["worker_pid"]
+        face_pid = workers["face"]["worker_pid"]
+        self.assertIsNotNone(object_pid)
+        self.assertIsNotNone(face_pid)
+        self.assertNotEqual(object_pid, face_pid)
+        face_comm_path = Path(f"/proc/{face_pid}/comm")
+        if face_comm_path.exists():
+            self.assertEqual(face_comm_path.read_text(encoding="utf-8"), "survng-face\n")
 
-        self.supervisor.stop()
+        os.kill(int(face_pid), signal.SIGKILL)
+        face_process = supervisor._face._process
+        self.assertIsNotNone(face_process)
+        face_process.join(timeout=3.0)
 
-        self.assertFalse(process.is_alive())
-        self.assertIsNone(self.supervisor.isolation_status()["worker_pid"])
+        failed_face = supervisor.face_status()["isolation"]
+        self.assertFalse(failed_face["worker_alive"])
+        self.assertEqual(failed_face["last_exit_code"], -signal.SIGKILL)
+        self.assertEqual(supervisor.worker_status()["object"]["worker_pid"], object_pid)
+
+        time.sleep(1.1)
+        recovered_face = supervisor.face_status()["isolation"]
+        self.assertTrue(recovered_face["worker_alive"])
+        self.assertNotEqual(recovered_face["worker_pid"], face_pid)
+        self.assertEqual(recovered_face["restart_count"], 1)
+        self.assertEqual(supervisor.worker_status()["object"]["worker_pid"], object_pid)
+
+    def test_stop_reaps_both_workers(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, face_recognition_enabled=True)
+        )
+        self.assertTrue(supervisor.start())
+        object_process = supervisor._object._process
+        face_process = supervisor._face._process
+        self.assertIsNotNone(object_process)
+        self.assertIsNotNone(face_process)
+
+        supervisor.stop()
+
+        self.assertFalse(object_process.is_alive())
+        self.assertFalse(face_process.is_alive())
+        self.assertIsNone(supervisor.worker_status()["object"]["worker_pid"])
+        self.assertIsNone(supervisor.worker_status()["face"]["worker_pid"])
 
 
 if __name__ == "__main__":

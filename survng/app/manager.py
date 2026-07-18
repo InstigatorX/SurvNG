@@ -193,7 +193,7 @@ class AppManager:
         LOGGER.info("SurvNG shutdown: stopping face recognition")
         self.faces.close()
 
-        LOGGER.info("SurvNG shutdown: stopping isolated inference worker")
+        LOGGER.info("SurvNG shutdown: stopping isolated inference workers")
         self.detector.stop()
 
         LOGGER.info("SurvNG shutdown: stopping recorder processes")

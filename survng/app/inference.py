@@ -69,6 +69,16 @@ def _disable_worker_core_dumps() -> None:
         pass
 
 
+def _set_worker_process_name(role: str) -> str:
+    name = f"survng-{role}"[:15]
+    multiprocessing.current_process().name = name
+    try:
+        Path("/proc/self/comm").write_text(name, encoding="utf-8")
+    except OSError:
+        pass
+    return name
+
+
 def _openvino_devices() -> dict[str, Any]:
     try:
         try:
@@ -98,22 +108,31 @@ def _inspect_openvino_model(path_text: str) -> dict[str, Any]:
         return {"input_shape": [], "output_shapes": [], "error": str(exc)}
 
 
-def _inference_worker_main(connection, frame_buffer, config_payload: dict[str, Any]) -> None:
+def _inference_worker_main(
+    connection,
+    frame_buffer,
+    config_payload: dict[str, Any],
+    role: str,
+) -> None:
+    _set_worker_process_name(role)
     _disable_worker_core_dumps()
     config = DetectorConfig.model_validate(config_payload)
-    detector = None
-    face_recognizer = None
     try:
-        from .detector import OpenVinoDetector
-        from .face_recognition import OpenVinoFaceRecognizer
+        if role == "object":
+            from .detector import OpenVinoDetector
 
-        detector = OpenVinoDetector(config)
-        face_recognizer = OpenVinoFaceRecognizer(config)
+            engine = OpenVinoDetector(config)
+        elif role == "face":
+            from .face_recognition import OpenVinoFaceRecognizer
+
+            engine = OpenVinoFaceRecognizer(config)
+        else:
+            raise ValueError(f"unknown inference worker role: {role}")
         connection.send({
             "type": "ready",
             "pid": os.getpid(),
-            "detector": detector.status(),
-            "face": face_recognizer.status(),
+            "role": role,
+            "status": engine.status(),
         })
     except BaseException as exc:
         try:
@@ -142,20 +161,20 @@ def _inference_worker_main(connection, frame_buffer, config_payload: dict[str, A
                         raise ValueError("invalid shared inference frame")
                     view = np.frombuffer(frame_buffer, dtype=np.uint8, count=byte_count)
                     frame = view.view(dtype).reshape(shape)
-                    if operation == "detect":
-                        result = detector.detect(
+                    if operation == "detect" and role == "object":
+                        result = engine.detect(
                             frame,
                             confidence_threshold=request.get("confidence_threshold"),
                         )
+                    elif operation == "embed" and role == "face":
+                        result = engine.embed(frame).astype(np.float32).tolist()
                     else:
-                        result = face_recognizer.embed(frame).astype(np.float32).tolist()
-                elif operation == "detector_status":
-                    result = detector.status()
-                elif operation == "face_status":
-                    result = face_recognizer.status()
-                elif operation == "probe_devices":
+                        raise ValueError(f"{operation} is unavailable in the {role} worker")
+                elif operation == "status":
+                    result = engine.status()
+                elif operation == "probe_devices" and role == "object":
                     result = _openvino_devices()
-                elif operation == "inspect_model":
+                elif operation == "inspect_model" and role == "object":
                     result = _inspect_openvino_model(str(request.get("path") or ""))
                 else:
                     raise ValueError(f"unknown inference operation: {operation}")
@@ -170,14 +189,19 @@ def _inference_worker_main(connection, frame_buffer, config_payload: dict[str, A
         connection.close()
 
 
-class InferenceSupervisor:
-    def __init__(self, config: DetectorConfig) -> None:
+class _InferenceWorker:
+    def __init__(
+        self,
+        config: DetectorConfig,
+        role: str,
+        initial_status: dict[str, Any],
+        *,
+        start_enabled: bool = True,
+    ) -> None:
         self.config = config
-        self.labels = load_detector_labels(config)
-        self.enabled = bool(
-            config.enabled
-            and (config.resolved_model_path() or config.resolved_coreml_model_path())
-        )
+        self.role = role
+        self.start_enabled = start_enabled
+        self._status = dict(initial_status)
         self._context = multiprocessing.get_context("spawn")
         self._lock = threading.RLock()
         self._pending_lock = threading.Lock()
@@ -195,8 +219,275 @@ class InferenceSupervisor:
         self._last_exit_code: int | None = None
         self._last_exit_at = ""
         self._last_error = ""
-        self._detector_status = self._base_detector_status()
-        self._face_status = self._base_face_status()
+
+    @property
+    def configured_device(self) -> str:
+        if self.role == "face":
+            return self.config.face_recognition_device
+        return self.config.device
+
+    def start(self) -> bool:
+        if not self.start_enabled:
+            return True
+        with self._lock:
+            self._stopping = False
+            return self._ensure_worker_locked(force=True)
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopping = True
+            process = self._process
+            connection = self._connection
+            if process is not None and process.is_alive() and connection is not None:
+                try:
+                    self._request_id += 1
+                    connection.send({"id": self._request_id, "op": "shutdown"})
+                    if connection.poll(5.0):
+                        connection.recv()
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+            if process is not None:
+                process.join(timeout=5.0)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=3.0)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=2.0)
+            if connection is not None:
+                connection.close()
+            self._connection = None
+            self._process = None
+            self._frame_buffer = None
+
+    def _active_config_payload(self) -> dict[str, Any]:
+        payload = self.config.model_dump(mode="json")
+        if self.role == "object":
+            payload["face_recognition_enabled"] = False
+            if time.monotonic() < self._fallback_until:
+                payload["device"] = "CPU"
+        else:
+            payload["enabled"] = False
+            if time.monotonic() < self._fallback_until:
+                payload["face_recognition_device"] = "CPU"
+        return payload
+
+    def _ensure_worker_locked(self, force: bool = False) -> bool:
+        if not self.start_enabled:
+            return False
+        process = self._process
+        if process is not None and process.is_alive():
+            return True
+        if process is not None:
+            self._record_dead_worker_locked(process.exitcode)
+        if self._stopping:
+            return False
+        if not force and time.monotonic() < self._next_restart_at:
+            return False
+        return self._spawn_worker_locked()
+
+    def _spawn_worker_locked(self) -> bool:
+        if self._frame_buffer is None:
+            self._frame_buffer = self._context.RawArray("B", MAX_INFERENCE_FRAME_BYTES)
+        parent, child = self._context.Pipe(duplex=True)
+        process = self._context.Process(
+            target=_inference_worker_main,
+            args=(child, self._frame_buffer, self._active_config_payload(), self.role),
+            name=f"survng-{self.role}-inference",
+            daemon=False,
+        )
+        process.start()
+        child.close()
+        self._process = process
+        self._connection = parent
+        self._generation += 1
+        if self._generation > 1:
+            self._restart_count += 1
+        if not parent.poll(INFERENCE_START_TIMEOUT_SECONDS):
+            self._terminate_failed_worker_locked(f"{self.role} inference worker startup timed out")
+            return False
+        try:
+            message = parent.recv()
+        except (EOFError, OSError) as exc:
+            self._terminate_failed_worker_locked(
+                f"{self.role} inference worker startup failed: {exc}"
+            )
+            return False
+        if message.get("type") != "ready":
+            self._terminate_failed_worker_locked(
+                str(message.get("error") or f"{self.role} inference worker failed during startup")
+            )
+            return False
+        self._status = dict(message.get("status") or self._status)
+        self._last_error = ""
+        self._next_restart_at = 0.0
+        loaded_device = self._status.get("loaded_device") or self._status.get("device")
+        LOGGER.info(
+            "%s inference worker ready pid=%s generation=%s device=%s",
+            self.role.capitalize(),
+            process.pid,
+            self._generation,
+            loaded_device or "unavailable",
+        )
+        return True
+
+    def _record_dead_worker_locked(self, exit_code: int | None) -> None:
+        process = self._process
+        connection = self._connection
+        if process is not None:
+            process.join(timeout=0.1)
+        if connection is not None:
+            connection.close()
+        self._process = None
+        self._connection = None
+        self._last_exit_code = exit_code
+        self._last_exit_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if not self._stopping and exit_code not in {0, None}:
+            now = time.monotonic()
+            self._crash_times.append(now)
+            while self._crash_times and now - self._crash_times[0] > INFERENCE_CRASH_WINDOW_SECONDS:
+                self._crash_times.popleft()
+            if (
+                self.configured_device.upper() != "CPU"
+                and len(self._crash_times) >= INFERENCE_GPU_FALLBACK_CRASHES
+            ):
+                self._fallback_until = now + INFERENCE_GPU_FALLBACK_SECONDS
+                LOGGER.error("%s inference worker entered CPU fallback", self.role.capitalize())
+            self._next_restart_at = now + INFERENCE_RESTART_DELAY_SECONDS
+            self._last_error = f"{self.role} inference worker exited with code {exit_code}"
+            LOGGER.error("%s", self._last_error)
+
+    def _terminate_failed_worker_locked(self, error: str) -> None:
+        self._last_error = error
+        process = self._process
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=3.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2.0)
+        exit_code = process.exitcode if process is not None else None
+        self._record_dead_worker_locked(exit_code if exit_code not in {0, None} else -1)
+
+    def _write_frame_locked(self, frame: np.ndarray) -> dict[str, Any]:
+        contiguous = np.ascontiguousarray(frame)
+        byte_count = int(contiguous.nbytes)
+        if byte_count <= 0 or byte_count > MAX_INFERENCE_FRAME_BYTES:
+            raise InferenceUnavailable(
+                f"inference frame is {byte_count} bytes; maximum is {MAX_INFERENCE_FRAME_BYTES}"
+            )
+        target = np.frombuffer(self._frame_buffer, dtype=np.uint8, count=byte_count)
+        target[:] = contiguous.view(np.uint8).reshape(-1)
+        return {
+            "shape": list(contiguous.shape),
+            "dtype": str(contiguous.dtype),
+            "byte_count": byte_count,
+        }
+
+    def request(
+        self,
+        operation: str,
+        *,
+        frame: np.ndarray | None = None,
+        timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
+        **payload: Any,
+    ) -> Any:
+        with self._pending_lock:
+            self._pending_requests += 1
+        try:
+            with self._lock:
+                if not self._ensure_worker_locked():
+                    raise InferenceUnavailable(
+                        self._last_error or f"{self.role} inference worker is unavailable"
+                    )
+                connection = self._connection
+                if connection is None:
+                    raise InferenceUnavailable(
+                        f"{self.role} inference worker connection is unavailable"
+                    )
+                self._request_id += 1
+                request = {"id": self._request_id, "op": operation, **payload}
+                if frame is not None:
+                    request.update(self._write_frame_locked(frame))
+                try:
+                    connection.send(request)
+                    if not connection.poll(timeout):
+                        self._terminate_failed_worker_locked(
+                            f"{self.role} {operation} timed out after {timeout:.1f}s"
+                        )
+                        raise InferenceUnavailable(self._last_error)
+                    response = connection.recv()
+                except (BrokenPipeError, EOFError, OSError) as exc:
+                    process = self._process
+                    self._record_dead_worker_locked(
+                        process.exitcode if process is not None else -1
+                    )
+                    raise InferenceUnavailable(
+                        f"{self.role} inference worker connection failed: {exc}"
+                    ) from exc
+                if response.get("id") != self._request_id:
+                    raise InferenceUnavailable(
+                        f"{self.role} inference worker response was out of sequence"
+                    )
+                if not response.get("ok"):
+                    raise RuntimeError(str(response.get("error") or f"{operation} failed"))
+                return response.get("result")
+        finally:
+            with self._pending_lock:
+                self._pending_requests = max(0, self._pending_requests - 1)
+
+    def status(self) -> dict[str, Any]:
+        if self.start_enabled:
+            try:
+                self._status = dict(
+                    self.request("status", timeout=INFERENCE_STATUS_TIMEOUT_SECONDS) or {}
+                )
+            except Exception as exc:
+                self._last_error = str(exc)
+        status = dict(self._status)
+        status["isolation"] = self.isolation_status()
+        return status
+
+    def isolation_status(self) -> dict[str, Any]:
+        process = self._process
+        now = time.monotonic()
+        with self._pending_lock:
+            pending = self._pending_requests
+        return {
+            "enabled": self.start_enabled,
+            "role": self.role,
+            "configured_device": self.configured_device,
+            "worker_pid": process.pid if process is not None and process.is_alive() else None,
+            "worker_alive": bool(process is not None and process.is_alive()),
+            "generation": self._generation,
+            "restart_count": self._restart_count,
+            "crash_count": len(self._crash_times),
+            "last_exit_code": self._last_exit_code,
+            "last_exit_at": self._last_exit_at,
+            "last_error": self._last_error,
+            "pending_requests": pending,
+            "fallback_active": now < self._fallback_until,
+            "fallback_seconds_remaining": round(max(0.0, self._fallback_until - now), 1),
+            "request_timeout_seconds": INFERENCE_REQUEST_TIMEOUT_SECONDS,
+            "max_frame_bytes": MAX_INFERENCE_FRAME_BYTES,
+        }
+
+
+class InferenceSupervisor:
+    def __init__(self, config: DetectorConfig) -> None:
+        self.config = config
+        self.labels = load_detector_labels(config)
+        self.enabled = bool(
+            config.enabled
+            and (config.resolved_model_path() or config.resolved_coreml_model_path())
+        )
+        self._object = _InferenceWorker(config, "object", self._base_detector_status())
+        self._face = _InferenceWorker(
+            config,
+            "face",
+            self._base_face_status(),
+            start_enabled=bool(config.face_recognition_enabled),
+        )
 
     def _base_detector_status(self) -> dict[str, Any]:
         return {
@@ -244,7 +535,7 @@ class InferenceSupervisor:
         return {
             "enabled": bool(self.config.face_recognition_enabled),
             "ready": False,
-            "error": "Inference worker has not started.",
+            "error": "Face inference worker has not started.",
             "device": self.config.face_recognition_device,
             "model_path": self.config.face_embedding_model_path,
             "landmark_model_path": self.config.face_landmark_model_path,
@@ -259,284 +550,77 @@ class InferenceSupervisor:
         }
 
     def start(self) -> bool:
-        with self._lock:
-            self._stopping = False
-            return self._ensure_worker_locked(force=True)
+        object_ready = self._object.start()
+        face_ready = self._face.start()
+        return object_ready and face_ready
 
     def stop(self) -> None:
-        with self._lock:
-            self._stopping = True
-            process = self._process
-            connection = self._connection
-            if process is not None and process.is_alive() and connection is not None:
-                try:
-                    self._request_id += 1
-                    connection.send({"id": self._request_id, "op": "shutdown"})
-                    if connection.poll(5.0):
-                        connection.recv()
-                except (BrokenPipeError, EOFError, OSError):
-                    pass
-            if process is not None:
-                process.join(timeout=5.0)
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=3.0)
-                if process.is_alive():
-                    process.kill()
-                    process.join(timeout=2.0)
-            if connection is not None:
-                connection.close()
-            self._connection = None
-            self._process = None
-            self._frame_buffer = None
+        self._face.stop()
+        self._object.stop()
 
-    def _active_config_payload(self) -> dict[str, Any]:
-        payload = self.config.model_dump(mode="json")
-        if time.monotonic() < self._fallback_until:
-            payload["device"] = "CPU"
-            payload["face_recognition_device"] = "CPU"
-        return payload
-
-    def _ensure_worker_locked(self, force: bool = False) -> bool:
-        process = self._process
-        if process is not None and process.is_alive():
-            return True
-        if process is not None:
-            self._record_dead_worker_locked(process.exitcode)
-        if self._stopping:
-            return False
-        if not force and time.monotonic() < self._next_restart_at:
-            return False
-        return self._spawn_worker_locked()
-
-    def _spawn_worker_locked(self) -> bool:
-        if self._frame_buffer is None:
-            self._frame_buffer = self._context.RawArray("B", MAX_INFERENCE_FRAME_BYTES)
-        parent, child = self._context.Pipe(duplex=True)
-        process = self._context.Process(
-            target=_inference_worker_main,
-            args=(child, self._frame_buffer, self._active_config_payload()),
-            name="survng-inference",
-            daemon=False,
-        )
-        process.start()
-        child.close()
-        self._process = process
-        self._connection = parent
-        self._generation += 1
-        if self._generation > 1:
-            self._restart_count += 1
-        if not parent.poll(INFERENCE_START_TIMEOUT_SECONDS):
-            self._terminate_failed_worker_locked("inference worker startup timed out")
-            return False
-        try:
-            message = parent.recv()
-        except (EOFError, OSError) as exc:
-            self._terminate_failed_worker_locked(f"inference worker startup failed: {exc}")
-            return False
-        if message.get("type") != "ready":
-            self._terminate_failed_worker_locked(
-                str(message.get("error") or "inference worker failed during startup")
-            )
-            return False
-        self._detector_status = dict(message.get("detector") or self._base_detector_status())
-        self._detector_status["configured_device"] = self.config.device
-        self._face_status = dict(message.get("face") or self._base_face_status())
-        self._last_error = ""
-        self._next_restart_at = 0.0
-        LOGGER.info(
-            "Inference worker ready pid=%s generation=%s detector=%s face=%s",
-            process.pid,
-            self._generation,
-            self._detector_status.get("loaded_device") or "unavailable",
-            self._face_status.get("device") if self._face_status.get("ready") else "unavailable",
-        )
-        return True
-
-    def _record_dead_worker_locked(self, exit_code: int | None) -> None:
-        process = self._process
-        connection = self._connection
-        if process is not None:
-            process.join(timeout=0.1)
-        if connection is not None:
-            connection.close()
-        self._process = None
-        self._connection = None
-        self._last_exit_code = exit_code
-        self._last_exit_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if not self._stopping and exit_code not in {0, None}:
-            now = time.monotonic()
-            self._crash_times.append(now)
-            while self._crash_times and now - self._crash_times[0] > INFERENCE_CRASH_WINDOW_SECONDS:
-                self._crash_times.popleft()
-            if (
-                self.config.device.upper() != "CPU"
-                and len(self._crash_times) >= INFERENCE_GPU_FALLBACK_CRASHES
-            ):
-                self._fallback_until = now + INFERENCE_GPU_FALLBACK_SECONDS
-                LOGGER.error("Inference worker entered CPU fallback after repeated crashes")
-            self._next_restart_at = now + INFERENCE_RESTART_DELAY_SECONDS
-            self._last_error = f"inference worker exited with code {exit_code}"
-            LOGGER.error("%s", self._last_error)
-
-    def _terminate_failed_worker_locked(self, error: str) -> None:
-        self._last_error = error
-        process = self._process
-        if process is not None and process.is_alive():
-            process.terminate()
-            process.join(timeout=3.0)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=2.0)
-        exit_code = process.exitcode if process is not None else None
-        self._record_dead_worker_locked(exit_code if exit_code not in {0, None} else -1)
-
-    def _write_frame_locked(self, frame: np.ndarray) -> dict[str, Any]:
-        contiguous = np.ascontiguousarray(frame)
-        byte_count = int(contiguous.nbytes)
-        if byte_count <= 0 or byte_count > MAX_INFERENCE_FRAME_BYTES:
-            raise InferenceUnavailable(
-                f"inference frame is {byte_count} bytes; maximum is {MAX_INFERENCE_FRAME_BYTES}"
-            )
-        target = np.frombuffer(self._frame_buffer, dtype=np.uint8, count=byte_count)
-        target[:] = contiguous.view(np.uint8).reshape(-1)
-        return {
-            "shape": list(contiguous.shape),
-            "dtype": str(contiguous.dtype),
-            "byte_count": byte_count,
-        }
-
-    def _request_locked(
+    def detect(
         self,
-        operation: str,
-        *,
-        frame: np.ndarray | None = None,
-        timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
-        **payload: Any,
-    ) -> Any:
-        if not self._ensure_worker_locked():
-            raise InferenceUnavailable(self._last_error or "inference worker is unavailable")
-        connection = self._connection
-        if connection is None:
-            raise InferenceUnavailable("inference worker connection is unavailable")
-        self._request_id += 1
-        request = {"id": self._request_id, "op": operation, **payload}
-        if frame is not None:
-            request.update(self._write_frame_locked(frame))
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            connection.send(request)
-            if not connection.poll(timeout):
-                self._terminate_failed_worker_locked(f"{operation} timed out after {timeout:.1f}s")
-                raise InferenceUnavailable(self._last_error)
-            response = connection.recv()
-        except (BrokenPipeError, EOFError, OSError) as exc:
-            process = self._process
-            self._record_dead_worker_locked(process.exitcode if process is not None else -1)
-            raise InferenceUnavailable(f"inference worker connection failed: {exc}") from exc
-        if response.get("id") != self._request_id:
-            raise InferenceUnavailable("inference worker response was out of sequence")
-        if not response.get("ok"):
-            raise RuntimeError(str(response.get("error") or f"{operation} failed"))
-        return response.get("result")
-
-    def _begin_request(self) -> None:
-        with self._pending_lock:
-            self._pending_requests += 1
-
-    def _finish_request(self) -> None:
-        with self._pending_lock:
-            self._pending_requests = max(0, self._pending_requests - 1)
-
-    def detect(self, frame: np.ndarray, confidence_threshold: float | None = None) -> list[dict[str, Any]]:
-        self._begin_request()
-        try:
-            with self._lock:
-                return list(self._request_locked(
+            return list(
+                self._object.request(
                     "detect",
                     frame=frame,
                     confidence_threshold=confidence_threshold,
-                ) or [])
+                )
+                or []
+            )
         except Exception as exc:
             LOGGER.error("Isolated object detection unavailable: %s", exc)
             return [{"status": "detector_unavailable", "error": str(exc)}]
-        finally:
-            self._finish_request()
 
     def embed(self, face: np.ndarray) -> np.ndarray:
-        self._begin_request()
-        try:
-            with self._lock:
-                result = self._request_locked("embed", frame=face)
-            return np.asarray(result, dtype=np.float32)
-        finally:
-            self._finish_request()
+        result = self._face.request("embed", frame=face)
+        return np.asarray(result, dtype=np.float32)
 
     def status(self) -> dict[str, Any]:
-        with self._lock:
-            try:
-                status = dict(self._request_locked(
-                    "detector_status",
-                    timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
-                ) or {})
-                status["configured_device"] = self.config.device
-                self._detector_status = status
-            except Exception as exc:
-                self._last_error = str(exc)
-            status = dict(self._detector_status)
-            runtime = dict(status.get("runtime") or {})
-            with self._pending_lock:
-                pending = self._pending_requests
-            runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
-            runtime["pending_frames"] = runtime["queue_depth"]
-            status["runtime"] = runtime
-            status["isolation"] = self.isolation_status()
-            return status
+        status = self._object.status()
+        runtime = dict(status.get("runtime") or {})
+        pending = self._object.isolation_status()["pending_requests"]
+        runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
+        runtime["pending_frames"] = runtime["queue_depth"]
+        status["runtime"] = runtime
+        status["configured_device"] = self.config.device
+        status["workers"] = self.worker_status()
+        return status
 
     def face_status(self) -> dict[str, Any]:
-        with self._lock:
-            try:
-                self._face_status = dict(self._request_locked(
-                    "face_status",
-                    timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
-                ) or {})
-            except Exception as exc:
-                self._last_error = str(exc)
-            return dict(self._face_status)
+        return self._face.status()
 
     def probe_devices(self) -> dict[str, Any]:
-        with self._lock:
-            try:
-                return dict(self._request_locked(
+        try:
+            return dict(
+                self._object.request(
                     "probe_devices",
                     timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
-                ) or {})
-            except Exception as exc:
-                return {"devices": [], "error": str(exc)}
+                )
+                or {}
+            )
+        except Exception as exc:
+            return {"devices": [], "error": str(exc)}
 
     def inspect_model(self, path: str) -> dict[str, Any]:
-        with self._lock:
-            try:
-                return dict(self._request_locked("inspect_model", path=path, timeout=10.0) or {})
-            except Exception as exc:
-                return {"input_shape": [], "output_shapes": [], "error": str(exc)}
+        try:
+            return dict(
+                self._object.request("inspect_model", path=path, timeout=10.0) or {}
+            )
+        except Exception as exc:
+            return {"input_shape": [], "output_shapes": [], "error": str(exc)}
 
     def isolation_status(self) -> dict[str, Any]:
-        process = self._process
-        now = time.monotonic()
+        return self._object.isolation_status()
+
+    def worker_status(self) -> dict[str, dict[str, Any]]:
         return {
-            "enabled": True,
-            "worker_pid": process.pid if process is not None and process.is_alive() else None,
-            "worker_alive": bool(process is not None and process.is_alive()),
-            "generation": self._generation,
-            "restart_count": self._restart_count,
-            "crash_count": len(self._crash_times),
-            "last_exit_code": self._last_exit_code,
-            "last_exit_at": self._last_exit_at,
-            "last_error": self._last_error,
-            "fallback_active": now < self._fallback_until,
-            "fallback_seconds_remaining": round(max(0.0, self._fallback_until - now), 1),
-            "request_timeout_seconds": INFERENCE_REQUEST_TIMEOUT_SECONDS,
-            "max_frame_bytes": MAX_INFERENCE_FRAME_BYTES,
+            "object": self._object.isolation_status(),
+            "face": self._face.isolation_status(),
         }
 
 
