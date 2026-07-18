@@ -5,9 +5,34 @@ from typing import Any
 from .config import CameraConfig, DetectionZone
 
 
+ZONE_BOUNDARY_EPSILON = 1e-6
+
+
 def _class_applies(zone: DetectionZone, label: str) -> bool:
     classes = {item.strip().lower() for item in zone.object_classes if item.strip()}
     return not classes or label.lower() in classes
+
+
+def _point_on_segment(
+    x: float,
+    y: float,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+) -> bool:
+    segment_x = end_x - start_x
+    segment_y = end_y - start_y
+    length_squared = segment_x * segment_x + segment_y * segment_y
+    if length_squared <= ZONE_BOUNDARY_EPSILON * ZONE_BOUNDARY_EPSILON:
+        return (x - start_x) ** 2 + (y - start_y) ** 2 <= ZONE_BOUNDARY_EPSILON ** 2
+
+    projection = ((x - start_x) * segment_x + (y - start_y) * segment_y) / length_squared
+    if projection < -ZONE_BOUNDARY_EPSILON or projection > 1.0 + ZONE_BOUNDARY_EPSILON:
+        return False
+    closest_x = start_x + min(1.0, max(0.0, projection)) * segment_x
+    closest_y = start_y + min(1.0, max(0.0, projection)) * segment_y
+    return (x - closest_x) ** 2 + (y - closest_y) ** 2 <= ZONE_BOUNDARY_EPSILON ** 2
 
 
 def _point_in_polygon(x: float, y: float, zone: DetectionZone) -> bool:
@@ -17,6 +42,8 @@ def _point_in_polygon(x: float, y: float, zone: DetectionZone) -> bool:
     inside = False
     previous = points[-1]
     for current in points:
+        if _point_on_segment(x, y, previous.x, previous.y, current.x, current.y):
+            return True
         if (current.y > y) != (previous.y > y):
             crossing_x = (previous.x - current.x) * (y - current.y) / (previous.y - current.y) + current.x
             if x < crossing_x:
