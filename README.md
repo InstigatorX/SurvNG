@@ -40,6 +40,109 @@ npm --prefix frontend run build
 
 The React frontend in `frontend/` is the default interface. Its production build is emitted into `survng/static/`, which FastAPI serves for `/` and `/recordings`.
 
+### Intel GPU runtime upgrade
+
+OpenVINO's Intel GPU plug-in depends on the host OpenCL runtime and Intel
+Graphics Compiler (IGC). Ubuntu 24.04's standard repository may provide an
+older compute stack than the installed OpenVINO release. The following upgrade
+uses Intel's Ubuntu graphics PPA for a coordinated compute and QSV/media stack.
+See Intel's [Ubuntu graphics package guide](https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html)
+for the upstream repository procedure.
+
+These instructions are written for the SurvNG Ubuntu 24.04 host using a
+Proxmox kernel. Keep the kernel's existing `i915` driver. Do **not** install
+`intel-i915-dkms` or replace the Proxmox kernel as part of this procedure.
+
+Capture the current package and repository state:
+
+```bash
+sudo -i
+cd /root/SurvNG
+
+stamp=$(date +%Y%m%d-%H%M%S)
+backup="/root/intel-gpu-backup-$stamp"
+mkdir -p "$backup"
+dpkg-query -W > "$backup/packages.txt"
+apt-mark showmanual > "$backup/manual-packages.txt"
+cp -a /etc/apt/sources.list /etc/apt/sources.list.d "$backup/"
+clinfo > "$backup/clinfo.txt"
+vainfo --display drm --device /dev/dri/renderD128 > "$backup/vainfo.txt" 2>&1
+```
+
+Add Intel's repository and inspect the new candidates:
+
+```bash
+apt-get update
+apt-get install -y software-properties-common
+add-apt-repository -y ppa:kobuk-team/intel-graphics
+apt-get update
+
+apt-cache policy intel-opencl-icd libigc2 libze-intel-gpu1 libze1 \
+  libigdgmm12 intel-media-va-driver-non-free libmfx-gen1.2 libvpl2
+```
+
+Simulate the coordinated userspace upgrade before changing the host:
+
+```bash
+apt-get --simulate install \
+  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
+  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo \
+  | tee "$backup/apt-simulation.txt"
+
+grep -E '^(Inst|Remv)|linux-image|pve|proxmox|i915-dkms' \
+  "$backup/apt-simulation.txt"
+```
+
+Stop if the simulation proposes removing Proxmox packages or installing
+`intel-i915-dkms`. Otherwise, install the userspace packages together:
+
+```bash
+systemctl stop survng.service
+apt-get install -y \
+  intel-opencl-icd libze-intel-gpu1 libze1 clinfo \
+  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 libvpl-tools vainfo
+
+cd /root/SurvNG
+if [ -d .cache/openvino ]; then
+  mv .cache/openvino ".cache/openvino-before-intel-$stamp"
+fi
+mkdir -p .cache/openvino
+reboot
+```
+
+After reconnecting, verify OpenCL, VA-API/QSV, OpenVINO, and clean service
+shutdown. The first model load recompiles the OpenVINO cache and is expected to
+take longer than subsequent starts.
+
+```bash
+cd /root/SurvNG
+clinfo -l
+vainfo --display drm --device /dev/dri/renderD128
+/etc/frigate/custom-ffmpeg/bin/ffmpeg -hide_banner -hwaccels
+systemctl status survng.service --no-pager
+curl -s http://127.0.0.1:8088/api/system/status | .venv/bin/python -m json.tool
+
+systemctl restart survng.service
+sleep 15
+journalctl -u survng.service --since "5 minutes ago" --no-pager \
+  | grep -E 'shutdown complete|SEGV|core-dump|left-over|SIGKILL'
+```
+
+The detector status should report `loaded_device: GPU`, `openvino_loaded: true`,
+and an empty `warmup_error`. To roll back the PPA packages:
+
+```bash
+sudo -i
+systemctl stop survng.service
+apt-get install -y ppa-purge
+ppa-purge ppa:kobuk-team/intel-graphics
+cd /root/SurvNG
+rollback_stamp=$(date +%Y%m%d-%H%M%S)
+mv .cache/openvino ".cache/openvino-failed-$rollback_stamp"
+mkdir -p .cache/openvino
+reboot
+```
+
 ## Run
 
 ```bash
