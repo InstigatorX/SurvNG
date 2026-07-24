@@ -28,9 +28,11 @@ RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 12.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
-CAPTURE_OPEN_TIMEOUT_MS = 5000
-CAPTURE_READ_TIMEOUT_MS = 5000
+CAPTURE_OPEN_TIMEOUT_MS = 15000
+CAPTURE_READ_TIMEOUT_MS = 15000
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
+CAPTURE_RETRY_INITIAL_SECONDS = 1.0
+CAPTURE_RETRY_MAX_SECONDS = 30.0
 FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
 MOTION_QUEUE_SIZE = 32
@@ -761,11 +763,13 @@ class CameraWorker:
                 self._thread = None
 
     def _run_source(self, source: str, stop_event: threading.Event) -> None:
+        retry_delay = CAPTURE_RETRY_INITIAL_SECONDS
         try:
             while not self._stop.is_set() and not stop_event.is_set():
                 if self._source_is_idle(source):
                     return
                 capture = cv2.VideoCapture()
+                failure_reason = ""
                 try:
                     opened = capture.open(
                         self.camera.source_url(source),
@@ -779,7 +783,8 @@ class CameraWorker:
                     )
                     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     if not opened or not capture.isOpened():
-                        self._set_source_error(source, "failed to open stream")
+                        failure_reason = "failed to open stream"
+                        self._set_source_error(source, failure_reason)
                     else:
                         self._set_source_error(source, "")
                         while not self._stop.is_set() and not stop_event.is_set():
@@ -787,8 +792,10 @@ class CameraWorker:
                                 return
                             ok, frame = capture.read()
                             if not ok:
-                                self._set_source_error(source, "stream read failed")
+                                failure_reason = "stream read failed"
+                                self._set_source_error(source, failure_reason)
                                 break
+                            retry_delay = CAPTURE_RETRY_INITIAL_SECONDS
                             stamp = datetime.now(timezone.utc).isoformat()
                             frame_clock = time.monotonic()
                             with self._frame_lock:
@@ -800,12 +807,33 @@ class CameraWorker:
                             if source == "live":
                                 self._remember_motion_frame(frame, frame_clock)
                 except Exception as exc:
-                    self._set_source_error(source, f"stream error: {str(exc)[:160]}")
+                    failure_reason = f"stream error: {str(exc)[:160]}"
+                    self._set_source_error(source, failure_reason)
                     LOGGER.warning("camera stream failed for %s/%s: %s", self.camera.id, source, exc)
                 finally:
                     capture.release()
-                if stop_event.wait(1.0):
+                if self._stop.is_set() or stop_event.is_set() or self._source_is_idle(source):
                     break
+                LOGGER.info(
+                    "camera=%s source=%s retry_delay=%s failure_reason=%s",
+                    self.camera.id,
+                    source,
+                    retry_delay,
+                    failure_reason,
+                )
+                wait_delay = retry_delay
+                if source != "live":
+                    with self._frame_lock:
+                        last_access = self._source_last_access.get(source)
+                    if last_access is not None:
+                        idle_in = max(
+                            0.0,
+                            MAIN_SOURCE_IDLE_SECONDS - (time.monotonic() - last_access),
+                        )
+                        wait_delay = min(wait_delay, idle_in)
+                if stop_event.wait(wait_delay):
+                    break
+                retry_delay = min(retry_delay * 2.0, CAPTURE_RETRY_MAX_SECONDS)
         finally:
             self._source_finished(source)
 
