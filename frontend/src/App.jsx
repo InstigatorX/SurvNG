@@ -271,11 +271,12 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     let connected = false;
     let socket = null;
     let peer = null;
+    let disconnectTimer = null;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const fallback = () => {
       if (!disposed) setStage("mse");
     };
-    const failTimer = window.setTimeout(() => !connected && fallback(), 6000);
+    const failTimer = window.setTimeout(() => !connected && fallback(), 3000);
 
     try {
       peer = new RTCPeerConnection({
@@ -298,8 +299,12 @@ const WebRtcLive = forwardRef(function WebRtcLive({
         if (peer.connectionState === "connected") {
           connected = true;
           window.clearTimeout(failTimer);
-        } else if (["failed", "disconnected"].includes(peer.connectionState) && !disposed) {
+          window.clearTimeout(disconnectTimer);
+          disconnectTimer = null;
+        } else if (peer.connectionState === "failed" && !disposed) {
           fallback();
+        } else if (peer.connectionState === "disconnected" && !disposed && !disconnectTimer) {
+          disconnectTimer = window.setTimeout(fallback, 1000);
         }
       });
       socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(source)}&compat=${compatibility}`)}`);
@@ -333,6 +338,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     return () => {
       disposed = true;
       window.clearTimeout(failTimer);
+      window.clearTimeout(disconnectTimer);
       socket?.close();
       peer?.close();
       if (videoRef.current) videoRef.current.srcObject = null;
