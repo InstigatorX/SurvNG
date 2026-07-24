@@ -1303,7 +1303,12 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
   const mediaRef = useRef(null);
   const [aspect, setAspect] = useState("16 / 9");
   const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
+  const [showControls, setShowControls] = useState(false);
   const activeSource = source === "main" ? "main" : "live";
+
+  useEffect(() => {
+    setShowControls(false);
+  }, [camera.id, activeSource]);
 
   useEffect(() => {
     function onKey(event) {
@@ -1333,14 +1338,19 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             <X size={18} />
           </button>
         </div>
-        <div className="live-overlay-media">
+        <div
+          className="live-overlay-media"
+          onClick={() => {
+            if (!showControls) setShowControls(true);
+          }}
+        >
           <WebRtcLive
             ref={mediaRef}
             cameraId={camera.id}
             source={activeSource}
             timeZone={timeZone}
             muted
-            controls
+            controls={showControls}
             onReady={(media) => setAspect(mediaAspect(media))}
           />
         </div>
