@@ -273,11 +273,9 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     let peer = null;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const fallback = () => {
-      if (disposed) return;
-      if (compatibility === "native") setCompatibility("h264");
-      else setStage("recording");
+      if (!disposed) setStage("mjpeg");
     };
-    const failTimer = window.setTimeout(() => !connected && fallback(), compatibility === "native" ? 8000 : 15000);
+    const failTimer = window.setTimeout(() => !connected && fallback(), 6000);
 
     try {
       peer = new RTCPeerConnection({
@@ -347,7 +345,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       setCompatibility("detect");
       setStage("webrtc");
       setSnapshotToken(Date.now());
-    }, 30_000);
+    }, 60_000);
     return () => window.clearTimeout(timer);
   }, [stage]);
 
@@ -361,7 +359,9 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     <div className="live-stack" data-stage={stage}>
       <img
         className="live-poster"
-        src={appUrl(`/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`)}
+        src={appUrl(stage === "mjpeg"
+          ? `/api/cameras/${cameraId}/stream.mjpg?source=${source}&fps=1&t=${snapshotToken}`
+          : `/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`)}
         alt=""
         onLoad={(event) => stage !== "webrtc" && onReady?.(event.currentTarget, "snapshot")}
       />
@@ -967,7 +967,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   useEffect(() => {
     if (!camera.running) return undefined;
     if (camera.running && streamReady && activeTransport !== "snapshot") return undefined;
-    const timer = window.setInterval(() => setSnapshotToken(String(Date.now())), 2000);
+    const timer = window.setInterval(
+      () => setSnapshotToken(String(Date.now())),
+      isMobileViewport() ? 8000 : 2000,
+    );
     return () => window.clearInterval(timer);
   }, [camera.running, streamReady, activeTransport]);
 

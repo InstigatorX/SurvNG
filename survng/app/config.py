@@ -153,6 +153,7 @@ class DetectorConfig(BaseModel):
 class AppConfig(BaseModel):
     base_path: str = "/survng"
     storage_dir: str = "survng/storage"
+    recording_index_dir: str = ""
     ffmpeg_path: str = "ffmpeg"
     hardware_acceleration: str = "auto"
     event_clip_before_seconds: float = 5.0

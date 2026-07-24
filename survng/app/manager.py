@@ -34,7 +34,14 @@ class AppManager:
             self.face_recognizer,
             start_recognition=False,
         )
-        self.recorder = Recorder(config.ffmpeg_path, self.storage_dir, config.recording_segment_seconds, config.hardware_acceleration)
+        recording_index_dir = Path(config.recording_index_dir) if config.recording_index_dir else None
+        self.recorder = Recorder(
+            config.ffmpeg_path,
+            self.storage_dir,
+            config.recording_segment_seconds,
+            config.hardware_acceleration,
+            index_dir=recording_index_dir,
+        )
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()
         self.mqtt = MqttService(

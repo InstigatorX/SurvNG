@@ -269,6 +269,33 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(removed, 1)
 
+    def test_index_can_be_stored_outside_recording_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as index:
+            recorder = Recorder(
+                "ffmpeg",
+                Path(storage),
+                segment_seconds=10,
+                index_dir=Path(index),
+            )
+
+            self.assertEqual(recorder.recordings_dir, Path(storage) / "recordings")
+            self.assertEqual(recorder.index_path, Path(index) / "recordings.sqlite3")
+            self.assertTrue(recorder.index_path.is_file())
+
+    def test_periodic_maintenance_does_not_run_full_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            with (
+                patch.object(recorder, "_prune_missing_index_rows", side_effect=lambda limit: recorder._index_stop.set()),
+                patch.object(recorder, "_validate_index_batch"),
+                patch.object(recorder, "_backfill_stream_fingerprints"),
+                patch.object(recorder, "_reconcile_recording_source") as reconcile,
+                patch.object(recorder._index_stop, "wait", return_value=False),
+            ):
+                recorder._recording_index_maintenance_loop({})
+
+        reconcile.assert_not_called()
+
     def test_validation_batch_checks_unvalidated_startup_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

@@ -1646,10 +1646,16 @@ def live_info(camera_id: str, source: str = "live") -> dict:
 
 
 @app.get("/api/cameras/{camera_id}/stream.mjpg")
-async def stream(camera_id: str, request: Request, source: str = "live") -> StreamingResponse:
+async def stream(
+    camera_id: str,
+    request: Request,
+    source: str = "live",
+    fps: float = 4.0,
+) -> StreamingResponse:
     worker = manager.workers.get(camera_id)
     if worker is None:
         raise HTTPException(status_code=404, detail="camera not found")
+    frame_interval = 1.0 / max(0.5, min(4.0, fps))
 
     async def frames():
         while not await request.is_disconnected():
@@ -1662,7 +1668,7 @@ async def stream(camera_id: str, request: Request, source: str = "live") -> Stre
                     + image
                     + b"\r\n"
                 )
-            await asyncio.sleep(0.25 if image is not None else 0.1)
+            await asyncio.sleep(frame_interval if image is not None else 0.1)
 
     return StreamingResponse(
         frames(),

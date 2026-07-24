@@ -23,13 +23,22 @@ LOGGER = logging.getLogger(__name__)
 
 
 class Recorder:
-    def __init__(self, ffmpeg_path: str, storage_dir: Path, segment_seconds: float = 10.0, hardware_acceleration: str = "auto") -> None:
+    def __init__(
+        self,
+        ffmpeg_path: str,
+        storage_dir: Path,
+        segment_seconds: float = 10.0,
+        hardware_acceleration: str = "auto",
+        index_dir: Path | None = None,
+    ) -> None:
         self.ffmpeg_path = ffmpeg_path
         self.hardware_acceleration = hardware_acceleration
         self.segment_seconds = max(2.0, min(300.0, float(segment_seconds or 10.0)))
         self.recordings_dir = storage_dir / "recordings"
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
-        self.index_path = storage_dir / "recordings.sqlite3"
+        resolved_index_dir = index_dir or storage_dir
+        resolved_index_dir.mkdir(parents=True, exist_ok=True)
+        self.index_path = resolved_index_dir / "recordings.sqlite3"
         self.processes: dict[RecorderKey, ProcessItem] = {}
         self._starting: set[RecorderKey] = set()
         self._retry_after: dict[RecorderKey, float] = {}
@@ -41,7 +50,6 @@ class Recorder:
         self._index_stop = threading.Event()
         self._index_thread: threading.Thread | None = None
         self._index_maintenance_thread: threading.Thread | None = None
-        self._reconcile_cursor = 0
         self._prune_cursor = 0
         self._fingerprint_pending: deque[str] = deque()
         self._fingerprint_pending_set: set[str] = set()
@@ -713,18 +721,11 @@ class Recorder:
     def _recording_index_maintenance_loop(self, camera_map: dict[str, CameraConfig]) -> None:
         if self._index_stop.wait(30):
             return
-        wanted_keys = sorted(self._wanted_keys(camera_map))
-        next_reconcile = time.monotonic()
         while not self._index_stop.is_set():
             try:
                 self._prune_missing_index_rows(limit=200)
                 self._validate_index_batch(limit=20)
                 self._backfill_stream_fingerprints(limit=20)
-                if wanted_keys and time.monotonic() >= next_reconcile:
-                    camera_id, source = wanted_keys[self._reconcile_cursor % len(wanted_keys)]
-                    self._reconcile_cursor += 1
-                    self._reconcile_recording_source(camera_id, source)
-                    next_reconcile = time.monotonic() + 30
             except Exception:
                 LOGGER.exception("Recording index maintenance failed")
             if self._index_stop.wait(5):

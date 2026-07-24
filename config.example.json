@@ -1,6 +1,7 @@
 {
   "base_path": "/survng",
   "storage_dir": "survng/storage",
+  "recording_index_dir": "",
   "ffmpeg_path": "ffmpeg",
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
