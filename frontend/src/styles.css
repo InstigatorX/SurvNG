@@ -1462,6 +1462,7 @@ button.status-pill.hud-toggle:disabled {
 }
 
 .live-overlay-media {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1471,6 +1472,21 @@ button.status-pill.hud-toggle:disabled {
   aspect-ratio: var(--media-aspect, 16 / 9);
   border-radius: 8px;
   background: var(--video-bg);
+}
+
+.live-media-status {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  background: var(--video-bg);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-weight: 760;
+  pointer-events: none;
 }
 
 .live-overlay-media video,
