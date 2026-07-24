@@ -1676,9 +1676,8 @@ async def stream(
     )
 
 
-@app.websocket("/api/cameras/{camera_id}/webrtc")
-async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
-    """Relay go2rtc signaling while its WebRTC media remains direct and shared."""
+async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport: str) -> None:
+    """Relay one camera's go2rtc WebSocket without exposing the go2rtc API."""
     try:
         camera = manager.camera(camera_id)
         if camera is None:
@@ -1729,12 +1728,24 @@ async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
     except (WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     except Exception as exc:
-        logging.getLogger(__name__).warning("WebRTC signaling failed for %s: %s", camera_id, exc)
+        logging.getLogger(__name__).warning("%s relay failed for %s: %s", transport, camera_id, exc)
     finally:
         try:
             await websocket.close()
         except RuntimeError:
             pass
+
+
+@app.websocket("/api/cameras/{camera_id}/webrtc")
+async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
+    """Relay signaling while go2rtc WebRTC media remains direct and shared."""
+    await relay_go2rtc_websocket(websocket, camera_id, "WebRTC signaling")
+
+
+@app.websocket("/api/cameras/{camera_id}/mse")
+async def mse_stream(websocket: WebSocket, camera_id: str) -> None:
+    """Relay go2rtc fragmented MP4 media over the SurvNG connection."""
+    await relay_go2rtc_websocket(websocket, camera_id, "MSE stream")
 
 
 @app.post("/api/cameras/{camera_id}/camera/start")

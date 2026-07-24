@@ -92,10 +92,13 @@ Browser live-view modes currently include:
   active.
 - MJPEG: frames served by SurvNG from the latest OpenCV capture.
 - WebRTC: SurvNG relays go2rtc signaling; media remains a shared go2rtc stream.
+- MSE: if WebRTC fails, SurvNG relays go2rtc fragmented MP4 over the existing
+  WebSocket connection before falling back to MJPEG. This keeps go2rtc's API
+  private and works through HTTP proxies that support WebSocket upgrades.
 
-The intended fallback order is WebRTC, near-live recording where supported,
-then snapshot refresh. H265 browser compatibility may require a go2rtc
-compatibility stream; SurvNG does not make OpenCV frames into WebRTC media.
+The live-view fallback order is WebRTC, MSE, then MJPEG. H265 browser
+compatibility may require a go2rtc compatibility stream; SurvNG does not make
+OpenCV frames into WebRTC media.
 
 ## 3. Continuous Recording
 
