@@ -13,7 +13,12 @@ import cv2
 
 from survng.app.camera import CameraWorker
 from survng.app.config import CameraConfig, MotionQualificationConfig
-from survng.app.motion_pipeline import build_legacy_motion_pipeline
+from survng.app.detector import objects_to_json
+from survng.app.motion_pipeline import (
+    MotionDecisionHandlerFactory,
+    RecordedMotionObjectDetectorFactory,
+    build_default_motion_pipeline,
+)
 
 
 class DummyDetector:
@@ -52,15 +57,23 @@ def make_worker(
     motion_config: MotionQualificationConfig | None = None,
     event_callback=None,
 ) -> CameraWorker:
+    event_store = events or DummyEvents()
+    detector_backend = detector or DummyDetector()
+    recording_provider = recorder or DummyRecorder()
     return CameraWorker(
         camera,
         storage_dir,
-        detector or DummyDetector(),
-        events or DummyEvents(),
-        recorder or DummyRecorder(),
         motion_config,
         event_callback,
-        motion_pipeline=build_legacy_motion_pipeline(camera.id),
+        motion_pipeline=build_default_motion_pipeline(camera.id),
+        motion_decision_handler_factory=MotionDecisionHandlerFactory(
+            events=event_store,
+            object_serializer=objects_to_json,
+        ),
+        motion_object_detector_factory=RecordedMotionObjectDetectorFactory(
+            detector=detector_backend,
+            recorder=recording_provider,
+        ),
     )
 
 
@@ -293,8 +306,8 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), detector=detector)
             with (
-                patch("survng.app.camera.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
-                patch("survng.app.camera.RECORDED_EVENT_RETRY_SECONDS", 0.0),
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.0),
                 patch.object(worker, "_get_latest_frame", lambda source="live": frame.copy()),
             ):
                 fallback, objects, recording_path = worker._recorded_motion_frame(

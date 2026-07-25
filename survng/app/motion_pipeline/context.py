@@ -7,26 +7,11 @@ from typing import Any, Mapping, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
+from ..motion_types import MotionBlob, MotionFrameBlobs, MotionTrack
 from .runtime import MotionRuntimeState
 
 
 Frame: TypeAlias = NDArray[np.uint8]
-
-
-@dataclass(frozen=True, slots=True)
-class MotionBlob:
-    box: tuple[float, float, float, float]
-    centroid: tuple[float, float]
-    area_ratio: float
-    touches_edge: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class MotionTrack:
-    track_id: int
-    box: tuple[float, float, float, float]
-    path: tuple[tuple[float, float], ...]
-    score: float = 0.0
 
 
 @dataclass(slots=True)
@@ -86,6 +71,13 @@ class MotionContext:
     runtime: MotionRuntimeState
 
     frame_history: tuple[Frame, ...] = ()
+    processed_frame_history: tuple[Frame, ...] = ()
+    difference_history: tuple[Frame, ...] = ()
+    threshold_mask_history: tuple[Frame, ...] = ()
+    motion_mask_history: tuple[Frame, ...] = ()
+    raw_blob_history: tuple[MotionFrameBlobs, ...] = ()
+    filtered_blob_history: tuple[MotionFrameBlobs, ...] = ()
+    dominant_track: MotionTrack | None = None
     processed_frame: Frame | None = None
     background_image: Frame | None = None
     difference_image: Frame | None = None
@@ -98,4 +90,3 @@ class MotionContext:
     source_evidence: dict[str, Any] = field(default_factory=dict)
     timings: dict[str, StageTiming] = field(default_factory=dict)
     debug: MotionDebugData = field(default_factory=MotionDebugData)
-

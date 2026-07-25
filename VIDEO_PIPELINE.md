@@ -15,18 +15,27 @@ separate `MotionPipeline` for every camera from an instance-scoped stage
 registry. The pipeline owns per-camera runtime state, executes stages in order,
 and records call, failure, last, average, and maximum timing for each stage.
 
-The currently selected production stage is `legacy_qualifier`. It adapts the
-existing frame-difference scoring function to `MotionContext`, so this first
-migration step changes the dependency boundary without changing qualification
-scores or suppression behavior. MOG2 audit collection remains in
-`CameraWorker` until its background, mask, blob, tracking, and scoring pieces
-are extracted into independent stages.
+The production frame-difference path now uses independently registered
+preprocessing, frame-difference, threshold, morphology, contour extraction,
+minimum-area filtering, dominant-centroid tracking, scoring, event-state, and
+trigger-decision stages. Each stage consumes and publishes typed context
+artifacts without invoking or depending on concrete neighboring stages. The
+original all-in-one `legacy_qualifier` and combined `legacy_motion_scorer`
+remain registered as parity/reference implementations. MOG2 audit collection
+remains in `CameraWorker` until its background, mask, blob, tracking, and
+scoring pieces are extracted into independent stages.
 
 New motion implementations are registered explicitly with a
 `MotionStageRegistry`; there is no mutable module-level plugin registry. The
 factory validates stage IDs and required context artifacts before a camera
 pipeline starts. Object inference, recording lookup, event persistence, MQTT,
 and SSE remain outside the motion pipeline.
+
+`MotionDecisionHandler` owns downstream event persistence and notifications.
+It receives object evidence from an injected `RecordedMotionObjectDetector`,
+which owns recorded-frame selection, decode, zone-aware inference, and live
+fallback. `CameraWorker` coordinates these components but no longer implements
+their policies.
 
 ## Pipeline At A Glance
 

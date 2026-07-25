@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import queue
 import random
-import subprocess
 import threading
 import time
 from collections import deque
@@ -15,20 +14,17 @@ import cv2
 import numpy as np
 
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
-from .detector import OpenVinoDetector, objects_to_json
-from .events import EventStore
-from .ffmpeg_hw import recorded_frame_hw_args
 from .onvif_events import OnvifEventListener
-from .recorder import Recorder
 from .motion import BackgroundMotionTracker, MotionQualificationResult, aggregate_mog2_evidence
-from .motion_pipeline import MotionContext, MotionPipeline
-from .zones import apply_detection_zones, detection_threshold
+from .motion_pipeline import (
+    MotionContext,
+    MotionDecisionHandlerFactory,
+    MotionPipeline,
+    RecordedMotionObjectDetectorFactory,
+)
 
 LOGGER = logging.getLogger(__name__)
-RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
-RECORDED_EVENT_SETTLE_SECONDS = 0.75
-RECORDED_EVENT_RETRY_SECONDS = 12.0
-RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
+MOTION_THREAD_STOP_TIMEOUT_SECONDS = 22.0
 CAPTURE_OPEN_TIMEOUT_MS = 15000
 CAPTURE_READ_TIMEOUT_MS = 15000
 CAPTURE_DECODER_THREADS = 1
@@ -45,22 +41,28 @@ class CameraWorker:
         self,
         camera: CameraConfig,
         storage_dir: Path,
-        detector: OpenVinoDetector,
-        events: EventStore,
-        recorder: Recorder,
         motion_config: MotionQualificationConfig | None = None,
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
         *,
         motion_pipeline: MotionPipeline,
+        motion_decision_handler_factory: MotionDecisionHandlerFactory,
+        motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
-        self.detector = detector
-        self.events = events
-        self.recorder = recorder
         self.motion_config = motion_config or MotionQualificationConfig()
         self.event_callback = event_callback
         self.motion_pipeline = motion_pipeline
+        self.motion_object_detector = motion_object_detector_factory.create(
+            camera=camera,
+            live_frame_provider=lambda: self._get_latest_frame(),
+        )
+        self.motion_decision_handler = motion_decision_handler_factory.create(
+            camera_id=camera.id,
+            detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
+            snapshot_writer=lambda frame: self._write_snapshot(frame),
+            event_callback=event_callback,
+        )
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
@@ -144,7 +146,7 @@ class CameraWorker:
                 pass
             motion_thread = self._motion_thread
             if motion_thread is not None:
-                motion_thread.join(timeout=RECORDED_EVENT_RETRY_SECONDS + 10)
+                motion_thread.join(timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS)
                 if motion_thread.is_alive():
                     LOGGER.error("motion worker did not stop for %s", self.camera.id)
             self._motion_thread = motion_thread if motion_thread is not None and motion_thread.is_alive() else None
@@ -629,10 +631,9 @@ class CameraWorker:
                 })
             if not effective_accepted:
                 snapshot_path = self._sample_rejected_motion(event_at, result)
-                audit = self.events.add_motion_audit(
-                    camera_id=self.camera.id,
+                self.motion_decision_handler.record_audit(
                     snapshot_path=snapshot_path,
-                    created_at=event_at.isoformat(),
+                    event_at=event_at,
                     mode=mode,
                     sensitivity=sensitivity,
                     score=result.score,
@@ -642,8 +643,6 @@ class CameraWorker:
                     trigger_count=len(triggers),
                     features=result.features,
                 )
-                if self.event_callback:
-                    self.event_callback("motion_audit", audit)
                 continue
 
             outcome = self._process_motion_event(
@@ -663,11 +662,10 @@ class CameraWorker:
                 with self._motion_stats_lock:
                     self._motion_stats["audit_object_matches"] += 1
             if mode in {"audit", "enforce"} and not result.accepted:
-                audit = self.events.add_motion_audit(
+                self.motion_decision_handler.record_audit(
                     event_id=int(outcome["event_id"]),
-                    camera_id=self.camera.id,
                     snapshot_path=str(outcome.get("snapshot_path") or ""),
-                    created_at=event_at.isoformat(),
+                    event_at=event_at,
                     mode=mode,
                     sensitivity=sensitivity,
                     score=result.score,
@@ -677,8 +675,6 @@ class CameraWorker:
                     trigger_count=len(triggers),
                     features=result.features,
                 )
-                if self.event_callback:
-                    self.event_callback("motion_audit", audit)
 
     def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
         if self.motion_config.rejected_sample_rate <= 0 or random.random() > self.motion_config.rejected_sample_rate:
@@ -707,54 +703,12 @@ class CameraWorker:
         event_at: datetime,
         qualification: dict[str, Any],
     ) -> dict[str, Any]:
-        frame, objects, recording_path = self._recorded_motion_frame(event_at)
-        snapshot_path = ""
-        if frame is not None:
-            snapshot_path = self._write_snapshot(frame)
-        else:
-            objects = [{"status": "no_recorded_frame"}]
-        eligible_objects = [
-            detected for detected in objects
-            if detected.get("label") and detected.get("incident_eligible") is not False
-        ]
-        if qualification.get("borderline_candidate"):
-            qualification["rescued_by_object"] = bool(eligible_objects)
-            qualification["effective_accepted"] = bool(eligible_objects)
-            qualification["would_suppress"] = not bool(eligible_objects)
-        objects.append({"status": "motion_qualification", "motion_qualification": qualification})
-        event = self.events.add_event(
-            camera_id=self.camera.id,
-            kind="motion",
-            topic=topic,
-            message=message,
-            snapshot_path=snapshot_path,
-            recording_path=recording_path,
-            objects_json=objects_to_json(objects),
-            created_at=event_at.isoformat(),
-        )
-        if self.event_callback:
-            self.event_callback("incident", {
-                "event_id": event.get("id"),
-                "camera_id": self.camera.id,
-                "timestamp": event_at.isoformat(),
-                "kind": "motion",
-            })
-        detected_objects = [detected for detected in objects if detected.get("label")]
-        if self.event_callback and detected_objects:
-            self.event_callback("object", {
-                "event_id": event.get("id"),
-                "camera_id": self.camera.id,
-                "timestamp": event_at.isoformat(),
-                "snapshot_path": snapshot_path,
-                "recording_path": recording_path,
-                "objects": detected_objects,
-                "incident_objects": eligible_objects,
-            })
-        return {
-            "event_id": int(event["id"]),
-            "snapshot_path": snapshot_path,
-            "object_detected": bool(eligible_objects),
-        }
+        return self.motion_decision_handler.handle(
+            topic,
+            message,
+            event_at,
+            qualification,
+        ).as_dict()
 
     def _start_source(self, source: str) -> bool:
         source = self.camera.normalized_source(source)
@@ -904,160 +858,7 @@ class CameraWorker:
         self,
         event_at: datetime,
     ) -> tuple[Any | None, list[dict[str, Any]], str]:
-        event_epoch = event_at.timestamp()
-        newest_needed = event_epoch + max(RECORDED_EVENT_FRAME_OFFSETS) + RECORDED_EVENT_SETTLE_SECONDS
-        wait_seconds = max(0.0, newest_needed - time.time())
-        if wait_seconds > 0:
-            time.sleep(min(wait_seconds, 3.0))
-
-        deadline = time.time() + RECORDED_EVENT_RETRY_SECONDS
-        best_frame: Any | None = None
-        best_objects: list[dict[str, Any]] = []
-        best_score = -1.0
-        best_distance = float("inf")
-        best_recording_path = ""
-
-        while True:
-            for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
-                target_epoch = event_epoch + sample_offset
-                row = self.recorder.recording_at(self.camera.id, target_epoch)
-                if row is None:
-                    continue
-
-                start_epoch = row.get("start_epoch")
-                if start_epoch is None:
-                    continue
-                frame_offset = max(0.0, target_epoch - float(start_epoch))
-                frame = self._read_recorded_frame(Path(row["path"]), frame_offset)
-                if frame is None:
-                    continue
-
-                threshold = detection_threshold(self.camera, self.detector.config.confidence_threshold)
-                objects = self.detector.detect(frame, confidence_threshold=threshold)
-                apply_detection_zones(
-                    self.camera,
-                    objects,
-                    int(frame.shape[1]),
-                    int(frame.shape[0]),
-                    self.detector.config.confidence_threshold,
-                )
-                score = self._motion_object_score(objects)
-                distance = abs(sample_offset)
-                if score > best_score or (score == best_score and distance < best_distance):
-                    best_frame = frame
-                    best_objects = objects
-                    best_score = score
-                    best_distance = distance
-                    best_recording_path = str(row["path"])
-
-            if best_frame is not None or time.time() >= deadline:
-                break
-            time.sleep(RECORDED_EVENT_RETRY_INTERVAL_SECONDS)
-
-        if best_frame is not None:
-            return best_frame, best_objects, best_recording_path
-
-        fallback = self._get_latest_frame()
-        if fallback is not None:
-            threshold = detection_threshold(self.camera, self.detector.config.confidence_threshold)
-            objects = self.detector.detect(fallback, confidence_threshold=threshold)
-            apply_detection_zones(
-                self.camera,
-                objects,
-                int(fallback.shape[1]),
-                int(fallback.shape[0]),
-                self.detector.config.confidence_threshold,
-            )
-            if objects:
-                for detected in objects:
-                    detected["frame_source"] = "live_fallback"
-                    detected["recording_status"] = "no_recorded_frame"
-                return fallback, objects, ""
-            return fallback, [{"status": "no_recorded_frame", "frame_source": "live_fallback"}], ""
-        return None, [{"status": "no_recorded_frame"}], ""
-
-    def _read_recorded_frame(self, path: Path, offset_seconds: float) -> Any | None:
-        if not path.exists():
-            return None
-
-        attempts = [0.0, -0.25, 0.25, -0.75, 0.75]
-        last_error = ""
-        hw_input_args, hw_filter_args = recorded_frame_hw_args(self.recorder.hardware_acceleration)
-        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
-        decode_plans.append(("cpu", [], []))
-        for nudge in attempts:
-            sample_at = max(0.0, offset_seconds + nudge)
-            for backend, input_args, filter_args in decode_plans:
-                command = [
-                    self.recorder.ffmpeg_path,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-fflags",
-                    "+discardcorrupt",
-                    "-err_detect",
-                    "ignore_err",
-                    *input_args,
-                    "-ss",
-                    f"{sample_at:.3f}",
-                    "-i",
-                    str(path),
-                    "-map",
-                    "0:v:0",
-                    "-an",
-                    "-frames:v",
-                    "1",
-                    *filter_args,
-                    "-f",
-                    "image2pipe",
-                    "-vcodec",
-                    "mjpeg",
-                    "pipe:1",
-                ]
-                try:
-                    result = subprocess.run(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=8,
-                        check=False,
-                    )
-                except subprocess.TimeoutExpired:
-                    last_error = f"{backend} timed out"
-                    continue
-
-                if result.returncode != 0 or not result.stdout:
-                    detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
-                    last_error = f"{backend}: {' '.join(detail)[:180]}"
-                    continue
-
-                array = np.frombuffer(result.stdout, dtype=np.uint8)
-                frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    return frame
-                last_error = f"{backend}: mjpeg decode returned no frame"
-
-        LOGGER.debug(
-            "skipped unreadable recording sample for %s at %.2fs: %s%s",
-            self.camera.id,
-            offset_seconds,
-            path,
-            f" ({last_error})" if last_error else "",
-        )
-        return None
-
-    def _motion_object_score(self, objects: list[dict[str, Any]]) -> float:
-        score = 0.0
-        for detected in objects:
-            label = detected.get("label")
-            if not label or detected.get("incident_eligible") is False:
-                continue
-            confidence = detected.get("confidence")
-            if isinstance(confidence, (float, int)):
-                score = max(score, float(confidence))
-            else:
-                score = max(score, 0.01)
-        return score
+        return self.motion_object_detector.detect(event_at)
 
     def _write_snapshot(self, frame: Any) -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")

@@ -10,14 +10,17 @@ from .camera import CameraWorker
 from .config import AppConfig, DetectionZone
 from .events import EventStore
 from .faces import FaceStore
+from .detector import objects_to_json
 from .go2rtc import Go2RtcAdapter
 from .inference import InferenceSupervisor, IsolatedFaceRecognizer
 from .mqtt import MqttService
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
+    MotionDecisionHandlerFactory,
     MotionPipelineFactory,
-    MotionStageConfig,
+    RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
+    default_motion_stage_configs,
 )
 from .recorder import Recorder
 from .state_events import StateEventBroker
@@ -54,6 +57,14 @@ class AppManager:
             registry=build_builtin_motion_registry(),
             observer=LoggingMotionPipelineObserver(),
         )
+        self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
+            events=self.events,
+            object_serializer=objects_to_json,
+        )
+        self.motion_object_detector_factory = RecordedMotionObjectDetectorFactory(
+            detector=self.detector,
+            recorder=self.recorder,
+        )
         self.mqtt = MqttService(
             config.mqtt,
             self._mqtt_power_command,
@@ -75,20 +86,14 @@ class AppManager:
             camera.id: CameraWorker(
                 camera,
                 self.storage_dir,
-                self.detector,
-                self.events,
-                self.recorder,
                 config.motion_qualification,
                 self.publish_event,
                 motion_pipeline=self.motion_pipeline_factory.create(
                     camera.id,
-                    [
-                        MotionStageConfig(
-                            stage_id="qualification",
-                            implementation="legacy_qualifier",
-                        )
-                    ],
+                    default_motion_stage_configs(),
                 ),
+                motion_decision_handler_factory=self.motion_decision_handler_factory,
+                motion_object_detector_factory=self.motion_object_detector_factory,
             )
             for camera in config.cameras
         }
