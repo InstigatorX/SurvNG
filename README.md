@@ -252,6 +252,8 @@ The built-in fusion policy is observational and preserves existing decisions. Co
 
 Use the guided **Motion decision** panel under **Config > Detection** to choose a global policy without editing stage graphs. Each camera also has a Motion decision panel that either inherits the global policy or creates a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
 
+For the normal low-CPU setup, select **Efficient ONVIF + SurvNG analysis** and click **Use this setup**. This enables modular frame analysis as the active filter, retains ONVIF as the event trigger, and disables continuous MOG2 background processing. Detailed thresholds, supporting-signal policies, and camera-specific overrides remain available under the advanced sections.
+
 The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 
 Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. The built-in MOG2 and ONVIF observation sources use the `evidence_sources` parallel group.

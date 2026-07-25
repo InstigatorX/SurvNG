@@ -3714,22 +3714,56 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
 
 const MOTION_DECISION_POLICIES = {
   audit: {
-    label: "Keep current decisions (Recommended)",
-    description: "Collects extra motion evidence for review, but does not change when object detection runs.",
+    label: "Use SurvNG analysis only (Recommended)",
+    description: "Uses SurvNG's frame analysis result. Optional supporting signals are recorded but do not change it.",
   },
   any: {
-    label: "More sensitive",
-    description: "Runs object detection when the normal motion check or either extra source sees motion.",
+    label: "Accept motion from any signal",
+    description: "Accepts motion when SurvNG analysis or any available supporting signal sees it.",
   },
   all: {
-    label: "Require agreement",
-    description: "Runs object detection only when the normal motion check and every available extra source agree.",
+    label: "Require every available signal",
+    description: "Accepts motion only when SurvNG analysis and every available supporting signal agree.",
   },
   weighted: {
-    label: "Balanced combination",
-    description: "Combines the normal motion score and extra sources into one confidence score.",
+    label: "Blend signals by importance",
+    description: "Combines SurvNG analysis and supporting signals into one weighted confidence score.",
   },
 };
+
+function efficientMotionFusion() {
+  return buildMotionDecisionFusion({
+    ...defaultMotionDecisionSettings(),
+    policy: "audit",
+    sources: ["onvif"],
+  });
+}
+
+function isEfficientMotionSetup({ mode, mog2Enabled, qualification, fusion, catalog }) {
+  const analysis = readMotionAnalysisPreset(qualification, catalog);
+  const decision = readMotionDecisionFusion(fusion);
+  return mode === "enforce"
+    && mog2Enabled === false
+    && analysis.preset?.id === "modular"
+    && !analysis.custom
+    && decision.settings.policy === "audit"
+    && !decision.settings.sources.includes("mog2")
+    && decision.settings.sources.includes("onvif");
+}
+
+function EfficientMotionSetup({ active, inherited = false, disabled = false, onApply }) {
+  return (
+    <div className={`efficient-motion-setup ${active ? "active" : ""}`}>
+      <div>
+        <strong>Efficient ONVIF + SurvNG analysis</strong>
+        <span>The camera's ONVIF notice starts the check. SurvNG analyzes recent frames and skips weak events. Continuous background monitoring stays off to save CPU.</span>
+      </div>
+      {active ? <span className="efficient-motion-status">{inherited ? "Using global setup" : "Currently selected"}</span> : (
+        <button type="button" className="primary" disabled={disabled} onClick={onApply}>Use this setup</button>
+      )}
+    </div>
+  );
+}
 
 function MotionAnalysisPresetEditor({
   qualification,
@@ -3804,18 +3838,18 @@ function MotionDecisionEditor({
   const policy = MOTION_DECISION_POLICIES[settings.policy] || MOTION_DECISION_POLICIES.audit;
   const effectiveMode = mode === "inherit" ? globalMode : mode;
   const modeControl = (
-    <label>Filtering status<select value={mode} onChange={(event) => onModeChange(event.target.value)}>
+    <label>What should SurvNG do?<select value={mode} onChange={(event) => onModeChange(event.target.value)}>
       {onSetInherited ? <option value="inherit">Use global setting</option> : null}
-      <option value="audit">Monitor only (recommended while tuning)</option>
-      <option value="enforce">Use motion decisions</option>
-      <option value="off">Turn filtering off</option>
+      <option value="audit">Preview filtering without skipping events</option>
+      <option value="enforce">Skip events that fail motion analysis</option>
+      <option value="off">Send every event to object detection</option>
     </select></label>
   );
   const modeExplanation = effectiveMode === "enforce"
-    ? "Active: the decision below controls whether object detection runs."
+    ? "Active filtering: object detection runs only after motion analysis accepts the event."
     : effectiveMode === "off"
-      ? "Off: object detection runs without motion filtering."
-      : "Preview: decisions are logged for review, but object detection continues as it does today.";
+      ? "No filtering: every camera motion event is sent to object detection."
+      : "Preview only: SurvNG records what it would skip, but still sends every event to object detection.";
 
   function updateSettings(patch) {
     onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
@@ -3890,7 +3924,10 @@ function MotionDecisionEditor({
       {modeControl}
       <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
 
-      <label>Decision style<select value={settings.policy} onChange={(event) => {
+      <details className="motion-decision-options">
+        <summary>Advanced decision options</summary>
+        <div className="motion-decision-options-body">
+      <label>How should supporting signals be used?<select value={settings.policy} onChange={(event) => {
         const nextPolicy = event.target.value;
         updateSettings({
           policy: nextPolicy,
@@ -3906,14 +3943,14 @@ function MotionDecisionEditor({
       <div className={`motion-decision-explanation policy-${settings.policy}`}>
         <strong>{policy.label}</strong>
         <span>{policy.description}</span>
-        {settings.policy === "all" ? <span>Use this cautiously: one source repeatedly reporting low confidence can prevent confirmation.</span> : null}
+        {settings.policy === "all" ? <span>Use this cautiously: one low-confidence signal can prevent object detection.</span> : null}
       </div>
 
       <fieldset className="motion-decision-sources">
-        <legend>Extra motion sources</legend>
-        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("onvif")} onChange={(event) => toggleSource("onvif", event.target.checked)} /> Camera motion signal (ONVIF)</label>
-        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("mog2")} onChange={(event) => toggleSource("mog2", event.target.checked)} /> Visual background changes</label>
-        <small>The normal SurvNG motion score is always included. Unavailable extra sources are ignored.</small>
+        <legend>Optional supporting signals</legend>
+        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("onvif")} onChange={(event) => toggleSource("onvif", event.target.checked)} /> Include camera ONVIF notices</label>
+        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("mog2")} onChange={(event) => toggleSource("mog2", event.target.checked)} /> Include continuous background monitor</label>
+        <small>SurvNG frame analysis is always included. Unavailable supporting signals are ignored.</small>
       </fieldset>
 
       <div className="motion-decision-stability">
@@ -3959,6 +3996,8 @@ function MotionDecisionEditor({
           </div>
         ) : null}
         <label>Forget an unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
+      </details>
+        </div>
       </details>
     </div>
   );
@@ -4568,6 +4607,30 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 </div>
                 <div className="sub-panel">
                   <h3>Motion Filtering</h3>
+                  <EfficientMotionSetup
+                    active={isEfficientMotionSetup({
+                      mode: selectedCamera.motion_qualification?.mode === "inherit" ? config.motion_qualification?.mode : selectedCamera.motion_qualification?.mode,
+                      mog2Enabled: selectedCamera.motion_qualification?.mog2_audit_enabled ?? config.motion_qualification?.mog2_audit_enabled,
+                      qualification: selectedCamera.motion_qualification?.pipeline?.qualification ?? config.motion_qualification?.pipeline?.qualification,
+                      fusion: selectedCamera.motion_qualification?.pipeline?.fusion ?? config.motion_qualification?.pipeline?.fusion,
+                      catalog: motionCatalog,
+                    })}
+                    inherited={selectedCamera.motion_qualification?.mode === "inherit"
+                      && selectedCamera.motion_qualification?.mog2_audit_enabled == null
+                      && selectedCamera.motion_qualification?.pipeline?.qualification == null
+                      && selectedCamera.motion_qualification?.pipeline?.fusion == null}
+                    disabled={!availableQualificationPresets(motionCatalog).length}
+                    onApply={() => {
+                      const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.id === "modular" || preset.recommended);
+                      updateCamera(selectedCamera.id, ["motion_qualification", "mode"], "enforce");
+                      updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], false);
+                      updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], {
+                        ...(selectedCamera.motion_qualification?.pipeline || {}),
+                        qualification: presetQualificationGraph(modular),
+                        fusion: efficientMotionFusion(),
+                      });
+                    }}
+                  />
                   <MotionAnalysisPresetEditor
                     qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
                     inherited={selectedCamera.motion_qualification?.pipeline?.qualification == null}
@@ -4584,6 +4647,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                       { ...(selectedCamera.motion_qualification?.pipeline || {}), qualification },
                     )}
                   />
+                  <details className="motion-tuning-details">
+                    <summary>Advanced camera tuning</summary>
+                    <div className="motion-camera-tuning">
                   <label>Sensitivity<select value={selectedCamera.motion_qualification?.sensitivity || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "sensitivity"], event.target.value)}>
                     <option value="inherit">Use global setting</option>
                     <option value="high">High</option>
@@ -4604,11 +4670,13 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                     <option value="false">Disabled</option>
                   </select></label>
                   <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" placeholder="Global" value={selectedCamera.motion_qualification?.borderline_margin ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_margin"], event.target.value === "" ? null : Number(event.target.value))} /></label>
-                  <label>Visual Background Analysis<select value={selectedCamera.motion_qualification?.mog2_audit_enabled == null ? "" : String(selectedCamera.motion_qualification.mog2_audit_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
+                  <label>Continuous Background Monitor<select value={selectedCamera.motion_qualification?.mog2_audit_enabled == null ? "" : String(selectedCamera.motion_qualification.mog2_audit_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
                     <option value="">Use global setting</option>
-                    <option value="true">Enabled</option>
-                    <option value="false">Disabled</option>
+                    <option value="false">Off (lower CPU)</option>
+                    <option value="true">On (MOG2, higher CPU)</option>
                   </select></label>
+                    </div>
+                  </details>
                 </div>
               </div>
 
@@ -5260,6 +5328,26 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
         </div>
         <h3>Motion Filtering</h3>
+        <EfficientMotionSetup
+          active={isEfficientMotionSetup({
+            mode: config.motion_qualification?.mode,
+            mog2Enabled: config.motion_qualification?.mog2_audit_enabled,
+            qualification: config.motion_qualification?.pipeline?.qualification,
+            fusion: config.motion_qualification?.pipeline?.fusion,
+            catalog: motionCatalog,
+          })}
+          disabled={!availableQualificationPresets(motionCatalog).length}
+          onApply={() => {
+            const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.id === "modular" || preset.recommended);
+            updateConfig(["motion_qualification", "mode"], "enforce");
+            updateConfig(["motion_qualification", "mog2_audit_enabled"], false);
+            updateConfig(["motion_qualification", "pipeline"], {
+              ...(config.motion_qualification?.pipeline || {}),
+              qualification: presetQualificationGraph(modular),
+              fusion: efficientMotionFusion(),
+            });
+          }}
+        />
         <MotionAnalysisPresetEditor
           qualification={config.motion_qualification?.pipeline?.qualification || []}
           catalog={motionCatalog}
@@ -5268,7 +5356,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             { ...(config.motion_qualification?.pipeline || {}), qualification },
           )}
         />
-        <div className="field-row">
+        <details className="motion-tuning-details">
+          <summary>Advanced motion tuning</summary>
+          <div className="field-row">
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
@@ -5278,9 +5368,10 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Rejected Sample Rate<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.rejected_sample_rate ?? 0.05} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))} /></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
           <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> Analyze visual background changes</label>
-          <label>Background Learning Time (seconds)<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} /></label>
-        </div>
+          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> Continuous background monitor (MOG2, higher CPU)</label>
+          <label>Background Learning Time (seconds)<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} disabled={config.motion_qualification?.mog2_audit_enabled === false} /></label>
+          </div>
+        </details>
         <MotionDecisionEditor
           fusion={config.motion_qualification?.pipeline?.fusion}
           mode={config.motion_qualification?.mode || "audit"}

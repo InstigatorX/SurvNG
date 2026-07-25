@@ -2837,6 +2837,74 @@ button.status-pill.hud-toggle:disabled {
   padding: 10px;
 }
 
+.efficient-motion-setup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--control-muted));
+  padding: 11px;
+}
+
+.efficient-motion-setup > div {
+  display: grid;
+  gap: 4px;
+}
+
+.efficient-motion-setup strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.efficient-motion-setup > div > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.efficient-motion-setup button,
+.efficient-motion-status {
+  flex: 0 0 auto;
+}
+
+.efficient-motion-status {
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 5px 8px;
+}
+
+.motion-tuning-details,
+.motion-decision-options {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.motion-tuning-details > summary,
+.motion-decision-options > summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.motion-tuning-details[open],
+.motion-decision-options[open] {
+  display: grid;
+  gap: 10px;
+}
+
+.motion-camera-tuning,
+.motion-decision-options-body {
+  display: grid;
+  gap: 10px;
+}
+
 .motion-analysis-description {
   display: grid;
   gap: 4px;
@@ -5782,6 +5850,17 @@ button.status-pill.hud-toggle:disabled {
   .motion-debug-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .efficient-motion-setup {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .efficient-motion-setup button,
+  .efficient-motion-status {
+    align-self: stretch;
+    text-align: center;
   }
 
   .motion-debug-heading button {
