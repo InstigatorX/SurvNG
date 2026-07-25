@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .context import MotionContext, MotionEventPhase, TriggerDecision
-from .registry import MotionStageDependencies, MotionStageRegistration, MotionStageRegistry
+from .registry import (
+    MotionStageDependencies,
+    MotionStageOption,
+    MotionStageRegistration,
+    MotionStageRegistry,
+)
 
 
 @dataclass(slots=True)
@@ -179,6 +184,16 @@ def register_decision_stages(registry: MotionStageRegistry) -> None:
             builder=_build_event_state,
             requires=frozenset({"scoring"}),
             provides=frozenset({"event_state"}),
+            graph="fusion",
+            category="event_state",
+            display_name="Motion event stability",
+            description="Controls how quickly motion starts, ends, and becomes eligible again.",
+            options=(
+                MotionStageOption("activation_frames", "Signals to start", "integer", 1, minimum=1, maximum=20),
+                MotionStageOption("release_frames", "Quiet signals to end", "integer", 1, minimum=1, maximum=20),
+                MotionStageOption("cooldown_seconds", "Pause after event", "number", 0.0, minimum=0, maximum=300),
+                MotionStageOption("state_timeout_seconds", "Unfinished event timeout", "number", 10.0, minimum=0, maximum=300, advanced=True),
+            ),
         )
     )
     registry.register(
@@ -187,5 +202,9 @@ def register_decision_stages(registry: MotionStageRegistry) -> None:
             builder=_build_trigger,
             requires=frozenset({"scoring", "event_state"}),
             provides=frozenset({"decision"}),
+            graph="fusion",
+            category="trigger",
+            display_name="Object detection trigger",
+            description="Turns an active motion event into an object-detection decision.",
         )
     )

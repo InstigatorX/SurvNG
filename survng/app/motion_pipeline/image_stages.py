@@ -15,7 +15,12 @@ from ..motion import (
     track_dominant_motion,
 )
 from .context import MotionContext, MotionEventPhase, MotionScoring, TriggerDecision
-from .registry import MotionStageDependencies, MotionStageRegistration, MotionStageRegistry
+from .registry import (
+    MotionStageDependencies,
+    MotionStageOption,
+    MotionStageRegistration,
+    MotionStageRegistry,
+)
 
 
 class MotionFramePreprocessorStage:
@@ -321,6 +326,10 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_preprocessor,
             requires=frozenset({"frame_history"}),
             provides=frozenset({"processed_frame", "processed_frame_history"}),
+            graph="qualification",
+            category="preprocessing",
+            display_name="Grayscale smoothing",
+            description="Reduces image noise before motion is measured.",
         )
     )
     registry.register(
@@ -329,6 +338,10 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_difference,
             requires=frozenset({"processed_frame_history"}),
             provides=frozenset({"difference_image", "difference_history"}),
+            graph="qualification",
+            category="difference",
+            display_name="Frame-to-frame difference",
+            description="Measures changes between consecutive video frames.",
         )
     )
     registry.register(
@@ -337,6 +350,14 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_threshold,
             requires=frozenset({"difference_history"}),
             provides=frozenset({"binary_motion_mask", "threshold_mask_history"}),
+            graph="qualification",
+            category="threshold",
+            display_name="Fixed change threshold",
+            description="Separates meaningful pixel changes from minor video noise.",
+            options=(MotionStageOption(
+                "value", "Change threshold", "integer", 18,
+                "Higher values ignore more subtle changes.", 0, 255,
+            ),),
         )
     )
     registry.register(
@@ -345,6 +366,14 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_morphology,
             requires=frozenset({"threshold_mask_history"}),
             provides=frozenset({"binary_motion_mask", "motion_mask_history"}),
+            graph="qualification",
+            category="morphology",
+            display_name="Mask cleanup",
+            description="Removes speckles and joins nearby motion areas.",
+            options=(
+                MotionStageOption("kernel_size", "Cleanup size", "integer", 3, minimum=1, maximum=15),
+                MotionStageOption("close_iterations", "Join passes", "integer", 2, minimum=0, maximum=10),
+            ),
         )
     )
     registry.register(
@@ -353,6 +382,10 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_scorer,
             requires=frozenset({"processed_frame_history", "motion_mask_history"}),
             provides=frozenset({"scoring", "event_state", "decision"}),
+            graph="qualification",
+            category="compatibility",
+            display_name="Classic combined scorer",
+            description="Preserves the earlier combined mask, score, and trigger behavior.",
         )
     )
     registry.register(
@@ -361,6 +394,10 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_blob_extractor,
             requires=frozenset({"processed_frame_history", "motion_mask_history"}),
             provides=frozenset({"raw_blob_history"}),
+            graph="qualification",
+            category="blob_extraction",
+            display_name="Contour extraction",
+            description="Turns connected motion-mask regions into candidate objects.",
         )
     )
     registry.register(
@@ -369,6 +406,14 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_blob_filter,
             requires=frozenset({"raw_blob_history"}),
             provides=frozenset({"filtered_blob_history", "blobs"}),
+            graph="qualification",
+            category="blob_filtering",
+            display_name="Minimum area filter",
+            description="Removes motion regions that are too small to be useful.",
+            options=(MotionStageOption(
+                "minimum_area_ratio", "Minimum area", "number", 0.0003,
+                "Smallest accepted region as a portion of the frame.", 0, 1, advanced=True,
+            ),),
         )
     )
     registry.register(
@@ -377,6 +422,14 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_tracker,
             requires=frozenset({"filtered_blob_history"}),
             provides=frozenset({"dominant_track", "tracked_objects"}),
+            graph="qualification",
+            category="tracking",
+            display_name="Centroid motion tracking",
+            description="Tracks the dominant moving region by its center point.",
+            options=(
+                MotionStageOption("minimum_active_area_ratio", "Minimum active area", "number", 0.0008, minimum=0, maximum=1, advanced=True),
+                MotionStageOption("minimum_changed_ratio", "Minimum changed area", "number", 0.003, minimum=0, maximum=1, advanced=True),
+            ),
         )
     )
     registry.register(
@@ -385,5 +438,9 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_motion_scorer,
             requires=frozenset({"dominant_track", "processed_frame_history"}),
             provides=frozenset({"scoring"}),
+            graph="qualification",
+            category="scoring",
+            display_name="SurvNG motion score",
+            description="Scores motion persistence, continuity, area, and image stability.",
         )
     )

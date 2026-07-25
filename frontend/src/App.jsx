@@ -50,6 +50,11 @@ import {
   defaultMotionDecisionSettings,
   readMotionDecisionFusion,
 } from "./motionDecisionConfig.mjs";
+import {
+  availableQualificationPresets,
+  presetQualificationGraph,
+  readMotionAnalysisPreset,
+} from "./motionAnalysisConfig.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -3726,6 +3731,61 @@ const MOTION_DECISION_POLICIES = {
   },
 };
 
+function MotionAnalysisPresetEditor({
+  qualification,
+  inherited = false,
+  inheritedQualification,
+  catalog,
+  onSetInherited,
+  onChange,
+}) {
+  const presets = availableQualificationPresets(catalog);
+  const parsed = readMotionAnalysisPreset(qualification, catalog);
+  const inheritedParsed = readMotionAnalysisPreset(inheritedQualification, catalog);
+  const effective = inherited ? inheritedParsed : parsed;
+  const selectedValue = inherited
+    ? "inherit"
+    : parsed.custom
+      ? "custom"
+      : parsed.preset?.id || "";
+  const stageNames = new Map(
+    (catalog?.stages || []).map((stage) => [stage.implementation, stage.name]),
+  );
+
+  function selectPreset(value) {
+    if (value === "inherit") {
+      onSetInherited?.(true);
+      return;
+    }
+    const preset = presets.find((candidate) => candidate.id === value);
+    if (preset) onChange(presetQualificationGraph(preset));
+  }
+
+  return (
+    <div className="motion-analysis-preset">
+      <label>Motion analysis method<select value={selectedValue} onChange={(event) => selectPreset(event.target.value)} disabled={!presets.length}>
+        {inherited ? <option value="inherit">Use global setting</option> : null}
+        {parsed.custom && !inherited ? <option value="custom">Advanced custom pipeline</option> : null}
+        {!presets.length ? <option value="">Loading available methods...</option> : null}
+        {presets.map((preset) => (
+          <option key={preset.id} value={preset.id}>{preset.label}{preset.recommended ? " (Recommended)" : ""}</option>
+        ))}
+      </select></label>
+      {effective.preset ? (
+        <div className="motion-analysis-description">
+          <strong>{inherited ? `Global: ${effective.preset.label}` : effective.preset.label}</strong>
+          <span>{effective.preset.description}</span>
+          <details>
+            <summary>{effective.preset.stages.length} processing {effective.preset.stages.length === 1 ? "step" : "steps"}</summary>
+            <span>{effective.preset.stages.map((stage) => stageNames.get(stage.implementation) || stage.implementation).join(" → ")}</span>
+          </details>
+        </div>
+      ) : null}
+      {parsed.custom && !inherited ? <div className="motion-analysis-warning">This advanced pipeline is protected. Selecting another method will replace only the motion-analysis stages.</div> : null}
+    </div>
+  );
+}
+
 function MotionDecisionEditor({
   fusion,
   mode,
@@ -3911,6 +3971,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [detectorModels, setDetectorModels] = useState([]);
   const [recordingCache, setRecordingCache] = useState(null);
   const [mqttStatus, setMqttStatus] = useState(null);
+  const [motionCatalog, setMotionCatalog] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
   const [selectedId, setSelectedId] = useState("");
@@ -3939,13 +4000,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const auditPageSize = 24;
 
   async function load() {
-    const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse, systemResponse] = await Promise.all([
+    const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse, systemResponse, motionCatalogResponse] = await Promise.all([
       fetch("/api/config"),
       fetch("/api/cameras"),
       fetch("/api/accelerator"),
       fetch("/api/detector/models"),
       fetch("/api/recordings/cache/status"),
       fetch("/api/system/status"),
+      fetch("/api/motion/pipeline/catalog"),
     ]);
     const nextConfig = await response.json();
     setConfig(nextConfig);
@@ -3954,12 +4016,28 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     if (modelsResponse.ok) setDetectorModels((await modelsResponse.json()).models || []);
     if (cacheResponse.ok) setRecordingCache(await cacheResponse.json());
     if (systemResponse.ok) setMqttStatus((await systemResponse.json()).mqtt || null);
+    if (motionCatalogResponse.ok) setMotionCatalog(await motionCatalogResponse.json());
     setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
   }
 
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (settingsTab !== "cameras") return undefined;
+    let active = true;
+    async function refreshCameraRuntime() {
+      const response = await fetch("/api/cameras");
+      if (active && response.ok) setRuntimeStatus(await response.json());
+    }
+    refreshCameraRuntime();
+    const timer = window.setInterval(refreshCameraRuntime, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [settingsTab]);
 
 
   async function loadLogs() {
@@ -4308,6 +4386,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             detectorModels={detectorModels}
             recordingCache={recordingCache}
             mqttStatus={mqttStatus}
+            motionCatalog={motionCatalog}
             section={generalSection}
           />
         </section>
@@ -4489,6 +4568,22 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 </div>
                 <div className="sub-panel">
                   <h3>Motion Filtering</h3>
+                  <MotionAnalysisPresetEditor
+                    qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
+                    inherited={selectedCamera.motion_qualification?.pipeline?.qualification == null}
+                    inheritedQualification={config.motion_qualification?.pipeline?.qualification}
+                    catalog={motionCatalog}
+                    onSetInherited={() => updateCamera(
+                      selectedCamera.id,
+                      ["motion_qualification", "pipeline"],
+                      { ...(selectedCamera.motion_qualification?.pipeline || {}), qualification: null },
+                    )}
+                    onChange={(qualification) => updateCamera(
+                      selectedCamera.id,
+                      ["motion_qualification", "pipeline"],
+                      { ...(selectedCamera.motion_qualification?.pipeline || {}), qualification },
+                    )}
+                  />
                   <label>Sensitivity<select value={selectedCamera.motion_qualification?.sensitivity || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "sensitivity"], event.target.value)}>
                     <option value="inherit">Use global setting</option>
                     <option value="high">High</option>
@@ -4551,7 +4646,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 saving={zonesSaving}
               />
 
-              <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} />
+              <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} motionCatalog={motionCatalog} />
               {probe ? <ProbeResult probe={probe} /> : null}
             </>
           ) : (
@@ -5027,7 +5122,7 @@ function ProbeResult({ probe }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, section }) {
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
@@ -5164,6 +5259,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
         </div>
         <h3>Motion Filtering</h3>
+        <MotionAnalysisPresetEditor
+          qualification={config.motion_qualification?.pipeline?.qualification || []}
+          catalog={motionCatalog}
+          onChange={(qualification) => updateConfig(
+            ["motion_qualification", "pipeline"],
+            { ...(config.motion_qualification?.pipeline || {}), qualification },
+          )}
+        />
         <div className="field-row">
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
@@ -5258,7 +5361,49 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   );
 }
 
-function RuntimeStatus({ status, timeZone }) {
+function MotionPipelineRuntimeCard({ label, pipeline, origin, motionCatalog }) {
+  if (!pipeline) return null;
+  const metrics = Object.values(pipeline.stages || {});
+  const calls = Math.max(0, ...metrics.map((item) => Number(item.calls) || 0));
+  const failures = metrics.reduce((total, item) => total + (Number(item.failures) || 0), 0);
+  const averageMs = metrics.reduce((total, item) => total + (Number(item.average_ms) || 0), 0);
+  const lastMs = metrics.reduce((total, item) => total + (Number(item.last_ms) || 0), 0);
+  const health = failures ? "attention" : calls ? "healthy" : "ready";
+  const stageNames = new Map(
+    (motionCatalog?.stages || []).map((stage) => [stage.implementation, stage.name]),
+  );
+  const originLabel = origin === "camera" ? "Camera override" : origin === "global" ? "Global setting" : "Built-in default";
+  return (
+    <div className={`motion-pipeline-runtime-card ${health}`}>
+      <div className="motion-pipeline-runtime-head">
+        <strong>{label}</strong>
+        <span>{health === "attention" ? "Needs attention" : health === "healthy" ? "Healthy" : "Ready"}</span>
+      </div>
+      <small>{originLabel} · {pipeline.configuration?.length || 0} steps · {calls.toLocaleString()} cycles</small>
+      <div className="motion-pipeline-timing">
+        <span>Last <strong>{lastMs.toFixed(2)} ms</strong></span>
+        <span>Average <strong>{averageMs.toFixed(2)} ms</strong></span>
+        <span>Failures <strong>{failures}</strong></span>
+      </div>
+      <details>
+        <summary>Processing steps</summary>
+        <div className="motion-pipeline-stage-list">
+          {(pipeline.configuration || []).map((stage) => {
+            const stageMetrics = pipeline.stages?.[stage.stage_id] || {};
+            return (
+              <div key={stage.stage_id}>
+                <span><strong>{stageNames.get(stage.implementation) || stage.implementation}</strong><small>{stage.stage_id}</small></span>
+                <span>{Number(stageMetrics.average_ms || 0).toFixed(2)} ms avg{stageMetrics.failures ? ` · ${stageMetrics.failures} failed` : ""}</span>
+              </div>
+            );
+          })}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
   }
@@ -5269,7 +5414,28 @@ function RuntimeStatus({ status, timeZone }) {
       <span>Recording: {status.recording ? "running" : "stopped"}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF message: {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
-      {status.motion_qualification ? <span>Motion qualification: {status.motion_qualification.mode} / {status.motion_qualification.sensitivity} · {status.motion_qualification.frame_width || 320}px · {status.motion_qualification.passed || 0} passed · {status.motion_qualification.audit_rejected || 0} audit rejects · {status.motion_qualification.suppressed || 0} suppressed</span> : null}
+      {status.motion_qualification ? (
+        <div className="motion-runtime-status">
+          <div className="motion-runtime-summary">
+            <strong>Motion processing</strong>
+            <span>{status.motion_qualification.mode === "enforce" ? "Using decisions" : status.motion_qualification.mode === "off" ? "Filtering off" : "Monitoring only"} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
+            <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} monitor-only rejects · {status.motion_qualification.suppressed || 0} filtered</span>
+          </div>
+          <div className="motion-pipeline-runtime-grid">
+            <MotionPipelineRuntimeCard label="Motion analysis" pipeline={status.motion_qualification.pipeline} origin={status.motion_qualification.pipeline_origins?.qualification} motionCatalog={motionCatalog} />
+            <MotionPipelineRuntimeCard label="Extra sources" pipeline={status.motion_qualification.observation_pipeline} origin={status.motion_qualification.pipeline_origins?.observation} motionCatalog={motionCatalog} />
+            <MotionPipelineRuntimeCard label="Decision" pipeline={status.motion_qualification.fusion_pipeline} origin={status.motion_qualification.pipeline_origins?.fusion} motionCatalog={motionCatalog} />
+          </div>
+          <div className="motion-evidence-runtime">
+            {Object.entries(status.motion_qualification.evidence_sources || {}).map(([source, evidence]) => (
+              <span key={source} className={evidence.enabled ? "enabled" : "disabled"}>
+                <strong>{source === "mog2" ? "Visual background" : source === "onvif" ? "Camera signal" : source}</strong>
+                {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}` : "Disabled"}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

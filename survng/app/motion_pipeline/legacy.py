@@ -55,6 +55,9 @@ def register_legacy_motion_stage(registry: MotionStageRegistry) -> None:
             builder=_build_legacy_stage,
             requires=frozenset({"frame_history", "configuration"}),
             provides=frozenset({"scoring", "event_state", "decision"}),
+            graph="qualification",
+            category="compatibility",
+            display_name="Classic motion analysis",
+            description="Runs the original all-in-one SurvNG motion algorithm.",
         )
     )
-

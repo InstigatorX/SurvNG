@@ -2,12 +2,43 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from .contracts import MotionStage
 
 
 MotionStageBuilder = Callable[[str, Mapping[str, Any], "MotionStageDependencies"], MotionStage]
+MotionOptionType = Literal["boolean", "integer", "number", "string", "string_list", "object"]
+
+
+@dataclass(frozen=True, slots=True)
+class MotionStageOption:
+    key: str
+    label: str
+    value_type: MotionOptionType
+    default: Any = None
+    description: str = ""
+    minimum: float | None = None
+    maximum: float | None = None
+    choices: tuple[str, ...] = ()
+    advanced: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "key": self.key,
+            "label": self.label,
+            "type": self.value_type,
+            "default": self.default,
+            "description": self.description,
+            "advanced": self.advanced,
+        }
+        if self.minimum is not None:
+            payload["minimum"] = self.minimum
+        if self.maximum is not None:
+            payload["maximum"] = self.maximum
+        if self.choices:
+            payload["choices"] = list(self.choices)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +53,11 @@ class MotionStageRegistration:
     builder: MotionStageBuilder
     requires: frozenset[str] = frozenset()
     provides: frozenset[str] = frozenset()
+    graph: str = "custom"
+    category: str = "custom"
+    display_name: str = ""
+    description: str = ""
+    options: tuple[MotionStageOption, ...] = ()
 
 
 class MotionStageRegistry:
@@ -49,3 +85,17 @@ class MotionStageRegistry:
     def implementations(self) -> tuple[str, ...]:
         return tuple(sorted(self._registrations))
 
+    def catalog(self) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {
+                "implementation": name,
+                "graph": registration.graph,
+                "category": registration.category,
+                "name": registration.display_name or name.replace("_", " ").title(),
+                "description": registration.description,
+                "requires": sorted(registration.requires),
+                "provides": sorted(registration.provides),
+                "options": [option.as_dict() for option in registration.options],
+            }
+            for name, registration in sorted(self._registrations.items())
+        )

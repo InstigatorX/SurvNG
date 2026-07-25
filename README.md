@@ -252,6 +252,8 @@ The built-in fusion policy is observational and preserves existing decisions. Co
 
 Use the guided **Motion decision** panel under **Config > Detection** to choose a global policy without editing stage graphs. Each camera also has a Motion decision panel that either inherits the global policy or creates a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
 
+The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
+
 MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. The default audit fusion records both sources without changing trigger decisions.
 
 ## Face Recognition

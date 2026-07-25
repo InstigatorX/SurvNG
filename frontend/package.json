@@ -2,6 +2,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 0.0.0.0 --port 5173",
+    "test:motion-analysis": "node tests/motion-analysis-config.mjs",
     "test:motion-decision": "node tests/motion-decision-config.mjs",
     "test:recordings-soak": "node tests/recordings-soak.mjs"
   },

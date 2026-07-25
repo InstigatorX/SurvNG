@@ -2828,6 +2828,48 @@ button.status-pill.hud-toggle:disabled {
   font-size: 15px;
 }
 
+.motion-analysis-preset {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-muted);
+  padding: 10px;
+}
+
+.motion-analysis-description {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.motion-analysis-description strong,
+.motion-analysis-description summary {
+  color: var(--ink);
+}
+
+.motion-analysis-description summary {
+  cursor: pointer;
+  font-weight: 760;
+}
+
+.motion-analysis-description details span {
+  display: block;
+  padding-top: 5px;
+}
+
+.motion-analysis-warning {
+  border-left: 3px solid var(--warning, #d98b25);
+  border-radius: 5px;
+  background: var(--subtle);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 7px 9px;
+}
+
 .motion-decision-editor {
   display: grid;
   gap: 12px;
@@ -3653,6 +3695,131 @@ button.status-pill.hud-toggle:disabled {
 .probe-result strong,
 .save-status {
   color: var(--ink);
+}
+
+.motion-runtime-status {
+  display: grid;
+  gap: 10px;
+  margin-top: 5px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.motion-runtime-summary {
+  display: grid;
+  gap: 3px;
+}
+
+.motion-pipeline-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.motion-pipeline-runtime-card {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--muted);
+  border-radius: 7px;
+  background: var(--subtle);
+  padding: 9px;
+}
+
+.motion-pipeline-runtime-card.healthy {
+  border-top-color: var(--accent);
+}
+
+.motion-pipeline-runtime-card.attention {
+  border-top-color: var(--warning, #d98b25);
+}
+
+.motion-pipeline-runtime-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.motion-pipeline-runtime-head > span {
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 760;
+  padding: 3px 6px;
+}
+
+.motion-pipeline-runtime-card > small {
+  line-height: 1.35;
+}
+
+.motion-pipeline-timing {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.motion-pipeline-timing > span {
+  display: grid;
+  gap: 2px;
+  font-size: 10px;
+}
+
+.motion-pipeline-runtime-card details summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.motion-pipeline-stage-list {
+  display: grid;
+  gap: 5px;
+  padding-top: 7px;
+}
+
+.motion-pipeline-stage-list > div {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 5px;
+  font-size: 10px;
+}
+
+.motion-pipeline-stage-list > div > span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.motion-pipeline-stage-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.motion-evidence-runtime {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.motion-evidence-runtime > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--subtle);
+  font-size: 10px;
+  padding: 4px 7px;
+}
+
+.motion-evidence-runtime > span.disabled {
+  opacity: 0.65;
 }
 
 .log-panel {
@@ -5515,7 +5682,8 @@ button.status-pill.hud-toggle:disabled {
   .config-panels,
   .inline-field,
   .motion-decision-stability,
-  .motion-decision-sources {
+  .motion-decision-sources,
+  .motion-pipeline-runtime-grid {
     grid-template-columns: 1fr;
   }
 

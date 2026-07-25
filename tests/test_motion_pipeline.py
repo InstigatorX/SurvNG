@@ -25,6 +25,7 @@ from survng.app.motion_pipeline import (
     build_builtin_motion_registry,
     build_legacy_motion_pipeline,
     default_motion_stage_configs,
+    motion_pipeline_catalog,
 )
 
 
@@ -49,6 +50,27 @@ def build_recording_stage(
 
 
 class MotionPipelineTest(unittest.TestCase):
+    def test_builtin_catalog_exposes_stages_options_and_available_presets(self) -> None:
+        registry = build_builtin_motion_registry()
+        catalog = motion_pipeline_catalog(registry)
+        stages = {
+            stage["implementation"]: stage
+            for stage in catalog["stages"]
+        }
+
+        self.assertEqual(catalog["schema_version"], 1)
+        self.assertEqual(stages["dominant_centroid"]["name"], "Centroid motion tracking")
+        self.assertEqual(stages["dominant_centroid"]["graph"], "qualification")
+        self.assertIn(
+            "minimum_active_area_ratio",
+            {option["key"] for option in stages["dominant_centroid"]["options"]},
+        )
+        self.assertTrue(all(preset["available"] for preset in catalog["presets"]))
+        self.assertEqual(
+            next(preset for preset in catalog["presets"] if preset["recommended"])["id"],
+            "modular",
+        )
+
     def test_legacy_pipeline_helper_builds_reference_stage(self) -> None:
         pipeline = build_legacy_motion_pipeline("gate")
 

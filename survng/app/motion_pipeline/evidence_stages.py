@@ -5,7 +5,12 @@ from typing import Any, Mapping
 from ..motion import BackgroundMotionTracker, aggregate_mog2_evidence
 from .context import MotionContext
 from .evidence import MotionEvidenceRepository, MotionEvidenceSample
-from .registry import MotionStageDependencies, MotionStageRegistration, MotionStageRegistry
+from .registry import (
+    MotionStageDependencies,
+    MotionStageOption,
+    MotionStageRegistration,
+    MotionStageRegistry,
+)
 
 
 EVIDENCE_REPOSITORY_SERVICE = "motion_evidence_repository"
@@ -362,6 +367,15 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             builder=_build_mog2_source,
             requires=frozenset({"original_frame"}),
             provides=frozenset({"source_evidence"}),
+            graph="observation",
+            category="background",
+            display_name="Adaptive background (MOG2)",
+            description="Learns the normal scene and reports foreground changes.",
+            options=(
+                MotionStageOption("enabled", "Enabled", "boolean", True),
+                MotionStageOption("sample_fps", "Samples per second", "number", 5.0, minimum=0.1, maximum=30),
+                MotionStageOption("history_seconds", "Learning time", "number", 30.0, minimum=1, maximum=600),
+            ),
         )
     )
     registry.register(
@@ -370,6 +384,16 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             builder=_build_onvif_source,
             requires=frozenset({"configuration"}),
             provides=frozenset({"source_evidence"}),
+            graph="observation",
+            category="camera_signal",
+            display_name="Camera motion signal (ONVIF)",
+            description="Uses motion and object notifications sent by the camera.",
+            options=(
+                MotionStageOption("enabled", "Enabled", "boolean", True),
+                MotionStageOption("base_score", "Motion confidence", "number", 0.55, minimum=0, maximum=1),
+                MotionStageOption("priority_score", "Priority confidence", "number", 0.95, minimum=0, maximum=1),
+                MotionStageOption("priority_keywords", "Priority event words", "string_list", [], advanced=True),
+            ),
         )
     )
     registry.register(
@@ -378,5 +402,18 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             builder=_build_buffered_fusion,
             requires=frozenset({"scoring"}),
             provides=frozenset({"source_evidence", "scoring"}),
+            graph="fusion",
+            category="fusion",
+            display_name="Buffered evidence fusion",
+            description="Combines the normal motion score with recent independent evidence.",
+            options=(
+                MotionStageOption("sources", "Extra sources", "string_list", ["mog2", "onvif"]),
+                MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "any", "all", "weighted")),
+                MotionStageOption("source_thresholds", "Source confidence levels", "object", {}, advanced=True),
+                MotionStageOption("source_weights", "Source importance", "object", {}, advanced=True),
+                MotionStageOption("weighted_threshold", "Combined confidence", "number", 0.5, minimum=0, maximum=1, advanced=True),
+                MotionStageOption("minimum_sources", "Minimum available sources", "integer", 1, minimum=0, advanced=True),
+                MotionStageOption("require_warmed", "Require learned background", "boolean", True, advanced=True),
+            ),
         )
     )

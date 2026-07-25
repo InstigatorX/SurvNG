@@ -38,6 +38,7 @@ from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_c
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
 from .detector import objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
+from .motion_pipeline import motion_pipeline_catalog
 from .go2rtc import Go2RtcError
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
@@ -311,6 +312,11 @@ async def application_event_stream(request: Request) -> StreamingResponse:
 @app.get("/api/config")
 def get_config() -> dict:
     return config.model_dump(mode="json")
+
+
+@app.get("/api/motion/pipeline/catalog")
+def get_motion_pipeline_catalog() -> dict:
+    return motion_pipeline_catalog(manager.motion_pipeline_registry)
 
 
 @app.get("/api/logs")

@@ -14,6 +14,11 @@ from .context import (
 )
 from .contracts import MotionPipelineObserver, MotionStage
 from .configuration import ResolvedMotionPipelineGraphs, resolve_motion_pipeline_graphs
+from .catalog import (
+    MotionPipelinePreset,
+    builtin_motion_pipeline_presets,
+    motion_pipeline_catalog,
+)
 from .defaults import (
     default_motion_fusion_stage_configs as motion_fusion_stage_configs,
     default_motion_observation_stage_configs as motion_observation_stage_configs,
@@ -53,7 +58,12 @@ from .image_stages import (
 from .legacy import LegacyQualificationStage, register_legacy_motion_stage
 from .pipeline import LoggingMotionPipelineObserver, MotionPipeline
 from .object_detection import RecordedMotionObjectDetector, RecordedMotionObjectDetectorFactory
-from .registry import MotionStageDependencies, MotionStageRegistration, MotionStageRegistry
+from .registry import (
+    MotionStageDependencies,
+    MotionStageOption,
+    MotionStageRegistration,
+    MotionStageRegistry,
+)
 from .runtime import MotionRuntimeState
 
 
@@ -107,12 +117,14 @@ __all__ = [
     "MotionFrameBlobs",
     "MotionEventStateStage",
     "MotionPipeline",
+    "MotionPipelinePreset",
     "MotionPipelineFactory",
     "MotionPipelineObserver",
     "MotionRuntimeState",
     "MotionScoring",
     "MotionScoringStage",
     "MotionStage",
+    "MotionStageOption",
     "MotionStageConfig",
     "MotionStageDependencies",
     "MotionStageRegistration",
@@ -131,10 +143,12 @@ __all__ = [
     "TriggerDecision",
     "EVIDENCE_REPOSITORY_SERVICE",
     "build_builtin_motion_registry",
+    "builtin_motion_pipeline_presets",
     "build_default_motion_pipeline",
     "build_legacy_motion_pipeline",
     "default_motion_stage_configs",
     "motion_fusion_stage_configs",
+    "motion_pipeline_catalog",
     "motion_observation_stage_configs",
     "register_legacy_motion_stage",
     "register_image_motion_stages",
