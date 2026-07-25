@@ -54,6 +54,72 @@ class Mog2EvidenceSourceStage:
         return context
 
 
+class OnvifEventEvidenceStage:
+    def __init__(
+        self,
+        stage_id: str,
+        repository: MotionEvidenceRepository,
+        *,
+        enabled: bool = True,
+        base_score: float = 0.55,
+        priority_score: float = 0.95,
+        priority_keywords: tuple[str, ...] = (
+            "manual",
+            "person",
+            "people",
+            "human",
+            "vehicle",
+            "animal",
+            "face",
+        ),
+    ) -> None:
+        self._stage_id = stage_id
+        self.repository = repository
+        self.enabled = bool(enabled)
+        self.base_score = max(0.0, min(1.0, float(base_score)))
+        self.priority_score = max(0.0, min(1.0, float(priority_score)))
+        self.priority_keywords = tuple(
+            keyword.strip().lower()
+            for keyword in priority_keywords
+            if keyword.strip()
+        )
+        repository.configure_source(
+            "onvif",
+            enabled=self.enabled,
+            implementation="onvif_event",
+            base_score=self.base_score,
+            priority_score=self.priority_score,
+        )
+
+    @property
+    def stage_id(self) -> str:
+        return self._stage_id
+
+    def process(self, context: MotionContext) -> MotionContext:
+        if not self.enabled or context.configuration.get("observation_kind") != "motion_event":
+            return context
+        topic = str(context.configuration.get("event_topic") or "")
+        message = str(context.configuration.get("event_message") or "")
+        event_source = str(context.configuration.get("event_source") or "onvif")
+        searchable = f"{topic} {message}".lower()
+        priority = any(keyword in searchable for keyword in self.priority_keywords)
+        evidence = {
+            "warmed": 1.0,
+            "score": self.priority_score if priority else self.base_score,
+            "priority": priority,
+            "topic": topic[:300],
+            "message": message[:500],
+            "event_source": event_source,
+            "received_at": context.captured_at,
+            "event_at": float(
+                context.configuration.get("event_at", context.captured_at)
+            ),
+        }
+        self.repository.append("onvif", context.captured_at, evidence)
+        context.source_evidence["onvif"] = dict(evidence)
+        return context
+
+
 class BufferedMotionFusionStage:
     """Aggregates independent sources and optionally applies an explicit policy."""
 
@@ -224,6 +290,31 @@ def _build_mog2_source(
     )
 
 
+def _build_onvif_source(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> OnvifEventEvidenceStage:
+    raw_keywords = options.get(
+        "priority_keywords",
+        ("manual", "person", "people", "human", "vehicle", "animal", "face"),
+    )
+    if isinstance(raw_keywords, str):
+        priority_keywords = (raw_keywords,)
+    elif isinstance(raw_keywords, (list, tuple)):
+        priority_keywords = tuple(str(keyword) for keyword in raw_keywords)
+    else:
+        raise ValueError("ONVIF priority_keywords must be a list of strings")
+    return OnvifEventEvidenceStage(
+        stage_id,
+        _repository(dependencies),
+        enabled=bool(options.get("enabled", True)),
+        base_score=float(options.get("base_score", 0.55)),
+        priority_score=float(options.get("priority_score", 0.95)),
+        priority_keywords=priority_keywords,
+    )
+
+
 def _build_buffered_fusion(
     stage_id: str,
     options: Mapping[str, Any],
@@ -270,6 +361,14 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             implementation="opencv_mog2_evidence",
             builder=_build_mog2_source,
             requires=frozenset({"original_frame"}),
+            provides=frozenset({"source_evidence"}),
+        )
+    )
+    registry.register(
+        MotionStageRegistration(
+            implementation="onvif_event_evidence",
+            builder=_build_onvif_source,
+            requires=frozenset({"configuration"}),
             provides=frozenset({"source_evidence"}),
         )
     )

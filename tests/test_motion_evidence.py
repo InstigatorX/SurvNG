@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -79,6 +80,20 @@ class MotionEvidenceTest(unittest.TestCase):
         self.assertEqual(repository.last("mog2").values["score"], 0.3)
         self.assertEqual(repository.status()["mog2"]["sample_count"], 2)
 
+    def test_repository_accepts_parallel_source_writers(self) -> None:
+        repository = MotionEvidenceRepository("gate", max_samples_per_source=200)
+
+        def append_sample(index: int) -> None:
+            source = "mog2" if index % 2 else "onvif"
+            repository.append(source, float(index), {"score": index / 100.0})
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(append_sample, range(100)))
+
+        status = repository.status()
+        self.assertEqual(status["mog2"]["sample_count"], 50)
+        self.assertEqual(status["onvif"]["sample_count"], 50)
+
     def test_mog2_source_owns_tracker_in_per_camera_runtime(self) -> None:
         repository = MotionEvidenceRepository("gate", max_samples_per_source=64)
         factory = pipeline_factory(repository)
@@ -139,6 +154,71 @@ class MotionEvidenceTest(unittest.TestCase):
         self.assertIsNone(repository.last("mog2"))
         self.assertEqual(pipeline.runtime.stage_state, {})
         self.assertFalse(repository.status()["mog2"]["enabled"])
+
+    def test_onvif_source_normalizes_motion_event_without_touching_mog2_runtime(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        pipeline = pipeline_factory(repository).create(
+            "gate",
+            motion_observation_stage_configs(
+                mog2_enabled=True,
+                sample_fps=5.0,
+                mog2_history_seconds=30.0,
+            ),
+        )
+
+        result = pipeline.process(
+            MotionContext(
+                camera_id="gate",
+                captured_at=12.0,
+                original_frame=None,
+                configuration={
+                    "observation_kind": "motion_event",
+                    "event_source": "onvif",
+                    "event_topic": "RuleEngine/CellMotionDetector/Motion",
+                    "event_message": "State=true",
+                    "event_at": 11.75,
+                },
+                runtime=pipeline.runtime,
+            )
+        )
+
+        evidence = repository.last("onvif")
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence.values["score"], 0.55)
+        self.assertFalse(evidence.values["priority"])
+        self.assertEqual(evidence.values["event_at"], 11.75)
+        self.assertEqual(evidence.values["received_at"], 12.0)
+        self.assertEqual(result.source_evidence["onvif"]["event_source"], "onvif")
+        self.assertNotIn("mog2_source", pipeline.runtime.stage_state)
+
+    def test_onvif_source_scores_semantic_topic_as_priority(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        pipeline = pipeline_factory(repository).create(
+            "gate",
+            motion_observation_stage_configs(
+                mog2_enabled=True,
+                sample_fps=5.0,
+                mog2_history_seconds=30.0,
+            ),
+        )
+
+        pipeline.process(
+            MotionContext(
+                camera_id="gate",
+                captured_at=12.0,
+                original_frame=None,
+                configuration={
+                    "observation_kind": "motion_event",
+                    "event_topic": "RuleEngine/PeopleDetector/Person",
+                    "event_message": "State=true",
+                },
+                runtime=pipeline.runtime,
+            )
+        )
+
+        evidence = repository.last("onvif")
+        self.assertTrue(evidence.values["priority"])
+        self.assertEqual(evidence.values["score"], 0.95)
 
     def test_fusion_preserves_primary_decision_and_adds_windowed_evidence(self) -> None:
         repository = MotionEvidenceRepository("gate")

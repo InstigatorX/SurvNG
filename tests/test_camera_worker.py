@@ -260,6 +260,7 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual(worker.last_motion_at, "")
         self.assertEqual(detector.calls, 0)
+        self.assertIsNone(worker.motion_evidence.last("onvif"))
 
     def test_motion_handler_enqueues_without_running_detection_inline(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -269,6 +270,10 @@ class CameraWorkerTest(unittest.TestCase):
                 worker.handle_motion_event("onvif/motion", "motion")
 
             self.assertEqual(worker._motion_queue.qsize(), 1)
+            evidence = worker.motion_evidence.last("onvif")
+            self.assertIsNotNone(evidence)
+            self.assertEqual(evidence.values["event_source"], "onvif")
+            self.assertEqual(evidence.values["score"], 0.55)
             recorded_frame.assert_not_called()
 
     def test_motion_worker_coalesces_a_trigger_burst(self) -> None:

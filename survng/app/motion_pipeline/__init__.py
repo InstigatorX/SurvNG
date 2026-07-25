@@ -34,6 +34,7 @@ from .evidence_stages import (
     EVIDENCE_REPOSITORY_SERVICE,
     BufferedMotionFusionStage,
     Mog2EvidenceSourceStage,
+    OnvifEventEvidenceStage,
     register_evidence_stages,
 )
 from .factory import MotionPipelineFactory, MotionStageConfig
@@ -118,6 +119,7 @@ __all__ = [
     "MotionStageRegistry",
     "MotionTrack",
     "Mog2EvidenceSourceStage",
+    "OnvifEventEvidenceStage",
     "OpenCloseMorphologyStage",
     "ObjectDetectionTriggerStage",
     "RecordedMotionObjectDetector",

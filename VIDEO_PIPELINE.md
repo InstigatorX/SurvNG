@@ -29,8 +29,10 @@ Its registered `opencv_mog2_evidence` stage owns the OpenCV model in per-camera
 pipeline runtime and publishes samples to an injected, bounded
 `MotionEvidenceRepository`. A later `buffered_evidence_fusion` stage selects
 samples by event time and adds aggregated evidence to `MotionContext`. The
-repository boundary allows additional ONVIF, optical-flow, or AI sources to
-run independently and join the same fusion stage without calling each other.
+registered `onvif_event_evidence` stage independently normalizes camera motion
+events into the same repository. The repository boundary allows additional
+optical-flow or AI sources to run independently and join the same fusion stage
+without calling each other.
 
 New motion implementations are registered explicitly with a
 `MotionStageRegistry`; there is no mutable module-level plugin registry. The
@@ -218,6 +220,20 @@ using the `mog2_` prefix.
 Audit entries also retain up to six active tracks as normalized bounding boxes
 and the last 30 centroid positions. The browser draws stable track IDs,
 outlines, and trails over the clean audit image; no annotated image is written.
+
+### ONVIF event evidence
+
+Each accepted ONVIF motion notification also traverses the observation graph.
+The `onvif_event_evidence` stage records the normalized topic, bounded message,
+camera event timestamp, local receipt timestamp, source type, and score. Basic
+motion events default to `0.55`; semantic topics containing configured person,
+vehicle, animal, face, or manual keywords default to `0.95`. These values and
+keywords are stage options, not hard-coded fusion policy.
+
+Frame and event observations can arrive concurrently. Irrelevant stages no-op:
+MOG2 processes only frame contexts and ONVIF evidence processes only event
+contexts. The shared repository is thread-safe and bounded. Evidence-stage
+failure is logged but never blocks the established trigger queue.
 
 MOG2 evidence is observational only. It does not alter the existing motion
 score, acceptance decision, suppression behavior, borderline rescue, or
@@ -598,10 +614,10 @@ and temporal hysteresis explicitly:
           "stage_id": "evidence_fusion",
           "implementation": "buffered_evidence_fusion",
           "options": {
-            "sources": ["mog2"],
+            "sources": ["mog2", "onvif"],
             "policy": "weighted",
-            "source_thresholds": {"mog2": 0.55},
-            "source_weights": {"primary": 2.0, "mog2": 1.0},
+            "source_thresholds": {"mog2": 0.55, "onvif": 0.5},
+            "source_weights": {"primary": 2.0, "mog2": 1.0, "onvif": 0.5},
             "weighted_threshold": 0.5,
             "minimum_sources": 1,
             "require_warmed": true
@@ -663,6 +679,8 @@ Relevant automated coverage includes:
   brightness changes, and insufficient-frame fail-open behavior.
 - MOG2 warmup, persistent slow-blob tracking, evidence aggregation, and
   audit-only configuration inheritance.
+- Concurrent ONVIF event normalization, semantic priority scoring, bounded
+  storage, and event-window aggregation.
 - Event-state activation/release hysteresis, cooldown, timeout reset, and
   per-camera isolation.
 - Audit, any-source, all-source, and weighted evidence-fusion policies.
@@ -689,9 +707,9 @@ default `audit` policy does not let those tracks participate in suppression;
 The repository and fusion stage accept multiple independently produced motion
 sources, but SurvNG does not yet calculate dense/sparse optical flow, maintain
 semantic object tracks, use a KNN background model, or consume vendor motion
-bounding boxes. Those remain possible source stages if audit data shows that
-frame differences plus MOG2 cannot separate scene motion from insects reliably
-enough.
+bounding boxes beyond normalized ONVIF event signals. Those remain possible
+source stages if audit data shows that frame differences plus MOG2 cannot
+separate scene motion from insects reliably enough.
 
 The next evidence-driven progression is:
 

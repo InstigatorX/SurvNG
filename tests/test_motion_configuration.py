@@ -28,7 +28,9 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(graphs.qualification[0].implementation, "gray_blur")
         self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
         self.assertFalse(graphs.observation[0].options["enabled"])
+        self.assertEqual(graphs.observation[1].implementation, "onvif_event_evidence")
         self.assertEqual(graphs.fusion[0].implementation, "buffered_evidence_fusion")
+        self.assertEqual(graphs.fusion[0].options["sources"], ["mog2", "onvif"])
 
     def test_global_graph_is_selected_and_camera_graph_takes_precedence(self) -> None:
         global_config = MotionQualificationConfig.model_validate({

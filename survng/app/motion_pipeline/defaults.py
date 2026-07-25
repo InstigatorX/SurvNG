@@ -50,7 +50,25 @@ def default_motion_observation_stage_configs(
                 "sample_fps": sample_fps,
                 "history_seconds": mog2_history_seconds,
             },
-        )
+        ),
+        MotionStageConfig(
+            stage_id="onvif_source",
+            implementation="onvif_event_evidence",
+            options={
+                "enabled": True,
+                "base_score": 0.55,
+                "priority_score": 0.95,
+                "priority_keywords": [
+                    "manual",
+                    "person",
+                    "people",
+                    "human",
+                    "vehicle",
+                    "animal",
+                    "face",
+                ],
+            },
+        ),
     ]
 
 
@@ -59,7 +77,7 @@ def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:
         MotionStageConfig(
             stage_id="evidence_fusion",
             implementation="buffered_evidence_fusion",
-            options={"sources": ["mog2"], "policy": "audit"},
+            options={"sources": ["mog2", "onvif"], "policy": "audit"},
         ),
         MotionStageConfig(
             stage_id="event_state",

@@ -310,6 +310,8 @@ class CameraWorker:
         else:
             event_at = event_at.astimezone(timezone.utc)
 
+        self._observe_motion_event(topic, message, event_at, received_at)
+
         if self.event_callback:
             self.event_callback("motion", {
                 "camera_id": self.camera.id,
@@ -367,10 +369,39 @@ class CameraWorker:
             camera_id=self.camera.id,
             captured_at=captured_at,
             original_frame=gray,
-            configuration={},
+            configuration={"observation_kind": "frame"},
             runtime=self.motion_observation_pipeline.runtime,
         )
         self.motion_observation_pipeline.process(observation)
+
+    def _observe_motion_event(
+        self,
+        topic: str,
+        message: str,
+        event_at: datetime,
+        received_at: float,
+    ) -> None:
+        observation = MotionContext(
+            camera_id=self.camera.id,
+            captured_at=received_at,
+            original_frame=None,
+            configuration={
+                "observation_kind": "motion_event",
+                "event_source": "manual" if topic.startswith("manual") else "onvif",
+                "event_topic": topic,
+                "event_message": message,
+                "event_at": event_at.timestamp(),
+            },
+            runtime=self.motion_observation_pipeline.runtime,
+        )
+        try:
+            self.motion_observation_pipeline.process(observation)
+        except Exception as error:
+            LOGGER.warning(
+                "motion event evidence failed for %s: %s",
+                self.camera.id,
+                error,
+            )
 
     def _motion_settings(self) -> tuple[str, str, int]:
         override = self.camera.motion_qualification
