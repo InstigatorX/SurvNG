@@ -12,7 +12,13 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .baichuan_native import BaichuanFfmpegPipe, ffmpeg_input_args, is_native_baichuan, start_ffmpeg_pipe
+from .baichuan_native import (
+    BaichuanFfmpegPipe,
+    ffmpeg_input_args,
+    ffmpeg_timestamp_repair_args,
+    is_native_baichuan,
+    start_ffmpeg_pipe,
+)
 from .config import CameraConfig
 from .recording_media import mp4_stream_fingerprint
 
@@ -162,6 +168,7 @@ class Recorder:
                 f"survng_source={source}",
                 "-c",
                 "copy",
+                *ffmpeg_timestamp_repair_args(camera),
                 "-f",
                 "segment",
                 "-segment_time",

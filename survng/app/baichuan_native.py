@@ -425,6 +425,8 @@ def is_native_baichuan(camera: CameraConfig) -> bool:
 def ffmpeg_input_args(camera: CameraConfig, source: str) -> list[str]:
     if not is_native_baichuan(camera):
         return [
+            "-fflags",
+            "+genpts",
             "-dts_error_threshold",
             "10",
             "-rtsp_transport",
@@ -446,6 +448,22 @@ def ffmpeg_input_args(camera: CameraConfig, source: str) -> list[str]:
         "-i",
         "pipe:0",
     ]
+
+
+def ffmpeg_timestamp_repair_args(camera: CameraConfig) -> list[str]:
+    if is_native_baichuan(camera):
+        return []
+    missing_pts = (
+        "if(eq(PTS\\,NOPTS)\\,"
+        "if(eq(DTS\\,NOPTS)\\,"
+        "if(eq(PREV_OUTPTS\\,NOPTS)\\,0\\,PREV_OUTPTS+max(DURATION\\,1))\\,DTS)\\,PTS)"
+    )
+    missing_dts = (
+        "if(eq(DTS\\,NOPTS)\\,"
+        "if(eq(PTS\\,NOPTS)\\,"
+        "if(eq(PREV_OUTDTS\\,NOPTS)\\,0\\,PREV_OUTDTS+max(DURATION\\,1))\\,PTS)\\,DTS)"
+    )
+    return ["-bsf:v", f"setts=pts={missing_pts}:dts={missing_dts}"]
 
 
 def start_ffmpeg_pipe(camera: CameraConfig, source: str, process) -> BaichuanFfmpegPipe | None:

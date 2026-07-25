@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from survng.app.baichuan_native import ffmpeg_input_args
+from survng.app.baichuan_native import ffmpeg_input_args, ffmpeg_timestamp_repair_args
 from survng.app.config import CameraConfig
 from survng.app.recorder import Recorder
 
@@ -25,7 +25,7 @@ class RecorderTest(unittest.TestCase):
             "source": "main",
         }
 
-    def test_rtsp_recording_discards_large_timestamp_regressions(self) -> None:
+    def test_rtsp_recording_generates_missing_pts_and_discards_large_regressions(self) -> None:
         camera = CameraConfig(
             id="upper-garage",
             name="Upper Garage",
@@ -36,6 +36,8 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(
             ffmpeg_input_args(camera, "live"),
             [
+                "-fflags",
+                "+genpts",
                 "-dts_error_threshold",
                 "10",
                 "-rtsp_transport",
@@ -44,6 +46,11 @@ class RecorderTest(unittest.TestCase):
                 "rtsp://camera/sub",
             ],
         )
+        repair_args = ffmpeg_timestamp_repair_args(camera)
+        self.assertEqual(repair_args[0], "-bsf:v")
+        self.assertIn("setts=pts=", repair_args[1])
+        self.assertIn("PREV_OUTPTS", repair_args[1])
+        self.assertIn("PREV_OUTDTS", repair_args[1])
 
     def test_persistent_non_monotonic_dts_restarts_recorder(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
