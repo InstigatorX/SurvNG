@@ -13,6 +13,7 @@ import cv2
 
 from survng.app.camera import CameraWorker
 from survng.app.config import CameraConfig, MotionQualificationConfig
+from survng.app.motion_pipeline import build_legacy_motion_pipeline
 
 
 class DummyDetector:
@@ -42,12 +43,33 @@ class DummyRecorder:
         return None
 
 
+def make_worker(
+    camera: CameraConfig,
+    storage_dir: Path,
+    detector=None,
+    events=None,
+    recorder=None,
+    motion_config: MotionQualificationConfig | None = None,
+    event_callback=None,
+) -> CameraWorker:
+    return CameraWorker(
+        camera,
+        storage_dir,
+        detector or DummyDetector(),
+        events or DummyEvents(),
+        recorder or DummyRecorder(),
+        motion_config,
+        event_callback,
+        motion_pipeline=build_legacy_motion_pipeline(camera.id),
+    )
+
+
 class CameraWorkerTest(unittest.TestCase):
     def test_capture_limits_ffmpeg_decoder_threads(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         capture = Mock()
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
 
             def stop_after_open(*_args):
@@ -75,7 +97,7 @@ class CameraWorkerTest(unittest.TestCase):
         frame = np.zeros((180, 320, 3), dtype=np.uint8)
         objects = [{"label": "dog", "confidence": 0.8, "incident_eligible": True}]
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), events, DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir), events=events)
             with (
                 patch.object(worker, "_recorded_motion_frame", return_value=(frame, objects, "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
@@ -98,7 +120,7 @@ class CameraWorkerTest(unittest.TestCase):
         }
         frame = np.zeros((180, 320, 3), dtype=np.uint8)
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), events, DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir), events=events)
             with (
                 patch.object(worker, "_recorded_motion_frame", return_value=(frame, [], "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
@@ -119,7 +141,7 @@ class CameraWorkerTest(unittest.TestCase):
         })
         config = MotionQualificationConfig(frame_width=320, sample_fps=5)
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder(), config)
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._remember_motion_frame(np.zeros((720, 1280, 3), dtype=np.uint8), time.monotonic())
 
             self.assertEqual(worker._motion_settings(), ("audit", "balanced", 480))
@@ -136,7 +158,7 @@ class CameraWorkerTest(unittest.TestCase):
             live_stream_url="rtsp://example.invalid/sub",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir))
             with patch.object(worker, "_start_source", wraps=worker._start_source) as start_source:
                 self.assertIsNone(worker.snapshot("main"))
 
@@ -150,7 +172,7 @@ class CameraWorkerTest(unittest.TestCase):
             live_stream_url="rtsp://example.invalid/sub",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir))
             worker._enabled = True
             worker._stop.clear()
             worker._source_threads["live"] = Mock(is_alive=lambda: True)
@@ -171,7 +193,7 @@ class CameraWorkerTest(unittest.TestCase):
             live_stream_url="rtsp://example.invalid/sub",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir))
             worker._source_last_access["main"] = time.monotonic() - 60
 
             self.assertTrue(worker._source_is_idle("main"))
@@ -186,7 +208,7 @@ class CameraWorkerTest(unittest.TestCase):
         )
         detector = DummyDetector()
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), detector, DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir), detector=detector)
             worker.set_detection_enabled(False)
             worker.handle_motion_event("onvif/motion", "motion")
 
@@ -196,7 +218,7 @@ class CameraWorkerTest(unittest.TestCase):
     def test_motion_handler_enqueues_without_running_detection_inline(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir))
             with patch.object(worker, "_recorded_motion_frame") as recorded_frame:
                 worker.handle_motion_event("onvif/motion", "motion")
 
@@ -208,14 +230,11 @@ class CameraWorkerTest(unittest.TestCase):
         config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1, window_seconds=0.8)
         published = []
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(
+            worker = make_worker(
                 camera,
                 Path(tmpdir),
-                DummyDetector(),
-                DummyEvents(),
-                DummyRecorder(),
-                config,
-                lambda event_type, payload: published.append((event_type, payload)),
+                motion_config=config,
+                event_callback=lambda event_type, payload: published.append((event_type, payload)),
             )
             worker._stop.clear()
             with patch.object(
@@ -244,7 +263,7 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(post_trigger_seconds=0.5, window_seconds=0.8)
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder(), config)
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             received_at = time.time() - 1.0
             for index in range(5):
@@ -272,7 +291,7 @@ class CameraWorkerTest(unittest.TestCase):
         frame = np.zeros((10, 10, 3), dtype=np.uint8)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = CameraWorker(camera, Path(tmpdir), detector, DummyEvents(), DummyRecorder())
+            worker = make_worker(camera, Path(tmpdir), detector=detector)
             with (
                 patch("survng.app.camera.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
                 patch("survng.app.camera.RECORDED_EVENT_RETRY_SECONDS", 0.0),

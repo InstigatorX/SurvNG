@@ -20,7 +20,8 @@ from .events import EventStore
 from .ffmpeg_hw import recorded_frame_hw_args
 from .onvif_events import OnvifEventListener
 from .recorder import Recorder
-from .motion import BackgroundMotionTracker, MotionQualificationResult, aggregate_mog2_evidence, qualify_motion
+from .motion import BackgroundMotionTracker, MotionQualificationResult, aggregate_mog2_evidence
+from .motion_pipeline import MotionContext, MotionPipeline
 from .zones import apply_detection_zones, detection_threshold
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +50,8 @@ class CameraWorker:
         recorder: Recorder,
         motion_config: MotionQualificationConfig | None = None,
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        *,
+        motion_pipeline: MotionPipeline,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -57,6 +60,7 @@ class CameraWorker:
         self.recorder = recorder
         self.motion_config = motion_config or MotionQualificationConfig()
         self.event_callback = event_callback
+        self.motion_pipeline = motion_pipeline
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
@@ -243,6 +247,7 @@ class CameraWorker:
                 "queue_depth": self._motion_queue.qsize(),
                 "buffered_frames": motion_buffered_frames,
                 "frame_shape": motion_frame_shape,
+                "pipeline": self.motion_pipeline.status(),
             },
         }
 
@@ -443,7 +448,11 @@ class CameraWorker:
                 if key in evaluated_windows:
                     continue
                 evaluated_windows.add(key)
-                result = qualify_motion([item[1] for item in window], sensitivity)
+                result = self._run_motion_pipeline(
+                    [item[1] for item in window],
+                    sensitivity,
+                    window_end,
+                )
                 if best_result is None or result.score > best_result.score:
                     best_result = result
                 if result.accepted:
@@ -499,6 +508,37 @@ class CameraWorker:
             anchor - self.motion_config.window_seconds,
             time.time(),
         ), diagnostics
+
+    def _run_motion_pipeline(
+        self,
+        frames: list[np.ndarray],
+        sensitivity: str,
+        captured_at: float,
+    ) -> MotionQualificationResult:
+        mode, _resolved_sensitivity, frame_width = self._motion_settings()
+        context = MotionContext(
+            camera_id=self.camera.id,
+            captured_at=captured_at,
+            original_frame=frames[-1] if frames else None,
+            frame_history=tuple(frames),
+            configuration={
+                **self.motion_config.model_dump(mode="python"),
+                "camera_id": self.camera.id,
+                "mode": mode,
+                "sensitivity": sensitivity,
+                "frame_width": frame_width,
+            },
+            runtime=self.motion_pipeline.runtime,
+        )
+        result = self.motion_pipeline.process(context).scoring
+        return MotionQualificationResult(
+            accepted=result.accepted,
+            score=result.score,
+            threshold=result.threshold,
+            reason=result.reason,
+            frame_count=result.frame_count,
+            features=dict(result.features),
+        )
 
     def _run_motion_events(self) -> None:
         while not self._stop.is_set():

@@ -5,7 +5,28 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-07-16
+Last reviewed: 2026-07-25
+
+## Motion Pipeline Migration
+
+Motion qualification now enters through the typed, per-camera orchestration
+contracts in `survng/app/motion_pipeline`. `AppManager` assembles and injects a
+separate `MotionPipeline` for every camera from an instance-scoped stage
+registry. The pipeline owns per-camera runtime state, executes stages in order,
+and records call, failure, last, average, and maximum timing for each stage.
+
+The currently selected production stage is `legacy_qualifier`. It adapts the
+existing frame-difference scoring function to `MotionContext`, so this first
+migration step changes the dependency boundary without changing qualification
+scores or suppression behavior. MOG2 audit collection remains in
+`CameraWorker` until its background, mask, blob, tracking, and scoring pieces
+are extracted into independent stages.
+
+New motion implementations are registered explicitly with a
+`MotionStageRegistry`; there is no mutable module-level plugin registry. The
+factory validates stage IDs and required context artifacts before a camera
+pipeline starts. Object inference, recording lookup, event persistence, MQTT,
+and SSE remain outside the motion pipeline.
 
 ## Pipeline At A Glance
 

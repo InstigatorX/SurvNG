@@ -13,6 +13,12 @@ from .faces import FaceStore
 from .go2rtc import Go2RtcAdapter
 from .inference import InferenceSupervisor, IsolatedFaceRecognizer
 from .mqtt import MqttService
+from .motion_pipeline import (
+    LoggingMotionPipelineObserver,
+    MotionPipelineFactory,
+    MotionStageConfig,
+    build_builtin_motion_registry,
+)
 from .recorder import Recorder
 from .state_events import StateEventBroker
 
@@ -44,6 +50,10 @@ class AppManager:
         )
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()
+        self.motion_pipeline_factory = MotionPipelineFactory(
+            registry=build_builtin_motion_registry(),
+            observer=LoggingMotionPipelineObserver(),
+        )
         self.mqtt = MqttService(
             config.mqtt,
             self._mqtt_power_command,
@@ -70,6 +80,15 @@ class AppManager:
                 self.recorder,
                 config.motion_qualification,
                 self.publish_event,
+                motion_pipeline=self.motion_pipeline_factory.create(
+                    camera.id,
+                    [
+                        MotionStageConfig(
+                            stage_id="qualification",
+                            implementation="legacy_qualifier",
+                        )
+                    ],
+                ),
             )
             for camera in config.cameras
         }
