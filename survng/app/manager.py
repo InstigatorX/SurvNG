@@ -56,12 +56,21 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
                 config.motion_qualification,
                 camera_config,
             )
-            factory.create(camera_id, graphs.qualification)
-            factory.create(camera_id, graphs.observation)
+            factory.create(
+                camera_id,
+                graphs.qualification,
+                required_artifacts={"scoring"},
+            )
+            factory.create(
+                camera_id,
+                graphs.observation,
+                required_artifacts={"source_evidence"},
+            )
             factory.create(
                 camera_id,
                 graphs.fusion,
                 initial_artifacts={"scoring"},
+                required_artifacts={"scoring", "decision"},
             )
         except ValueError as error:
             raise ValueError(
@@ -153,15 +162,21 @@ class AppManager:
             self.storage_dir,
             motion_config,
             self.publish_event,
-            motion_pipeline=factory.create(camera.id, graphs.qualification),
+            motion_pipeline=factory.create(
+                camera.id,
+                graphs.qualification,
+                required_artifacts={"scoring"},
+            ),
             motion_observation_pipeline=factory.create(
                 camera.id,
                 graphs.observation,
+                required_artifacts={"source_evidence"},
             ),
             motion_fusion_pipeline=factory.create(
                 camera.id,
                 graphs.fusion,
                 initial_artifacts={"scoring"},
+                required_artifacts={"scoring", "decision"},
             ),
             motion_evidence=evidence,
             motion_pipeline_origins=graphs.origins,

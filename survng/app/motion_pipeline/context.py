@@ -38,6 +38,10 @@ class MotionEventState:
     event_key: str = ""
     started_at: float | None = None
     updated_at: float | None = None
+    consecutive_accepts: int = 0
+    consecutive_rejects: int = 0
+    cooldown_until: float | None = None
+    transition_reason: str = "uninitialized"
 
 
 @dataclass(frozen=True, slots=True)

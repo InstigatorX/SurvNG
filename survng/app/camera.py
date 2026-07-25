@@ -417,14 +417,38 @@ class CameraWorker:
                 features=dict(result.features),
             ),
         )
-        scoring = self.motion_fusion_pipeline.process(context).scoring
+        processed = self.motion_fusion_pipeline.process(context)
+        scoring = processed.scoring
+        decision = processed.decision
+        features = dict(scoring.features)
+        features.update(
+            {
+                "event_state_phase": processed.event_state.phase.value,
+                "event_state_transition": processed.event_state.transition_reason,
+                "event_state_consecutive_accepts": (
+                    processed.event_state.consecutive_accepts
+                ),
+                "event_state_consecutive_rejects": (
+                    processed.event_state.consecutive_rejects
+                ),
+            }
+        )
+        if processed.event_state.cooldown_until is not None:
+            features["event_state_cooldown_remaining"] = round(
+                max(0.0, processed.event_state.cooldown_until - end_epoch),
+                3,
+            )
         return MotionQualificationResult(
-            accepted=scoring.accepted,
-            score=scoring.score,
+            accepted=(
+                decision.run_object_detection
+                if decision is not None
+                else scoring.accepted
+            ),
+            score=decision.score if decision is not None else scoring.score,
             threshold=scoring.threshold,
-            reason=scoring.reason,
+            reason=decision.reason if decision is not None else scoring.reason,
             frame_count=scoring.frame_count,
-            features=dict(scoring.features),
+            features=features,
         )
 
     @staticmethod

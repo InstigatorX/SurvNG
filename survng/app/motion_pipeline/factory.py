@@ -32,6 +32,7 @@ class MotionPipelineFactory:
         stage_configs: Sequence[MotionStageConfig],
         error_policy: MotionErrorPolicy = "raise",
         initial_artifacts: Iterable[str] = (),
+        required_artifacts: Iterable[str] = (),
     ) -> MotionPipeline:
         stage_ids: set[str] = set()
         available_artifacts = {
@@ -57,6 +58,12 @@ class MotionPipelineFactory:
             stages.append(registration.builder(stage_id, stage_config.options, self.dependencies))
             stage_ids.add(stage_id)
             available_artifacts.update(registration.provides)
+        missing_outputs = set(required_artifacts) - available_artifacts
+        if missing_outputs:
+            raise ValueError(
+                "motion pipeline does not provide required artifacts: "
+                + ", ".join(sorted(missing_outputs))
+            )
         return MotionPipeline(
             camera_id=camera_id,
             stages=stages,

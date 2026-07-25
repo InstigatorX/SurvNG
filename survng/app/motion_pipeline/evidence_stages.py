@@ -4,7 +4,7 @@ from typing import Any, Mapping
 
 from ..motion import BackgroundMotionTracker, aggregate_mog2_evidence
 from .context import MotionContext
-from .evidence import MotionEvidenceRepository
+from .evidence import MotionEvidenceRepository, MotionEvidenceSample
 from .registry import MotionStageDependencies, MotionStageRegistration, MotionStageRegistry
 
 
@@ -55,17 +55,43 @@ class Mog2EvidenceSourceStage:
 
 
 class BufferedMotionFusionStage:
-    """Adds buffered source evidence without changing the primary decision policy."""
+    """Aggregates independent sources and optionally applies an explicit policy."""
 
     def __init__(
         self,
         stage_id: str,
         repository: MotionEvidenceRepository,
         sources: tuple[str, ...] = ("mog2",),
+        *,
+        policy: str = "audit",
+        source_thresholds: Mapping[str, float] | None = None,
+        source_weights: Mapping[str, float] | None = None,
+        weighted_threshold: float | None = None,
+        minimum_sources: int = 1,
+        require_warmed: bool = True,
     ) -> None:
         self._stage_id = stage_id
         self.repository = repository
         self.sources = sources
+        normalized_policy = policy.strip().lower()
+        if normalized_policy not in {"audit", "any", "all", "weighted"}:
+            raise ValueError(f"unsupported motion fusion policy: {policy}")
+        self.policy = normalized_policy
+        self.source_thresholds = {
+            str(source): max(0.0, min(1.0, float(threshold)))
+            for source, threshold in (source_thresholds or {}).items()
+        }
+        self.source_weights = {
+            str(source): max(0.0, float(weight))
+            for source, weight in (source_weights or {}).items()
+        }
+        self.weighted_threshold = (
+            None
+            if weighted_threshold is None
+            else max(0.0, min(1.0, float(weighted_threshold)))
+        )
+        self.minimum_sources = max(0, int(minimum_sources))
+        self.require_warmed = bool(require_warmed)
 
     @property
     def stage_id(self) -> str:
@@ -81,12 +107,98 @@ class BufferedMotionFusionStage:
                     [dict(sample.values) for sample in samples]
                 )
             else:
-                aggregate = {
-                    f"{source}_sample_count": len(samples),
-                }
+                aggregate = self._aggregate_generic_source(source, samples)
             context.source_evidence[source] = aggregate
             context.scoring.features.update(aggregate)
+        self._apply_policy(context)
         return context
+
+    @staticmethod
+    def _aggregate_generic_source(
+        source: str,
+        samples: tuple[MotionEvidenceSample, ...],
+    ) -> dict[str, Any]:
+        if not samples:
+            return {
+                f"{source}_warmed": 0.0,
+                f"{source}_sample_count": 0,
+            }
+        best = max(
+            samples,
+            key=lambda sample: float(sample.values.get("score", 0.0)),
+        )
+        values = dict(best.values)
+        aggregate = {
+            f"{source}_warmed": float(values.get("warmed", 1.0)),
+            f"{source}_score": max(0.0, min(1.0, float(values.get("score", 0.0)))),
+            f"{source}_sample_count": len(samples),
+        }
+        aggregate.update(
+            {
+                f"{source}_{key}": value
+                for key, value in values.items()
+                if key not in {"warmed", "score"}
+            }
+        )
+        return aggregate
+
+    def _apply_policy(self, context: MotionContext) -> None:
+        if self.policy == "audit":
+            return
+        source_scores: dict[str, float] = {}
+        source_votes: dict[str, bool] = {}
+        for source in self.sources:
+            aggregate = context.source_evidence.get(source, {})
+            if not isinstance(aggregate, Mapping):
+                continue
+            score_value = aggregate.get(f"{source}_score", aggregate.get("score"))
+            if score_value is None:
+                continue
+            warmed = aggregate.get(f"{source}_warmed", aggregate.get("warmed", 1.0))
+            if self.require_warmed and float(warmed or 0.0) < 1.0:
+                continue
+            score = max(0.0, min(1.0, float(score_value)))
+            source_scores[source] = score
+            source_votes[source] = score >= self.source_thresholds.get(source, 0.5)
+
+        features = context.scoring.features
+        features["fusion_policy"] = self.policy
+        features["fusion_sources_considered"] = sorted(source_scores)
+        features["fusion_primary_accepted"] = context.scoring.accepted
+        if len(source_scores) < self.minimum_sources:
+            features["fusion_applied"] = False
+            features["fusion_reason"] = "insufficient_sources"
+            return
+
+        primary_score = context.scoring.score
+        if self.policy == "any":
+            fused_score = max([primary_score, *source_scores.values()])
+            accepted = context.scoring.accepted or any(source_votes.values())
+        elif self.policy == "all":
+            fused_score = min([primary_score, *source_scores.values()])
+            accepted = context.scoring.accepted and all(source_votes.values())
+        else:
+            primary_weight = self.source_weights.get("primary", 1.0)
+            weighted_total = primary_score * primary_weight
+            total_weight = primary_weight
+            for source, score in source_scores.items():
+                weight = self.source_weights.get(source, 1.0)
+                weighted_total += score * weight
+                total_weight += weight
+            fused_score = weighted_total / total_weight if total_weight > 0 else primary_score
+            threshold = (
+                self.weighted_threshold
+                if self.weighted_threshold is not None
+                else context.scoring.threshold
+            )
+            accepted = fused_score >= threshold
+
+        context.scoring.accepted = accepted
+        context.scoring.score = round(fused_score, 4)
+        context.scoring.reason = f"fusion_{self.policy}_{'accepted' if accepted else 'rejected'}"
+        features["fusion_applied"] = True
+        features["fusion_score"] = context.scoring.score
+        features["fusion_source_votes"] = dict(source_votes)
 
 
 def _repository(dependencies: MotionStageDependencies) -> MotionEvidenceRepository:
@@ -124,7 +236,32 @@ def _build_buffered_fusion(
         sources = tuple(str(source) for source in raw_sources)
     else:
         raise ValueError("motion fusion sources must be a list of source names")
-    return BufferedMotionFusionStage(stage_id, _repository(dependencies), sources)
+    raw_thresholds = options.get("source_thresholds", {})
+    raw_weights = options.get("source_weights", {})
+    if not isinstance(raw_thresholds, Mapping):
+        raise ValueError("motion fusion source_thresholds must be an object")
+    if not isinstance(raw_weights, Mapping):
+        raise ValueError("motion fusion source_weights must be an object")
+    weighted_threshold = options.get("weighted_threshold")
+    return BufferedMotionFusionStage(
+        stage_id,
+        _repository(dependencies),
+        sources,
+        policy=str(options.get("policy", "audit")),
+        source_thresholds={
+            str(source): float(threshold)
+            for source, threshold in raw_thresholds.items()
+        },
+        source_weights={
+            str(source): float(weight)
+            for source, weight in raw_weights.items()
+        },
+        weighted_threshold=(
+            None if weighted_threshold is None else float(weighted_threshold)
+        ),
+        minimum_sources=int(options.get("minimum_sources", 1)),
+        require_warmed=bool(options.get("require_warmed", True)),
+    )
 
 
 def register_evidence_stages(registry: MotionStageRegistry) -> None:

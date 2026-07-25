@@ -24,6 +24,11 @@ from .decision_handler import (
     MotionDecisionHandlerFactory,
     MotionDecisionOutcome,
 )
+from .decision_stages import (
+    MotionEventStateStage,
+    ObjectDetectionTriggerStage,
+    register_decision_stages,
+)
 from .evidence import MotionEvidenceRepository, MotionEvidenceSample
 from .evidence_stages import (
     EVIDENCE_REPOSITORY_SERVICE,
@@ -39,10 +44,8 @@ from .image_stages import (
     FixedThresholdStage,
     FrameDifferenceStage,
     LegacyMotionScoringStage,
-    MotionEventStateStage,
     MotionFramePreprocessorStage,
     MotionScoringStage,
-    ObjectDetectionTriggerStage,
     OpenCloseMorphologyStage,
     register_image_motion_stages,
 )
@@ -58,6 +61,7 @@ def build_builtin_motion_registry() -> MotionStageRegistry:
     register_legacy_motion_stage(registry)
     register_image_motion_stages(registry)
     register_evidence_stages(registry)
+    register_decision_stages(registry)
     return registry
 
 
@@ -133,5 +137,6 @@ __all__ = [
     "register_legacy_motion_stage",
     "register_image_motion_stages",
     "register_evidence_stages",
+    "register_decision_stages",
     "resolve_motion_pipeline_graphs",
 ]

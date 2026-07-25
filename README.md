@@ -248,6 +248,8 @@ SurvNG can qualify noisy ONVIF motion before starting the recorded-frame OpenVIN
 
 Set `motion_qualification.mode` to `off`, `audit`, or `enforce`. Audit mode is the default: it records pass/suppress telemetry but never suppresses a coalesced motion burst. Enforce mode suppresses only rejected motion bursts; semantic ONVIF topics such as person, vehicle, animal, and manual triggers bypass the filter. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
+The built-in fusion policy is observational and preserves existing decisions. Configured final graphs may select `any`, `all`, or weighted source consensus and add activation/release hysteresis or cooldown; incomplete graphs are rejected before config is saved.
+
 ## Face Recognition
 
 SurvNG stores detected face observations separately from object detections. Install the default OpenVINO embedding model with:

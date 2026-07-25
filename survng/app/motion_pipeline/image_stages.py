@@ -187,42 +187,6 @@ class MotionScoringStage:
         return context
 
 
-class MotionEventStateStage:
-    def __init__(self, stage_id: str) -> None:
-        self._stage_id = stage_id
-
-    @property
-    def stage_id(self) -> str:
-        return self._stage_id
-
-    def process(self, context: MotionContext) -> MotionContext:
-        context.event_state.phase = (
-            MotionEventPhase.ACTIVE
-            if context.scoring.accepted
-            else MotionEventPhase.REJECTED
-        )
-        context.event_state.updated_at = context.captured_at
-        return context
-
-
-class ObjectDetectionTriggerStage:
-    def __init__(self, stage_id: str) -> None:
-        self._stage_id = stage_id
-
-    @property
-    def stage_id(self) -> str:
-        return self._stage_id
-
-    def process(self, context: MotionContext) -> MotionContext:
-        context.decision = TriggerDecision(
-            run_object_detection=context.scoring.accepted,
-            reason=context.scoring.reason,
-            score=context.scoring.score,
-            evidence_sources=("frame_difference",),
-        )
-        return context
-
-
 class LegacyMotionScoringStage:
     """Compatibility stage retaining combined blob, score, state, and trigger policy."""
 
@@ -350,24 +314,6 @@ def _build_motion_scorer(
     return MotionScoringStage(stage_id)
 
 
-def _build_event_state(
-    stage_id: str,
-    options: Mapping[str, Any],
-    dependencies: MotionStageDependencies,
-) -> MotionEventStateStage:
-    del options, dependencies
-    return MotionEventStateStage(stage_id)
-
-
-def _build_trigger(
-    stage_id: str,
-    options: Mapping[str, Any],
-    dependencies: MotionStageDependencies,
-) -> ObjectDetectionTriggerStage:
-    del options, dependencies
-    return ObjectDetectionTriggerStage(stage_id)
-
-
 def register_image_motion_stages(registry: MotionStageRegistry) -> None:
     registry.register(
         MotionStageRegistration(
@@ -439,21 +385,5 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
             builder=_build_motion_scorer,
             requires=frozenset({"dominant_track", "processed_frame_history"}),
             provides=frozenset({"scoring"}),
-        )
-    )
-    registry.register(
-        MotionStageRegistration(
-            implementation="score_event_state",
-            builder=_build_event_state,
-            requires=frozenset({"scoring"}),
-            provides=frozenset({"event_state"}),
-        )
-    )
-    registry.register(
-        MotionStageRegistration(
-            implementation="score_trigger",
-            builder=_build_trigger,
-            requires=frozenset({"scoring", "event_state"}),
-            provides=frozenset({"decision"}),
         )
     )

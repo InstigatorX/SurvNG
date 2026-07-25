@@ -180,6 +180,21 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         validate_motion_pipeline_configuration(config)
 
+    def test_application_preflight_requires_final_trigger_decision(self) -> None:
+        config = AppConfig.model_validate({
+            "motion_qualification": {
+                "pipeline": {
+                    "fusion": [{
+                        "stage_id": "fusion_only",
+                        "implementation": "buffered_evidence_fusion",
+                    }],
+                },
+            },
+        })
+
+        with self.assertRaisesRegex(ValueError, "required artifacts: decision"):
+            validate_motion_pipeline_configuration(config)
+
 
 if __name__ == "__main__":
     unittest.main()

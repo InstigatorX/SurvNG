@@ -200,10 +200,9 @@ class MotionPipelineTest(unittest.TestCase):
                 "blob_filter",
                 "tracking",
                 "scoring",
-                "event_state",
-                "trigger",
             ],
         )
+        self.assertIsNone(result.decision)
 
 
 if __name__ == "__main__":

@@ -32,8 +32,6 @@ def default_motion_stage_configs() -> list[MotionStageConfig]:
             },
         ),
         MotionStageConfig(stage_id="scoring", implementation="default_motion_score"),
-        MotionStageConfig(stage_id="event_state", implementation="score_event_state"),
-        MotionStageConfig(stage_id="trigger", implementation="score_trigger"),
     ]
 
 
@@ -61,6 +59,17 @@ def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:
         MotionStageConfig(
             stage_id="evidence_fusion",
             implementation="buffered_evidence_fusion",
-            options={"sources": ["mog2"]},
-        )
+            options={"sources": ["mog2"], "policy": "audit"},
+        ),
+        MotionStageConfig(
+            stage_id="event_state",
+            implementation="score_event_state",
+            options={
+                "activation_frames": 1,
+                "release_frames": 1,
+                "cooldown_seconds": 0.0,
+                "state_timeout_seconds": 10.0,
+            },
+        ),
+        MotionStageConfig(stage_id="trigger", implementation="score_trigger"),
     ]

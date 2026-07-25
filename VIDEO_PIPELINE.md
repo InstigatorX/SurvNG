@@ -15,10 +15,11 @@ separate `MotionPipeline` for every camera from an instance-scoped stage
 registry. The pipeline owns per-camera runtime state, executes stages in order,
 and records call, failure, last, average, and maximum timing for each stage.
 
-The production frame-difference path now uses independently registered
-preprocessing, frame-difference, threshold, morphology, contour extraction,
-minimum-area filtering, dominant-centroid tracking, scoring, event-state, and
-trigger-decision stages. Each stage consumes and publishes typed context
+The production frame-difference qualification graph now uses independently
+registered preprocessing, frame-difference, threshold, morphology, contour
+extraction, minimum-area filtering, dominant-centroid tracking, and scoring
+stages. The final graph then runs evidence fusion, the persistent event-state
+machine, and trigger decision. Each stage consumes and publishes typed context
 artifacts without invoking or depending on concrete neighboring stages. The
 original all-in-one `legacy_qualifier` and combined `legacy_motion_scorer`
 remain registered as parity/reference implementations.
@@ -583,6 +584,57 @@ stopped. Camera status reports the resolved implementation, options, and
 whether each graph came from built-in defaults, global config, or a camera
 override.
 
+The built-in final graph is parity-safe: fusion uses `audit`, activation and
+release both require one decision, cooldown is zero, and state expires after
+10 seconds of inactivity. A complete custom final graph can enable consensus
+and temporal hysteresis explicitly:
+
+```json
+{
+  "motion_qualification": {
+    "pipeline": {
+      "fusion": [
+        {
+          "stage_id": "evidence_fusion",
+          "implementation": "buffered_evidence_fusion",
+          "options": {
+            "sources": ["mog2"],
+            "policy": "weighted",
+            "source_thresholds": {"mog2": 0.55},
+            "source_weights": {"primary": 2.0, "mog2": 1.0},
+            "weighted_threshold": 0.5,
+            "minimum_sources": 1,
+            "require_warmed": true
+          }
+        },
+        {
+          "stage_id": "event_state",
+          "implementation": "score_event_state",
+          "options": {
+            "activation_frames": 2,
+            "release_frames": 2,
+            "cooldown_seconds": 3.0,
+            "state_timeout_seconds": 10.0
+          }
+        },
+        {
+          "stage_id": "trigger",
+          "implementation": "score_trigger",
+          "options": {}
+        }
+      ]
+    }
+  }
+}
+```
+
+Fusion policies are `audit` (collect only), `any`, `all`, and `weighted`.
+Unavailable or unwarmed sources leave the primary decision unchanged until
+`minimum_sources` is satisfied. Generic evidence producers only need to write
+`score` and optional `warmed` values to the per-camera repository. The final
+graph must provide a trigger `decision`; preflight validation rejects partial
+graphs before configuration is persisted.
+
 AI audit advisor:
 
 ```json
@@ -611,6 +663,9 @@ Relevant automated coverage includes:
   brightness changes, and insufficient-frame fail-open behavior.
 - MOG2 warmup, persistent slow-blob tracking, evidence aggregation, and
   audit-only configuration inheritance.
+- Event-state activation/release hysteresis, cooldown, timeout reset, and
+  per-camera isolation.
+- Audit, any-source, all-source, and weighted evidence-fusion policies.
 - Non-blocking event enqueue and ONVIF burst coalescing.
 - Recorder ownership, failure isolation, indexing, media validation, recording
   range selection, and playback continuity helpers.
@@ -628,9 +683,10 @@ Chrome across repeated seeks and many segment boundaries.
 
 ## 14. Current Boundaries And Future Work
 
-The modular observation and fusion paths now maintain audit-only MOG2
-foreground tracks, but those tracks do not participate in suppression. The
-repository and fusion stage can accept multiple independently produced motion
+The modular observation and fusion paths maintain MOG2 foreground tracks. The
+default `audit` policy does not let those tracks participate in suppression;
+`any`, `all`, or `weighted` must be selected explicitly after evidence review.
+The repository and fusion stage accept multiple independently produced motion
 sources, but SurvNG does not yet calculate dense/sparse optical flow, maintain
 semantic object tracks, use a KNN background model, or consume vendor motion
 bounding boxes. Those remain possible source stages if audit data shows that

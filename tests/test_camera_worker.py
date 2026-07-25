@@ -14,6 +14,7 @@ import cv2
 from survng.app.camera import CameraWorker
 from survng.app.config import CameraConfig, MotionQualificationConfig
 from survng.app.detector import objects_to_json
+from survng.app.motion import MotionQualificationResult
 from survng.app.motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
     MotionDecisionHandlerFactory,
@@ -80,15 +81,21 @@ def make_worker(
         storage_dir,
         motion_config,
         event_callback,
-        motion_pipeline=factory.create(camera.id, graphs.qualification),
+        motion_pipeline=factory.create(
+            camera.id,
+            graphs.qualification,
+            required_artifacts={"scoring"},
+        ),
         motion_observation_pipeline=factory.create(
             camera.id,
             graphs.observation,
+            required_artifacts={"source_evidence"},
         ),
         motion_fusion_pipeline=factory.create(
             camera.id,
             graphs.fusion,
             initial_artifacts={"scoring"},
+            required_artifacts={"scoring", "decision"},
         ),
         motion_evidence=evidence,
         motion_pipeline_origins=graphs.origins,
@@ -318,6 +325,52 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(result.reason, "no_temporal_signal")
             self.assertGreater(diagnostics["windows_evaluated"], 0)
             self.assertEqual(result.features["mog2_warmed"], 0.0)
+            self.assertEqual(result.features["event_state_phase"], "active")
+
+    def test_worker_uses_final_state_machine_trigger_decision(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+        )
+        config = MotionQualificationConfig.model_validate({
+            "pipeline": {
+                "fusion": [
+                    {
+                        "stage_id": "fusion",
+                        "implementation": "buffered_evidence_fusion",
+                        "options": {"policy": "audit"},
+                    },
+                    {
+                        "stage_id": "event_state",
+                        "implementation": "score_event_state",
+                        "options": {"activation_frames": 2},
+                    },
+                    {
+                        "stage_id": "trigger",
+                        "implementation": "score_trigger",
+                    },
+                ],
+            },
+        })
+        score = MotionQualificationResult(
+            accepted=True,
+            score=0.8,
+            threshold=0.48,
+            reason="qualified",
+            frame_count=9,
+            features={},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+
+            candidate = worker._with_source_evidence(score, 9.0, 10.0)
+            active = worker._with_source_evidence(score, 10.0, 11.0)
+
+        self.assertFalse(candidate.accepted)
+        self.assertEqual(candidate.reason, "event_state_candidate")
+        self.assertTrue(active.accepted)
+        self.assertEqual(active.reason, "qualified")
 
     def test_motion_event_runs_detection_on_live_fallback(self) -> None:
         camera = CameraConfig(
