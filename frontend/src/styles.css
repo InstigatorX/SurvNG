@@ -2828,6 +2828,147 @@ button.status-pill.hud-toggle:disabled {
   font-size: 15px;
 }
 
+.motion-decision-editor {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.motion-decision-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.motion-decision-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.motion-decision-heading strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.motion-decision-heading span,
+.motion-decision-sources small,
+.motion-decision-fine-tuning p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.motion-decision-heading label {
+  min-width: min(260px, 45%);
+}
+
+.motion-decision-status {
+  align-self: start;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--ink) !important;
+  font-weight: 760;
+  padding: 4px 8px;
+}
+
+.motion-decision-explanation {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 9px 11px;
+}
+
+.motion-decision-explanation strong {
+  color: var(--ink);
+}
+
+.motion-decision-mode {
+  border-radius: 6px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.motion-decision-mode.mode-enforce {
+  border-left: 3px solid var(--accent);
+  color: var(--ink);
+}
+
+.motion-decision-explanation.policy-all {
+  border-left-color: var(--warning, #d98b25);
+}
+
+.motion-decision-sources {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.motion-decision-sources legend {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 760;
+  padding: 0 5px;
+}
+
+.motion-decision-sources small {
+  grid-column: 1 / -1;
+}
+
+.motion-decision-stability {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.motion-decision-fine-tuning {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.motion-decision-fine-tuning summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.motion-decision-fine-tuning p {
+  margin: 8px 0;
+}
+
+.motion-decision-fine-tuning[open] {
+  display: grid;
+  gap: 10px;
+}
+
+.motion-decision-custom {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warning, #d98b25);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.motion-decision-custom button {
+  justify-self: start;
+}
+
 .preference-action {
   display: flex;
   min-height: 38px;
@@ -5372,8 +5513,24 @@ button.status-pill.hud-toggle:disabled {
   .time-row,
   .field-row,
   .config-panels,
-  .inline-field {
+  .inline-field,
+  .motion-decision-stability,
+  .motion-decision-sources {
     grid-template-columns: 1fr;
+  }
+
+  .motion-decision-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .motion-decision-heading label {
+    min-width: 0;
+  }
+
+  .motion-decision-sources small {
+    grid-column: auto;
   }
 
   .review-toolbar {

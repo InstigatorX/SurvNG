@@ -65,6 +65,31 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(overridden.qualification[0].stage_id, "camera_qualification")
         self.assertEqual(overridden.qualification[0].options["profile"], "camera")
 
+    def test_mog2_observation_runs_when_enforced_fusion_uses_it(self) -> None:
+        graphs = resolve_motion_pipeline_graphs(
+            MotionQualificationConfig.model_validate({
+                "mode": "enforce",
+                "mog2_audit_enabled": True,
+                "pipeline": {
+                    "fusion": [
+                        {
+                            "stage_id": "evidence_fusion",
+                            "implementation": "buffered_evidence_fusion",
+                            "options": {"policy": "any", "sources": ["mog2", "onvif"]},
+                        },
+                        {
+                            "stage_id": "event_state",
+                            "implementation": "score_event_state",
+                        },
+                        {"stage_id": "trigger", "implementation": "score_trigger"},
+                    ],
+                },
+            }),
+            CameraMotionQualificationConfig(),
+        )
+
+        self.assertTrue(graphs.observation[0].options["enabled"])
+
     def test_camera_graph_cannot_explicitly_override_with_empty_list(self) -> None:
         camera_config = CameraMotionQualificationConfig.model_validate({
             "pipeline": {"qualification": []},

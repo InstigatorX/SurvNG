@@ -45,6 +45,11 @@ import {
   X,
 } from "lucide-react";
 import "./styles.css";
+import {
+  buildMotionDecisionFusion,
+  defaultMotionDecisionSettings,
+  readMotionDecisionFusion,
+} from "./motionDecisionConfig.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -3702,6 +3707,203 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
   );
 }
 
+const MOTION_DECISION_POLICIES = {
+  audit: {
+    label: "Keep current decisions (Recommended)",
+    description: "Collects extra motion evidence for review, but does not change when object detection runs.",
+  },
+  any: {
+    label: "More sensitive",
+    description: "Runs object detection when the normal motion check or either extra source sees motion.",
+  },
+  all: {
+    label: "Require agreement",
+    description: "Runs object detection only when the normal motion check and every available extra source agree.",
+  },
+  weighted: {
+    label: "Balanced combination",
+    description: "Combines the normal motion score and extra sources into one confidence score.",
+  },
+};
+
+function MotionDecisionEditor({
+  fusion,
+  mode,
+  globalMode = "audit",
+  inherited = false,
+  inheritedFusion,
+  onSetInherited,
+  onModeChange,
+  onChange,
+  cameraName,
+}) {
+  const parsed = readMotionDecisionFusion(fusion);
+  const inheritedParsed = readMotionDecisionFusion(inheritedFusion);
+  const effective = inherited ? inheritedParsed : parsed;
+  const settings = effective.settings;
+  const policy = MOTION_DECISION_POLICIES[settings.policy] || MOTION_DECISION_POLICIES.audit;
+  const effectiveMode = mode === "inherit" ? globalMode : mode;
+  const modeControl = (
+    <label>Filtering status<select value={mode} onChange={(event) => onModeChange(event.target.value)}>
+      {onSetInherited ? <option value="inherit">Use global setting</option> : null}
+      <option value="audit">Monitor only (recommended while tuning)</option>
+      <option value="enforce">Use motion decisions</option>
+      <option value="off">Turn filtering off</option>
+    </select></label>
+  );
+  const modeExplanation = effectiveMode === "enforce"
+    ? "Active: the decision below controls whether object detection runs."
+    : effectiveMode === "off"
+      ? "Off: object detection runs without motion filtering."
+      : "Preview: decisions are logged for review, but object detection continues as it does today.";
+
+  function updateSettings(patch) {
+    onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
+  }
+
+  function updateNested(key, child, value) {
+    updateSettings({ [key]: { ...settings[key], [child]: value } });
+  }
+
+  function toggleSource(source, enabled) {
+    let sources = enabled
+      ? [...new Set([...settings.sources, source])]
+      : settings.sources.filter((item) => item !== source);
+    if (settings.policy !== "audit" && sources.length === 0) sources = [source];
+    updateSettings({ sources });
+  }
+
+  if (inherited) {
+    return (
+      <div className="motion-decision-editor">
+        <div className="motion-decision-heading">
+          <div>
+            <strong>Motion decision</strong>
+            <span>{inheritedParsed.custom ? "Uses the global advanced configuration." : `Uses global setting: ${policy.label}.`}</span>
+          </div>
+          <label>Decision settings<select value="inherit" onChange={() => onSetInherited(false)}>
+            <option value="inherit">Use global setting</option>
+            <option value="camera">Customize this camera</option>
+          </select></label>
+        </div>
+        {modeControl}
+        <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+      </div>
+    );
+  }
+
+  if (parsed.custom) {
+    return (
+      <div className="motion-decision-editor motion-decision-custom">
+        <div className="motion-decision-heading">
+          <div>
+            <strong>Advanced motion pipeline</strong>
+            <span>This configuration was created outside the guided editor, so SurvNG will not overwrite it.</span>
+          </div>
+          {onSetInherited ? <label>Decision settings<select value="camera" onChange={() => onSetInherited(true)}>
+            <option value="camera">Custom advanced setting</option>
+            <option value="inherit">Use global setting</option>
+          </select></label> : null}
+        </div>
+        {modeControl}
+        <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+        <button type="button" onClick={() => onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()))}>
+          Replace with recommended settings
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="motion-decision-editor">
+      <div className="motion-decision-heading">
+        <div>
+          <strong>Motion decision</strong>
+          <span>{cameraName ? `Choose how ${cameraName} confirms motion before object detection runs.` : "Choose how SurvNG confirms motion before object detection runs."}</span>
+        </div>
+        {onSetInherited ? <label>Decision settings<select value="camera" onChange={() => onSetInherited(true)}>
+          <option value="camera">Customize this camera</option>
+          <option value="inherit">Use global setting</option>
+        </select></label> : parsed.usesDefaults ? <span className="motion-decision-status">Recommended default</span> : <span className="motion-decision-status">Customized</span>}
+      </div>
+
+      {modeControl}
+      <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+
+      <label>Decision style<select value={settings.policy} onChange={(event) => {
+        const nextPolicy = event.target.value;
+        updateSettings({
+          policy: nextPolicy,
+          sources: nextPolicy !== "audit" && settings.sources.length === 0
+            ? ["mog2", "onvif"]
+            : settings.sources,
+        });
+      }}>
+        {Object.entries(MOTION_DECISION_POLICIES).map(([value, option]) => (
+          <option key={value} value={value}>{option.label}</option>
+        ))}
+      </select></label>
+      <div className={`motion-decision-explanation policy-${settings.policy}`}>
+        <strong>{policy.label}</strong>
+        <span>{policy.description}</span>
+        {settings.policy === "all" ? <span>Use this cautiously: one source repeatedly reporting low confidence can prevent confirmation.</span> : null}
+      </div>
+
+      <fieldset className="motion-decision-sources">
+        <legend>Extra motion sources</legend>
+        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("onvif")} onChange={(event) => toggleSource("onvif", event.target.checked)} /> Camera motion signal (ONVIF)</label>
+        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("mog2")} onChange={(event) => toggleSource("mog2", event.target.checked)} /> Visual background changes</label>
+        <small>The normal SurvNG motion score is always included. Unavailable extra sources are ignored.</small>
+      </fieldset>
+
+      <div className="motion-decision-stability">
+        <label>Start after<select value={settings.activationFrames} onChange={(event) => updateSettings({ activationFrames: Number(event.target.value) })}>
+          {![1, 2, 3, 5].includes(settings.activationFrames) ? <option value={settings.activationFrames}>{settings.activationFrames} matching signals</option> : null}
+          <option value={1}>1 matching signal (immediate)</option>
+          <option value={2}>2 matching signals</option>
+          <option value={3}>3 matching signals</option>
+          <option value={5}>5 matching signals</option>
+        </select></label>
+        <label>End after<select value={settings.releaseFrames} onChange={(event) => updateSettings({ releaseFrames: Number(event.target.value) })}>
+          {![1, 2, 3, 5].includes(settings.releaseFrames) ? <option value={settings.releaseFrames}>{settings.releaseFrames} quiet signals</option> : null}
+          <option value={1}>1 quiet signal (immediate)</option>
+          <option value={2}>2 quiet signals</option>
+          <option value={3}>3 quiet signals</option>
+          <option value={5}>5 quiet signals</option>
+        </select></label>
+        <label>Pause after an event<select value={settings.cooldownSeconds} onChange={(event) => updateSettings({ cooldownSeconds: Number(event.target.value) })}>
+          {![0, 1, 2, 5, 10].includes(settings.cooldownSeconds) ? <option value={settings.cooldownSeconds}>{settings.cooldownSeconds} seconds</option> : null}
+          <option value={0}>No pause</option>
+          <option value={1}>1 second</option>
+          <option value={2}>2 seconds</option>
+          <option value={5}>5 seconds</option>
+          <option value={10}>10 seconds</option>
+        </select></label>
+      </div>
+
+      <details className="motion-decision-fine-tuning">
+        <summary>Fine tuning</summary>
+        <p>These values are already set to safe defaults. Change them only when reviewing motion audit results.</p>
+        {(settings.policy === "any" || settings.policy === "all") ? (
+          <div className="field-row">
+            <label>Camera signal confidence<input type="number" min="0" max="1" step="0.05" value={settings.sourceThresholds.onvif} onChange={(event) => updateNested("sourceThresholds", "onvif", Number(event.target.value))} /></label>
+            <label>Visual change confidence<input type="number" min="0" max="1" step="0.05" value={settings.sourceThresholds.mog2} onChange={(event) => updateNested("sourceThresholds", "mog2", Number(event.target.value))} /></label>
+          </div>
+        ) : null}
+        {settings.policy === "weighted" ? (
+          <div className="field-row">
+            <label>Normal motion importance<input type="number" min="0" max="10" step="0.25" value={settings.sourceWeights.primary} onChange={(event) => updateNested("sourceWeights", "primary", Number(event.target.value))} /></label>
+            <label>Camera signal importance<input type="number" min="0" max="10" step="0.25" value={settings.sourceWeights.onvif} onChange={(event) => updateNested("sourceWeights", "onvif", Number(event.target.value))} /></label>
+            <label>Visual change importance<input type="number" min="0" max="10" step="0.25" value={settings.sourceWeights.mog2} onChange={(event) => updateNested("sourceWeights", "mog2", Number(event.target.value))} /></label>
+            <label>Combined confidence needed<input type="number" min="0" max="1" step="0.05" value={settings.weightedThreshold} onChange={(event) => updateSettings({ weightedThreshold: Number(event.target.value) })} /></label>
+          </div>
+        ) : null}
+        <label>Forget an unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
+      </details>
+    </div>
+  );
+}
+
 function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
@@ -4286,13 +4488,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   <label>Password<input type="password" value={selectedCamera.onvif?.password || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
                 </div>
                 <div className="sub-panel">
-                  <h3>Motion Qualification</h3>
-                  <label>Mode<select value={selectedCamera.motion_qualification?.mode || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], event.target.value)}>
-                    <option value="inherit">Use global setting</option>
-                    <option value="off">Off</option>
-                    <option value="audit">Audit</option>
-                    <option value="enforce">Enforce</option>
-                  </select></label>
+                  <h3>Motion Filtering</h3>
                   <label>Sensitivity<select value={selectedCamera.motion_qualification?.sensitivity || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "sensitivity"], event.target.value)}>
                     <option value="inherit">Use global setting</option>
                     <option value="high">High</option>
@@ -4313,12 +4509,38 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                     <option value="false">Disabled</option>
                   </select></label>
                   <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" placeholder="Global" value={selectedCamera.motion_qualification?.borderline_margin ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_margin"], event.target.value === "" ? null : Number(event.target.value))} /></label>
-                  <label>MOG2 Audit<select value={selectedCamera.motion_qualification?.mog2_audit_enabled == null ? "" : String(selectedCamera.motion_qualification.mog2_audit_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
+                  <label>Visual Background Analysis<select value={selectedCamera.motion_qualification?.mog2_audit_enabled == null ? "" : String(selectedCamera.motion_qualification.mog2_audit_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
                     <option value="">Use global setting</option>
                     <option value="true">Enabled</option>
                     <option value="false">Disabled</option>
                   </select></label>
                 </div>
+              </div>
+
+              <div className="sub-panel">
+                <MotionDecisionEditor
+                  cameraName={selectedCamera.name}
+                  fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
+                  mode={selectedCamera.motion_qualification?.mode || "inherit"}
+                  globalMode={config.motion_qualification?.mode || "audit"}
+                  inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
+                  inheritedFusion={config.motion_qualification?.pipeline?.fusion}
+                  onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
+                  onSetInherited={(shouldInherit) => {
+                    const pipeline = { ...(selectedCamera.motion_qualification?.pipeline || {}) };
+                    pipeline.fusion = shouldInherit
+                      ? null
+                      : buildMotionDecisionFusion(
+                        readMotionDecisionFusion(config.motion_qualification?.pipeline?.fusion).settings,
+                      );
+                    updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], pipeline);
+                  }}
+                  onChange={(fusion) => updateCamera(
+                    selectedCamera.id,
+                    ["motion_qualification", "pipeline"],
+                    { ...(selectedCamera.motion_qualification?.pipeline || {}), fusion },
+                  )}
+                />
               </div>
 
               <ZoneEditor
@@ -4941,9 +5163,8 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
           <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
         </div>
-        <h3>Motion Qualification</h3>
+        <h3>Motion Filtering</h3>
         <div className="field-row">
-          <label>Mode<select value={config.motion_qualification?.mode || "audit"} onChange={(event) => updateConfig(["motion_qualification", "mode"], event.target.value)}><option value="off">Off</option><option value="audit">Audit</option><option value="enforce">Enforce</option></select></label>
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
@@ -4953,9 +5174,18 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Rejected Sample Rate<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.rejected_sample_rate ?? 0.05} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))} /></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
           <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> MOG2 + blob tracking audit</label>
-          <label>MOG2 History Seconds<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} /></label>
+          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> Analyze visual background changes</label>
+          <label>Background Learning Time (seconds)<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} /></label>
         </div>
+        <MotionDecisionEditor
+          fusion={config.motion_qualification?.pipeline?.fusion}
+          mode={config.motion_qualification?.mode || "audit"}
+          onModeChange={(mode) => updateConfig(["motion_qualification", "mode"], mode)}
+          onChange={(fusion) => updateConfig(
+            ["motion_qualification", "pipeline"],
+            { ...(config.motion_qualification?.pipeline || {}), fusion },
+          )}
+        />
         <h3>AI Audit Advisor</h3>
         <div className="field-row">
           <label className="check-field"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /> Enable AI advisor</label>

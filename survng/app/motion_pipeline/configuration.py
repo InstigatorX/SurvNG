@@ -49,6 +49,21 @@ def _resolve_graph(
     return tuple(defaults), "default"
 
 
+def _fusion_uses_mog2_for_decisions(fusion: tuple[MotionStageConfig, ...]) -> bool:
+    for stage in fusion:
+        if stage.implementation != "buffered_evidence_fusion":
+            continue
+        policy = str(stage.options.get("policy", "audit")).strip().lower()
+        sources = stage.options.get("sources", [])
+        if (
+            policy != "audit"
+            and isinstance(sources, (list, tuple))
+            and "mog2" in sources
+        ):
+            return True
+    return False
+
+
 def resolve_motion_pipeline_graphs(
     global_config: MotionQualificationConfig,
     camera_config: CameraMotionQualificationConfig,
@@ -65,21 +80,26 @@ def resolve_motion_pipeline_graphs(
         camera_config.pipeline.qualification,
         default_motion_stage_configs(),
     )
-    observation, observation_origin = _resolve_graph(
-        "observation",
-        global_config.pipeline.observation,
-        camera_config.pipeline.observation,
-        default_motion_observation_stage_configs(
-            mog2_enabled=bool(mog2_requested and mode == "audit"),
-            sample_fps=global_config.sample_fps,
-            mog2_history_seconds=global_config.mog2_history_seconds,
-        ),
-    )
     fusion, fusion_origin = _resolve_graph(
         "fusion",
         global_config.pipeline.fusion,
         camera_config.pipeline.fusion,
         default_motion_fusion_stage_configs(),
+    )
+    mog2_enabled = bool(
+        mog2_requested
+        and mode != "off"
+        and (mode == "audit" or _fusion_uses_mog2_for_decisions(fusion))
+    )
+    observation, observation_origin = _resolve_graph(
+        "observation",
+        global_config.pipeline.observation,
+        camera_config.pipeline.observation,
+        default_motion_observation_stage_configs(
+            mog2_enabled=mog2_enabled,
+            sample_fps=global_config.sample_fps,
+            mog2_history_seconds=global_config.mog2_history_seconds,
+        ),
     )
     return ResolvedMotionPipelineGraphs(
         qualification=qualification,

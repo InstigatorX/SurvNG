@@ -250,6 +250,8 @@ Set `motion_qualification.mode` to `off`, `audit`, or `enforce`. Audit mode is t
 
 The built-in fusion policy is observational and preserves existing decisions. Configured final graphs may select `any`, `all`, or weighted source consensus and add activation/release hysteresis or cooldown; incomplete graphs are rejected before config is saved.
 
+Use the guided **Motion decision** panel under **Config > Detection** to choose a global policy without editing stage graphs. Each camera also has a Motion decision panel that either inherits the global policy or creates a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
+
 MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. The default audit fusion records both sources without changing trigger decisions.
 
 ## Face Recognition
