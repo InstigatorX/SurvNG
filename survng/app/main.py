@@ -1784,6 +1784,38 @@ def motion_test(camera_id: str) -> dict:
     return {"ok": True}
 
 
+@app.get("/api/cameras/{camera_id}/motion-debug")
+def motion_debug_status(camera_id: str) -> dict:
+    worker = manager.workers.get(camera_id)
+    if worker is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    return worker.motion_debug_status()
+
+
+@app.put("/api/cameras/{camera_id}/motion-debug")
+def set_motion_debug(camera_id: str, state: CameraFeatureState) -> dict:
+    worker = manager.workers.get(camera_id)
+    if worker is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    worker.set_motion_debug_enabled(state.enabled)
+    return worker.motion_debug_status()
+
+
+@app.get("/api/cameras/{camera_id}/motion-debug/{layer}.jpg")
+def motion_debug_image(camera_id: str, layer: str) -> Response:
+    worker = manager.workers.get(camera_id)
+    if worker is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    image = worker.motion_debug_image(layer)
+    if image is None:
+        raise HTTPException(status_code=404, detail="motion debug layer not available")
+    return Response(
+        content=image,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/cameras/{camera_id}/recording/start")
 def start_recording(camera_id: str, source: str = "main") -> dict:
     if not manager.set_recording(camera_id, True):

@@ -19,6 +19,7 @@ from .motion import MotionQualificationResult
 from .motion_pipeline import (
     MotionContext,
     MotionDecisionHandlerFactory,
+    MotionDebugSnapshotStore,
     MotionEvidenceRepository,
     MotionPipeline,
     MotionScoring,
@@ -63,6 +64,8 @@ class CameraWorker:
         self.motion_fusion_pipeline = motion_fusion_pipeline
         self.motion_evidence = motion_evidence
         self.motion_pipeline_origins = dict(motion_pipeline_origins)
+        self.motion_debug = MotionDebugSnapshotStore()
+        self._motion_debug_last_run = 0.0
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
@@ -263,6 +266,7 @@ class CameraWorker:
                 "pipeline": self.motion_pipeline.status(),
                 "observation_pipeline": self.motion_observation_pipeline.status(),
                 "fusion_pipeline": self.motion_fusion_pipeline.status(),
+                "debug": self.motion_debug.status(),
             },
         }
 
@@ -378,6 +382,20 @@ class CameraWorker:
             runtime=self.motion_observation_pipeline.runtime,
         )
         self.motion_observation_pipeline.process(observation)
+        if self.motion_debug.enabled() and frame_clock - self._motion_debug_last_run >= 1.0:
+            self._motion_debug_last_run = frame_clock
+            self._capture_motion_debug(captured_at)
+
+    def _capture_motion_debug(self, captured_at: float) -> None:
+        with self._frame_lock:
+            frames = [frame.copy() for _timestamp, frame in self._motion_frames]
+        if len(frames) < 2:
+            return
+        _mode, sensitivity, _frame_width = self._motion_settings()
+        try:
+            self._run_motion_pipeline(frames, sensitivity, captured_at)
+        except Exception as error:
+            LOGGER.debug("motion debug capture failed for %s: %s", self.camera.id, error)
 
     def _observe_motion_event(
         self,
@@ -609,7 +627,9 @@ class CameraWorker:
             },
             runtime=self.motion_pipeline.runtime,
         )
-        result = self.motion_pipeline.process(context).scoring
+        processed = self.motion_pipeline.process(context)
+        self.motion_debug.capture(processed)
+        result = processed.scoring
         return MotionQualificationResult(
             accepted=result.accepted,
             score=result.score,
@@ -618,6 +638,15 @@ class CameraWorker:
             frame_count=result.frame_count,
             features=dict(result.features),
         )
+
+    def set_motion_debug_enabled(self, enabled: bool) -> None:
+        self.motion_debug.set_enabled(enabled)
+
+    def motion_debug_status(self) -> dict[str, Any]:
+        return self.motion_debug.status()
+
+    def motion_debug_image(self, layer: str) -> bytes | None:
+        return self.motion_debug.image(layer)
 
     def _run_motion_events(self) -> None:
         while not self._stop.is_set():

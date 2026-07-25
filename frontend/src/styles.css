@@ -3822,6 +3822,92 @@ button.status-pill.hud-toggle:disabled {
   opacity: 0.65;
 }
 
+.motion-debug-viewer {
+  gap: 12px;
+}
+
+.motion-debug-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.motion-debug-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.motion-debug-heading span,
+.motion-debug-waiting {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.motion-debug-heading button {
+  flex: 0 0 auto;
+}
+
+.motion-debug-waiting {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 7px;
+  background: var(--control-muted);
+  padding: 10px;
+}
+
+.motion-debug-content {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(210px, 1fr);
+  gap: 12px;
+}
+
+.motion-debug-image-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.motion-debug-image-panel img {
+  display: block;
+  width: 100%;
+  min-height: 180px;
+  max-height: 520px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #050707;
+  object-fit: contain;
+}
+
+.motion-debug-details {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px;
+}
+
+.motion-debug-details > strong,
+.motion-debug-details summary {
+  color: var(--ink);
+}
+
+.motion-debug-details summary {
+  cursor: pointer;
+  font-weight: 760;
+}
+
+.motion-debug-details details span {
+  display: block;
+  padding-top: 5px;
+}
+
 .log-panel {
   min-height: min(760px, calc(100vh - 132px));
 }
@@ -5691,6 +5777,19 @@ button.status-pill.hud-toggle:disabled {
     align-items: stretch;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .motion-debug-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .motion-debug-heading button {
+    width: 100%;
+  }
+
+  .motion-debug-content {
+    grid-template-columns: 1fr;
   }
 
   .motion-decision-heading label {

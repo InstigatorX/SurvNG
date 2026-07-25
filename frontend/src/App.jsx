@@ -4647,6 +4647,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
               />
 
               <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} motionCatalog={motionCatalog} />
+              <MotionDebugViewer cameraId={selectedCamera.id} timeZone={timeZone} />
               {probe ? <ProbeResult probe={probe} /> : null}
             </>
           ) : (
@@ -5401,6 +5402,122 @@ function MotionPipelineRuntimeCard({ label, pipeline, origin, motionCatalog }) {
           })}
         </div>
       </details>
+    </div>
+  );
+}
+
+function MotionDebugViewer({ cameraId, timeZone }) {
+  const [status, setStatus] = useState(null);
+  const [selectedLayer, setSelectedLayer] = useState("overlay");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const ownedRef = useRef(false);
+
+  async function loadStatus(renew = false) {
+    const response = await fetch(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug`, renew ? {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    } : undefined);
+    if (!response.ok) throw new Error("Could not load motion diagnostics");
+    const payload = await response.json();
+    setStatus(payload);
+    const layers = payload.snapshot?.layers || [];
+    if (layers.length && !layers.some((layer) => layer.id === selectedLayer)) {
+      setSelectedLayer(layers[0].id);
+    }
+    return payload;
+  }
+
+  useEffect(() => {
+    let active = true;
+    setStatus(null);
+    setError("");
+    fetch(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Could not load motion diagnostics")))
+      .then((payload) => { if (active) setStatus(payload); })
+      .catch((loadError) => { if (active) setError(loadError.message); });
+    return () => {
+      active = false;
+      if (ownedRef.current) {
+        fetch(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: false }),
+          keepalive: true,
+        }).catch(() => {});
+        ownedRef.current = false;
+      }
+    };
+  }, [cameraId]);
+
+  useEffect(() => {
+    if (!status?.enabled) return undefined;
+    const timer = window.setInterval(() => {
+      loadStatus(ownedRef.current && Number(status.expires_in_seconds || 0) < 70).catch((loadError) => setError(loadError.message));
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [cameraId, status?.enabled, status?.expires_in_seconds]);
+
+  async function setEnabled(enabled) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!response.ok) throw new Error("Could not update motion diagnostics");
+      ownedRef.current = enabled;
+      setStatus(await response.json());
+    } catch (updateError) {
+      setError(updateError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const snapshot = status?.snapshot;
+  const layers = snapshot?.layers || [];
+  const imageUrl = snapshot && selectedLayer
+    ? appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug/${encodeURIComponent(selectedLayer)}.jpg?t=${snapshot.captured_at}`)
+    : "";
+  return (
+    <div className="sub-panel motion-debug-viewer">
+      <div className="motion-debug-heading">
+        <div>
+          <h3>Motion Diagnostics</h3>
+          <span>See what each processing step sees. Runs only for this camera and expires automatically.</span>
+        </div>
+        <button type="button" className={status?.enabled ? "danger" : ""} disabled={busy} onClick={() => setEnabled(!status?.enabled)}>
+          {busy ? <RefreshCcw className="spin" size={15} /> : <Activity size={15} />}
+          {status?.enabled ? "Stop Diagnostics" : "Start Diagnostics"}
+        </button>
+      </div>
+      {error ? <div className="motion-analysis-warning">{error}</div> : null}
+      {status?.enabled && !snapshot ? <div className="motion-debug-waiting"><RefreshCcw className="spin" size={16} /> Collecting the first diagnostic frame...</div> : null}
+      {snapshot ? (
+        <div className="motion-debug-content">
+          <div className="motion-debug-image-panel">
+            <label>Diagnostic view<select value={selectedLayer} onChange={(event) => setSelectedLayer(event.target.value)}>
+              {layers.map((layer) => <option key={layer.id} value={layer.id}>{layer.label}</option>)}
+            </select></label>
+            {imageUrl ? <img src={imageUrl} alt={layers.find((layer) => layer.id === selectedLayer)?.label || "Motion diagnostic"} /> : null}
+          </div>
+          <div className="motion-debug-details">
+            <strong>{snapshot.accepted ? "Motion accepted" : "Motion not accepted"}</strong>
+            <span>{Math.round(Number(snapshot.score || 0) * 100)}% score · {Math.round(Number(snapshot.threshold || 0) * 100)}% needed</span>
+            <span>{snapshot.frame_count || 0} frames · {snapshot.blob_count || 0} regions · {snapshot.track_points || 0} tracked points</span>
+            <span>{snapshot.reason || "No reason reported"}</span>
+            <span>{formatDateTime(new Date(Number(snapshot.captured_at) * 1000).toISOString(), timeZone)}</span>
+            <details>
+              <summary>Stage timing</summary>
+              {Object.entries(snapshot.timings || {}).map(([stage, milliseconds]) => <span key={stage}>{stage}: {Number(milliseconds).toFixed(2)} ms</span>)}
+            </details>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

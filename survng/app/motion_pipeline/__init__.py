@@ -29,6 +29,7 @@ from .decision_handler import (
     MotionDecisionHandlerFactory,
     MotionDecisionOutcome,
 )
+from .debug import MotionDebugSnapshot, MotionDebugSnapshotStore
 from .decision_stages import (
     MotionEventStateStage,
     ObjectDetectionTriggerStage,
@@ -106,6 +107,8 @@ __all__ = [
     "MotionBlob",
     "MotionContext",
     "MotionDebugData",
+    "MotionDebugSnapshot",
+    "MotionDebugSnapshotStore",
     "MotionDecisionHandler",
     "MotionDecisionHandlerFactory",
     "MotionDecisionOutcome",

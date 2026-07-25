@@ -256,6 +256,8 @@ The adjacent **Motion analysis method** selector is populated from the runtime s
 
 Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. The built-in MOG2 and ONVIF observation sources use the `evidence_sources` parallel group.
 
+Camera Settings also includes an on-demand **Motion Diagnostics** viewer for the original and processed frame, difference image, threshold and cleaned masks, blob/track overlay, decision score, and stage timings. Diagnostics are limited to one selected camera and one capture per second, retain only the latest encoded snapshot in memory, stop when the viewer closes, and expire automatically if the browser disconnects.
+
 MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. The default audit fusion records both sources without changing trigger decisions.
 
 ## Face Recognition
