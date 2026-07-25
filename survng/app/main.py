@@ -37,7 +37,7 @@ import numpy as np
 from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
 from .detector import objects_to_json
-from .manager import AppManager
+from .manager import AppManager, validate_motion_pipeline_configuration
 from .go2rtc import Go2RtcError
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
@@ -903,6 +903,10 @@ def system_status() -> dict:
 
 @app.put("/api/config")
 def put_config(next_config: AppConfig) -> dict:
+    try:
+        validate_motion_pipeline_configuration(next_config)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     save_config(next_config)
     reload_manager(next_config)
     return {"ok": True, "cameras": len(next_config.cameras)}
@@ -970,6 +974,10 @@ def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
         next_config.cameras.append(camera_settings)
     else:
         next_config.cameras[existing_index] = camera_settings
+    try:
+        validate_motion_pipeline_configuration(next_config)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     save_config(next_config, assign_ids=False)
     reload_manager(next_config)
     return {"ok": True, "camera": camera_settings.model_dump(mode="json")}

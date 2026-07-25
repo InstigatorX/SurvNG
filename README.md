@@ -246,7 +246,7 @@ The detector is optional. If OpenVINO or the model is missing, the app records a
 
 SurvNG can qualify noisy ONVIF motion before starting the recorded-frame OpenVINO cycle. It reuses a small grayscale ring from the existing live/substream connection, coalesces bursts of ONVIF messages, and scores temporal persistence, component continuity, area stability, edge position, fragmentation, and global image changes.
 
-Set `motion_qualification.mode` to `off`, `audit`, or `enforce`. Audit mode is the default: it records pass/suppress telemetry but never suppresses a coalesced motion burst. Enforce mode suppresses only rejected motion bursts; semantic ONVIF topics such as person, vehicle, animal, and manual triggers bypass the filter. Each camera can inherit or override the global mode and sensitivity.
+Set `motion_qualification.mode` to `off`, `audit`, or `enforce`. Audit mode is the default: it records pass/suppress telemetry but never suppresses a coalesced motion burst. Enforce mode suppresses only rejected motion bursts; semantic ONVIF topics such as person, vehicle, animal, and manual triggers bypass the filter. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
 ## Face Recognition
 

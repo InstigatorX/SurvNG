@@ -62,4 +62,12 @@ class MotionPipelineFactory:
             stages=stages,
             observer=self.observer,
             error_policy=error_policy,
+            stage_configuration=[
+                {
+                    "stage_id": stage.stage_id,
+                    "implementation": stage.implementation,
+                    "options": dict(stage.options),
+                }
+                for stage in stage_configs
+            ],
         )

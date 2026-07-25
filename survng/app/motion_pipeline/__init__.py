@@ -13,6 +13,12 @@ from .context import (
     TriggerDecision,
 )
 from .contracts import MotionPipelineObserver, MotionStage
+from .configuration import ResolvedMotionPipelineGraphs, resolve_motion_pipeline_graphs
+from .defaults import (
+    default_motion_fusion_stage_configs as motion_fusion_stage_configs,
+    default_motion_observation_stage_configs as motion_observation_stage_configs,
+    default_motion_stage_configs,
+)
 from .decision_handler import (
     MotionDecisionHandler,
     MotionDecisionHandlerFactory,
@@ -66,69 +72,6 @@ def build_legacy_motion_pipeline(camera_id: str) -> MotionPipeline:
     )
 
 
-def default_motion_stage_configs() -> list[MotionStageConfig]:
-    return [
-        MotionStageConfig(stage_id="preprocess", implementation="gray_blur"),
-        MotionStageConfig(stage_id="difference", implementation="frame_difference"),
-        MotionStageConfig(
-            stage_id="threshold",
-            implementation="fixed_threshold",
-            options={"value": 18},
-        ),
-        MotionStageConfig(
-            stage_id="morphology",
-            implementation="open_close",
-            options={"kernel_size": 3, "close_iterations": 2},
-        ),
-        MotionStageConfig(stage_id="blob_extract", implementation="contour_blobs"),
-        MotionStageConfig(
-            stage_id="blob_filter",
-            implementation="minimum_area",
-            options={"minimum_area_ratio": 0.0003},
-        ),
-        MotionStageConfig(
-            stage_id="tracking",
-            implementation="dominant_centroid",
-            options={
-                "minimum_active_area_ratio": 0.0008,
-                "minimum_changed_ratio": 0.003,
-            },
-        ),
-        MotionStageConfig(stage_id="scoring", implementation="default_motion_score"),
-        MotionStageConfig(stage_id="event_state", implementation="score_event_state"),
-        MotionStageConfig(stage_id="trigger", implementation="score_trigger"),
-    ]
-
-
-def motion_observation_stage_configs(
-    *,
-    mog2_enabled: bool,
-    sample_fps: float,
-    mog2_history_seconds: float,
-) -> list[MotionStageConfig]:
-    return [
-        MotionStageConfig(
-            stage_id="mog2_source",
-            implementation="opencv_mog2_evidence",
-            options={
-                "enabled": mog2_enabled,
-                "sample_fps": sample_fps,
-                "history_seconds": mog2_history_seconds,
-            },
-        )
-    ]
-
-
-def motion_fusion_stage_configs() -> list[MotionStageConfig]:
-    return [
-        MotionStageConfig(
-            stage_id="evidence_fusion",
-            implementation="buffered_evidence_fusion",
-            options={"sources": ["mog2"]},
-        )
-    ]
-
-
 def build_default_motion_pipeline(camera_id: str) -> MotionPipeline:
     factory = MotionPipelineFactory(
         build_builtin_motion_registry(),
@@ -175,6 +118,7 @@ __all__ = [
     "ObjectDetectionTriggerStage",
     "RecordedMotionObjectDetector",
     "RecordedMotionObjectDetectorFactory",
+    "ResolvedMotionPipelineGraphs",
     "FixedThresholdStage",
     "FrameDifferenceStage",
     "StageTiming",
@@ -189,4 +133,5 @@ __all__ = [
     "register_legacy_motion_stage",
     "register_image_motion_stages",
     "register_evidence_stages",
+    "resolve_motion_pipeline_graphs",
 ]

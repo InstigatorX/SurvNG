@@ -523,7 +523,12 @@ Global motion qualification:
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
     "mog2_audit_enabled": true,
-    "mog2_history_seconds": 30.0
+    "mog2_history_seconds": 30.0,
+    "pipeline": {
+      "qualification": [],
+      "observation": [],
+      "fusion": []
+    }
   }
 }
 ```
@@ -539,10 +544,44 @@ Per-camera override:
     "frame_width": null,
     "borderline_rescue_enabled": null,
     "borderline_margin": null,
-    "mog2_audit_enabled": null
+    "mog2_audit_enabled": null,
+    "pipeline": {
+      "qualification": null,
+      "observation": null,
+      "fusion": null
+    }
   }
 }
 ```
+
+Empty global pipeline lists select SurvNG's built-in graphs. A `null`
+per-camera graph inherits the global graph; a non-empty per-camera list
+replaces that graph for only that camera. Each configured item contains a
+stable stage ID, a registered implementation name, and implementation-specific
+options. For example, this swaps one camera back to the parity qualifier
+without changing application code:
+
+```json
+{
+  "motion_qualification": {
+    "pipeline": {
+      "qualification": [
+        {
+          "stage_id": "qualification",
+          "implementation": "legacy_qualifier",
+          "options": {}
+        }
+      ]
+    }
+  }
+}
+```
+
+Configured graphs are checked for non-empty names, duplicate IDs, registered
+implementations, and artifact ordering before config is saved or workers are
+stopped. Camera status reports the resolved implementation, options, and
+whether each graph came from built-in defaults, global config, or a camera
+override.
 
 AI audit advisor:
 

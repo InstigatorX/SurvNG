@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from .context import MotionContext, StageTiming
 from .contracts import MotionPipelineObserver, MotionStage, NullMotionPipelineObserver
@@ -70,6 +70,7 @@ class MotionPipeline:
         stages: Sequence[MotionStage],
         observer: MotionPipelineObserver | None = None,
         error_policy: MotionErrorPolicy = "raise",
+        stage_configuration: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         if not stages:
             raise ValueError("motion pipeline requires at least one stage")
@@ -83,6 +84,7 @@ class MotionPipeline:
         self.runtime = MotionRuntimeState(camera_id=camera_id)
         self.observer = observer or NullMotionPipelineObserver()
         self.error_policy = error_policy
+        self.stage_configuration = tuple(dict(item) for item in stage_configuration)
         self._metrics = {stage.stage_id: _StageMetrics() for stage in self.stages}
         self._metrics_lock = threading.Lock()
 
@@ -135,5 +137,6 @@ class MotionPipeline:
             "camera_id": self.camera_id,
             "runtime_generation": self.runtime.generation,
             "error_policy": self.error_policy,
+            "configuration": [dict(item) for item in self.stage_configuration],
             "stages": stages,
         }

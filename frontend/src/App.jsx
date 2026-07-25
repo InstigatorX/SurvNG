@@ -825,6 +825,7 @@ function defaultCamera(cameras, seed = {}) {
       borderline_rescue_enabled: seed.motion_qualification?.borderline_rescue_enabled ?? null,
       borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
       mog2_audit_enabled: seed.motion_qualification?.mog2_audit_enabled ?? null,
+      pipeline: structuredClone(seed.motion_qualification?.pipeline || {}),
     },
     zones: structuredClone(seed.zones || []),
     onvif: {

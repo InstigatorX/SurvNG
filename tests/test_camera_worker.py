@@ -22,9 +22,7 @@ from survng.app.motion_pipeline import (
     MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
-    default_motion_stage_configs,
-    motion_fusion_stage_configs,
-    motion_observation_stage_configs,
+    resolve_motion_pipeline_graphs,
 )
 
 
@@ -69,12 +67,7 @@ def make_worker(
     recording_provider = recorder or DummyRecorder()
     effective_config = motion_config or MotionQualificationConfig()
     override = camera.motion_qualification
-    mode = effective_config.mode if override.mode == "inherit" else override.mode
-    mog2_requested = (
-        effective_config.mog2_audit_enabled
-        if override.mog2_audit_enabled is None
-        else override.mog2_audit_enabled
-    )
+    graphs = resolve_motion_pipeline_graphs(effective_config, override)
     evidence = MotionEvidenceRepository(camera.id)
     factory = MotionPipelineFactory(
         build_builtin_motion_registry(),
@@ -87,21 +80,18 @@ def make_worker(
         storage_dir,
         motion_config,
         event_callback,
-        motion_pipeline=factory.create(camera.id, default_motion_stage_configs()),
+        motion_pipeline=factory.create(camera.id, graphs.qualification),
         motion_observation_pipeline=factory.create(
             camera.id,
-            motion_observation_stage_configs(
-                mog2_enabled=bool(mog2_requested and mode == "audit"),
-                sample_fps=effective_config.sample_fps,
-                mog2_history_seconds=effective_config.mog2_history_seconds,
-            ),
+            graphs.observation,
         ),
         motion_fusion_pipeline=factory.create(
             camera.id,
-            motion_fusion_stage_configs(),
+            graphs.fusion,
             initial_artifacts={"scoring"},
         ),
         motion_evidence=evidence,
+        motion_pipeline_origins=graphs.origins,
         motion_decision_handler_factory=MotionDecisionHandlerFactory(
             events=event_store,
             object_serializer=objects_to_json,

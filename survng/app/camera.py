@@ -50,6 +50,7 @@ class CameraWorker:
         motion_observation_pipeline: MotionPipeline,
         motion_fusion_pipeline: MotionPipeline,
         motion_evidence: MotionEvidenceRepository,
+        motion_pipeline_origins: dict[str, str],
         motion_decision_handler_factory: MotionDecisionHandlerFactory,
         motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
     ) -> None:
@@ -61,6 +62,7 @@ class CameraWorker:
         self.motion_observation_pipeline = motion_observation_pipeline
         self.motion_fusion_pipeline = motion_fusion_pipeline
         self.motion_evidence = motion_evidence
+        self.motion_pipeline_origins = dict(motion_pipeline_origins)
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
@@ -249,6 +251,7 @@ class CameraWorker:
                 "mog2_history_seconds": self.motion_config.mog2_history_seconds,
                 "mog2_last": mog2_status.get("last"),
                 "evidence_sources": evidence_status,
+                "pipeline_origins": dict(self.motion_pipeline_origins),
                 "queue_depth": self._motion_queue.qsize(),
                 "buffered_frames": motion_buffered_frames,
                 "frame_shape": motion_frame_shape,

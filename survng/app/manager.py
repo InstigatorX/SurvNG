@@ -7,7 +7,12 @@ import time
 from pathlib import Path
 
 from .camera import CameraWorker
-from .config import AppConfig, CameraConfig, DetectionZone
+from .config import (
+    AppConfig,
+    CameraConfig,
+    CameraMotionQualificationConfig,
+    DetectionZone,
+)
 from .events import EventStore
 from .faces import FaceStore
 from .detector import objects_to_json
@@ -23,9 +28,7 @@ from .motion_pipeline import (
     MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
-    default_motion_stage_configs,
-    motion_fusion_stage_configs,
-    motion_observation_stage_configs,
+    resolve_motion_pipeline_graphs,
 )
 from .recorder import Recorder
 from .state_events import StateEventBroker
@@ -34,8 +37,41 @@ from .state_events import StateEventBroker
 LOGGER = logging.getLogger("uvicorn.error")
 
 
+def validate_motion_pipeline_configuration(config: AppConfig) -> None:
+    registry = build_builtin_motion_registry()
+    targets = [("global", CameraMotionQualificationConfig())] + [
+        (camera.id, camera.motion_qualification)
+        for camera in config.cameras
+    ]
+    for camera_id, camera_config in targets:
+        evidence = MotionEvidenceRepository(camera_id)
+        factory = MotionPipelineFactory(
+            registry=registry,
+            dependencies=MotionStageDependencies(
+                services={EVIDENCE_REPOSITORY_SERVICE: evidence},
+            ),
+        )
+        try:
+            graphs = resolve_motion_pipeline_graphs(
+                config.motion_qualification,
+                camera_config,
+            )
+            factory.create(camera_id, graphs.qualification)
+            factory.create(camera_id, graphs.observation)
+            factory.create(
+                camera_id,
+                graphs.fusion,
+                initial_artifacts={"scoring"},
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"invalid motion pipeline for camera {camera_id!r}: {error}"
+            ) from error
+
+
 class AppManager:
     def __init__(self, config: AppConfig) -> None:
+        validate_motion_pipeline_configuration(config)
         self.config = config
         self.storage_dir = Path(config.storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -90,13 +126,7 @@ class AppManager:
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
         motion_config = self.config.motion_qualification
         override = camera.motion_qualification
-        mode = motion_config.mode if override.mode == "inherit" else override.mode
-        mog2_requested = (
-            motion_config.mog2_audit_enabled
-            if override.mog2_audit_enabled is None
-            else override.mog2_audit_enabled
-        )
-        mog2_enabled = bool(mog2_requested and mode == "audit")
+        graphs = resolve_motion_pipeline_graphs(motion_config, override)
         ring_size = max(
             12,
             round(
@@ -123,21 +153,18 @@ class AppManager:
             self.storage_dir,
             motion_config,
             self.publish_event,
-            motion_pipeline=factory.create(camera.id, default_motion_stage_configs()),
+            motion_pipeline=factory.create(camera.id, graphs.qualification),
             motion_observation_pipeline=factory.create(
                 camera.id,
-                motion_observation_stage_configs(
-                    mog2_enabled=mog2_enabled,
-                    sample_fps=motion_config.sample_fps,
-                    mog2_history_seconds=motion_config.mog2_history_seconds,
-                ),
+                graphs.observation,
             ),
             motion_fusion_pipeline=factory.create(
                 camera.id,
-                motion_fusion_stage_configs(),
+                graphs.fusion,
                 initial_artifacts={"scoring"},
             ),
             motion_evidence=evidence,
+            motion_pipeline_origins=graphs.origins,
             motion_decision_handler_factory=self.motion_decision_handler_factory,
             motion_object_detector_factory=self.motion_object_detector_factory,
         )

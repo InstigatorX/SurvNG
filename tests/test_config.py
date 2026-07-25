@@ -40,6 +40,10 @@ class AppConfigTest(unittest.TestCase):
         self.assertTrue(config.motion_qualification.mog2_audit_enabled)
         self.assertEqual(config.motion_qualification.mog2_history_seconds, 30.0)
         self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
+        self.assertEqual(config.motion_qualification.pipeline.qualification, [])
+        self.assertIsNone(
+            config.cameras[0].motion_qualification.pipeline.qualification
+        )
 
 
 if __name__ == "__main__":

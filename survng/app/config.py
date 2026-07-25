@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -66,6 +66,65 @@ class AuditAiConfig(BaseModel):
     allow_apply_recommendations: bool = False
 
 
+class MotionStageSelection(BaseModel):
+    stage_id: str
+    implementation: str
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("stage_id", "implementation", mode="before")
+    @classmethod
+    def normalize_stage_name(cls, value: object) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("motion stage name cannot be empty")
+        return normalized
+
+
+def _validate_unique_motion_stage_ids(
+    graphs: dict[str, list[MotionStageSelection] | None],
+) -> None:
+    for graph_name, stages in graphs.items():
+        if stages is None:
+            continue
+        stage_ids = [stage.stage_id for stage in stages]
+        if len(stage_ids) != len(set(stage_ids)):
+            raise ValueError(f"duplicate motion stage ID in {graph_name} graph")
+
+
+class MotionPipelineConfig(BaseModel):
+    qualification: list[MotionStageSelection] = Field(default_factory=list)
+    observation: list[MotionStageSelection] = Field(default_factory=list)
+    fusion: list[MotionStageSelection] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_stage_ids(self) -> "MotionPipelineConfig":
+        _validate_unique_motion_stage_ids(
+            {
+                "qualification": self.qualification,
+                "observation": self.observation,
+                "fusion": self.fusion,
+            }
+        )
+        return self
+
+
+class CameraMotionPipelineConfig(BaseModel):
+    qualification: list[MotionStageSelection] | None = None
+    observation: list[MotionStageSelection] | None = None
+    fusion: list[MotionStageSelection] | None = None
+
+    @model_validator(mode="after")
+    def validate_unique_stage_ids(self) -> "CameraMotionPipelineConfig":
+        _validate_unique_motion_stage_ids(
+            {
+                "qualification": self.qualification,
+                "observation": self.observation,
+                "fusion": self.fusion,
+            }
+        )
+        return self
+
+
 class MotionQualificationConfig(BaseModel):
     mode: Literal["off", "audit", "enforce"] = "audit"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
@@ -79,6 +138,7 @@ class MotionQualificationConfig(BaseModel):
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
     mog2_audit_enabled: bool = True
     mog2_history_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
+    pipeline: MotionPipelineConfig = Field(default_factory=MotionPipelineConfig)
 
 
 class CameraMotionQualificationConfig(BaseModel):
@@ -88,6 +148,7 @@ class CameraMotionQualificationConfig(BaseModel):
     borderline_rescue_enabled: bool | None = None
     borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
     mog2_audit_enabled: bool | None = None
+    pipeline: CameraMotionPipelineConfig = Field(default_factory=CameraMotionPipelineConfig)
 
 
 class CameraConfig(BaseModel):

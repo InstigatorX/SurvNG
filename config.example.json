@@ -18,7 +18,12 @@
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
     "mog2_audit_enabled": true,
-    "mog2_history_seconds": 30.0
+    "mog2_history_seconds": 30.0,
+    "pipeline": {
+      "qualification": [],
+      "observation": [],
+      "fusion": []
+    }
   },
   "audit_ai": {
     "enabled": false,
