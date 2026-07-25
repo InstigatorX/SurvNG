@@ -240,6 +240,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   muted = true,
   controls = false,
   onReady,
+  onStageChange,
 }, forwardedRef) {
   const videoRef = useRef(null);
   const [stage, setStage] = useState("webrtc");
@@ -251,6 +252,10 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     setStage("webrtc");
     setCompatibility("detect");
   }, [cameraId, source]);
+
+  useEffect(() => {
+    onStageChange?.(stage);
+  }, [stage, onStageChange]);
 
   useEffect(() => {
     if (stage !== "webrtc" || compatibility !== "detect") return undefined;
@@ -520,7 +525,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           ? `/api/cameras/${cameraId}/stream.mjpg?source=${source}&fps=1&t=${snapshotToken}`
           : `/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`)}
         alt=""
-        onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, "snapshot")}
+        onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, stage)}
       />
       {["webrtc", "mse"].includes(stage) ? (
         <video
@@ -660,6 +665,18 @@ function preferredStreamSource() {
 
 function sourceLabel(source) {
   return source === "main" ? "Main" : "Sub";
+}
+
+const LIVE_TRANSPORT_LABELS = {
+  webrtc: "WebRTC",
+  mse: "MSE",
+  mjpeg: "MJPEG",
+  recording: "Recording",
+  snapshot: "Snapshot",
+};
+
+function liveTransportLabel(stage) {
+  return LIVE_TRANSPORT_LABELS[stage] || "Connecting";
 }
 
 function dateKeyForTimeZone(value, timeZone) {
@@ -1305,11 +1322,13 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
   const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
   const [showControls, setShowControls] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
+  const [transport, setTransport] = useState("webrtc");
   const activeSource = source === "main" ? "main" : "live";
 
   useEffect(() => {
     setShowControls(false);
     setMediaReady(false);
+    setTransport("webrtc");
   }, [camera.id, activeSource]);
 
   useEffect(() => {
@@ -1331,7 +1350,12 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
         <div className="live-overlay-head">
           <div>
             <h2>{camera.name}</h2>
-            <span>{sourceLabel(activeSource)} stream</span>
+            <div className="live-overlay-subtitle">
+              <span>{sourceLabel(activeSource)} stream</span>
+              <span className="live-transport-badge" aria-label={`Stream transport ${liveTransportLabel(transport)}`}>
+                {liveTransportLabel(transport)}
+              </span>
+            </div>
           </div>
           <button type="button" className="tile-control-button" onClick={() => setSource(activeSource === "main" ? "live" : "main")} aria-label="Switch live stream">
             <Radio size={15} /> {sourceLabel(activeSource)}
@@ -1359,9 +1383,11 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             timeZone={timeZone}
             muted
             controls={showControls}
-            onReady={(media) => {
+            onStageChange={setTransport}
+            onReady={(media, readyTransport) => {
               setAspect(mediaAspect(media));
               setMediaReady(true);
+              if (readyTransport) setTransport(readyTransport);
             }}
           />
         </div>

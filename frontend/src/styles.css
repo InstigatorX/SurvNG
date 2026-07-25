@@ -1453,12 +1453,33 @@ button.status-pill.hud-toggle:disabled {
   font-size: 17px;
 }
 
-.live-overlay-head span {
-  display: block;
+.live-overlay-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin-top: 3px;
+}
+
+.live-overlay-subtitle > span:first-child {
   color: var(--muted);
   font-size: 12px;
   font-weight: 760;
+}
+
+.live-overlay-subtitle .live-transport-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .live-overlay-media {

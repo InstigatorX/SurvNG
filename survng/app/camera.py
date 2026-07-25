@@ -30,6 +30,7 @@ RECORDED_EVENT_RETRY_SECONDS = 12.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 CAPTURE_OPEN_TIMEOUT_MS = 15000
 CAPTURE_READ_TIMEOUT_MS = 15000
+CAPTURE_DECODER_THREADS = 1
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
 CAPTURE_RETRY_INITIAL_SECONDS = 1.0
 CAPTURE_RETRY_MAX_SECONDS = 30.0
@@ -775,6 +776,8 @@ class CameraWorker:
                         self.camera.source_url(source),
                         cv2.CAP_FFMPEG,
                         [
+                            cv2.CAP_PROP_N_THREADS,
+                            CAPTURE_DECODER_THREADS,
                             cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
                             CAPTURE_OPEN_TIMEOUT_MS,
                             cv2.CAP_PROP_READ_TIMEOUT_MSEC,

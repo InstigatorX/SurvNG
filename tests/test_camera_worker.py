@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import cv2
 
 from survng.app.camera import CameraWorker
 from survng.app.config import CameraConfig, MotionQualificationConfig
@@ -42,6 +43,26 @@ class DummyRecorder:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_capture_limits_ffmpeg_decoder_threads(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        capture = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = CameraWorker(camera, Path(tmpdir), DummyDetector(), DummyEvents(), DummyRecorder())
+            worker._stop.clear()
+
+            def stop_after_open(*_args):
+                worker._stop.set()
+                return False
+
+            capture.open.side_effect = stop_after_open
+            with patch("survng.app.camera.cv2.VideoCapture", return_value=capture):
+                worker._run_source("live", __import__("threading").Event())
+
+        _, backend, options = capture.open.call_args.args
+        self.assertEqual(backend, cv2.CAP_FFMPEG)
+        self.assertEqual(options[options.index(cv2.CAP_PROP_N_THREADS) + 1], 1)
+        capture.release.assert_called_once()
+
     def test_borderline_candidate_is_rescued_by_eligible_object(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         events = Mock()
