@@ -20,6 +20,8 @@ from .recording_media import mp4_stream_fingerprint
 ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event, threading.Thread]
 RecorderKey = tuple[str, str]
 LOGGER = logging.getLogger(__name__)
+DTS_WARNING_WINDOW_SECONDS = 5.0
+DTS_WARNING_RESTART_COUNT = 12
 
 
 class Recorder:
@@ -175,8 +177,15 @@ class Recorder:
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.PIPE if is_native_baichuan(camera) else None,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            threading.Thread(
+                target=self._monitor_ffmpeg_stderr,
+                args=(key, process),
+                name=f"recorder-stderr-{camera.id}-{source}",
+                daemon=True,
+            ).start()
             pipe = start_ffmpeg_pipe(camera, source, process)
             with self._lock:
                 self.processes[key] = (process, pipe, stop_event, keeper)
@@ -197,6 +206,34 @@ class Recorder:
             with self._lock:
                 self._starting.discard(key)
         self.cleanup_duplicate_recorders({key})
+
+    def _monitor_ffmpeg_stderr(self, key: RecorderKey, process: subprocess.Popen) -> None:
+        if process.stderr is None:
+            return
+        dts_warnings: deque[float] = deque()
+        for raw_line in process.stderr:
+            line = (
+                raw_line.decode("utf-8", errors="replace").strip()
+                if isinstance(raw_line, bytes)
+                else raw_line.strip()
+            )
+            if not line:
+                continue
+            if "Non-monotonic DTS" in line:
+                now = time.monotonic()
+                dts_warnings.append(now)
+                while dts_warnings and now - dts_warnings[0] > DTS_WARNING_WINDOW_SECONDS:
+                    dts_warnings.popleft()
+                if len(dts_warnings) >= DTS_WARNING_RESTART_COUNT:
+                    LOGGER.warning(
+                        "Recorder %s/%s detected persistent non-monotonic DTS; restarting FFmpeg",
+                        key[0],
+                        key[1],
+                    )
+                    self._kill_pid(process.pid)
+                    return
+                continue
+            LOGGER.warning("Recorder FFmpeg %s/%s: %s", key[0], key[1], line)
 
     def _camera_dir(self, camera_id: str, source: str = "main") -> Path:
         source = "main" if source == "main" else "live"

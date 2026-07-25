@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from survng.app.baichuan_native import ffmpeg_input_args
 from survng.app.config import CameraConfig
 from survng.app.recorder import Recorder
 
@@ -23,6 +24,38 @@ class RecorderTest(unittest.TestCase):
             "end_epoch": start_epoch + 10.0,
             "source": "main",
         }
+
+    def test_rtsp_recording_discards_large_timestamp_regressions(self) -> None:
+        camera = CameraConfig(
+            id="upper-garage",
+            name="Upper Garage",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+        )
+
+        self.assertEqual(
+            ffmpeg_input_args(camera, "live"),
+            [
+                "-dts_error_threshold",
+                "10",
+                "-rtsp_transport",
+                "tcp",
+                "-i",
+                "rtsp://camera/sub",
+            ],
+        )
+
+    def test_persistent_non_monotonic_dts_restarts_recorder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            process = Mock(
+                pid=1234,
+                stderr=iter(["Non-monotonic DTS\n"] * 12),
+            )
+            with patch.object(recorder, "_kill_pid") as kill_pid:
+                recorder._monitor_ffmpeg_stderr(("upper-garage", "live"), process)
+
+        kill_pid.assert_called_once_with(1234)
 
     def test_disabled_camera_is_excluded_from_watchdog_wanted_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -424,7 +424,14 @@ def is_native_baichuan(camera: CameraConfig) -> bool:
 
 def ffmpeg_input_args(camera: CameraConfig, source: str) -> list[str]:
     if not is_native_baichuan(camera):
-        return ["-rtsp_transport", "tcp", "-i", camera.source_url(source)]
+        return [
+            "-dts_error_threshold",
+            "10",
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            camera.source_url(source),
+        ]
     return [
         "-use_wallclock_as_timestamps",
         "1",
