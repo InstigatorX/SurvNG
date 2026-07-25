@@ -18,6 +18,13 @@ from .decision_handler import (
     MotionDecisionHandlerFactory,
     MotionDecisionOutcome,
 )
+from .evidence import MotionEvidenceRepository, MotionEvidenceSample
+from .evidence_stages import (
+    EVIDENCE_REPOSITORY_SERVICE,
+    BufferedMotionFusionStage,
+    Mog2EvidenceSourceStage,
+    register_evidence_stages,
+)
 from .factory import MotionPipelineFactory, MotionStageConfig
 from .image_stages import (
     BlobExtractionStage,
@@ -44,6 +51,7 @@ def build_builtin_motion_registry() -> MotionStageRegistry:
     registry = MotionStageRegistry()
     register_legacy_motion_stage(registry)
     register_image_motion_stages(registry)
+    register_evidence_stages(registry)
     return registry
 
 
@@ -92,6 +100,35 @@ def default_motion_stage_configs() -> list[MotionStageConfig]:
     ]
 
 
+def motion_observation_stage_configs(
+    *,
+    mog2_enabled: bool,
+    sample_fps: float,
+    mog2_history_seconds: float,
+) -> list[MotionStageConfig]:
+    return [
+        MotionStageConfig(
+            stage_id="mog2_source",
+            implementation="opencv_mog2_evidence",
+            options={
+                "enabled": mog2_enabled,
+                "sample_fps": sample_fps,
+                "history_seconds": mog2_history_seconds,
+            },
+        )
+    ]
+
+
+def motion_fusion_stage_configs() -> list[MotionStageConfig]:
+    return [
+        MotionStageConfig(
+            stage_id="evidence_fusion",
+            implementation="buffered_evidence_fusion",
+            options={"sources": ["mog2"]},
+        )
+    ]
+
+
 def build_default_motion_pipeline(camera_id: str) -> MotionPipeline:
     factory = MotionPipelineFactory(
         build_builtin_motion_registry(),
@@ -105,6 +142,7 @@ __all__ = [
     "LegacyMotionScoringStage",
     "BlobExtractionStage",
     "BlobFilteringStage",
+    "BufferedMotionFusionStage",
     "DominantCentroidTrackingStage",
     "LoggingMotionPipelineObserver",
     "MotionBlob",
@@ -115,6 +153,8 @@ __all__ = [
     "MotionDecisionOutcome",
     "MotionEventPhase",
     "MotionEventState",
+    "MotionEvidenceRepository",
+    "MotionEvidenceSample",
     "MotionFramePreprocessorStage",
     "MotionFrameBlobs",
     "MotionEventStateStage",
@@ -130,6 +170,7 @@ __all__ = [
     "MotionStageRegistration",
     "MotionStageRegistry",
     "MotionTrack",
+    "Mog2EvidenceSourceStage",
     "OpenCloseMorphologyStage",
     "ObjectDetectionTriggerStage",
     "RecordedMotionObjectDetector",
@@ -138,10 +179,14 @@ __all__ = [
     "FrameDifferenceStage",
     "StageTiming",
     "TriggerDecision",
+    "EVIDENCE_REPOSITORY_SERVICE",
     "build_builtin_motion_registry",
     "build_default_motion_pipeline",
     "build_legacy_motion_pipeline",
     "default_motion_stage_configs",
+    "motion_fusion_stage_configs",
+    "motion_observation_stage_configs",
     "register_legacy_motion_stage",
     "register_image_motion_stages",
+    "register_evidence_stages",
 ]

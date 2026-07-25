@@ -15,9 +15,16 @@ from survng.app.camera import CameraWorker
 from survng.app.config import CameraConfig, MotionQualificationConfig
 from survng.app.detector import objects_to_json
 from survng.app.motion_pipeline import (
+    EVIDENCE_REPOSITORY_SERVICE,
     MotionDecisionHandlerFactory,
+    MotionEvidenceRepository,
+    MotionPipelineFactory,
+    MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
-    build_default_motion_pipeline,
+    build_builtin_motion_registry,
+    default_motion_stage_configs,
+    motion_fusion_stage_configs,
+    motion_observation_stage_configs,
 )
 
 
@@ -60,12 +67,41 @@ def make_worker(
     event_store = events or DummyEvents()
     detector_backend = detector or DummyDetector()
     recording_provider = recorder or DummyRecorder()
+    effective_config = motion_config or MotionQualificationConfig()
+    override = camera.motion_qualification
+    mode = effective_config.mode if override.mode == "inherit" else override.mode
+    mog2_requested = (
+        effective_config.mog2_audit_enabled
+        if override.mog2_audit_enabled is None
+        else override.mog2_audit_enabled
+    )
+    evidence = MotionEvidenceRepository(camera.id)
+    factory = MotionPipelineFactory(
+        build_builtin_motion_registry(),
+        dependencies=MotionStageDependencies(
+            services={EVIDENCE_REPOSITORY_SERVICE: evidence},
+        ),
+    )
     return CameraWorker(
         camera,
         storage_dir,
         motion_config,
         event_callback,
-        motion_pipeline=build_default_motion_pipeline(camera.id),
+        motion_pipeline=factory.create(camera.id, default_motion_stage_configs()),
+        motion_observation_pipeline=factory.create(
+            camera.id,
+            motion_observation_stage_configs(
+                mog2_enabled=bool(mog2_requested and mode == "audit"),
+                sample_fps=effective_config.sample_fps,
+                mog2_history_seconds=effective_config.mog2_history_seconds,
+            ),
+        ),
+        motion_fusion_pipeline=factory.create(
+            camera.id,
+            motion_fusion_stage_configs(),
+            initial_artifacts={"scoring"},
+        ),
+        motion_evidence=evidence,
         motion_decision_handler_factory=MotionDecisionHandlerFactory(
             events=event_store,
             object_serializer=objects_to_json,

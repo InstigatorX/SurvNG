@@ -21,9 +21,15 @@ minimum-area filtering, dominant-centroid tracking, scoring, event-state, and
 trigger-decision stages. Each stage consumes and publishes typed context
 artifacts without invoking or depending on concrete neighboring stages. The
 original all-in-one `legacy_qualifier` and combined `legacy_motion_scorer`
-remain registered as parity/reference implementations. MOG2 audit collection
-remains in `CameraWorker` until its background, mask, blob, tracking, and
-scoring pieces are extracted into independent stages.
+remain registered as parity/reference implementations.
+
+Continuous background evidence runs through a separate observation pipeline.
+Its registered `opencv_mog2_evidence` stage owns the OpenCV model in per-camera
+pipeline runtime and publishes samples to an injected, bounded
+`MotionEvidenceRepository`. A later `buffered_evidence_fusion` stage selects
+samples by event time and adds aggregated evidence to `MotionContext`. The
+repository boundary allows additional ONVIF, optical-flow, or AI sources to
+run independently and join the same fusion stage without calling each other.
 
 New motion implementations are registered explicitly with a
 `MotionStageRegistry`; there is no mutable module-level plugin registry. The
@@ -193,6 +199,13 @@ the same grayscale frame samples also feed a per-camera OpenCV MOG2 background
 model. No additional stream or camera connection is opened. The model warms for
 approximately two seconds, separates foreground from its learned background,
 and applies morphology before extracting connected blobs.
+
+`CameraWorker` sends each sampled grayscale frame through the lightweight
+motion observation pipeline. The MOG2 stage retains its model in that
+pipeline's per-camera runtime and writes bounded evidence samples to the
+camera's injected repository. The event-time fusion pipeline reads only the
+requested time range. `CameraWorker` therefore owns neither the MOG2 model nor
+its sample history and has no direct dependency on its aggregation algorithm.
 
 Blobs are associated across samples using normalized centroid distance and
 bounding-box overlap. Tracks survive short detection gaps and report
@@ -576,12 +589,14 @@ Chrome across repeated seeks and many segment boundaries.
 
 ## 14. Current Boundaries And Future Work
 
-The motion qualifier now maintains audit-only MOG2 foreground tracks, but those
-tracks do not participate in suppression. It does not calculate dense/sparse
-optical flow, maintain semantic object tracks, use a KNN background model, or
-consume vendor motion bounding boxes. Those remain possible later stages if
-audit data shows that frame differences plus MOG2 cannot separate scene motion
-from insects reliably enough.
+The modular observation and fusion paths now maintain audit-only MOG2
+foreground tracks, but those tracks do not participate in suppression. The
+repository and fusion stage can accept multiple independently produced motion
+sources, but SurvNG does not yet calculate dense/sparse optical flow, maintain
+semantic object tracks, use a KNN background model, or consume vendor motion
+bounding boxes. Those remain possible source stages if audit data shows that
+frame differences plus MOG2 cannot separate scene motion from insects reliably
+enough.
 
 The next evidence-driven progression is:
 

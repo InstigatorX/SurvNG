@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .contracts import MotionPipelineObserver
 from .pipeline import MotionErrorPolicy, MotionPipeline
@@ -31,9 +31,16 @@ class MotionPipelineFactory:
         camera_id: str,
         stage_configs: Sequence[MotionStageConfig],
         error_policy: MotionErrorPolicy = "raise",
+        initial_artifacts: Iterable[str] = (),
     ) -> MotionPipeline:
         stage_ids: set[str] = set()
-        available_artifacts = {"original_frame", "frame_history", "configuration", "runtime"}
+        available_artifacts = {
+            "original_frame",
+            "frame_history",
+            "configuration",
+            "runtime",
+            *initial_artifacts,
+        }
         stages = []
         for stage_config in stage_configs:
             stage_id = stage_config.stage_id.strip()
@@ -56,4 +63,3 @@ class MotionPipelineFactory:
             observer=self.observer,
             error_policy=error_policy,
         )
-

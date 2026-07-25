@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .camera import CameraWorker
-from .config import AppConfig, DetectionZone
+from .config import AppConfig, CameraConfig, DetectionZone
 from .events import EventStore
 from .faces import FaceStore
 from .detector import objects_to_json
@@ -16,11 +16,16 @@ from .inference import InferenceSupervisor, IsolatedFaceRecognizer
 from .mqtt import MqttService
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
+    EVIDENCE_REPOSITORY_SERVICE,
     MotionDecisionHandlerFactory,
+    MotionEvidenceRepository,
     MotionPipelineFactory,
+    MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
     default_motion_stage_configs,
+    motion_fusion_stage_configs,
+    motion_observation_stage_configs,
 )
 from .recorder import Recorder
 from .state_events import StateEventBroker
@@ -53,10 +58,7 @@ class AppManager:
         )
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()
-        self.motion_pipeline_factory = MotionPipelineFactory(
-            registry=build_builtin_motion_registry(),
-            observer=LoggingMotionPipelineObserver(),
-        )
+        self.motion_pipeline_registry = build_builtin_motion_registry()
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
             object_serializer=objects_to_json,
@@ -82,21 +84,63 @@ class AppManager:
         self._stopping = False
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None
-        self.workers = {
-            camera.id: CameraWorker(
-                camera,
-                self.storage_dir,
-                config.motion_qualification,
-                self.publish_event,
-                motion_pipeline=self.motion_pipeline_factory.create(
-                    camera.id,
-                    default_motion_stage_configs(),
+        self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
+        self.workers = {camera.id: self._create_camera_worker(camera) for camera in config.cameras}
+
+    def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
+        motion_config = self.config.motion_qualification
+        override = camera.motion_qualification
+        mode = motion_config.mode if override.mode == "inherit" else override.mode
+        mog2_requested = (
+            motion_config.mog2_audit_enabled
+            if override.mog2_audit_enabled is None
+            else override.mog2_audit_enabled
+        )
+        mog2_enabled = bool(mog2_requested and mode == "audit")
+        ring_size = max(
+            12,
+            round(
+                motion_config.sample_fps
+                * (
+                    motion_config.window_seconds
+                    + motion_config.post_trigger_seconds
+                    + 3.0
+                )
+            ),
+        )
+        evidence = MotionEvidenceRepository(camera.id, max_samples_per_source=ring_size)
+        self.motion_evidence[camera.id] = evidence
+        dependencies = MotionStageDependencies(
+            services={EVIDENCE_REPOSITORY_SERVICE: evidence},
+        )
+        factory = MotionPipelineFactory(
+            registry=self.motion_pipeline_registry,
+            dependencies=dependencies,
+            observer=LoggingMotionPipelineObserver(),
+        )
+        return CameraWorker(
+            camera,
+            self.storage_dir,
+            motion_config,
+            self.publish_event,
+            motion_pipeline=factory.create(camera.id, default_motion_stage_configs()),
+            motion_observation_pipeline=factory.create(
+                camera.id,
+                motion_observation_stage_configs(
+                    mog2_enabled=mog2_enabled,
+                    sample_fps=motion_config.sample_fps,
+                    mog2_history_seconds=motion_config.mog2_history_seconds,
                 ),
-                motion_decision_handler_factory=self.motion_decision_handler_factory,
-                motion_object_detector_factory=self.motion_object_detector_factory,
-            )
-            for camera in config.cameras
-        }
+            ),
+            motion_fusion_pipeline=factory.create(
+                camera.id,
+                motion_fusion_stage_configs(),
+                initial_artifacts={"scoring"},
+            ),
+            motion_evidence=evidence,
+            motion_decision_handler_factory=self.motion_decision_handler_factory,
+            motion_object_detector_factory=self.motion_object_detector_factory,
+        )
 
     def _unique_cameras(self):
         seen: set[str] = set()

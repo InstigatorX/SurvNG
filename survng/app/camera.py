@@ -15,11 +15,13 @@ import numpy as np
 
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .onvif_events import OnvifEventListener
-from .motion import BackgroundMotionTracker, MotionQualificationResult, aggregate_mog2_evidence
+from .motion import MotionQualificationResult
 from .motion_pipeline import (
     MotionContext,
     MotionDecisionHandlerFactory,
+    MotionEvidenceRepository,
     MotionPipeline,
+    MotionScoring,
     RecordedMotionObjectDetectorFactory,
 )
 
@@ -45,6 +47,9 @@ class CameraWorker:
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
         *,
         motion_pipeline: MotionPipeline,
+        motion_observation_pipeline: MotionPipeline,
+        motion_fusion_pipeline: MotionPipeline,
+        motion_evidence: MotionEvidenceRepository,
         motion_decision_handler_factory: MotionDecisionHandlerFactory,
         motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
     ) -> None:
@@ -53,6 +58,9 @@ class CameraWorker:
         self.motion_config = motion_config or MotionQualificationConfig()
         self.event_callback = event_callback
         self.motion_pipeline = motion_pipeline
+        self.motion_observation_pipeline = motion_observation_pipeline
+        self.motion_fusion_pipeline = motion_fusion_pipeline
+        self.motion_evidence = motion_evidence
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
@@ -86,12 +94,6 @@ class CameraWorker:
             ),
         )
         self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
-        self._mog2_samples: deque[tuple[float, dict[str, Any]]] = deque(maxlen=ring_size)
-        self._mog2_lock = threading.Lock()
-        self._mog2_tracker = BackgroundMotionTracker(
-            sample_fps=self.motion_config.sample_fps,
-            history_seconds=self.motion_config.mog2_history_seconds,
-        )
         self._motion_last_sample = 0.0
         self._motion_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=MOTION_QUEUE_SIZE)
         self._motion_thread: threading.Thread | None = None
@@ -175,11 +177,10 @@ class CameraWorker:
                 self._source_last_access.clear()
                 self._source_errors.clear()
                 self._motion_frames.clear()
-                self._mog2_samples.clear()
                 self._motion_last_sample = 0.0
                 self.last_frame_at = ""
-            with self._mog2_lock:
-                self._mog2_tracker.reset()
+            self.motion_evidence.clear()
+            self.motion_observation_pipeline.runtime.reset()
             self._thread = self._source_threads.get("live")
 
     def status(self) -> dict[str, Any]:
@@ -195,7 +196,8 @@ class CameraWorker:
             main_error = self._source_errors.get("main", "")
             motion_buffered_frames = len(self._motion_frames)
             motion_frame_shape = list(self._motion_frames[-1][1].shape) if self._motion_frames else None
-            mog2_last = dict(self._mog2_samples[-1][1]) if self._mog2_samples else None
+        evidence_status = self.motion_evidence.status()
+        mog2_status = evidence_status.get("mog2", {})
         now = time.monotonic()
         live_age = max(0.0, now - live_frame_clock) if live_frame_clock is not None else None
         main_age = max(0.0, now - main_frame_clock) if main_frame_clock is not None else None
@@ -243,13 +245,16 @@ class CameraWorker:
                 "frame_width": frame_width,
                 "borderline_rescue_enabled": rescue_enabled,
                 "borderline_margin": rescue_margin,
-                "mog2_audit_enabled": self._mog2_audit_enabled(),
+                "mog2_audit_enabled": bool(mog2_status.get("enabled", False)),
                 "mog2_history_seconds": self.motion_config.mog2_history_seconds,
-                "mog2_last": mog2_last,
+                "mog2_last": mog2_status.get("last"),
+                "evidence_sources": evidence_status,
                 "queue_depth": self._motion_queue.qsize(),
                 "buffered_frames": motion_buffered_frames,
                 "frame_shape": motion_frame_shape,
                 "pipeline": self.motion_pipeline.status(),
+                "observation_pipeline": self.motion_observation_pipeline.status(),
+                "fusion_pipeline": self.motion_fusion_pipeline.status(),
             },
         }
 
@@ -353,14 +358,16 @@ class CameraWorker:
         except (cv2.error, ValueError):
             return
         captured_at = time.time()
-        mog2_evidence = None
-        if self._mog2_audit_enabled():
-            with self._mog2_lock:
-                mog2_evidence = self._mog2_tracker.update(gray)
         with self._frame_lock:
             self._motion_frames.append((captured_at, gray))
-            if mog2_evidence is not None:
-                self._mog2_samples.append((captured_at, mog2_evidence))
+        observation = MotionContext(
+            camera_id=self.camera.id,
+            captured_at=captured_at,
+            original_frame=gray,
+            configuration={},
+            runtime=self.motion_observation_pipeline.runtime,
+        )
+        self.motion_observation_pipeline.process(observation)
 
     def _motion_settings(self) -> tuple[str, str, int]:
         override = self.camera.motion_qualification
@@ -383,31 +390,38 @@ class CameraWorker:
         )
         return bool(enabled), float(margin)
 
-    def _mog2_audit_enabled(self) -> bool:
-        override = self.camera.motion_qualification.mog2_audit_enabled
-        enabled = self.motion_config.mog2_audit_enabled if override is None else override
-        return bool(enabled and self._motion_settings()[0] == "audit")
-
-    def _with_mog2_evidence(
+    def _with_source_evidence(
         self,
         result: MotionQualificationResult,
         start_epoch: float,
         end_epoch: float,
     ) -> MotionQualificationResult:
-        if not self._mog2_audit_enabled():
-            return result
-        with self._frame_lock:
-            samples = [
-                evidence for captured_at, evidence in self._mog2_samples
-                if start_epoch <= captured_at <= end_epoch
-            ]
+        context = MotionContext(
+            camera_id=self.camera.id,
+            captured_at=end_epoch,
+            original_frame=None,
+            configuration={
+                "evidence_started_at": start_epoch,
+                "evidence_ended_at": end_epoch,
+            },
+            runtime=self.motion_fusion_pipeline.runtime,
+            scoring=MotionScoring(
+                accepted=result.accepted,
+                score=result.score,
+                threshold=result.threshold,
+                reason=result.reason,
+                frame_count=result.frame_count,
+                features=dict(result.features),
+            ),
+        )
+        scoring = self.motion_fusion_pipeline.process(context).scoring
         return MotionQualificationResult(
-            accepted=result.accepted,
-            score=result.score,
-            threshold=result.threshold,
-            reason=result.reason,
-            frame_count=result.frame_count,
-            features={**result.features, **aggregate_mog2_evidence(samples)},
+            accepted=scoring.accepted,
+            score=scoring.score,
+            threshold=scoring.threshold,
+            reason=scoring.reason,
+            frame_count=scoring.frame_count,
+            features=dict(scoring.features),
         )
 
     @staticmethod
@@ -458,7 +472,7 @@ class CameraWorker:
                 if best_result is None or result.score > best_result.score:
                     best_result = result
                 if result.accepted:
-                    return self._with_mog2_evidence(
+                    return self._with_source_evidence(
                         result,
                         anchor - self.motion_config.window_seconds,
                         time.time(),
@@ -486,7 +500,7 @@ class CameraWorker:
                 len(samples),
                 {},
             )
-            return self._with_mog2_evidence(
+            return self._with_source_evidence(
                 result,
                 anchor - self.motion_config.window_seconds,
                 time.time(),
@@ -500,12 +514,12 @@ class CameraWorker:
                 best_result.frame_count,
                 best_result.features,
             )
-            return self._with_mog2_evidence(
+            return self._with_source_evidence(
                 result,
                 anchor - self.motion_config.window_seconds,
                 time.time(),
             ), diagnostics
-        return self._with_mog2_evidence(
+        return self._with_source_evidence(
             best_result,
             anchor - self.motion_config.window_seconds,
             time.time(),
