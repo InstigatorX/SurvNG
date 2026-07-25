@@ -13,6 +13,7 @@ class MotionStageConfig:
     stage_id: str
     implementation: str
     options: Mapping[str, Any] = field(default_factory=dict)
+    parallel_group: str = ""
 
 
 class MotionPipelineFactory:
@@ -43,6 +44,9 @@ class MotionPipelineFactory:
             *initial_artifacts,
         }
         stages = []
+        registrations = []
+        execution_groups: list[list[int]] = []
+        current_parallel_group = ""
         for stage_config in stage_configs:
             stage_id = stage_config.stage_id.strip()
             if not stage_id:
@@ -50,14 +54,39 @@ class MotionPipelineFactory:
             if stage_id in stage_ids:
                 raise ValueError(f"duplicate motion stage ID: {stage_id}")
             registration = self.registry.registration(stage_config.implementation)
-            missing = registration.requires - available_artifacts
+            parallel_group = stage_config.parallel_group.strip()
+            if parallel_group and parallel_group == current_parallel_group:
+                group_available = available_artifacts - set().union(
+                    *(registrations[index].provides for index in execution_groups[-1])
+                )
+            else:
+                group_available = available_artifacts
+            missing = registration.requires - group_available
             if missing:
                 raise ValueError(
                     f"motion stage {stage_id!r} requires unavailable artifacts: {', '.join(sorted(missing))}"
                 )
             stages.append(registration.builder(stage_id, stage_config.options, self.dependencies))
+            registrations.append(registration)
             stage_ids.add(stage_id)
             available_artifacts.update(registration.provides)
+            if parallel_group and parallel_group == current_parallel_group:
+                existing_provides = set().union(
+                    *(registrations[index].provides for index in execution_groups[-1])
+                )
+                conflicting = (existing_provides & registration.provides) - {
+                    "source_evidence",
+                    "debug",
+                }
+                if conflicting:
+                    raise ValueError(
+                        f"parallel motion group {parallel_group!r} has conflicting outputs: "
+                        + ", ".join(sorted(conflicting))
+                    )
+                execution_groups[-1].append(len(stages) - 1)
+            else:
+                execution_groups.append([len(stages) - 1])
+            current_parallel_group = parallel_group
         missing_outputs = set(required_artifacts) - available_artifacts
         if missing_outputs:
             raise ValueError(
@@ -74,7 +103,17 @@ class MotionPipelineFactory:
                     "stage_id": stage.stage_id,
                     "implementation": stage.implementation,
                     "options": dict(stage.options),
+                    **(
+                        {"parallel_group": stage.parallel_group}
+                        if stage.parallel_group
+                        else {}
+                    ),
                 }
                 for stage in stage_configs
             ],
+            execution_groups=execution_groups,
+            stage_provides={
+                stage.stage_id: registration.provides
+                for stage, registration in zip(stages, registrations, strict=True)
+            },
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
@@ -71,6 +72,8 @@ class MotionPipeline:
         observer: MotionPipelineObserver | None = None,
         error_policy: MotionErrorPolicy = "raise",
         stage_configuration: Sequence[Mapping[str, Any]] = (),
+        execution_groups: Sequence[Sequence[int]] = (),
+        stage_provides: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
         if not stages:
             raise ValueError("motion pipeline requires at least one stage")
@@ -85,6 +88,21 @@ class MotionPipeline:
         self.observer = observer or NullMotionPipelineObserver()
         self.error_policy = error_policy
         self.stage_configuration = tuple(dict(item) for item in stage_configuration)
+        normalized_groups = tuple(tuple(int(index) for index in group) for group in execution_groups)
+        self.execution_groups = normalized_groups or tuple((index,) for index in range(len(stages)))
+        flattened = [index for group in self.execution_groups for index in group]
+        if flattened != list(range(len(stages))):
+            raise ValueError("motion execution groups must contain every stage exactly once in order")
+        self.stage_provides = dict(stage_provides or {})
+        parallel_workers = max((len(group) for group in self.execution_groups), default=1)
+        self._executor = (
+            ThreadPoolExecutor(
+                max_workers=parallel_workers,
+                thread_name_prefix=f"motion-branch-{camera_id}",
+            )
+            if parallel_workers > 1
+            else None
+        )
         self._metrics = {stage.stage_id: _StageMetrics() for stage in self.stages}
         self._metrics_lock = threading.Lock()
 
@@ -97,32 +115,70 @@ class MotionPipeline:
             raise ValueError("motion context must use the pipeline's per-camera runtime state")
 
         current = context
-        for stage in self.stages:
-            self.observer.stage_started(stage.stage_id, current)
-            started_ns = time.perf_counter_ns()
-            succeeded = False
-            try:
-                next_context = stage.process(current)
-                if not isinstance(next_context, MotionContext):
-                    raise TypeError(f"motion stage {stage.stage_id!r} returned an invalid context")
-                if next_context.camera_id != self.camera_id or next_context.runtime is not self.runtime:
-                    raise ValueError(
-                        f"motion stage {stage.stage_id!r} replaced the camera identity or runtime state"
-                    )
-                current = next_context
-                succeeded = True
-            except Exception as error:
-                timing = self._record_timing(stage.stage_id, started_ns, False)
-                current.timings[stage.stage_id] = timing
-                self.observer.stage_failed(timing, current, error)
-                if self.error_policy == "raise":
-                    raise
-                continue
-
-            timing = self._record_timing(stage.stage_id, started_ns, succeeded)
-            current.timings[stage.stage_id] = timing
-            self.observer.stage_completed(timing, current)
+        for group in self.execution_groups:
+            if len(group) == 1:
+                current = self._process_stage(self.stages[group[0]], current)
+            else:
+                current = self._process_parallel_group(group, current)
         return current
+
+    def _process_stage(self, stage: MotionStage, context: MotionContext) -> MotionContext:
+        self.observer.stage_started(stage.stage_id, context)
+        started_ns = time.perf_counter_ns()
+        try:
+            next_context = stage.process(context)
+            if not isinstance(next_context, MotionContext):
+                raise TypeError(f"motion stage {stage.stage_id!r} returned an invalid context")
+            if next_context.camera_id != self.camera_id or next_context.runtime is not self.runtime:
+                raise ValueError(
+                    f"motion stage {stage.stage_id!r} replaced the camera identity or runtime state"
+                )
+        except Exception as error:
+            timing = self._record_timing(stage.stage_id, started_ns, False)
+            context.timings[stage.stage_id] = timing
+            self.observer.stage_failed(timing, context, error)
+            if self.error_policy == "raise":
+                raise
+            return context
+        timing = self._record_timing(stage.stage_id, started_ns, True)
+        next_context.timings[stage.stage_id] = timing
+        self.observer.stage_completed(timing, next_context)
+        return next_context
+
+    def _process_parallel_group(
+        self,
+        group: tuple[int, ...],
+        context: MotionContext,
+    ) -> MotionContext:
+        if self._executor is None:
+            raise RuntimeError("parallel motion executor is unavailable")
+        branches = [context.fork() for _index in group]
+        futures = [
+            self._executor.submit(self._process_stage, self.stages[index], branch)
+            for index, branch in zip(group, branches, strict=True)
+        ]
+        results = [future.result() for future in futures]
+        for index, result in zip(group, results, strict=True):
+            self._merge_branch(context, result, self.stage_provides.get(self.stages[index].stage_id, frozenset()))
+            context.timings.update(result.timings)
+            context.debug.values.update(result.debug.values)
+            context.debug.images.update(result.debug.images)
+        return context
+
+    @staticmethod
+    def _merge_branch(
+        context: MotionContext,
+        branch: MotionContext,
+        artifacts: frozenset[str],
+    ) -> None:
+        for artifact in artifacts:
+            if artifact == "source_evidence":
+                context.source_evidence.update(branch.source_evidence)
+            elif artifact == "debug":
+                context.debug.values.update(branch.debug.values)
+                context.debug.images.update(branch.debug.images)
+            elif hasattr(context, artifact):
+                setattr(context, artifact, getattr(branch, artifact))
 
     def _record_timing(self, stage_id: str, started_ns: int, succeeded: bool) -> StageTiming:
         duration_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
@@ -138,5 +194,17 @@ class MotionPipeline:
             "runtime_generation": self.runtime.generation,
             "error_policy": self.error_policy,
             "configuration": [dict(item) for item in self.stage_configuration],
+            "execution_groups": [
+                {
+                    "mode": "parallel" if len(group) > 1 else "sequential",
+                    "stages": [self.stages[index].stage_id for index in group],
+                }
+                for group in self.execution_groups
+            ],
             "stages": stages,
         }
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None

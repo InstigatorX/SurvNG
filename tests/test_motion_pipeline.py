@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -40,6 +41,18 @@ class RecordingStage:
         return context
 
 
+@dataclass
+class DelayedEvidenceStage:
+    stage_id: str
+    source: str
+    delay: float
+
+    def process(self, context: MotionContext) -> MotionContext:
+        time.sleep(self.delay)
+        context.source_evidence[self.source] = {"score": 0.5}
+        return context
+
+
 def build_recording_stage(
     stage_id: str,
     options: Mapping[str, Any],
@@ -49,7 +62,69 @@ def build_recording_stage(
     return RecordingStage(stage_id, str(options.get("marker") or stage_id))
 
 
+def build_delayed_evidence_stage(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> DelayedEvidenceStage:
+    del dependencies
+    return DelayedEvidenceStage(
+        stage_id,
+        str(options.get("source") or stage_id),
+        float(options.get("delay") or 0.0),
+    )
+
+
 class MotionPipelineTest(unittest.TestCase):
+    def test_parallel_group_runs_isolated_stages_concurrently_and_merges_evidence(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="delayed_evidence",
+            builder=build_delayed_evidence_stage,
+            provides=frozenset({"source_evidence"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("first", "delayed_evidence", {"source": "one", "delay": 0.08}, "sources"),
+                MotionStageConfig("second", "delayed_evidence", {"source": "two", "delay": 0.08}, "sources"),
+            ],
+        )
+        context = MotionContext(
+            camera_id="gate",
+            captured_at=10.0,
+            original_frame=None,
+            configuration={},
+            runtime=pipeline.runtime,
+        )
+
+        started = time.perf_counter()
+        result = pipeline.process(context)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.14)
+        self.assertEqual(set(result.source_evidence), {"one", "two"})
+        self.assertEqual(set(result.timings), {"first", "second"})
+        self.assertEqual(pipeline.status()["execution_groups"][0]["mode"], "parallel")
+        pipeline.close()
+
+    def test_parallel_group_rejects_conflicting_non_mergeable_outputs(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="score_a",
+            builder=build_recording_stage,
+            provides=frozenset({"scoring"}),
+        ))
+
+        with self.assertRaisesRegex(ValueError, "conflicting outputs: scoring"):
+            MotionPipelineFactory(registry).create(
+                "gate",
+                [
+                    MotionStageConfig("first", "score_a", parallel_group="scores"),
+                    MotionStageConfig("second", "score_a", parallel_group="scores"),
+                ],
+            )
+
     def test_builtin_catalog_exposes_stages_options_and_available_presets(self) -> None:
         registry = build_builtin_motion_registry()
         catalog = motion_pipeline_catalog(registry)

@@ -254,6 +254,8 @@ Use the guided **Motion decision** panel under **Config > Detection** to choose 
 
 The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 
+Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. The built-in MOG2 and ONVIF observation sources use the `evidence_sources` parallel group.
+
 MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. The default audit fusion records both sources without changing trigger decisions.
 
 ## Face Recognition

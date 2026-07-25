@@ -29,6 +29,7 @@ def _stage_configs(selections: list[MotionStageSelection]) -> tuple[MotionStageC
             stage_id=selection.stage_id,
             implementation=selection.implementation,
             options=dict(selection.options),
+            parallel_group=selection.parallel_group,
         )
         for selection in selections
     )

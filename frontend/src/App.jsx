@@ -5369,6 +5369,8 @@ function MotionPipelineRuntimeCard({ label, pipeline, origin, motionCatalog }) {
   const averageMs = metrics.reduce((total, item) => total + (Number(item.average_ms) || 0), 0);
   const lastMs = metrics.reduce((total, item) => total + (Number(item.last_ms) || 0), 0);
   const health = failures ? "attention" : calls ? "healthy" : "ready";
+  const parallelGroups = (pipeline.execution_groups || []).filter((group) => group.mode === "parallel");
+  const parallelStages = parallelGroups.reduce((total, group) => total + (group.stages?.length || 0), 0);
   const stageNames = new Map(
     (motionCatalog?.stages || []).map((stage) => [stage.implementation, stage.name]),
   );
@@ -5379,7 +5381,7 @@ function MotionPipelineRuntimeCard({ label, pipeline, origin, motionCatalog }) {
         <strong>{label}</strong>
         <span>{health === "attention" ? "Needs attention" : health === "healthy" ? "Healthy" : "Ready"}</span>
       </div>
-      <small>{originLabel} · {pipeline.configuration?.length || 0} steps · {calls.toLocaleString()} cycles</small>
+      <small>{originLabel} · {pipeline.configuration?.length || 0} steps · {calls.toLocaleString()} cycles{parallelStages ? ` · ${parallelStages} parallel branches` : ""}</small>
       <div className="motion-pipeline-timing">
         <span>Last <strong>{lastMs.toFixed(2)} ms</strong></span>
         <span>Average <strong>{averageMs.toFixed(2)} ms</strong></span>

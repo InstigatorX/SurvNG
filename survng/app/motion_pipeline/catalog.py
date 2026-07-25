@@ -37,6 +37,11 @@ class MotionPipelinePreset:
                     "stage_id": stage.stage_id,
                     "implementation": stage.implementation,
                     "options": dict(stage.options),
+                    **(
+                        {"parallel_group": stage.parallel_group}
+                        if stage.parallel_group
+                        else {}
+                    ),
                 }
                 for stage in self.stages
             ],

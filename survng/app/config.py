@@ -70,6 +70,7 @@ class MotionStageSelection(BaseModel):
     stage_id: str
     implementation: str
     options: dict[str, Any] = Field(default_factory=dict)
+    parallel_group: str = ""
 
     @field_validator("stage_id", "implementation", mode="before")
     @classmethod
@@ -78,6 +79,11 @@ class MotionStageSelection(BaseModel):
         if not normalized:
             raise ValueError("motion stage name cannot be empty")
         return normalized
+
+    @field_validator("parallel_group", mode="before")
+    @classmethod
+    def normalize_parallel_group(cls, value: object) -> str:
+        return str(value or "").strip()
 
 
 def _validate_unique_motion_stage_ids(

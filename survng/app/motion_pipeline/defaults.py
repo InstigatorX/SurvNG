@@ -50,6 +50,7 @@ def default_motion_observation_stage_configs(
                 "sample_fps": sample_fps,
                 "history_seconds": mog2_history_seconds,
             },
+            parallel_group="evidence_sources",
         ),
         MotionStageConfig(
             stage_id="onvif_source",
@@ -68,6 +69,7 @@ def default_motion_observation_stage_configs(
                     "face",
                 ],
             },
+            parallel_group="evidence_sources",
         ),
     ]
 

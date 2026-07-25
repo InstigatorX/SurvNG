@@ -306,6 +306,8 @@ class AppManager:
             thread.start()
         for thread in camera_shutdowns:
             thread.join()
+        for worker in self.workers.values():
+            worker.close()
 
         LOGGER.info("SurvNG shutdown: stopping face recognition")
         self.faces.close()

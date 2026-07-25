@@ -185,6 +185,11 @@ class CameraWorker:
             self.motion_observation_pipeline.runtime.reset()
             self._thread = self._source_threads.get("live")
 
+    def close(self) -> None:
+        self.motion_pipeline.close()
+        self.motion_observation_pipeline.close()
+        self.motion_fusion_pipeline.close()
+
     def status(self) -> dict[str, Any]:
         with self._lifecycle_lock:
             enabled = self._enabled

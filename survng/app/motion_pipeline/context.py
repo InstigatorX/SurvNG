@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Mapping, TypeAlias
 
@@ -94,3 +95,20 @@ class MotionContext:
     source_evidence: dict[str, Any] = field(default_factory=dict)
     timings: dict[str, StageTiming] = field(default_factory=dict)
     debug: MotionDebugData = field(default_factory=MotionDebugData)
+
+    def fork(self) -> "MotionContext":
+        """Create an isolated branch context while sharing immutable frame buffers and runtime."""
+        return replace(
+            self,
+            blobs=list(self.blobs),
+            tracked_objects=list(self.tracked_objects),
+            scoring=replace(self.scoring, features=deepcopy(self.scoring.features)),
+            event_state=replace(self.event_state),
+            source_evidence=deepcopy(self.source_evidence),
+            timings=dict(self.timings),
+            debug=MotionDebugData(
+                enabled=self.debug.enabled,
+                values=deepcopy(self.debug.values),
+                images=dict(self.debug.images),
+            ),
+        )
