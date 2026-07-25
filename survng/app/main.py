@@ -34,11 +34,18 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 
-from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
+from .config import AppConfig, CameraConfig, CameraMotionQualificationConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
 from .detector import objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
-from .motion_pipeline import motion_pipeline_catalog
+from .motion_pipeline import (
+    analysis_preset_selections,
+    guided_fusion_settings,
+    identify_analysis_preset,
+    motion_pipeline_catalog,
+    resolve_motion_pipeline_graphs,
+    update_guided_fusion,
+)
 from .go2rtc import Go2RtcError
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
@@ -1079,6 +1086,7 @@ def _audit_ai_context(audit: dict) -> dict:
         features = json.loads(str(audit.get("features_json") or "{}"))
     except json.JSONDecodeError:
         features = {}
+    pipeline_telemetry = features.pop("pipeline_telemetry", {})
     event = manager.events.get(int(audit["event_id"])) if audit.get("event_id") else None
     detected_objects: list[dict] = []
     qualification: dict = {}
@@ -1099,6 +1107,7 @@ def _audit_ai_context(audit: dict) -> dict:
             if entry.get("status") == "motion_qualification":
                 qualification = entry.get("motion_qualification") or {}
     override = camera.motion_qualification
+    graphs = resolve_motion_pipeline_graphs(config.motion_qualification, override)
     effective = {
         "mode": config.motion_qualification.mode if override.mode == "inherit" else override.mode,
         "sensitivity": config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
@@ -1123,6 +1132,9 @@ def _audit_ai_context(audit: dict) -> dict:
         "window_seconds": config.motion_qualification.window_seconds,
         "post_trigger_seconds": config.motion_qualification.post_trigger_seconds,
         "burst_quiet_seconds": config.motion_qualification.burst_quiet_seconds,
+        "analysis_preset": identify_analysis_preset(graphs.qualification),
+        "fusion": guided_fusion_settings(graphs.fusion),
+        "pipeline_origins": graphs.origins,
     }
     recent, _ = manager.events.motion_audits(limit=50, camera_id=camera_id)
     reason_counts: dict[str, int] = {}
@@ -1143,6 +1155,7 @@ def _audit_ai_context(audit: dict) -> dict:
             "trigger_count": audit.get("trigger_count"),
             "object_detected": None if audit.get("object_detected") is None else bool(audit.get("object_detected")),
             "qualification": qualification,
+            "pipeline_telemetry": pipeline_telemetry,
         },
         "detected_objects": detected_objects,
         "effective_settings": effective,
@@ -1160,8 +1173,43 @@ def _audit_ai_context(audit: dict) -> dict:
             "borderline_margin": [0, 0.10],
             "mog2_history_seconds": [5, 300],
             "sensitivity": ["high", "balanced", "low"],
+            "analysis_preset": ["modular", "classic"],
+            "fusion_policy": ["audit", "any", "all", "weighted"],
+            "fusion_sources": ["mog2", "onvif"],
         },
     }
+
+
+def _apply_pipeline_ai_change(
+    next_config: AppConfig,
+    camera: CameraConfig,
+    change: AuditAiChange,
+    value: object,
+) -> None:
+    target = (
+        next_config.motion_qualification
+        if change.scope == "global"
+        else camera.motion_qualification
+    )
+    if change.setting == "analysis_preset":
+        target.pipeline.qualification = analysis_preset_selections(str(value))
+        return
+    if change.setting not in {"fusion_policy", "fusion_sources"}:
+        setattr(target, change.setting, value)
+        return
+    override = (
+        CameraMotionQualificationConfig()
+        if change.scope == "global"
+        else camera.motion_qualification
+    )
+    graphs = resolve_motion_pipeline_graphs(next_config.motion_qualification, override)
+    target.pipeline.fusion = update_guided_fusion(
+        graphs.fusion,
+        change.setting,
+        value,
+    )
+    if change.setting == "fusion_sources" and "mog2" in value:
+        target.mog2_audit_enabled = True
 
 
 @app.get("/api/motion-audit")
@@ -1245,13 +1293,14 @@ def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
     if camera is None:
         raise HTTPException(status_code=404, detail="audit camera not found")
     applied: list[dict] = []
-    for change in request.changes:
-        value = validate_tuning_value(change.setting, change.value)
-        if change.scope == "global":
-            setattr(next_config.motion_qualification, change.setting, value)
-        else:
-            setattr(camera.motion_qualification, change.setting, value)
-        applied.append({**change.model_dump(mode="json"), "value": value})
+    try:
+        for change in request.changes:
+            value = validate_tuning_value(change.setting, change.value)
+            _apply_pipeline_ai_change(next_config, camera, change, value)
+            applied.append({**change.model_dump(mode="json"), "value": value})
+        validate_motion_pipeline_configuration(next_config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
     save_config(next_config, assign_ids=False)
     reload_manager(next_config)

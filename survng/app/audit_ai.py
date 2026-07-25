@@ -16,6 +16,7 @@ from .config import AuditAiConfig
 
 
 ALLOWED_GLOBAL_SETTINGS = {
+    "analysis_preset",
     "sensitivity",
     "frame_width",
     "sample_fps",
@@ -26,13 +27,18 @@ ALLOWED_GLOBAL_SETTINGS = {
     "borderline_margin",
     "mog2_audit_enabled",
     "mog2_history_seconds",
+    "fusion_policy",
+    "fusion_sources",
 }
 ALLOWED_CAMERA_SETTINGS = {
+    "analysis_preset",
     "sensitivity",
     "frame_width",
     "borderline_rescue_enabled",
     "borderline_margin",
     "mog2_audit_enabled",
+    "fusion_policy",
+    "fusion_sources",
 }
 
 
@@ -43,7 +49,18 @@ def _change_schema(scope: str, settings: set[str]) -> dict[str, Any]:
         "properties": {
             "scope": {"type": "string", "enum": [scope]},
             "setting": {"type": "string", "enum": sorted(settings)},
-            "value": {"type": ["string", "number", "boolean"]},
+            "value": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                    {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 2,
+                    },
+                ],
+            },
             "reason": {"type": "string"},
         },
         "required": ["scope", "setting", "value", "reason"],
@@ -63,8 +80,11 @@ class AuditAiChange(BaseModel):
         "borderline_margin",
         "mog2_audit_enabled",
         "mog2_history_seconds",
+        "analysis_preset",
+        "fusion_policy",
+        "fusion_sources",
     ]
-    value: str | int | float | bool
+    value: str | int | float | bool | list[str]
     reason: str = Field(min_length=1, max_length=500)
 
     @model_validator(mode="after")
@@ -86,6 +106,23 @@ class AuditAiAdvice(BaseModel):
 
 
 def validate_tuning_value(setting: str, value: Any) -> Any:
+    if setting == "analysis_preset":
+        normalized = str(value).strip().lower()
+        if normalized not in {"modular", "classic"}:
+            raise ValueError("analysis_preset must be modular or classic")
+        return normalized
+    if setting == "fusion_policy":
+        normalized = str(value).strip().lower()
+        if normalized not in {"audit", "any", "all", "weighted"}:
+            raise ValueError("fusion_policy must be audit, any, all, or weighted")
+        return normalized
+    if setting == "fusion_sources":
+        if not isinstance(value, list):
+            raise ValueError("fusion_sources must be a list")
+        normalized = list(dict.fromkeys(str(item).strip().lower() for item in value))
+        if any(source not in {"mog2", "onvif"} for source in normalized):
+            raise ValueError("fusion_sources may contain only mog2 and onvif")
+        return normalized
     if setting == "sensitivity":
         normalized = str(value)
         if normalized not in {"high", "balanced", "low"}:
@@ -138,23 +175,18 @@ ADVICE_SCHEMA: dict[str, Any] = {
 
 
 def gemini_advice_schema() -> dict[str, Any]:
-    schema = copy.deepcopy(ADVICE_SCHEMA)
-    change_variants = schema["properties"]["changes"]["items"]["anyOf"]
-    for variant in change_variants:
-        value_schema = variant["properties"]["value"]
-        value_schema.pop("type", None)
-        value_schema["anyOf"] = [
-            {"type": "string"},
-            {"type": "number"},
-            {"type": "boolean"},
-        ]
-    return schema
+    return copy.deepcopy(ADVICE_SCHEMA)
 
 
 SYSTEM_PROMPT = """You are a conservative video-motion calibration advisor for SurvNG.
 Analyze the supplied audit frame together with deterministic motion metrics and object detections.
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed. Prefer camera-scoped changes over global changes.
+Use analysis_preset only to choose modular or classic analysis. Prefer modular unless the
+telemetry shows a compatibility problem. Use fusion_policy and fusion_sources only when
+the audit-time source evidence supports that recommendation. An audit policy observes
+supporting sources without changing the primary decision; any, all, and weighted policies
+allow those sources to participate in the decision.
 Do not recommend lowering sensitivity merely because an object exists.
 Do not invent settings, alter model confidence, or recommend values outside the supplied bounds.
 Return only the requested JSON structure."""

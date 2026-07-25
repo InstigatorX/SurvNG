@@ -55,10 +55,14 @@ class AuditAiTest(unittest.TestCase):
         self.assertEqual(len(variants), 2)
         for variant in variants:
             value_schema = variant["properties"]["value"]
-            self.assertNotIn("type", value_schema)
             self.assertEqual(
                 value_schema["anyOf"],
-                [{"type": "string"}, {"type": "number"}, {"type": "boolean"}],
+                [
+                    {"type": "string"},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                    {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+                ],
             )
         camera_variant = next(
             variant for variant in variants
@@ -108,6 +112,23 @@ class AuditAiTest(unittest.TestCase):
         self.assertFalse(change.value)
         with self.assertRaises(ValueError):
             validate_tuning_value("mog2_history_seconds", 301)
+
+    def test_pipeline_recommendations_are_high_level_and_bounded(self) -> None:
+        self.assertEqual(validate_tuning_value("analysis_preset", "MODULAR"), "modular")
+        self.assertEqual(validate_tuning_value("fusion_policy", "weighted"), "weighted")
+        self.assertEqual(
+            validate_tuning_value("fusion_sources", ["mog2", "onvif", "mog2"]),
+            ["mog2", "onvif"],
+        )
+        change = AuditAiChange(
+            scope="camera",
+            setting="fusion_sources",
+            value=["onvif"],
+            reason="Use the camera's own motion events as supporting evidence.",
+        )
+        self.assertEqual(change.value, ["onvif"])
+        with self.assertRaises(ValueError):
+            validate_tuning_value("fusion_sources", ["optical_flow"])
 
 
 if __name__ == "__main__":

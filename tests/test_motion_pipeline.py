@@ -183,6 +183,28 @@ class MotionPipelineTest(unittest.TestCase):
         self.assertEqual(pipeline.status()["stages"]["first"]["calls"], 1)
         self.assertEqual(pipeline.runtime.state_for("first", list), [10.0])
 
+        snapshot = pipeline.audit_snapshot(result.timings)
+        self.assertEqual(set(snapshot["invocation_timings"]), {"first", "second"})
+        self.assertTrue(snapshot["invocation_timings"]["first"]["succeeded"])
+        self.assertEqual(snapshot["stage_metrics"]["first"]["calls"], 1)
+
+    def test_audit_snapshot_redacts_sensitive_stage_options(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="record",
+            builder=build_recording_stage,
+            provides=frozenset({"debug"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("first", "record", {"marker": "one", "api_key": "secret"})],
+        )
+
+        configuration = pipeline.audit_snapshot()["configuration"]
+
+        self.assertEqual(configuration[0]["options"]["marker"], "one")
+        self.assertEqual(configuration[0]["options"]["api_key"], "[redacted]")
+
     def test_pipeline_rejects_context_from_another_camera_or_runtime(self) -> None:
         factory = MotionPipelineFactory(build_builtin_motion_registry())
         gate = factory.create("gate", [MotionStageConfig("qualification", "legacy_qualifier")])

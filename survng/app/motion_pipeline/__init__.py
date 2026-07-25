@@ -44,6 +44,12 @@ from .evidence_stages import (
     register_evidence_stages,
 )
 from .factory import MotionPipelineFactory, MotionStageConfig
+from .guided import (
+    analysis_preset_selections,
+    guided_fusion_settings,
+    identify_analysis_preset,
+    update_guided_fusion,
+)
 from .image_stages import (
     BlobExtractionStage,
     BlobFilteringStage,
@@ -129,6 +135,7 @@ __all__ = [
     "MotionStage",
     "MotionStageOption",
     "MotionStageConfig",
+    "analysis_preset_selections",
     "MotionStageDependencies",
     "MotionStageRegistration",
     "MotionStageRegistry",
@@ -149,6 +156,8 @@ __all__ = [
     "builtin_motion_pipeline_presets",
     "build_default_motion_pipeline",
     "build_legacy_motion_pipeline",
+    "guided_fusion_settings",
+    "identify_analysis_preset",
     "default_motion_stage_configs",
     "motion_fusion_stage_configs",
     "motion_pipeline_catalog",
@@ -158,4 +167,5 @@ __all__ = [
     "register_evidence_stages",
     "register_decision_stages",
     "resolve_motion_pipeline_graphs",
+    "update_guided_fusion",
 ]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import cv2
@@ -24,6 +24,7 @@ class MotionQualificationResult:
     reason: str
     frame_count: int
     features: dict[str, Any]
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

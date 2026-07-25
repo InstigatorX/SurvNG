@@ -14,6 +14,28 @@ from .runtime import MotionRuntimeState
 
 LOGGER = logging.getLogger(__name__)
 MotionErrorPolicy = Literal["raise", "skip"]
+_SENSITIVE_OPTION_PARTS = ("api_key", "password", "secret", "token", "credential")
+
+
+def _audit_safe_value(value: object, depth: int = 0) -> object:
+    if depth >= 5:
+        return "[truncated]"
+    if isinstance(value, Mapping):
+        safe: dict[str, object] = {}
+        for raw_key, item in list(value.items())[:64]:
+            key = str(raw_key)[:100]
+            if any(part in key.lower() for part in _SENSITIVE_OPTION_PARTS):
+                safe[key] = "[redacted]"
+            else:
+                safe[key] = _audit_safe_value(item, depth + 1)
+        return safe
+    if isinstance(value, (list, tuple)):
+        return [_audit_safe_value(item, depth + 1) for item in value[:64]]
+    if isinstance(value, str):
+        return value[:500]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:500]
 
 
 @dataclass(slots=True)
@@ -202,6 +224,26 @@ class MotionPipeline:
                 for group in self.execution_groups
             ],
             "stages": stages,
+        }
+
+    def audit_snapshot(
+        self,
+        timings: Mapping[str, StageTiming] | None = None,
+    ) -> dict[str, object]:
+        """Return bounded, JSON-safe pipeline telemetry for a persisted decision."""
+        status = self.status()
+        invocation_timings = {
+            stage_id: {
+                "duration_ms": round(timing.duration_ms, 3),
+                "succeeded": timing.succeeded,
+            }
+            for stage_id, timing in (timings or {}).items()
+        }
+        return {
+            "configuration": _audit_safe_value(status["configuration"]),
+            "execution_groups": status["execution_groups"],
+            "invocation_timings": invocation_timings,
+            "stage_metrics": status["stages"],
         }
 
     def close(self) -> None:

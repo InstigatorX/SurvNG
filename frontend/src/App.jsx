@@ -5005,6 +5005,47 @@ function Mog2TrackOverlay({ tracks, bounds }) {
   );
 }
 
+const motionAiSettingLabels = {
+  analysis_preset: "Motion analysis method",
+  fusion_policy: "Supporting evidence behavior",
+  fusion_sources: "Supporting motion sources",
+};
+
+function formatMotionAiValue(setting, value) {
+  if (setting === "analysis_preset") return value === "modular" ? "Modular motion analysis" : "Classic compatibility";
+  if (setting === "fusion_policy") return ({ audit: "Observe only", any: "Any source can confirm", all: "All sources must agree", weighted: "Weighted agreement" })[value] || String(value);
+  if (setting === "fusion_sources") {
+    const labels = { mog2: "Background model", onvif: "Camera motion events" };
+    return Array.isArray(value) && value.length ? value.map((source) => labels[source] || source).join(", ") : "No supporting sources";
+  }
+  return String(value);
+}
+
+function MotionAuditPipeline({ telemetry }) {
+  const graphs = telemetry?.graphs && typeof telemetry.graphs === "object" ? telemetry.graphs : null;
+  if (!graphs) return null;
+  const graphLabels = { qualification: "Frame analysis", observation: "Supporting sources", fusion: "Final decision" };
+  return (
+    <details className="motion-audit-pipeline">
+      <summary>Processing used for this decision</summary>
+      <div>
+        {Object.entries(graphs).map(([name, graph]) => {
+          const configuration = Array.isArray(graph?.configuration) ? graph.configuration : [];
+          const timings = graph?.invocation_timings && typeof graph.invocation_timings === "object" ? Object.values(graph.invocation_timings) : [];
+          const duration = timings.reduce((total, timing) => total + Number(timing?.duration_ms || 0), 0);
+          return (
+            <section key={name}>
+              <span>{graphLabels[name] || name}</span>
+              <strong>{configuration.length} step{configuration.length === 1 ? "" : "s"}{timings.length ? ` · ${duration.toFixed(1)} ms` : " · continuous"}</strong>
+              <small>{telemetry.origins?.[name] || "default"} configuration · {configuration.map((stage) => stage.implementation).join(" → ") || "No stage details"}</small>
+            </section>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
 function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   const outcome = motionAuditOutcome(item);
   const currentIndex = items.findIndex((candidate) => candidate.id === item.id);
@@ -5018,6 +5059,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   const mediaRef = useRef(null);
   const imageRef = useRef(null);
   const mog2Tracks = Array.isArray(item.features?.mog2_tracks) ? item.features.mog2_tracks : [];
+  const pipelineTelemetry = item.features?.pipeline_telemetry;
 
   useEffect(() => {
     setAiAdvice(null);
@@ -5148,6 +5190,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
               <div><dt>Sensitivity</dt><dd>{item.sensitivity}</dd></div>
               <div><dt>Triggers</dt><dd>{item.trigger_count}</dd></div>
             </dl>
+            <MotionAuditPipeline telemetry={pipelineTelemetry} />
             <div className="motion-audit-ai">
               <div className="motion-audit-ai-head">
                 <strong><Sparkles size={15} /> AI Advisor</strong>
@@ -5163,7 +5206,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
                   {aiAdvice.advice.changes?.length ? (
                     <>
                       <div className="motion-audit-ai-changes">
-                        {aiAdvice.advice.changes.map((change, index) => <div key={`${change.scope}-${change.setting}-${index}`}><strong>{change.scope} · {change.setting.replaceAll("_", " ")}</strong><code>{String(change.value)}</code><small>{change.reason}</small></div>)}
+                        {aiAdvice.advice.changes.map((change, index) => <div key={`${change.scope}-${change.setting}-${index}`}><strong>{change.scope} · {motionAiSettingLabels[change.setting] || change.setting.replaceAll("_", " ")}</strong><code>{formatMotionAiValue(change.setting, change.value)}</code><small>{change.reason}</small></div>)}
                       </div>
                       <button type="button" className="primary" onClick={applyAiChanges} disabled={aiApplying || Boolean(aiAdvice.applied)}><Save size={15} /> {aiAdvice.applied ? "Applied" : aiApplying ? "Applying..." : "Apply Recommendations"}</button>
                     </>

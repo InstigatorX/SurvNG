@@ -4416,6 +4416,42 @@ button.status-pill.hud-toggle:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.motion-audit-pipeline {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--control);
+  font-size: 12px;
+}
+
+.motion-audit-pipeline summary {
+  cursor: pointer;
+  font-weight: 800;
+  padding: 9px;
+}
+
+.motion-audit-pipeline > div {
+  display: grid;
+  gap: 1px;
+  border-top: 1px solid var(--line);
+}
+
+.motion-audit-pipeline section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  padding: 8px 9px;
+}
+
+.motion-audit-pipeline section > span {
+  color: var(--muted);
+}
+
+.motion-audit-pipeline section > small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .motion-audit-ai {
   display: grid;
   gap: 10px;

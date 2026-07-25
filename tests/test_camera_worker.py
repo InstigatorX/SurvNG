@@ -376,6 +376,15 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(candidate.reason, "event_state_candidate")
         self.assertTrue(active.accepted)
         self.assertEqual(active.reason, "qualified")
+        self.assertEqual(active.telemetry["schema_version"], 1)
+        self.assertEqual(
+            set(active.telemetry["graphs"]),
+            {"qualification", "observation", "fusion"},
+        )
+        self.assertIn(
+            "event_state",
+            active.telemetry["graphs"]["fusion"]["invocation_timings"],
+        )
 
     def test_motion_event_runs_detection_on_live_fallback(self) -> None:
         camera = CameraConfig(

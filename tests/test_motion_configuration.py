@@ -8,12 +8,36 @@ from survng.app.config import AppConfig, CameraMotionQualificationConfig, Motion
 from survng.app.manager import validate_motion_pipeline_configuration
 from survng.app.motion_pipeline import (
     MotionPipelineFactory,
+    analysis_preset_selections,
     build_builtin_motion_registry,
+    guided_fusion_settings,
+    identify_analysis_preset,
     resolve_motion_pipeline_graphs,
+    update_guided_fusion,
 )
 
 
 class MotionPipelineConfigurationTest(unittest.TestCase):
+    def test_guided_helpers_identify_presets_and_update_fusion(self) -> None:
+        graphs = resolve_motion_pipeline_graphs(
+            MotionQualificationConfig(),
+            CameraMotionQualificationConfig(),
+        )
+        self.assertEqual(identify_analysis_preset(graphs.qualification), "modular")
+        self.assertEqual(
+            analysis_preset_selections("classic")[0].implementation,
+            "legacy_qualifier",
+        )
+
+        updated = update_guided_fusion(graphs.fusion, "fusion_policy", "weighted")
+        resolved = resolve_motion_pipeline_graphs(
+            MotionQualificationConfig.model_validate({
+                "pipeline": {"fusion": [stage.model_dump() for stage in updated]},
+            }),
+            CameraMotionQualificationConfig(),
+        )
+        self.assertEqual(guided_fusion_settings(resolved.fusion)["policy"], "weighted")
+
     def test_empty_global_graphs_resolve_to_compatible_defaults(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
             MotionQualificationConfig(mode="enforce"),

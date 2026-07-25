@@ -492,6 +492,16 @@ class CameraWorker:
                 max(0.0, processed.event_state.cooldown_until - end_epoch),
                 3,
             )
+        telemetry = dict(result.telemetry)
+        graphs = dict(telemetry.get("graphs") or {})
+        graphs.setdefault("qualification", self.motion_pipeline.audit_snapshot())
+        graphs["observation"] = self.motion_observation_pipeline.audit_snapshot()
+        graphs["fusion"] = self.motion_fusion_pipeline.audit_snapshot(processed.timings)
+        telemetry.update({
+            "schema_version": 1,
+            "origins": dict(self.motion_pipeline_origins),
+            "graphs": graphs,
+        })
         return MotionQualificationResult(
             accepted=(
                 decision.run_object_detection
@@ -503,7 +513,15 @@ class CameraWorker:
             reason=decision.reason if decision is not None else scoring.reason,
             frame_count=scoring.frame_count,
             features=features,
+            telemetry=telemetry,
         )
+
+    @staticmethod
+    def _audit_features(result: MotionQualificationResult) -> dict[str, Any]:
+        features = dict(result.features)
+        if result.telemetry:
+            features["pipeline_telemetry"] = result.telemetry
+        return features
 
     @staticmethod
     def _priority_motion_topic(topic: str) -> bool:
@@ -637,6 +655,13 @@ class CameraWorker:
             reason=result.reason,
             frame_count=result.frame_count,
             features=dict(result.features),
+            telemetry={
+                "schema_version": 1,
+                "origins": dict(self.motion_pipeline_origins),
+                "graphs": {
+                    "qualification": self.motion_pipeline.audit_snapshot(processed.timings),
+                },
+            },
         )
 
     def set_motion_debug_enabled(self, enabled: bool) -> None:
@@ -747,7 +772,7 @@ class CameraWorker:
                     reason=result.reason,
                     object_detected=None,
                     trigger_count=len(triggers),
-                    features=result.features,
+                    features=self._audit_features(result),
                 )
                 continue
 
@@ -779,7 +804,7 @@ class CameraWorker:
                     reason=result.reason,
                     object_detected=found_object,
                     trigger_count=len(triggers),
-                    features=result.features,
+                    features=self._audit_features(result),
                 )
 
     def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
