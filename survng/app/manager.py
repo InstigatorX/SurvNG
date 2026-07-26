@@ -124,14 +124,20 @@ class AppManager:
             self.set_detection,
             self._mqtt_connected,
         )
-        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._runtime_state_lock = threading.Lock()
         self._runtime_state_path = self.storage_dir / "runtime_state.json"
         runtime_state = self._load_runtime_state()
         self._recording_enabled = self._boolean_preferences(runtime_state, "recording_enabled")
         self._detection_enabled = self._boolean_preferences(runtime_state, "detection_enabled")
-        self._camera_enabled = {camera.id: True for camera in config.cameras}
+        persisted_camera_enabled = self._boolean_preferences(runtime_state, "camera_enabled")
+        self._camera_enabled = {
+            camera.id: persisted_camera_enabled.get(camera.id, True)
+            for camera in config.cameras
+        }
         self._stopping = False
+        self._started = False
+        self._closed = False
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
@@ -231,13 +237,18 @@ class AppManager:
         values = payload.get(key, {})
         if not isinstance(values, dict):
             return {}
-        return {str(camera_id): bool(enabled) for camera_id, enabled in values.items()}
+        return {
+            str(camera_id): enabled
+            for camera_id, enabled in values.items()
+            if isinstance(enabled, bool)
+        }
 
     def _save_runtime_state(self) -> None:
         with self._runtime_state_lock:
             payload = {
                 "recording_enabled": self._recording_enabled,
                 "detection_enabled": self._detection_enabled,
+                "camera_enabled": self._camera_enabled,
             }
             temporary = self._runtime_state_path.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -259,71 +270,179 @@ class AppManager:
             self.recorder.start(camera, "live")
 
     def set_recording(self, camera_id: str, enabled: bool) -> bool:
-        camera = self.camera(camera_id)
-        if camera is None:
-            return False
-        self._recording_enabled[camera_id] = bool(enabled)
-        self._save_runtime_state()
-        should_run = self._recorder_should_run(camera_id)
-        self.recorder.set_camera_enabled(camera_id, should_run)
-        if should_run:
-            self._start_configured_recorders(camera)
-        self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
-        self._publish_camera_status(camera_id)
-        return True
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                return False
+            camera = self.camera(camera_id)
+            if camera is None:
+                return False
+            had_previous = camera_id in self._recording_enabled
+            previous = self._recording_enabled.get(camera_id)
+            self._recording_enabled[camera_id] = bool(enabled)
+            try:
+                self._save_runtime_state()
+            except Exception:
+                if had_previous:
+                    self._recording_enabled[camera_id] = bool(previous)
+                else:
+                    self._recording_enabled.pop(camera_id, None)
+                raise
+            should_run = self._recorder_should_run(camera_id)
+            self.recorder.set_camera_enabled(camera_id, should_run)
+            if should_run:
+                self._start_configured_recorders(camera)
+            self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
+            self._publish_camera_status(camera_id)
+            return True
 
     def set_detection(self, camera_id: str, enabled: bool) -> bool:
-        worker = self.workers.get(camera_id)
-        if worker is None:
-            return False
-        self._detection_enabled[camera_id] = bool(enabled)
-        self._save_runtime_state()
-        worker.set_detection_enabled(enabled)
-        self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(enabled))
-        self._publish_camera_status(camera_id)
-        return True
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                return False
+            worker = self.workers.get(camera_id)
+            if worker is None:
+                return False
+            had_previous = camera_id in self._detection_enabled
+            previous = self._detection_enabled.get(camera_id)
+            self._detection_enabled[camera_id] = bool(enabled)
+            try:
+                self._save_runtime_state()
+            except Exception:
+                if had_previous:
+                    self._detection_enabled[camera_id] = bool(previous)
+                else:
+                    self._detection_enabled.pop(camera_id, None)
+                raise
+            worker.set_detection_enabled(enabled)
+            self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(enabled))
+            self._publish_camera_status(camera_id)
+            return True
+
+    def runtime_preferences(self) -> dict[str, dict[str, bool]]:
+        with self._lifecycle_lock:
+            return {
+                "recording_enabled": dict(self._recording_enabled),
+                "detection_enabled": dict(self._detection_enabled),
+                "camera_enabled": dict(self._camera_enabled),
+            }
+
+    def apply_runtime_preferences(
+        self,
+        preferences: dict[str, dict[str, bool]],
+        *,
+        persist: bool = False,
+    ) -> None:
+        with self._lifecycle_lock:
+            camera_ids = set(self.workers)
+            self._recording_enabled = {
+                camera_id: bool(enabled)
+                for camera_id, enabled in preferences.get("recording_enabled", {}).items()
+                if camera_id in camera_ids
+            }
+            self._detection_enabled = {
+                camera_id: bool(enabled)
+                for camera_id, enabled in preferences.get("detection_enabled", {}).items()
+                if camera_id in camera_ids
+            }
+            self._camera_enabled = {
+                camera_id: bool(preferences.get("camera_enabled", {}).get(camera_id, True))
+                for camera_id in camera_ids
+            }
+            if persist:
+                self._save_runtime_state()
 
     def start_all(self) -> None:
         with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("application manager is closed")
+            if self._started:
+                return
             self._stopping = False
-        self.detector.start()
-        self.faces.start()
-        cameras = list(self._unique_cameras())
-        recorder_keys = set()
-        for camera in cameras:
-            if camera.record:
-                recorder_keys.add((camera.id, "main"))
-            if camera.record_sub and camera.live_stream_url:
-                recorder_keys.add((camera.id, "live"))
-        self.recorder.cleanup_stale_recorders(recorder_keys)
-        for camera in cameras:
-            self._camera_enabled[camera.id] = True
-            self.recorder.set_camera_enabled(camera.id, self.recording_enabled(camera.id))
-            self.workers[camera.id].set_detection_enabled(self.detection_enabled(camera.id))
-            self.workers[camera.id].start()
-            if self.recording_enabled(camera.id):
-                self._start_configured_recorders(camera)
-            self.mqtt.publish_camera_state(camera.id, True)
-        self.recorder.start_indexer(cameras)
-        self.recorder.start_watchdog(cameras)
-        # Publish discovery only after persisted recording/detection preferences
-        # have been applied to every worker.
-        self.mqtt.start()
-        self._start_state_monitor()
+            try:
+                self.detector.start()
+                self.faces.start()
+                cameras = list(self._unique_cameras())
+                recorder_keys = set()
+                for camera in cameras:
+                    if camera.record:
+                        recorder_keys.add((camera.id, "main"))
+                    if camera.record_sub and camera.live_stream_url:
+                        recorder_keys.add((camera.id, "live"))
+                self.recorder.cleanup_stale_recorders(recorder_keys)
+                for camera in cameras:
+                    camera_enabled = self._camera_enabled.get(camera.id, True)
+                    self.recorder.set_camera_enabled(
+                        camera.id,
+                        camera_enabled and self.recording_enabled(camera.id),
+                    )
+                    self.workers[camera.id].set_detection_enabled(self.detection_enabled(camera.id))
+                    if camera_enabled:
+                        self.workers[camera.id].start()
+                        if self.recording_enabled(camera.id):
+                            self._start_configured_recorders(camera)
+                    self.mqtt.publish_camera_state(camera.id, camera_enabled)
+                self.recorder.start_indexer(cameras)
+                self.recorder.start_watchdog(cameras)
+                # Publish discovery only after persisted recording/detection preferences
+                # have been applied to every worker.
+                self.mqtt.start()
+                self._start_state_monitor()
+                self._started = True
+            except BaseException:
+                self._stopping = True
+                try:
+                    self._shutdown_components()
+                except Exception:
+                    LOGGER.exception("application startup rollback was incomplete")
+                self._closed = True
+                raise
 
     def stop_all(self) -> None:
+        self.stop_all_with_runtime_preferences()
+
+    def stop_all_with_runtime_preferences(self) -> dict[str, dict[str, bool]]:
         with self._lifecycle_lock:
-            if self._stopping:
-                return
+            preferences = self.runtime_preferences()
+            if self._closed:
+                return preferences
             self._stopping = True
-        self._stop_state_monitor()
+            try:
+                self._shutdown_components()
+            finally:
+                self._started = False
+                self._closed = True
+            return preferences
+
+    def _shutdown_components(self) -> None:
+        errors: list[tuple[str, Exception]] = []
+
+        def attempt(label: str, callback) -> None:
+            try:
+                callback()
+            except Exception as exc:
+                errors.append((label, exc))
+                LOGGER.exception("SurvNG shutdown step failed: %s", label)
+
+        attempt("state monitor", self._stop_state_monitor)
         started = time.monotonic()
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
-        self.mqtt.stop()
+        attempt("MQTT", self.mqtt.stop)
         LOGGER.info("SurvNG shutdown: stopping camera and ONVIF workers")
+        camera_errors: list[tuple[str, Exception]] = []
+        camera_errors_lock = threading.Lock()
+
+        def stop_worker(camera_id: str, worker: CameraWorker) -> None:
+            try:
+                worker.stop()
+            except Exception as exc:
+                with camera_errors_lock:
+                    camera_errors.append((camera_id, exc))
+                LOGGER.exception("camera shutdown failed for %s", camera_id)
+
         camera_shutdowns = [
             threading.Thread(
-                target=worker.stop,
+                target=stop_worker,
+                args=(camera_id, worker),
                 name=f"stop-camera-{camera_id}",
                 daemon=False,
             )
@@ -333,19 +452,25 @@ class AppManager:
             thread.start()
         for thread in camera_shutdowns:
             thread.join()
-        for worker in self.workers.values():
-            worker.close()
+        failed_cameras = {camera_id for camera_id, _exc in camera_errors}
+        errors.extend((f"camera {camera_id}", exc) for camera_id, exc in camera_errors)
+        for camera_id, worker in self.workers.items():
+            if camera_id not in failed_cameras:
+                attempt(f"camera {camera_id} resources", worker.close)
 
         LOGGER.info("SurvNG shutdown: stopping face recognition")
-        self.faces.close()
+        attempt("face recognition", self.faces.close)
 
         LOGGER.info("SurvNG shutdown: stopping isolated inference workers")
-        self.detector.stop()
+        attempt("inference", self.detector.stop)
 
         LOGGER.info("SurvNG shutdown: stopping recorder processes")
-        self.recorder.stop_all()
+        attempt("recorders", self.recorder.stop_all)
+        attempt("state event broker", self.state_events.close)
         LOGGER.info("SurvNG shutdown complete in %.2fs", time.monotonic() - started)
-        self.state_events.close()
+        if errors:
+            labels = ", ".join(label for label, _exc in errors)
+            raise RuntimeError(f"one or more shutdown steps failed: {labels}") from errors[0][1]
 
 
     def camera(self, camera_id: str):
@@ -353,31 +478,54 @@ class AppManager:
 
     def start_camera(self, camera_id: str) -> bool:
         with self._lifecycle_lock:
-            if self._stopping:
+            if self._stopping or self._closed:
                 return False
-        camera = self.camera(camera_id)
-        worker = self.workers.get(camera_id)
-        if camera is None or worker is None:
-            return False
-        self._camera_enabled[camera_id] = True
-        self.recorder.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
-        worker.start()
-        if self.recording_enabled(camera_id):
-            self._start_configured_recorders(camera)
-        self.mqtt.publish_camera_state(camera_id, True)
-        self._publish_camera_status(camera_id)
-        return True
+            camera = self.camera(camera_id)
+            worker = self.workers.get(camera_id)
+            if camera is None or worker is None:
+                return False
+            previous = self._camera_enabled.get(camera_id, True)
+            self._camera_enabled[camera_id] = True
+            try:
+                self._save_runtime_state()
+                self.recorder.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
+                worker.start()
+            except Exception:
+                self._camera_enabled[camera_id] = previous
+                try:
+                    self._save_runtime_state()
+                except Exception:
+                    LOGGER.exception("failed to roll back camera power state for %s", camera_id)
+                self.recorder.set_camera_enabled(
+                    camera_id,
+                    previous and self.recording_enabled(camera_id),
+                )
+                raise
+            if self.recording_enabled(camera_id):
+                self._start_configured_recorders(camera)
+            self.mqtt.publish_camera_state(camera_id, True)
+            self._publish_camera_status(camera_id)
+            return True
 
     def stop_camera(self, camera_id: str) -> bool:
-        worker = self.workers.get(camera_id)
-        if worker is None:
-            return False
-        self._camera_enabled[camera_id] = False
-        self.recorder.set_camera_enabled(camera_id, False)
-        worker.stop()
-        self.mqtt.publish_camera_state(camera_id, False)
-        self._publish_camera_status(camera_id)
-        return True
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                return False
+            worker = self.workers.get(camera_id)
+            if worker is None:
+                return False
+            previous = self._camera_enabled.get(camera_id, True)
+            self._camera_enabled[camera_id] = False
+            try:
+                self._save_runtime_state()
+            except Exception:
+                self._camera_enabled[camera_id] = previous
+                raise
+            self.recorder.set_camera_enabled(camera_id, False)
+            worker.stop()
+            self.mqtt.publish_camera_state(camera_id, False)
+            self._publish_camera_status(camera_id)
+            return True
 
     def update_camera_zones(
         self,
@@ -513,6 +661,8 @@ class AppManager:
         thread = self._state_monitor_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5.0)
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("camera state monitor did not stop")
         self._state_monitor_thread = None
 
     def mqtt_status(self) -> dict:

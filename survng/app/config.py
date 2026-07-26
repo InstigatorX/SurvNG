@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -158,7 +161,7 @@ class CameraMotionQualificationConfig(BaseModel):
 
 
 class CameraConfig(BaseModel):
-    id: str
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str
     video_backend: str = "url"
     stream_url: str
@@ -172,6 +175,24 @@ class CameraConfig(BaseModel):
 
     @model_validator(mode="after")
     def derive_connection_from_url(self) -> "CameraConfig":
+        try:
+            parsed = urlsplit(self.stream_url.strip())
+        except ValueError as exc:
+            raise ValueError("stream_url must be a valid camera URL") from exc
+        if parsed.scheme.lower() not in {"rtsp", "rtsps", "reolink", "http", "https"}:
+            raise ValueError("stream_url must use RTSP, Reolink, HTTP, or HTTPS")
+        if not parsed.hostname:
+            raise ValueError("stream_url must include a camera host")
+        self.stream_url = self.stream_url.strip()
+        if self.live_stream_url is not None:
+            self.live_stream_url = self.live_stream_url.strip() or None
+            if self.live_stream_url:
+                try:
+                    live = urlsplit(self.live_stream_url)
+                except ValueError as exc:
+                    raise ValueError("live_stream_url must be a valid camera URL") from exc
+                if live.scheme.lower() not in {"rtsp", "rtsps", "http", "https"} or not live.hostname:
+                    raise ValueError("live_stream_url must include a supported scheme and camera host")
         apply_stream_url_defaults(self)
         return self
 
@@ -244,12 +265,21 @@ class AppConfig(BaseModel):
             return ""
         if "?" in path or "#" in path:
             raise ValueError("base_path must contain only a URL path")
-        return f"/{path.strip('/')}"
+        normalized = f"/{path.strip('/')}"
+        if (
+            not re.fullmatch(r"/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*", normalized)
+            or any(part in {".", ".."} for part in normalized.split("/"))
+        ):
+            raise ValueError("base_path contains unsupported or unsafe characters")
+        return normalized
 
     @model_validator(mode="after")
     def validate_event_clip_window(self) -> "AppConfig":
         if self.event_clip_before_seconds + self.event_clip_after_seconds <= 0:
             raise ValueError("event clip window must include time before or after the event")
+        camera_ids = [camera.id for camera in self.cameras]
+        if len(camera_ids) != len(set(camera_ids)):
+            raise ValueError("camera ids must be unique")
         return self
 
 
@@ -330,11 +360,46 @@ def load_config(path: str = "config.json") -> AppConfig:
 
 
 def save_config(config: AppConfig, path: str = "config.json", assign_ids: bool = True) -> None:
-    config = normalize_config(config, assign_ids=assign_ids)
+    config = normalize_config(config.model_copy(deep=True), assign_ids=assign_ids)
     config_path = Path(path)
-    with config_path.open("w", encoding="utf-8") as handle:
-        json.dump(config.model_dump(mode="json"), handle, indent=2)
-        handle.write("\n")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode = 0o600
+    try:
+        existing_mode = config_path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        pass
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=config_path.parent,
+            prefix=f".{config_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            os.chmod(temporary_path, existing_mode)
+            json.dump(config.model_dump(mode="json"), handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, config_path)
+        temporary_path = None
+        try:
+            directory_fd = os.open(config_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def camera_by_id(config: AppConfig, camera_id: str) -> Optional[CameraConfig]:

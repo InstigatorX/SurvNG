@@ -59,6 +59,11 @@ class OnvifEventListener:
         self.subscription_termination_time = ""
         self.subscription_lifetime_seconds: float | None = None
 
+    @property
+    def running(self) -> bool:
+        with self._lifecycle_lock:
+            return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
         if not self.camera.onvif.enabled:
             return

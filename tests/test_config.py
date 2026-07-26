@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from survng.app.config import AppConfig
+from survng.app.config import AppConfig, CameraConfig, load_config, save_config
 
 
 class AppConfigTest(unittest.TestCase):
@@ -22,6 +26,10 @@ class AppConfigTest(unittest.TestCase):
             AppConfig(base_path="/survng?mode=remote")
         with self.assertRaises(ValidationError):
             AppConfig(base_path="/survng#remote")
+        with self.assertRaises(ValidationError):
+            AppConfig(base_path="/../survng")
+        with self.assertRaises(ValidationError):
+            AppConfig(base_path="/survng/<script>")
 
     def test_event_clip_window_requires_a_bounded_nonempty_duration(self) -> None:
         self.assertEqual(AppConfig(event_clip_before_seconds=0, event_clip_after_seconds=2).event_clip_before_seconds, 0)
@@ -54,6 +62,55 @@ class AppConfigTest(unittest.TestCase):
         self.assertIsNone(
             config.cameras[0].motion_qualification.pipeline.qualification
         )
+
+    def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
+        with self.assertRaises(ValidationError):
+            CameraConfig(id="../gate", name="Gate", stream_url="rtsp://camera/main")
+        with self.assertRaises(ValidationError):
+            CameraConfig(id="gate", name="Gate", stream_url="not-a-camera-url")
+        with self.assertRaises(ValidationError):
+            CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://camera/main",
+                live_stream_url="file:///tmp/video.mp4",
+            )
+
+    def test_duplicate_camera_ids_are_rejected(self) -> None:
+        camera = {
+            "id": "gate",
+            "name": "Gate",
+            "stream_url": "rtsp://camera/main",
+        }
+        with self.assertRaises(ValidationError):
+            AppConfig.model_validate({"cameras": [camera, {**camera, "name": "Other"}]})
+
+    def test_save_config_is_atomic_and_does_not_mutate_assigned_ids(self) -> None:
+        config = AppConfig(
+            cameras=[CameraConfig(id="old", name="Front Door", stream_url="rtsp://camera/main")]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "nested" / "config.json"
+            save_config(config, str(path), assign_ids=True)
+            saved = load_config(str(path))
+
+        self.assertEqual(config.cameras[0].id, "old")
+        self.assertEqual(saved.cameras[0].id, "front-door")
+
+    def test_failed_config_serialization_preserves_previous_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            original = AppConfig(base_path="/original")
+            save_config(original, str(path), assign_ids=False)
+            with patch("survng.app.config.json.dump", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    save_config(AppConfig(base_path="/replacement"), str(path), assign_ids=False)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            temporary_files = list(path.parent.glob(f".{path.name}.*.tmp"))
+
+        self.assertEqual(payload["base_path"], "/original")
+        self.assertEqual(temporary_files, [])
 
 
 if __name__ == "__main__":

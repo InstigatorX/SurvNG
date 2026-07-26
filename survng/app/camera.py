@@ -191,7 +191,13 @@ class CameraWorker:
                         raise
                 self.onvif.start()
             except BaseException:
-                self.stop()
+                try:
+                    self.stop()
+                except Exception:
+                    LOGGER.exception(
+                        "camera startup rollback was incomplete for %s",
+                        self.camera.id,
+                    )
                 raise
 
     def stop(self) -> None:
@@ -275,6 +281,17 @@ class CameraWorker:
             self._adaptive_last_completed_at = 0.0
             self._priority_motion_times.clear()
             self._thread = self._source_threads.get("live")
+            shutdown_failures: list[str] = []
+            if alive:
+                shutdown_failures.append(f"capture sources: {', '.join(alive)}")
+            if not motion_workers_stopped:
+                shutdown_failures.append("motion workers")
+            if self.onvif.running:
+                shutdown_failures.append("ONVIF worker")
+            if shutdown_failures:
+                raise RuntimeError(
+                    f"camera {self.camera.id} did not stop cleanly ({'; '.join(shutdown_failures)})"
+                )
 
     def close(self) -> None:
         self.motion_pipeline.close()

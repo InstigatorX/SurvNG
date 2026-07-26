@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 
-from .config import AppConfig, CameraConfig, CameraMotionQualificationConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
+from .config import AppConfig, CameraConfig, CameraMotionQualificationConfig, DetectionZone, camera_by_id, load_config, normalize_config, save_config, slugify_camera_id
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
 from .detector import detection_failure, merge_manual_detection_objects, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
@@ -100,6 +100,8 @@ RECORDING_PREWARM_THREAD: threading.Thread | None = None
 RECORDING_PREWARM_PROCESS_LOCK = threading.Lock()
 RECORDING_PREWARM_PROCESS: subprocess.Popen | None = None
 FACE_OBSERVATIONS_SYNCED = False
+FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
+MANAGER_RELOAD_LOCK = threading.RLock()
 
 
 class RecordingPrewarmCancelled(Exception):
@@ -213,26 +215,89 @@ def _validate_recording_range(
         raise HTTPException(status_code=400, detail=detail)
 
 
-def reload_manager(next_config: AppConfig) -> None:
+def reload_manager(
+    next_config: AppConfig,
+    *,
+    assign_ids: bool = False,
+    persist: bool = True,
+) -> AppConfig:
     global config, manager, FACE_OBSERVATIONS_SYNCED
-    _stop_recording_prewarmer()
-    manager.stop_all()
-    with RECORDING_DAY_CACHE_LOCK:
-        RECORDING_DAY_CACHE.clear()
-    config = next_config
-    manager = AppManager(config)
-    FACE_OBSERVATIONS_SYNCED = False
-    manager.start_all()
-    _start_recording_prewarmer()
+    effective_config = normalize_config(
+        next_config.model_copy(deep=True),
+        assign_ids=assign_ids,
+    )
+    with MANAGER_RELOAD_LOCK:
+        previous_config = config
+        previous_manager = manager
+        prewarmer_was_running = bool(
+            RECORDING_PREWARM_THREAD is not None
+            and RECORDING_PREWARM_THREAD.is_alive()
+        )
+        candidate = AppManager(effective_config)
+        previous_stop_attempted = False
+        runtime_preferences = previous_manager.runtime_preferences()
+        try:
+            _stop_recording_prewarmer()
+            previous_stop_attempted = True
+            previous_manager.stop_all_with_runtime_preferences()
+            candidate.apply_runtime_preferences(runtime_preferences)
+            candidate.start_all()
+            candidate.apply_runtime_preferences(runtime_preferences, persist=True)
+            if persist:
+                save_config(effective_config, assign_ids=False)
+        except BaseException as reload_error:
+            try:
+                candidate.stop_all()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "failed to clean up replacement manager after reload failure"
+                )
+            if not previous_stop_attempted:
+                if prewarmer_was_running:
+                    _start_recording_prewarmer()
+                raise RuntimeError(
+                    "configuration reload failed before the active manager was stopped"
+                ) from reload_error
+            try:
+                recovery = AppManager(previous_config)
+                recovery.apply_runtime_preferences(runtime_preferences, persist=True)
+                recovery.start_all()
+            except BaseException as recovery_error:
+                raise RuntimeError(
+                    "configuration reload failed and the previous manager could not be restored"
+                ) from recovery_error
+            config = previous_config
+            manager = recovery
+            FACE_OBSERVATIONS_SYNCED = False
+            if prewarmer_was_running:
+                _start_recording_prewarmer()
+            if not isinstance(reload_error, Exception):
+                raise
+            raise RuntimeError(
+                "configuration reload failed; the previous configuration was restored"
+            ) from reload_error
+
+        config = effective_config
+        manager = candidate
+        FACE_OBSERVATIONS_SYNCED = False
+        with RECORDING_DAY_CACHE_LOCK:
+            RECORDING_DAY_CACHE.clear()
+        if prewarmer_was_running:
+            _start_recording_prewarmer()
+        return effective_config
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.start_all()
-    _start_recording_prewarmer()
-    yield
-    _stop_recording_prewarmer()
-    manager.stop_all()
+    try:
+        _start_recording_prewarmer()
+        yield
+    finally:
+        try:
+            _stop_recording_prewarmer()
+        finally:
+            manager.stop_all()
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
@@ -949,28 +1014,43 @@ def put_config(next_config: AppConfig) -> dict:
         validate_motion_pipeline_configuration(next_config)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    save_config(next_config)
-    reload_manager(next_config)
-    return {"ok": True, "cameras": len(next_config.cameras)}
+    effective_config = reload_manager(next_config, assign_ids=True)
+    return {"ok": True, "cameras": len(effective_config.cameras)}
 
 
 @app.put("/api/config/cameras/{camera_id}/zones")
 def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:
     global config
-    next_config = config.model_copy(deep=True)
-    camera = camera_by_id(next_config, camera_id)
-    if camera is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    worker = manager.workers.get(camera_id)
-    if worker is None:
-        raise HTTPException(status_code=404, detail="camera worker not found")
-    current_camera = camera_by_id(config, camera_id)
-    previous_zones = [zone.model_dump(mode="json") for zone in (current_camera.zones if current_camera else [])]
-    camera.zones = zones
-    save_config(next_config, assign_ids=False)
-    config = next_config
-    manager.config = next_config
-    manager.update_camera_zones(camera_id, camera.zones, previous_zones)
+    with MANAGER_RELOAD_LOCK:
+        next_config = config.model_copy(deep=True)
+        camera = camera_by_id(next_config, camera_id)
+        if camera is None:
+            raise HTTPException(status_code=404, detail="camera not found")
+        worker = manager.workers.get(camera_id)
+        if worker is None:
+            raise HTTPException(status_code=404, detail="camera worker not found")
+        current_camera = camera_by_id(config, camera_id)
+        previous_zones = [zone.model_dump(mode="json") for zone in (current_camera.zones if current_camera else [])]
+        camera.zones = zones
+        next_zone_payload = [zone.model_dump(mode="json") for zone in camera.zones]
+        try:
+            manager.update_camera_zones(camera_id, camera.zones, previous_zones)
+            save_config(next_config, assign_ids=False)
+        except Exception:
+            try:
+                manager.update_camera_zones(
+                    camera_id,
+                    [DetectionZone.model_validate(zone) for zone in previous_zones],
+                    next_zone_payload,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "failed to roll back camera zones for %s",
+                    camera_id,
+                )
+            raise
+        config = next_config
+        manager.config = next_config
     return {
         "ok": True,
         "camera_id": camera.id,
@@ -982,58 +1062,59 @@ def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:
 @app.put("/api/config/cameras/order")
 def put_camera_order(camera_ids: list[str]) -> dict:
     global config
-    existing_ids = [camera.id for camera in config.cameras]
-    if len(camera_ids) != len(existing_ids) or len(set(camera_ids)) != len(camera_ids):
-        raise HTTPException(status_code=400, detail="camera order must contain every camera exactly once")
-    if set(camera_ids) != set(existing_ids):
-        raise HTTPException(status_code=400, detail="camera order does not match configured cameras")
-    camera_by_identifier = {camera.id: camera for camera in config.cameras}
-    next_config = config.model_copy(deep=True)
-    next_config.cameras = [camera_by_identifier[camera_id].model_copy(deep=True) for camera_id in camera_ids]
-    save_config(next_config, assign_ids=False)
+    with MANAGER_RELOAD_LOCK:
+        existing_ids = [camera.id for camera in config.cameras]
+        if len(camera_ids) != len(existing_ids) or len(set(camera_ids)) != len(camera_ids):
+            raise HTTPException(status_code=400, detail="camera order must contain every camera exactly once")
+        if set(camera_ids) != set(existing_ids):
+            raise HTTPException(status_code=400, detail="camera order does not match configured cameras")
+        camera_by_identifier = {camera.id: camera for camera in config.cameras}
+        next_config = config.model_copy(deep=True)
+        next_config.cameras = [camera_by_identifier[camera_id].model_copy(deep=True) for camera_id in camera_ids]
+        save_config(next_config, assign_ids=False)
 
-    config = next_config
-    manager.config = next_config
-    manager.workers = {camera_id: manager.workers[camera_id] for camera_id in camera_ids}
+        config = next_config
+        manager.config = next_config
+        manager.workers = {camera_id: manager.workers[camera_id] for camera_id in camera_ids}
     return {"ok": True, "camera_ids": camera_ids}
 
 
 @app.put("/api/config/cameras/{camera_id}")
 def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
-    next_config = config.model_copy(deep=True)
-    existing_index = next((index for index, item in enumerate(next_config.cameras) if item.id == camera_id), None)
-    existing = next_config.cameras[existing_index] if existing_index is not None else None
-    used_ids = {item.id for item in next_config.cameras if item.id != camera_id}
-    base_id = slugify_camera_id(camera_settings.name or camera_settings.id)
-    next_id = base_id
-    suffix = 2
-    while next_id in used_ids:
-        next_id = f"{base_id}-{suffix}"
-        suffix += 1
-    camera_settings.id = next_id
-    camera_settings.zones = existing.zones if existing is not None else []
-    if existing_index is None:
-        next_config.cameras.append(camera_settings)
-    else:
-        next_config.cameras[existing_index] = camera_settings
-    try:
-        validate_motion_pipeline_configuration(next_config)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    save_config(next_config, assign_ids=False)
-    reload_manager(next_config)
+    with MANAGER_RELOAD_LOCK:
+        next_config = config.model_copy(deep=True)
+        existing_index = next((index for index, item in enumerate(next_config.cameras) if item.id == camera_id), None)
+        existing = next_config.cameras[existing_index] if existing_index is not None else None
+        used_ids = {item.id for item in next_config.cameras if item.id != camera_id}
+        base_id = slugify_camera_id(camera_settings.name or camera_settings.id)
+        next_id = base_id
+        suffix = 2
+        while next_id in used_ids:
+            next_id = f"{base_id}-{suffix}"
+            suffix += 1
+        camera_settings.id = next_id
+        camera_settings.zones = existing.zones if existing is not None else []
+        if existing_index is None:
+            next_config.cameras.append(camera_settings)
+        else:
+            next_config.cameras[existing_index] = camera_settings
+        try:
+            validate_motion_pipeline_configuration(next_config)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        reload_manager(next_config)
     return {"ok": True, "camera": camera_settings.model_dump(mode="json")}
 
 
 @app.delete("/api/config/cameras/{camera_id}")
 def delete_camera(camera_id: str) -> dict:
-    next_config = config.model_copy(deep=True)
-    remaining = [camera for camera in next_config.cameras if camera.id != camera_id]
-    if len(remaining) == len(next_config.cameras):
-        raise HTTPException(status_code=404, detail="camera not found")
-    next_config.cameras = remaining
-    save_config(next_config, assign_ids=False)
-    reload_manager(next_config)
+    with MANAGER_RELOAD_LOCK:
+        next_config = config.model_copy(deep=True)
+        remaining = [camera for camera in next_config.cameras if camera.id != camera_id]
+        if len(remaining) == len(next_config.cameras):
+            raise HTTPException(status_code=404, detail="camera not found")
+        next_config.cameras = remaining
+        reload_manager(next_config)
     return {"ok": True, "camera_id": camera_id}
 
 
@@ -1285,13 +1366,16 @@ def motion_audit_snapshot(audit_id: int) -> FileResponse:
 
 @app.post("/api/motion-audit/{audit_id}/ai-analyze")
 async def motion_audit_ai_analyze(audit_id: int) -> dict:
-    audit = manager.events.get_motion_audit(audit_id)
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        audit_config = config.audit_ai.model_copy(deep=True)
+        audit = active_manager.events.get_motion_audit(audit_id)
     if audit is None:
         raise HTTPException(status_code=404, detail="motion audit entry not found")
     try:
-        snapshot_path = event_snapshot_path(manager.storage_dir, audit)
+        snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
         advice = await asyncio.to_thread(
-            AuditAiAdvisor(config.audit_ai).analyze,
+            AuditAiAdvisor(audit_config).analyze,
             snapshot_path,
             _audit_ai_context(audit),
         )
@@ -1302,37 +1386,37 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
     return {
         "audit_id": audit_id,
         "camera_id": audit.get("camera_id"),
-        "provider": config.audit_ai.provider,
-        "model": config.audit_ai.model or "",
+        "provider": audit_config.provider,
+        "model": audit_config.model or "",
         "advice": advice.model_dump(mode="json"),
     }
 
 
 @app.post("/api/motion-audit/{audit_id}/ai-apply")
 def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
-    if not config.audit_ai.allow_apply_recommendations:
-        raise HTTPException(status_code=403, detail="applying AI recommendations is disabled")
-    audit = manager.events.get_motion_audit(audit_id)
-    if audit is None:
-        raise HTTPException(status_code=404, detail="motion audit entry not found")
-    if not request.changes:
-        raise HTTPException(status_code=400, detail="no recommendation changes supplied")
-    next_config = config.model_copy(deep=True)
-    camera = camera_by_id(next_config, str(audit.get("camera_id") or ""))
-    if camera is None:
-        raise HTTPException(status_code=404, detail="audit camera not found")
-    applied: list[dict] = []
-    try:
-        for change in request.changes:
-            value = validate_tuning_value(change.setting, change.value)
-            _apply_pipeline_ai_change(next_config, camera, change, value)
-            applied.append({**change.model_dump(mode="json"), "value": value})
-        validate_motion_pipeline_configuration(next_config)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
-    save_config(next_config, assign_ids=False)
-    reload_manager(next_config)
+    with MANAGER_RELOAD_LOCK:
+        if not config.audit_ai.allow_apply_recommendations:
+            raise HTTPException(status_code=403, detail="applying AI recommendations is disabled")
+        audit = manager.events.get_motion_audit(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=404, detail="motion audit entry not found")
+        if not request.changes:
+            raise HTTPException(status_code=400, detail="no recommendation changes supplied")
+        next_config = config.model_copy(deep=True)
+        camera = camera_by_id(next_config, str(audit.get("camera_id") or ""))
+        if camera is None:
+            raise HTTPException(status_code=404, detail="audit camera not found")
+        applied: list[dict] = []
+        try:
+            for change in request.changes:
+                value = validate_tuning_value(change.setting, change.value)
+                _apply_pipeline_ai_change(next_config, camera, change, value)
+                applied.append({**change.model_dump(mode="json"), "value": value})
+            validate_motion_pipeline_configuration(next_config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
+        reload_manager(next_config)
     return {
         "ok": True,
         "audit_id": audit_id,
@@ -1452,11 +1536,15 @@ class FaceAssignment(BaseModel):
 
 def _sync_face_observations(limit: int = 5000) -> int:
     global FACE_OBSERVATIONS_SYNCED
-    if FACE_OBSERVATIONS_SYNCED:
-        return 0
-    inserted = manager.faces.ingest_events(manager.events.recent(max(1, min(limit, 20000))))
-    FACE_OBSERVATIONS_SYNCED = True
-    return inserted
+    with MANAGER_RELOAD_LOCK, FACE_OBSERVATIONS_SYNC_LOCK:
+        if FACE_OBSERVATIONS_SYNCED:
+            return 0
+        active_manager = manager
+        inserted = active_manager.faces.ingest_events(
+            active_manager.events.recent(max(1, min(limit, 20000)))
+        )
+        FACE_OBSERVATIONS_SYNCED = True
+        return inserted
 
 
 @app.get("/api/faces/status")
@@ -2373,15 +2461,21 @@ def _maintain_recording_cache(active_dir: Path) -> None:
 
 def _start_recording_prewarmer() -> None:
     global RECORDING_PREWARM_THREAD
-    RECORDING_PREWARM_STOP.clear()
     if RECORDING_PREWARM_THREAD is not None and RECORDING_PREWARM_THREAD.is_alive():
         return
-    RECORDING_PREWARM_THREAD = threading.Thread(
+    RECORDING_PREWARM_STOP.clear()
+    thread = threading.Thread(
         target=_recording_prewarm_loop,
         name="recording-prewarmer",
         daemon=False,
     )
-    RECORDING_PREWARM_THREAD.start()
+    RECORDING_PREWARM_THREAD = thread
+    try:
+        thread.start()
+    except BaseException:
+        RECORDING_PREWARM_THREAD = None
+        RECORDING_PREWARM_STOP.set()
+        raise
 
 
 def _stop_recording_prewarmer() -> None:
@@ -2402,6 +2496,7 @@ def _stop_recording_prewarmer() -> None:
             RECORDING_PREWARM_THREAD.join(timeout=3)
         if RECORDING_PREWARM_THREAD.is_alive():
             logger.error("recording prewarmer did not stop after cancellation")
+            raise RuntimeError("recording prewarmer did not stop after cancellation")
         else:
             RECORDING_PREWARM_THREAD = None
 
