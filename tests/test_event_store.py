@@ -168,8 +168,9 @@ class EventStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
             payload = {
+                "decision_id": "decision-gate-1800",
                 "camera_id": "gate",
-                "snapshot_path": "snapshot.jpg",
+                "snapshot_path": "",
                 "created_at": "2026-07-26T18:00:00+00:00",
                 "mode": "enforce",
                 "sensitivity": "balanced",
@@ -188,11 +189,15 @@ class EventStoreTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "post-commit read failed"):
                     store.add_motion_audit(**payload)
 
-            retry = store.add_motion_audit(**payload)
+            retry = store.add_motion_audit(
+                **{**payload, "snapshot_path": "snapshot-now-available.jpg"}
+            )
             rows, total = store.motion_audits(camera_id="gate")
 
             self.assertEqual(total, 1)
             self.assertEqual(rows[0]["id"], retry["id"])
+            self.assertEqual(rows[0]["decision_id"], "decision-gate-1800")
+            self.assertEqual(rows[0]["snapshot_path"], "snapshot-now-available.jpg")
 
 
 if __name__ == "__main__":

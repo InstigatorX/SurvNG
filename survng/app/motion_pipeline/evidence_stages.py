@@ -373,6 +373,7 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             provides=frozenset({"source_evidence"}),
             graph="observation",
             category="background",
+            observation_kinds=frozenset({"frame"}),
             display_name="Adaptive background (MOG2)",
             description="Learns the normal scene and reports foreground changes.",
             options=(
@@ -390,6 +391,7 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             provides=frozenset({"source_evidence"}),
             graph="observation",
             category="camera_signal",
+            observation_kinds=frozenset({"motion_event"}),
             display_name="Camera motion signal (ONVIF)",
             description="Uses motion and object notifications sent by the camera.",
             options=(

@@ -200,11 +200,13 @@ class MotionPipelineTest(unittest.TestCase):
             implementation="frame_observer",
             builder=build_frame_observer,
             provides=frozenset({"debug"}),
+            observation_kinds=frozenset({"frame"}),
         ))
         registry.register(MotionStageRegistration(
             implementation="event_observer",
             builder=build_event_observer,
             provides=frozenset({"debug"}),
+            observation_kinds=frozenset({"motion_event"}),
         ))
         pipeline = MotionPipelineFactory(registry).create(
             "gate",
@@ -227,6 +229,88 @@ class MotionPipelineTest(unittest.TestCase):
             self.assertEqual(pipeline.status()["stages"]["event"]["calls"], 1)
         finally:
             pipeline.close()
+
+    def test_factory_rejects_dependency_provided_only_by_another_observation_kind(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="frame_provider",
+            builder=build_frame_observer,
+            provides=frozenset({"scoring"}),
+            observation_kinds=frozenset({"frame"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="event_consumer",
+            builder=build_event_observer,
+            requires=frozenset({"scoring"}),
+            provides=frozenset({"decision"}),
+            observation_kinds=frozenset({"motion_event"}),
+        ))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires unavailable artifacts for observation 'motion_event': scoring",
+        ):
+            MotionPipelineFactory(registry).create(
+                "gate",
+                [
+                    MotionStageConfig("frame", "frame_provider"),
+                    MotionStageConfig("event", "event_consumer"),
+                ],
+            )
+
+    def test_pipeline_close_waits_for_active_stage_before_releasing_it(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        @dataclass
+        class BlockingStage:
+            stage_id: str
+            closed: bool = False
+
+            def process(self, context: MotionContext) -> MotionContext:
+                entered.set()
+                release.wait(timeout=2)
+                return context
+
+            def close(self) -> None:
+                self.closed = True
+
+        def build_blocking(stage_id, options, dependencies):
+            del options, dependencies
+            return BlockingStage(stage_id)
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="blocking",
+            builder=build_blocking,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("blocking", "blocking")],
+        )
+        stage = pipeline.stages[0]
+        process_thread = threading.Thread(target=lambda: pipeline.process(MotionContext(
+            camera_id="gate",
+            captured_at=10.0,
+            original_frame=None,
+            configuration={},
+            runtime=pipeline.runtime,
+        )))
+        close_thread = threading.Thread(target=pipeline.close)
+
+        process_thread.start()
+        self.assertTrue(entered.wait(timeout=1))
+        close_thread.start()
+        time.sleep(0.05)
+        self.assertFalse(stage.closed)
+        self.assertTrue(close_thread.is_alive())
+
+        release.set()
+        process_thread.join(timeout=1)
+        close_thread.join(timeout=1)
+        self.assertFalse(process_thread.is_alive())
+        self.assertFalse(close_thread.is_alive())
+        self.assertTrue(stage.closed)
 
     def test_parallel_group_waits_for_siblings_before_raising_failure(self) -> None:
         completed = threading.Event()

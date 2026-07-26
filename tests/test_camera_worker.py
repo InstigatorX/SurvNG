@@ -589,7 +589,11 @@ class CameraWorkerTest(unittest.TestCase):
 
             with (
                 patch.object(worker, "_qualify_motion_burst", side_effect=qualify),
-                patch.object(worker, "_sample_rejected_motion", return_value=""),
+                patch.object(
+                    worker,
+                    "_sample_rejected_motion",
+                    return_value="sample.jpg",
+                ) as sample_rejected,
                 patch.object(
                     worker.motion_decision_handler,
                     "record_audit",
@@ -606,6 +610,12 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(record_audit.call_count, 2)
+            self.assertEqual(sample_rejected.call_count, 1)
+            first_audit = record_audit.call_args_list[0].kwargs
+            retry_audit = record_audit.call_args_list[1].kwargs
+            self.assertEqual(first_audit["decision_id"], retry_audit["decision_id"])
+            self.assertEqual(first_audit["snapshot_path"], "sample.jpg")
+            self.assertEqual(retry_audit["snapshot_path"], "sample.jpg")
             process_event.assert_not_called()
             self.assertEqual(worker._motion_stats["event_retries"], 1)
             self.assertEqual(worker._motion_stats["bursts"], 1)

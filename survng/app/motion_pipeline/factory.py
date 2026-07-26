@@ -93,6 +93,48 @@ class MotionPipelineFactory:
                 "motion pipeline does not provide required artifacts: "
                 + ", ".join(sorted(missing_outputs))
             )
+        observation_kinds = sorted({
+            kind
+            for registration in registrations
+            for kind in (registration.observation_kinds or ())
+        })
+        for observation_kind in observation_kinds:
+            kind_available = {
+                "original_frame",
+                "frame_history",
+                "configuration",
+                "runtime",
+                *initial_artifacts,
+            }
+            has_runnable_stage = False
+            for group in execution_groups:
+                runnable = [
+                    index
+                    for index in group
+                    if registrations[index].observation_kinds is None
+                    or observation_kind in registrations[index].observation_kinds
+                ]
+                if not runnable:
+                    continue
+                has_runnable_stage = True
+                for index in runnable:
+                    missing = registrations[index].requires - kind_available
+                    if missing:
+                        stage_id = stage_configs[index].stage_id.strip()
+                        raise ValueError(
+                            f"motion stage {stage_id!r} requires unavailable artifacts "
+                            f"for observation {observation_kind!r}: "
+                            + ", ".join(sorted(missing))
+                        )
+                for index in runnable:
+                    kind_available.update(registrations[index].provides)
+            kind_missing_outputs = set(required_artifacts) - kind_available
+            if has_runnable_stage and kind_missing_outputs:
+                raise ValueError(
+                    f"motion pipeline does not provide required artifacts for observation "
+                    f"{observation_kind!r}: "
+                    + ", ".join(sorted(kind_missing_outputs))
+                )
         stage_blueprint = tuple(
             (
                 stage_config.stage_id.strip(),
@@ -133,6 +175,10 @@ class MotionPipelineFactory:
             execution_groups=execution_groups,
             stage_provides={
                 stage.stage_id: registration.provides
+                for stage, registration in zip(stages, registrations, strict=True)
+            },
+            stage_observation_kinds={
+                stage.stage_id: registration.observation_kinds
                 for stage, registration in zip(stages, registrations, strict=True)
             },
             continuous_analysis=any(

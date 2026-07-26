@@ -50,6 +50,7 @@ class EventStore:
                 create table if not exists motion_audits (
                     id integer primary key autoincrement,
                     event_id integer,
+                    decision_id text,
                     camera_id text not null,
                     snapshot_path text not null default '',
                     created_at text not null,
@@ -64,6 +65,12 @@ class EventStore:
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("pragma table_info(motion_audits)").fetchall()
+            }
+            if "decision_id" not in columns:
+                conn.execute("alter table motion_audits add column decision_id text")
             conn.execute(
                 "create index if not exists idx_motion_audits_created_at on motion_audits(created_at desc, id desc)"
             )
@@ -72,6 +79,9 @@ class EventStore:
             )
             conn.execute(
                 "create unique index if not exists idx_motion_audits_event on motion_audits(event_id) where event_id is not null"
+            )
+            conn.execute(
+                "create unique index if not exists idx_motion_audits_decision on motion_audits(decision_id) where decision_id is not null and decision_id != ''"
             )
             self._rebase_media_paths(conn)
             self._backfill_motion_audits(conn)
@@ -238,15 +248,49 @@ class EventStore:
         trigger_count: int,
         features: dict[str, Any],
         event_id: int | None = None,
+        decision_id: str = "",
     ) -> dict[str, Any]:
         normalized_object_detected = (
             None if object_detected is None else int(object_detected)
         )
         normalized_trigger_count = max(1, int(trigger_count))
+        normalized_decision_id = str(decision_id or "").strip()[:128]
         features_json = json.dumps(features or {}, separators=(",", ":"))
         with self._lock, self._connect() as conn:
             audit_id: int | None = None
-            if event_id is None:
+            if normalized_decision_id:
+                existing = conn.execute(
+                    "select id from motion_audits where decision_id = ?",
+                    (normalized_decision_id,),
+                ).fetchone()
+                if existing is not None:
+                    audit_id = int(existing["id"])
+                    conn.execute(
+                        """
+                        update motion_audits
+                        set event_id = coalesce(?, event_id), camera_id = ?,
+                            snapshot_path = ?, created_at = ?, mode = ?,
+                            sensitivity = ?, score = ?, threshold = ?, reason = ?,
+                            object_detected = ?, trigger_count = ?, features_json = ?
+                        where id = ?
+                        """,
+                        (
+                            event_id,
+                            camera_id,
+                            snapshot_path,
+                            created_at,
+                            mode,
+                            sensitivity,
+                            float(score),
+                            float(threshold),
+                            reason,
+                            normalized_object_detected,
+                            normalized_trigger_count,
+                            features_json,
+                            audit_id,
+                        ),
+                    )
+            elif event_id is None:
                 existing = conn.execute(
                     """
                     select id from motion_audits
@@ -277,13 +321,14 @@ class EventStore:
                 cursor = conn.execute(
                     """
                     insert or ignore into motion_audits (
-                        event_id, camera_id, snapshot_path, created_at, mode,
+                        event_id, decision_id, camera_id, snapshot_path, created_at, mode,
                         sensitivity, score, threshold, reason, object_detected,
                         trigger_count, features_json
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
+                        normalized_decision_id or None,
                         camera_id,
                         snapshot_path,
                         created_at,
@@ -299,7 +344,14 @@ class EventStore:
                 )
                 if cursor.rowcount:
                     audit_id = int(cursor.lastrowid)
-                elif event_id is not None:
+                elif normalized_decision_id:
+                    existing = conn.execute(
+                        "select id from motion_audits where decision_id = ?",
+                        (normalized_decision_id,),
+                    ).fetchone()
+                    if existing is not None:
+                        audit_id = int(existing["id"])
+                if audit_id is None and event_id is not None:
                     existing = conn.execute(
                         "select id from motion_audits where event_id = ?",
                         (int(event_id),),

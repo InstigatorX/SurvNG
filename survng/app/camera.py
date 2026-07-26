@@ -5,6 +5,7 @@ import queue
 import random
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -235,11 +236,21 @@ class CameraWorker:
                 self._motion_analysis_last_processed_at = 0.0
                 self.last_frame_at = ""
             self.motion_evidence.clear()
-            self.motion_observation_pipeline.runtime.reset()
-            self.motion_pipeline.runtime.reset()
-            with self._motion_fusion_lock:
-                self.motion_fusion_pipeline.runtime.reset()
-                self._motion_fusion_last_at = 0.0
+            motion_workers_stopped = (
+                self._motion_thread is None
+                and self._motion_analysis_thread is None
+            )
+            if motion_workers_stopped:
+                self.motion_observation_pipeline.runtime.reset()
+                self.motion_pipeline.runtime.reset()
+                with self._motion_fusion_lock:
+                    self.motion_fusion_pipeline.runtime.reset()
+                    self._motion_fusion_last_at = 0.0
+            else:
+                LOGGER.error(
+                    "preserving motion runtime for %s because a motion worker is still active",
+                    self.camera.id,
+                )
             self._active_motion_triggers = None
             self._adaptive_trigger_pending = False
             self._adaptive_last_completed_at = 0.0
@@ -1118,6 +1129,18 @@ class CameraWorker:
             )
             event_at = representative["event_at"]
             received_at = min(float(item.get("received_at") or time.time()) for item in triggers)
+            decision_id = next(
+                (
+                    str(item["_motion_decision_id"])
+                    for item in triggers
+                    if item.get("_motion_decision_id")
+                ),
+                "",
+            )
+            if not decision_id:
+                decision_id = uuid.uuid4().hex
+            for item in triggers:
+                item["_motion_decision_id"] = decision_id
 
             mode, sensitivity, frame_width = self._motion_settings()
             rescue_enabled, rescue_margin = self._motion_rescue_settings()
@@ -1235,8 +1258,20 @@ class CameraWorker:
                 })
             if not effective_accepted:
                 try:
-                    snapshot_path = self._sample_rejected_motion(event_at, result)
+                    snapshot_path = next(
+                        (
+                            str(item["_motion_audit_snapshot_path"])
+                            for item in triggers
+                            if item.get("_motion_audit_snapshot_path")
+                        ),
+                        None,
+                    )
+                    if snapshot_path is None:
+                        snapshot_path = self._sample_rejected_motion(event_at, result)
+                        for item in triggers:
+                            item["_motion_audit_snapshot_path"] = snapshot_path
                     self.motion_decision_handler.record_audit(
+                        decision_id=decision_id,
                         snapshot_path=snapshot_path,
                         event_at=event_at,
                         mode=mode,

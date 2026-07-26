@@ -60,6 +60,7 @@ class MotionStageRegistration:
     options: tuple[MotionStageOption, ...] = ()
     continuous_analysis: bool = False
     motion_source: str = ""
+    observation_kinds: frozenset[str] | None = None
 
 
 class MotionStageRegistry:
@@ -99,6 +100,11 @@ class MotionStageRegistry:
                 "provides": sorted(registration.provides),
                 "continuous_analysis": registration.continuous_analysis,
                 "motion_source": registration.motion_source,
+                "observation_kinds": (
+                    sorted(registration.observation_kinds)
+                    if registration.observation_kinds is not None
+                    else []
+                ),
                 "options": [option.as_dict() for option in registration.options],
             }
             for name, registration in sorted(self._registrations.items())
