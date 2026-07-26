@@ -873,7 +873,7 @@ class CameraWorker:
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
         event_epoch = event_at.timestamp()
         anchor = min(event_epoch, received_at) if abs(event_epoch - received_at) <= 10.0 else received_at
-        deadline = received_at + self.motion_config.post_trigger_seconds
+        deadline = time.monotonic() + self.motion_config.post_trigger_seconds
         best_result: MotionQualificationResult | None = None
         evaluated_windows: set[tuple[float, ...]] = set()
         samples: list[tuple[float, np.ndarray]] = []
@@ -916,7 +916,7 @@ class CameraWorker:
                         "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
                     }
 
-            remaining = deadline - time.time()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             if self._stop.wait(min(0.2, remaining)):

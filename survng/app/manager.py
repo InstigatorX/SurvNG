@@ -24,6 +24,7 @@ from .motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
     MotionDecisionHandlerFactory,
     MotionEvidenceRepository,
+    MotionPipeline,
     MotionPipelineFactory,
     MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
@@ -51,31 +52,35 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
                 services={EVIDENCE_REPOSITORY_SERVICE: evidence},
             ),
         )
+        pipelines: list[MotionPipeline] = []
         try:
             graphs = resolve_motion_pipeline_graphs(
                 config.motion_qualification,
                 camera_config,
             )
-            factory.create(
+            pipelines.append(factory.create(
                 camera_id,
                 graphs.qualification,
                 required_artifacts={"scoring"},
-            )
-            factory.create(
+            ))
+            pipelines.append(factory.create(
                 camera_id,
                 graphs.observation,
                 required_artifacts={"source_evidence"},
-            )
-            factory.create(
+            ))
+            pipelines.append(factory.create(
                 camera_id,
                 graphs.fusion,
                 initial_artifacts={"scoring"},
                 required_artifacts={"scoring", "decision"},
-            )
+            ))
         except ValueError as error:
             raise ValueError(
                 f"invalid motion pipeline for camera {camera_id!r}: {error}"
             ) from error
+        finally:
+            for pipeline in reversed(pipelines):
+                pipeline.close()
 
 
 class AppManager:
@@ -131,7 +136,15 @@ class AppManager:
         self._state_monitor_thread: threading.Thread | None = None
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
         self._motion_analysis_limiter = threading.BoundedSemaphore(2)
-        self.workers = {camera.id: self._create_camera_worker(camera) for camera in config.cameras}
+        workers: dict[str, CameraWorker] = {}
+        try:
+            for camera in self._unique_cameras():
+                workers[camera.id] = self._create_camera_worker(camera)
+        except BaseException:
+            for worker in reversed(tuple(workers.values())):
+                worker.close()
+            raise
+        self.workers = workers
 
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
         motion_config = self.config.motion_qualification
@@ -158,33 +171,45 @@ class AppManager:
             dependencies=dependencies,
             observer=LoggingMotionPipelineObserver(),
         )
-        return CameraWorker(
-            camera,
-            self.storage_dir,
-            motion_config,
-            self.publish_event,
-            motion_pipeline=factory.create(
+        pipelines: list[MotionPipeline] = []
+        try:
+            qualification_pipeline = factory.create(
                 camera.id,
                 graphs.qualification,
                 required_artifacts={"scoring"},
-            ),
-            motion_observation_pipeline=factory.create(
+            )
+            pipelines.append(qualification_pipeline)
+            observation_pipeline = factory.create(
                 camera.id,
                 graphs.observation,
                 required_artifacts={"source_evidence"},
-            ),
-            motion_fusion_pipeline=factory.create(
+            )
+            pipelines.append(observation_pipeline)
+            fusion_pipeline = factory.create(
                 camera.id,
                 graphs.fusion,
                 initial_artifacts={"scoring"},
                 required_artifacts={"scoring", "decision"},
-            ),
-            motion_evidence=evidence,
-            motion_pipeline_origins=graphs.origins,
-            motion_decision_handler_factory=self.motion_decision_handler_factory,
-            motion_object_detector_factory=self.motion_object_detector_factory,
-            motion_analysis_limiter=self._motion_analysis_limiter,
-        )
+            )
+            pipelines.append(fusion_pipeline)
+            return CameraWorker(
+                camera,
+                self.storage_dir,
+                motion_config,
+                self.publish_event,
+                motion_pipeline=qualification_pipeline,
+                motion_observation_pipeline=observation_pipeline,
+                motion_fusion_pipeline=fusion_pipeline,
+                motion_evidence=evidence,
+                motion_pipeline_origins=graphs.origins,
+                motion_decision_handler_factory=self.motion_decision_handler_factory,
+                motion_object_detector_factory=self.motion_object_detector_factory,
+                motion_analysis_limiter=self._motion_analysis_limiter,
+            )
+        except BaseException:
+            for pipeline in reversed(pipelines):
+                pipeline.close()
+            raise
 
     def _unique_cameras(self):
         seen: set[str] = set()

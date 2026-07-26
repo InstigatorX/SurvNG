@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
@@ -231,6 +232,40 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         validate_motion_pipeline_configuration(config)
 
+    def test_application_preflight_closes_temporary_pipelines(self) -> None:
+        config = AppConfig.model_validate({
+            "cameras": [{
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsp://example.invalid/main",
+            }],
+        })
+        pipeline = Mock()
+
+        with patch(
+            "survng.app.manager.MotionPipelineFactory.create",
+            return_value=pipeline,
+        ) as create:
+            validate_motion_pipeline_configuration(config)
+
+        self.assertEqual(create.call_count, 6)
+        self.assertEqual(pipeline.close.call_count, 6)
+
+    def test_application_preflight_closes_prior_pipeline_after_failure(self) -> None:
+        config = AppConfig()
+        pipeline = Mock()
+
+        with (
+            patch(
+                "survng.app.manager.MotionPipelineFactory.create",
+                side_effect=[pipeline, ValueError("invalid test graph")],
+            ),
+            self.assertRaisesRegex(ValueError, "invalid test graph"),
+        ):
+            validate_motion_pipeline_configuration(config)
+
+        pipeline.close.assert_called_once_with()
+
     def test_application_preflight_requires_final_trigger_decision(self) -> None:
         config = AppConfig.model_validate({
             "motion_qualification": {
@@ -244,6 +279,32 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         })
 
         with self.assertRaisesRegex(ValueError, "required artifacts: decision"):
+            validate_motion_pipeline_configuration(config)
+
+    def test_application_preflight_reports_invalid_stage_options_with_context(self) -> None:
+        config = AppConfig.model_validate({
+            "motion_qualification": {
+                "pipeline": {
+                    "qualification": [
+                        {"stage_id": "preprocess", "implementation": "gray_blur"},
+                        {
+                            "stage_id": "background",
+                            "implementation": "adaptive_ema_background",
+                        },
+                        {
+                            "stage_id": "threshold",
+                            "implementation": "adaptive_statistical_threshold",
+                            "options": {"sigma": None},
+                        },
+                    ],
+                },
+            },
+        })
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "stage 'threshold'.*could not be configured",
+        ):
             validate_motion_pipeline_configuration(config)
 
 

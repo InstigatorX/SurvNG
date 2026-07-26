@@ -61,6 +61,29 @@ class MotionPipelineFactory:
         initial_artifacts: Iterable[str] = (),
         required_artifacts: Iterable[str] = (),
     ) -> MotionPipeline:
+        constructed_stages: list[MotionStage] = []
+        try:
+            return self._create(
+                camera_id,
+                stage_configs,
+                error_policy,
+                initial_artifacts,
+                required_artifacts,
+                constructed_stages,
+            )
+        except BaseException:
+            self._close_stages(constructed_stages)
+            raise
+
+    def _create(
+        self,
+        camera_id: str,
+        stage_configs: Sequence[MotionStageConfig],
+        error_policy: MotionErrorPolicy,
+        initial_artifacts: Iterable[str],
+        required_artifacts: Iterable[str],
+        constructed_stages: list[MotionStage],
+    ) -> MotionPipeline:
         stage_ids: set[str] = set()
         available_artifacts = {
             "original_frame",
@@ -69,7 +92,7 @@ class MotionPipelineFactory:
             "runtime",
             *initial_artifacts,
         }
-        stages = []
+        stages = constructed_stages
         registrations = []
         effective_observation_kinds: list[frozenset[str] | None] = []
         execution_groups: list[list[int]] = []
@@ -95,8 +118,28 @@ class MotionPipelineFactory:
                 raise ValueError(
                     f"motion stage {stage_id!r} requires unavailable artifacts: {', '.join(sorted(missing))}"
                 )
-            stage = registration.builder(stage_id, stage_config.options, self.dependencies)
+            try:
+                stage = registration.builder(
+                    stage_id,
+                    stage_config.options,
+                    self.dependencies,
+                )
+            except Exception as error:
+                raise ValueError(
+                    f"motion stage {stage_id!r} implementation "
+                    f"{stage_config.implementation!r} could not be configured: {error}"
+                ) from error
             stages.append(stage)
+            if not isinstance(stage, MotionStage):
+                raise ValueError(
+                    f"motion stage {stage_id!r} implementation "
+                    f"{stage_config.implementation!r} did not return a MotionStage"
+                )
+            if stage.stage_id != stage_id:
+                raise ValueError(
+                    f"motion stage builder returned ID {stage.stage_id!r}; "
+                    f"expected {stage_id!r}"
+                )
             registrations.append(registration)
             stage_observation_kinds = _effective_observation_kinds(stage, registration)
             effective_observation_kinds.append(stage_observation_kinds)
@@ -211,10 +254,24 @@ class MotionPipelineFactory:
         )
 
         def build_isolated_stages() -> tuple[MotionStage, ...]:
-            return tuple(
-                builder(stage_id, dict(options), self.dependencies)
-                for stage_id, builder, options in stage_blueprint
-            )
+            isolated_stages: list[MotionStage] = []
+            try:
+                for stage_id, builder, options in stage_blueprint:
+                    stage = builder(stage_id, dict(options), self.dependencies)
+                    isolated_stages.append(stage)
+                    if not isinstance(stage, MotionStage):
+                        raise ValueError(
+                            f"isolated motion stage {stage_id!r} did not return a MotionStage"
+                        )
+                    if stage.stage_id != stage_id:
+                        raise ValueError(
+                            f"isolated motion stage builder returned ID {stage.stage_id!r}; "
+                            f"expected {stage_id!r}"
+                        )
+            except BaseException:
+                self._close_stages(isolated_stages)
+                raise
+            return tuple(isolated_stages)
 
         return MotionPipeline(
             camera_id=camera_id,
@@ -257,3 +314,21 @@ class MotionPipelineFactory:
             ),
             stage_factory=build_isolated_stages,
         )
+
+    def _close_stages(self, stages: Iterable[MotionStage]) -> None:
+        closed: set[int] = set()
+        for stage in reversed(tuple(stages)):
+            identity = id(stage)
+            if identity in closed:
+                continue
+            closed.add(identity)
+            close = getattr(stage, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException:
+                self.dependencies.logger.exception(
+                    "Motion stage cleanup failed during pipeline construction stage=%s",
+                    getattr(stage, "stage_id", "<invalid>"),
+                )

@@ -163,6 +163,135 @@ def build_lifecycle_stage(
 
 
 class MotionPipelineTest(unittest.TestCase):
+    def test_factory_rejects_wrong_builder_stage_id_and_closes_stage(self) -> None:
+        constructed: list[LifecycleStage] = []
+
+        def build_wrong_id(stage_id, options, dependencies):
+            del stage_id, options, dependencies
+            stage = LifecycleStage("wrong")
+            constructed.append(stage)
+            return stage
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="wrong_id",
+            builder=build_wrong_id,
+        ))
+
+        with self.assertRaisesRegex(ValueError, "returned ID 'wrong'.*expected 'resource'"):
+            MotionPipelineFactory(registry).create(
+                "gate",
+                [MotionStageConfig("resource", "wrong_id")],
+            )
+
+        self.assertTrue(constructed[0].closed)
+
+    def test_factory_closes_constructed_stages_when_later_validation_fails(self) -> None:
+        constructed: list[LifecycleStage] = []
+
+        def build_resource(stage_id, options, dependencies):
+            del options, dependencies
+            stage = LifecycleStage(stage_id)
+            constructed.append(stage)
+            return stage
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="resource",
+            builder=build_resource,
+            provides=frozenset({"debug"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="invalid",
+            builder=build_lifecycle_stage,
+            requires=frozenset({"missing"}),
+        ))
+
+        with self.assertRaisesRegex(ValueError, "requires unavailable artifacts: missing"):
+            MotionPipelineFactory(registry).create(
+                "gate",
+                [
+                    MotionStageConfig("resource", "resource"),
+                    MotionStageConfig("invalid", "invalid"),
+                ],
+            )
+
+        self.assertEqual(len(constructed), 1)
+        self.assertTrue(constructed[0].closed)
+
+    def test_isolated_copy_closes_partial_stage_set_when_builder_fails(self) -> None:
+        resources: list[LifecycleStage] = []
+        fragile_builds = 0
+
+        def build_resource(stage_id, options, dependencies):
+            del options, dependencies
+            stage = LifecycleStage(stage_id)
+            resources.append(stage)
+            return stage
+
+        def build_fragile(stage_id, options, dependencies):
+            nonlocal fragile_builds
+            del options, dependencies
+            fragile_builds += 1
+            if fragile_builds > 1:
+                raise RuntimeError("isolated builder failed")
+            return LifecycleStage(stage_id)
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="resource",
+            builder=build_resource,
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="fragile",
+            builder=build_fragile,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("resource", "resource"),
+                MotionStageConfig("fragile", "fragile"),
+            ],
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "isolated builder failed"):
+                pipeline.isolated_copy()
+
+            self.assertEqual(len(resources), 2)
+            self.assertFalse(resources[0].closed)
+            self.assertTrue(resources[1].closed)
+        finally:
+            pipeline.close()
+
+    def test_isolated_copy_closes_stages_when_runtime_clone_fails(self) -> None:
+        resources: list[LifecycleStage] = []
+
+        def build_resource(stage_id, options, dependencies):
+            del options, dependencies
+            stage = LifecycleStage(stage_id)
+            resources.append(stage)
+            return stage
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="resource",
+            builder=build_resource,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("resource", "resource")],
+        )
+        pipeline.runtime.state_for("noncopyable", threading.Lock)
+        try:
+            with self.assertRaisesRegex(TypeError, "must implement snapshot"):
+                pipeline.isolated_copy(clone_runtime=True)
+
+            self.assertEqual(len(resources), 2)
+            self.assertFalse(resources[0].closed)
+            self.assertTrue(resources[1].closed)
+        finally:
+            pipeline.close()
+
     def test_pipeline_close_releases_isolated_stage_and_runtime_resources(self) -> None:
         registry = MotionStageRegistry()
         registry.register(MotionStageRegistration(
@@ -373,6 +502,40 @@ class MotionPipelineTest(unittest.TestCase):
         close_thread.join(timeout=1)
         self.assertFalse(process_thread.is_alive())
         self.assertFalse(close_thread.is_alive())
+        self.assertTrue(stage.closed)
+
+    def test_pipeline_close_is_idempotent_during_stage_cleanup(self) -> None:
+        @dataclass
+        class RecursiveCloseStage:
+            stage_id: str
+            pipeline: Any = None
+            closed: bool = False
+
+            def process(self, context: MotionContext) -> MotionContext:
+                return context
+
+            def close(self) -> None:
+                self.pipeline.close()
+                self.closed = True
+
+        def build_recursive(stage_id, options, dependencies):
+            del options, dependencies
+            return RecursiveCloseStage(stage_id)
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="recursive",
+            builder=build_recursive,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("recursive", "recursive")],
+        )
+        stage = pipeline.stages[0]
+        stage.pipeline = pipeline
+
+        pipeline.close()
+
         self.assertTrue(stage.closed)
 
     def test_pipeline_close_from_observer_fails_instead_of_deadlocking(self) -> None:

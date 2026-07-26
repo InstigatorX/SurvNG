@@ -29,4 +29,16 @@ const custom = readMotionDecisionFusion([
 ]);
 assert.equal(custom.custom, true);
 
+const parallel = structuredClone(graph);
+parallel[0].parallel_group = "signals";
+assert.equal(readMotionDecisionFusion(parallel).custom, true);
+
+const extended = structuredClone(graph);
+extended[0].options.future_fusion_control = true;
+assert.equal(readMotionDecisionFusion(extended).custom, true);
+
+const alternateMinimum = structuredClone(graph);
+alternateMinimum[0].options.minimum_sources = 2;
+assert.equal(readMotionDecisionFusion(alternateMinimum).custom, true);
+
 console.log("motion decision configuration tests passed");

@@ -15,6 +15,33 @@ const GUIDED_IMPLEMENTATIONS = [
   "score_event_state",
   "score_trigger",
 ];
+const GUIDED_STAGE_IDS = ["evidence_fusion", "event_state", "trigger"];
+const GUIDED_OPTION_KEYS = [
+  new Set([
+    "sources",
+    "policy",
+    "source_thresholds",
+    "source_weights",
+    "weighted_threshold",
+    "minimum_sources",
+    "require_warmed",
+  ]),
+  new Set([
+    "activation_frames",
+    "release_frames",
+    "cooldown_seconds",
+    "state_timeout_seconds",
+  ]),
+  new Set(),
+];
+
+function isGuidedStage(stage, index) {
+  const options = stage?.options || {};
+  return stage?.implementation === GUIDED_IMPLEMENTATIONS[index]
+    && stage?.stage_id === GUIDED_STAGE_IDS[index]
+    && !stage?.parallel_group
+    && Object.keys(options).every((key) => GUIDED_OPTION_KEYS[index].has(key));
+}
 
 function finiteNumber(value, fallback) {
   const number = Number(value);
@@ -36,7 +63,9 @@ export function readMotionDecisionFusion(fusion) {
   if (
     !Array.isArray(fusion)
     || fusion.length !== GUIDED_IMPLEMENTATIONS.length
-    || fusion.some((stage, index) => stage?.implementation !== GUIDED_IMPLEMENTATIONS[index])
+    || fusion.some((stage, index) => !isGuidedStage(stage, index))
+    || (fusion[0]?.options?.minimum_sources ?? 1) !== 1
+    || (fusion[0]?.options?.require_warmed ?? true) !== true
   ) {
     return { custom: true, usesDefaults: false, settings: defaultMotionDecisionSettings() };
   }

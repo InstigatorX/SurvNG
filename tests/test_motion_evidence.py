@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -128,6 +131,59 @@ class MotionEvidenceTest(unittest.TestCase):
         self.assertEqual(aggregate["mog2_warmed"], 1.0)
         self.assertGreater(aggregate["mog2_track_hits"], 5)
         self.assertIn("mog2_source", pipeline.runtime.stage_state)
+
+    def test_mog2_tracker_updates_are_serialized_for_concurrent_observations(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        pipeline = pipeline_factory(repository).create(
+            "gate",
+            motion_observation_stage_configs(
+                mog2_enabled=True,
+                sample_fps=5.0,
+                mog2_history_seconds=20.0,
+            ),
+        )
+        frame = np.zeros((90, 160), dtype=np.uint8)
+        pipeline.process(MotionContext(
+            camera_id="gate",
+            captured_at=0.0,
+            original_frame=frame,
+            configuration={"observation_kind": "frame"},
+            runtime=pipeline.runtime,
+        ))
+        tracker = pipeline.runtime.stage_state["mog2_source"]
+        active = 0
+        maximum_active = 0
+        guard = threading.Lock()
+
+        def slow_update(_frame):
+            nonlocal active, maximum_active
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.01)
+                return {"warmed": 1.0, "score": 0.0}
+            finally:
+                with guard:
+                    active -= 1
+
+        def observe(index: int) -> None:
+            pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=float(index + 1),
+                original_frame=frame,
+                configuration={"observation_kind": "frame"},
+                runtime=pipeline.runtime,
+            ))
+
+        with (
+            patch.object(tracker, "update", side_effect=slow_update),
+            ThreadPoolExecutor(max_workers=4) as executor,
+        ):
+            list(executor.map(observe, range(8)))
+
+        self.assertEqual(maximum_active, 1)
+        pipeline.close()
 
     def test_disabled_mog2_source_does_not_allocate_runtime_or_samples(self) -> None:
         repository = MotionEvidenceRepository("gate")

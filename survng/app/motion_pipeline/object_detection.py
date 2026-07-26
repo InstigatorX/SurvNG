@@ -67,7 +67,7 @@ class RecordedMotionObjectDetector:
         if wait_seconds > 0:
             time.sleep(min(wait_seconds, 3.0))
 
-        deadline = time.time() + RECORDED_EVENT_RETRY_SECONDS
+        deadline = time.monotonic() + max(0.0, RECORDED_EVENT_RETRY_SECONDS)
         best_frame: Frame | None = None
         best_objects: list[dict[str, Any]] = []
         best_score = -1.0
@@ -76,6 +76,8 @@ class RecordedMotionObjectDetector:
 
         while True:
             for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
+                if time.monotonic() >= deadline:
+                    break
                 target_epoch = event_epoch + sample_offset
                 row = self.recorder.recording_at(self.camera.id, target_epoch)
                 if row is None:
@@ -84,7 +86,11 @@ class RecordedMotionObjectDetector:
                 if start_epoch is None:
                     continue
                 frame_offset = max(0.0, target_epoch - float(start_epoch))
-                frame = self._read_recorded_frame(Path(str(row["path"])), frame_offset)
+                frame = self._read_recorded_frame(
+                    Path(str(row["path"])),
+                    frame_offset,
+                    deadline=deadline,
+                )
                 if frame is None:
                     continue
                 objects = self._detect_objects(frame)
@@ -97,9 +103,12 @@ class RecordedMotionObjectDetector:
                     best_distance = distance
                     best_recording_path = str(row["path"])
 
-            if best_frame is not None or time.time() >= deadline:
+            if best_frame is not None:
                 break
-            time.sleep(RECORDED_EVENT_RETRY_INTERVAL_SECONDS)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
 
         if best_frame is not None:
             return best_frame, best_objects, best_recording_path
@@ -128,7 +137,13 @@ class RecordedMotionObjectDetector:
         )
         return objects
 
-    def _read_recorded_frame(self, path: Path, offset_seconds: float) -> Frame | None:
+    def _read_recorded_frame(
+        self,
+        path: Path,
+        offset_seconds: float,
+        *,
+        deadline: float | None = None,
+    ) -> Frame | None:
         if not path.exists():
             return None
         attempts = [0.0, -0.25, 0.25, -0.75, 0.75]
@@ -139,6 +154,13 @@ class RecordedMotionObjectDetector:
         for nudge in attempts:
             sample_at = max(0.0, offset_seconds + nudge)
             for backend, input_args, filter_args in decode_plans:
+                timeout = 8.0
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        last_error = "recorded-frame deadline expired"
+                        break
+                    timeout = min(timeout, remaining)
                 command = [
                     self.recorder.ffmpeg_path,
                     "-hide_banner",
@@ -170,7 +192,7 @@ class RecordedMotionObjectDetector:
                         command,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        timeout=8,
+                        timeout=timeout,
                         check=False,
                     )
                 except subprocess.TimeoutExpired:
@@ -185,6 +207,8 @@ class RecordedMotionObjectDetector:
                 if frame is not None:
                     return frame
                 last_error = f"{backend}: mjpeg decode returned no frame"
+            if deadline is not None and time.monotonic() >= deadline:
+                break
         LOGGER.debug(
             "skipped unreadable recording sample for %s at %.2fs: %s%s",
             self.camera.id,

@@ -153,6 +153,7 @@ class MotionPipeline:
         self._active_invocations = 0
         self._active_threads: dict[int, int] = {}
         self._closing = False
+        self._closing_thread_id: int | None = None
         self._closed = False
 
     def process(self, context: MotionContext) -> MotionContext:
@@ -237,23 +238,46 @@ class MotionPipeline:
         """Create a disposable pipeline that cannot mutate this pipeline's runtime or metrics."""
         if self._stage_factory is None:
             raise RuntimeError("motion pipeline does not define an isolated stage factory")
-        pipeline = MotionPipeline(
-            camera_id=self.camera_id,
-            stages=self._stage_factory(),
-            observer=self.observer,
-            error_policy=self.error_policy,
-            stage_configuration=self.stage_configuration,
-            execution_groups=self.execution_groups,
-            stage_provides=self.stage_provides,
-            stage_observation_kinds=self.stage_observation_kinds,
-            requires_observation_kind=self.requires_observation_kind,
-            continuous_analysis=self.continuous_analysis,
-            motion_sources=self.motion_sources,
-            stage_factory=self._stage_factory,
-        )
-        if clone_runtime:
-            pipeline.runtime = self.runtime.clone()
-        return pipeline
+        stages = tuple(self._stage_factory())
+        try:
+            pipeline = MotionPipeline(
+                camera_id=self.camera_id,
+                stages=stages,
+                observer=self.observer,
+                error_policy=self.error_policy,
+                stage_configuration=self.stage_configuration,
+                execution_groups=self.execution_groups,
+                stage_provides=self.stage_provides,
+                stage_observation_kinds=self.stage_observation_kinds,
+                requires_observation_kind=self.requires_observation_kind,
+                continuous_analysis=self.continuous_analysis,
+                motion_sources=self.motion_sources,
+                stage_factory=self._stage_factory,
+            )
+        except BaseException:
+            self._close_stage_sequence(stages)
+            raise
+        try:
+            if clone_runtime:
+                pipeline.runtime = self.runtime.clone()
+            return pipeline
+        except BaseException:
+            pipeline.close()
+            raise
+
+    def _close_stage_sequence(self, stages: Sequence[MotionStage]) -> None:
+        for stage in reversed(stages):
+            close = getattr(stage, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException:
+                LOGGER.exception(
+                    "Motion isolated stage cleanup failed camera=%s stage=%s",
+                    self.camera_id,
+                    stage.stage_id,
+                )
 
     @property
     def primary_motion_source(self) -> str:
@@ -387,18 +411,22 @@ class MotionPipeline:
         }
 
     def close(self) -> None:
+        thread_id = threading.get_ident()
         with self._lifecycle_condition:
             if self._closed:
                 return
-            if threading.get_ident() in self._active_threads:
+            if thread_id in self._active_threads:
                 raise RuntimeError(
                     "motion pipeline cannot be closed from an active processing thread"
                 )
             if self._closing:
+                if self._closing_thread_id == thread_id:
+                    return
                 while not self._closed:
                     self._lifecycle_condition.wait()
                 return
             self._closing = True
+            self._closing_thread_id = thread_id
             while self._active_invocations:
                 self._lifecycle_condition.wait()
             executor = self._executor
@@ -421,5 +449,6 @@ class MotionPipeline:
             self.runtime.close()
         finally:
             with self._lifecycle_condition:
+                self._closing_thread_id = None
                 self._closed = True
                 self._lifecycle_condition.notify_all()

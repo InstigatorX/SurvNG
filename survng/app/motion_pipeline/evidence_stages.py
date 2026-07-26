@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Mapping
 
 from ..motion import BackgroundMotionTracker, aggregate_mog2_evidence
@@ -33,6 +34,7 @@ class Mog2EvidenceSourceStage:
         self.enabled = bool(enabled)
         self.sample_fps = max(1.0, float(sample_fps))
         self.history_seconds = max(1.0, float(history_seconds))
+        self._update_lock = threading.Lock()
         repository.configure_source(
             "mog2",
             enabled=self.enabled,
@@ -55,7 +57,8 @@ class Mog2EvidenceSourceStage:
                 history_seconds=self.history_seconds,
             ),
         )
-        evidence = tracker.update(context.original_frame)
+        with self._update_lock:
+            evidence = tracker.update(context.original_frame)
         self.repository.append("mog2", context.captured_at, evidence)
         context.source_evidence["mog2"] = dict(evidence)
         return context

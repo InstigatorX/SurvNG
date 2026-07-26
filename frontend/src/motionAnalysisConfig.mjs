@@ -13,6 +13,7 @@ function normalizedGraph(stages) {
     stage_id: stage.stage_id,
     implementation: stage.implementation,
     options: normalizedValue(stage.options || {}),
+    parallel_group: stage.parallel_group || "",
   }));
 }
 

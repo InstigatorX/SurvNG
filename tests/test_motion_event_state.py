@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from survng.app.motion_pipeline import (
     MotionContext,
@@ -154,6 +155,32 @@ class MotionEventStateTest(unittest.TestCase):
         self.assertFalse(continuous.decision.run_object_detection)
         self.assertEqual(continuous.event_state.phase, MotionEventPhase.ACTIVE)
         self.assertEqual(continuous.decision.reason, "event_state_active")
+
+    def test_concurrent_scores_produce_only_one_activation_trigger(self) -> None:
+        pipeline = state_pipeline("gate")
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(
+                lambda _index: process_score(pipeline, 10.0, True),
+                range(32),
+            ))
+
+        self.assertEqual(
+            sum(bool(result.decision.run_object_detection) for result in results),
+            1,
+        )
+
+    def test_event_runtime_can_be_cloned_for_isolated_replay(self) -> None:
+        pipeline = state_pipeline("gate", activation_frames=2)
+        process_score(pipeline, 10.0, True)
+
+        isolated = pipeline.isolated_copy(clone_runtime=True)
+        replay = process_score(isolated, 11.0, True)
+        original = process_score(pipeline, 11.0, True)
+
+        self.assertTrue(replay.decision.run_object_detection)
+        self.assertTrue(original.decision.run_object_detection)
+        isolated.close()
 
 
 if __name__ == "__main__":

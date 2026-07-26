@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .context import MotionContext, MotionEventPhase, TriggerDecision
@@ -22,6 +23,20 @@ class _EventRuntime:
     consecutive_rejects: int = 0
     cooldown_until: float | None = None
     transition_reason: str = "initialized"
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def snapshot(self) -> "_EventRuntime":
+        with self.lock:
+            return _EventRuntime(
+                phase=self.phase,
+                event_key=self.event_key,
+                started_at=self.started_at,
+                updated_at=self.updated_at,
+                consecutive_accepts=self.consecutive_accepts,
+                consecutive_rejects=self.consecutive_rejects,
+                cooldown_until=self.cooldown_until,
+                transition_reason=self.transition_reason,
+            )
 
     def reset(self, reason: str) -> None:
         self.phase = MotionEventPhase.IDLE
@@ -55,6 +70,15 @@ class MotionEventStateStage:
 
     def process(self, context: MotionContext) -> MotionContext:
         state = context.runtime.state_for(self.stage_id, _EventRuntime)
+        with state.lock:
+            self._process_locked(context, state)
+        return context
+
+    def _process_locked(
+        self,
+        context: MotionContext,
+        state: _EventRuntime,
+    ) -> None:
         now = context.captured_at
         if state.updated_at is not None and now < state.updated_at:
             state.reset("clock_reset")
@@ -66,7 +90,7 @@ class MotionEventStateStage:
                 state.transition_reason = "cooldown_active"
                 state.updated_at = now
                 self._publish(context, state)
-                return context
+                return
             state.reset("cooldown_complete")
         elif (
             state.updated_at is not None
@@ -109,7 +133,6 @@ class MotionEventStateStage:
 
         state.updated_at = now
         self._publish(context, state)
-        return context
 
     @staticmethod
     def _publish(context: MotionContext, state: _EventRuntime) -> None:

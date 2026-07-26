@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import threading
 import time
 import unittest
@@ -50,6 +51,7 @@ class DummyEvents:
 
 class DummyRecorder:
     ffmpeg_path = "ffmpeg"
+    hardware_acceleration = "none"
 
     def recording_at(self, camera_id: str, epoch: float):
         return None
@@ -1024,6 +1026,56 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(objects[0]["label"], "car")
         self.assertEqual(objects[0]["frame_source"], "live_fallback")
         self.assertEqual(objects[0]["recording_status"], "no_recorded_frame")
+
+    def test_recorded_frame_retry_deadline_bounds_ffmpeg_attempts(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+        )
+        detector = DummyDetector()
+        fallback = np.zeros((10, 10, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "segment.mp4"
+            recording.touch()
+            recorder = DummyRecorder()
+            recorder.recording_at = Mock(return_value={
+                "path": str(recording),
+                "start_epoch": time.time() - 1.0,
+            })
+            worker = make_worker(
+                camera,
+                Path(tmpdir),
+                detector=detector,
+                recorder=recorder,
+            )
+
+            timeouts: list[float] = []
+
+            def timeout_ffmpeg(command, **kwargs):
+                timeout = float(kwargs["timeout"])
+                timeouts.append(timeout)
+                time.sleep(timeout)
+                raise subprocess.TimeoutExpired(command, timeout)
+
+            started = time.monotonic()
+            with (
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+                patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.04),
+                patch("survng.app.motion_pipeline.object_detection.subprocess.run", side_effect=timeout_ffmpeg),
+                patch.object(worker, "_get_latest_frame", return_value=fallback.copy()),
+            ):
+                frame, objects, recording_path = worker._recorded_motion_frame(
+                    datetime.fromtimestamp(time.time() - 2.0, timezone.utc)
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.15)
+        self.assertEqual(len(timeouts), 1)
+        self.assertLessEqual(timeouts[0], 0.04)
+        self.assertIsNotNone(frame)
+        self.assertEqual(recording_path, "")
+        self.assertEqual(objects[0]["frame_source"], "live_fallback")
 
 
 if __name__ == "__main__":
