@@ -33,6 +33,32 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_camera_state_fingerprint_includes_trigger_health_changes(self) -> None:
+        status = {
+            "id": "gate",
+            "onvif_connected": True,
+            "onvif_notifications_received": 10,
+            "onvif_motion_events_received": 2,
+            "onvif_renewals": 1,
+            "motion_qualification": {},
+        }
+        original = AppManager._camera_state_fingerprint(status)
+
+        self.assertNotEqual(
+            original,
+            AppManager._camera_state_fingerprint({
+                **status,
+                "onvif_motion_events_received": 3,
+            }),
+        )
+        self.assertNotEqual(
+            original,
+            AppManager._camera_state_fingerprint({
+                **status,
+                "onvif_renewal_errors": 1,
+            }),
+        )
+
     def test_real_empty_manager_starts_and_stops_all_background_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = AppManager(AppConfig(storage_dir=tmpdir))

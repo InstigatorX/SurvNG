@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from survng.app.config import AppConfig, CameraConfig, load_config, save_config
+from survng.app.config import AppConfig, CameraConfig, MqttConfig, load_config, save_config
 
 
 class AppConfigTest(unittest.TestCase):
@@ -75,6 +75,13 @@ class AppConfigTest(unittest.TestCase):
                 stream_url="rtsp://camera/main",
                 live_stream_url="file:///tmp/video.mp4",
             )
+        with self.assertRaises(ValidationError):
+            CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://camera/main",
+                onvif={"enabled": True, "host": "camera", "port": 70000},
+            )
 
     def test_duplicate_camera_ids_are_rejected(self) -> None:
         camera = {
@@ -84,6 +91,18 @@ class AppConfigTest(unittest.TestCase):
         }
         with self.assertRaises(ValidationError):
             AppConfig.model_validate({"cameras": [camera, {**camera, "name": "Other"}]})
+
+    def test_mqtt_topic_prefixes_are_normalized_and_reject_wildcards(self) -> None:
+        config = MqttConfig(topic_prefix=" /house/survng/ ", discovery_prefix=" /ha/ ")
+
+        self.assertEqual(config.topic_prefix, "house/survng")
+        self.assertEqual(config.discovery_prefix, "ha")
+        self.assertEqual(MqttConfig(topic_prefix="").topic_prefix, "survng")
+        self.assertEqual(MqttConfig(discovery_prefix="/").discovery_prefix, "homeassistant")
+        with self.assertRaises(ValidationError):
+            MqttConfig(topic_prefix="survng/#")
+        with self.assertRaises(ValidationError):
+            MqttConfig(discovery_prefix="home/+/assistant")
 
     def test_save_config_is_atomic_and_does_not_mutate_assigned_ids(self) -> None:
         config = AppConfig(

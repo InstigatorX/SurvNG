@@ -5402,7 +5402,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Discovery Prefix<input value={config.mqtt?.discovery_prefix || "homeassistant"} onChange={(event) => updateConfig(["mqtt", "discovery_prefix"], event.target.value)} disabled={config.mqtt?.discovery_enabled === false} /></label>
           <label>QoS<select value={config.mqtt?.qos ?? 0} onChange={(event) => updateConfig(["mqtt", "qos"], Number(event.target.value))}><option value={0}>0</option><option value={1}>1</option><option value={2}>2</option></select></label>
           <label className="check-field"><input type="checkbox" checked={config.mqtt?.tls || false} onChange={(event) => updateConfig(["mqtt", "tls"], event.target.checked)} /> TLS</label>
-          {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>{mqttStatus.connected ? "Connected" : mqttStatus.enabled ? "Disconnected" : "Disabled"}</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published, {mqttStatus.commands_received || 0} commands</span>{mqttStatus.incident_events_enabled ? <span>Incidents: {mqttStatus.incident_topic} ({mqttStatus.pending_incidents || 0} pending)</span> : null}{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
+          {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>{mqttStatus.connected ? "Connected" : mqttStatus.enabled ? "Disconnected" : "Disabled"}</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published · {mqttStatus.publish_failures || 0} publish failures</span><span>Commands: {mqttStatus.command_subscriptions_active ? "ready" : mqttStatus.connected ? "not subscribed" : "offline"} · {mqttStatus.commands_received || 0} accepted · {mqttStatus.commands_rejected || 0} rejected · {mqttStatus.command_errors || 0} failed · {mqttStatus.command_queue_depth || 0} queued</span>{mqttStatus.incident_events_enabled ? <span>Incidents: {mqttStatus.incident_topic} ({mqttStatus.pending_incidents || 0} pending)</span> : null}{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
         </div>
         ) : null}
 
@@ -5722,11 +5722,10 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
   }
-  const onvifEvidence = status.motion_qualification?.evidence_sources?.onvif;
   const cameraAlertsOnly = status.motion_qualification?.mode !== "enforce";
   const missingMotionNotices = cameraAlertsOnly
     && status.onvif_enabled
-    && Number(onvifEvidence?.sample_count || 0) === 0;
+    && Number(status.onvif_motion_events_received || 0) === 0;
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
@@ -5734,6 +5733,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
       <span>Recording: {status.recording ? "running" : "stopped"}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
       {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
+      {status.onvif_enabled ? <span>{status.onvif_notifications_received || 0} notifications · {status.onvif_motion_events_received || 0} active motion · {status.onvif_inactive_motion_events || 0} inactive motion · {status.onvif_renewals || 0} subscription renewals</span> : null}
       {status.motion_qualification ? (
         <div className="motion-runtime-status">
           <div className="motion-runtime-summary">

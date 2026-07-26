@@ -4,6 +4,7 @@ import json
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from survng.app.config import MqttConfig
 from survng.app.mqtt import MqttService
@@ -21,6 +22,15 @@ class FakeClient:
         self.published.append((topic, payload, qos, retain))
         return FakePublishResult()
 
+    def subscribe(self, topic: str, qos: int):
+        return (0, 1)
+
+    def disconnect(self) -> None:
+        pass
+
+    def loop_stop(self) -> None:
+        pass
+
 
 class MqttServiceTest(unittest.TestCase):
     def service(self, recording_callback=lambda camera_id, enabled: True, detection_callback=lambda camera_id, enabled: True):
@@ -32,6 +42,8 @@ class MqttServiceTest(unittest.TestCase):
         )
         service.client = FakeClient()
         service.connected = True
+        service._start_command_worker()
+        self.addCleanup(service.stop)
         return service
 
     def test_discovery_includes_recording_and_detection_switches(self) -> None:
@@ -64,11 +76,11 @@ class MqttServiceTest(unittest.TestCase):
             return apply
 
         service = self.service(callback("recording"), callback("detection"))
-        service._on_message(None, None, SimpleNamespace(
+        service._on_message(service.client, None, SimpleNamespace(
             topic="survng/camera/gate/recording/set",
             payload=b"OFF",
         ))
-        service._on_message(None, None, SimpleNamespace(
+        service._on_message(service.client, None, SimpleNamespace(
             topic="survng/camera/gate/detection/set",
             payload=b'{"state":"ON"}',
         ))
@@ -158,6 +170,106 @@ class MqttServiceTest(unittest.TestCase):
 
         service.track_incident(event, "Front Door", allow_new=False)
         self.assertEqual(len(service.client.published), 3)
+
+    def test_retained_commands_are_rejected_without_replaying_state(self) -> None:
+        callback = Mock(return_value=True)
+        service = self.service(recording_callback=callback)
+
+        service._on_message(service.client, None, SimpleNamespace(
+            topic="survng/camera/gate/recording/set",
+            payload=b"OFF",
+            retain=True,
+        ))
+
+        callback.assert_not_called()
+        self.assertEqual(service.commands_received, 0)
+        self.assertEqual(service.commands_rejected, 1)
+
+    def test_stale_client_callbacks_are_ignored(self) -> None:
+        callback = Mock(return_value=True)
+        service = self.service(recording_callback=callback)
+
+        service._on_message(object(), None, SimpleNamespace(
+            topic="survng/camera/gate/recording/set",
+            payload=b"OFF",
+        ))
+        service._on_disconnect(object(), None, None, 1, None)
+
+        callback.assert_not_called()
+        self.assertTrue(service.connected)
+
+    def test_shutdown_invalidates_client_before_disconnect_callbacks(self) -> None:
+        connected = Mock()
+        service = self.service()
+        service.connected_callback = connected
+        client = service.client
+        client.disconnect = Mock(side_effect=lambda: service._on_connect(
+            client, None, None, 0, None
+        ))
+
+        service.stop()
+
+        self.assertFalse(service.connected)
+        self.assertIsNone(service.client)
+        connected.assert_not_called()
+
+    def test_connect_tracks_command_subscription_health(self) -> None:
+        connected = Mock()
+        service = self.service()
+        service.connected_callback = connected
+
+        service._on_connect(service.client, None, None, 0, None)
+
+        self.assertTrue(service.command_subscriptions_active)
+        self.assertEqual(service.subscription_failures, 0)
+        connected.assert_called_once_with()
+
+    def test_oversized_command_is_rejected_before_parsing(self) -> None:
+        callback = Mock(return_value=True)
+        service = self.service(recording_callback=callback)
+
+        service._on_message(service.client, None, SimpleNamespace(
+            topic="survng/camera/gate/recording/set",
+            payload=b"1" * 5000,
+        ))
+
+        callback.assert_not_called()
+        self.assertEqual(service.commands_rejected, 1)
+
+    def test_start_failure_releases_client_and_command_worker(self) -> None:
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+        )
+        client = Mock()
+        client.connect_async.side_effect = RuntimeError("connect setup failed")
+        with patch("paho.mqtt.client.Client", return_value=client):
+            service.start()
+
+        self.assertIsNone(service.client)
+        self.assertIsNone(service._command_thread)
+        client.loop_stop.assert_called_once_with()
+        self.assertIn("connect setup failed", service.last_error)
+
+    def test_nonzero_network_loop_result_rolls_back_startup(self) -> None:
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+        )
+        client = Mock()
+        client.connect_async.return_value = 0
+        client.loop_start.return_value = 3
+        with patch("paho.mqtt.client.Client", return_value=client):
+            service.start()
+
+        self.assertIsNone(service.client)
+        self.assertIsNone(service._command_thread)
+        client.loop_stop.assert_called_once_with()
+        self.assertIn("network loop failed", service.last_error)
 
 
 if __name__ == "__main__":

@@ -618,7 +618,11 @@ class AppManager:
         keys = (
             "running", "connected", "capture_running", "frame_fresh", "main_running",
             "main_frame_fresh", "last_error", "main_last_error", "onvif_connected",
-            "onvif_last_event_at", "last_motion_at", "detection_enabled", "recording",
+            "onvif_last_event_at", "onvif_last_motion_event_at", "onvif_last_error",
+            "onvif_last_poll_success_at", "onvif_last_poll_error_at",
+            "onvif_notifications_received", "onvif_motion_events_received",
+            "onvif_renewals", "onvif_renewal_errors", "last_motion_at",
+            "detection_enabled", "recording",
             "sub_recording", "recording_enabled", "recording_configured",
         )
         motion = status.get("motion_qualification") or {}

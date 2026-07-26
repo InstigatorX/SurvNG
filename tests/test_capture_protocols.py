@@ -4,6 +4,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -123,6 +124,11 @@ class CaptureProtocolTest(unittest.TestCase):
         callback.assert_called_once()
         subscribe.assert_called_once()
         self.assertEqual(listener.poll_errors, 0)
+        self.assertEqual(listener.notifications_received, 1)
+        self.assertEqual(listener.motion_events_received, 1)
+        self.assertEqual(listener.callback_errors, 1)
+        self.assertTrue(listener.last_event_at)
+        self.assertTrue(listener.last_motion_event_at)
 
     def test_onvif_run_always_releases_subscription_and_transport(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
@@ -161,6 +167,61 @@ class CaptureProtocolTest(unittest.TestCase):
                     '<tt:SimpleItem Name="IsMotion" Value="true"/>'
                 ),
             )
+        )
+
+    def test_onvif_structured_off_state_is_not_reported_as_motion(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+
+        self.assertFalse(
+            listener._is_motion_event(
+                "tns1:RuleEngine/CellMotionDetector/Motion",
+                "{'Name': 'IsMotion', 'Value': false}",
+            )
+        )
+        self.assertIsNone(listener._motion_event_state("tns1:VideoSource", "signal ok"))
+
+    def test_onvif_subscription_renews_before_expiration(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        manager = Mock()
+        manager.Renew.return_value = SimpleNamespace(
+            CurrentTime="2026-07-26T12:00:00Z",
+            TerminationTime="2026-07-26T13:00:00Z",
+        )
+        listener._subscription_manager = manager
+        listener.subscription_lifetime_seconds = 120
+        listener._subscription_granted_lifetime_seconds = 3600
+        listener._subscription_expires_monotonic = time.monotonic() + 120
+
+        self.assertTrue(listener._subscription_renewal_due())
+        self.assertTrue(listener._renew_subscription())
+
+        manager.Renew.assert_called_once_with(TerminationTime="PT1H")
+        self.assertEqual(listener.renewal_attempts, 1)
+        self.assertEqual(listener.renewals, 1)
+        self.assertEqual(listener.renewal_errors, 0)
+        self.assertEqual(listener.subscription_lifetime_seconds, 3600)
+
+    def test_onvif_poll_without_subscription_times_preserves_renewal_deadline(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        listener._record_subscription_times(SimpleNamespace(
+            CurrentTime="2026-07-26T12:00:00Z",
+            TerminationTime="2026-07-26T13:00:00Z",
+        ))
+        deadline = listener._subscription_expires_monotonic
+
+        listener._record_subscription_times(SimpleNamespace())
+
+        self.assertEqual(listener._subscription_expires_monotonic, deadline)
+        self.assertEqual(listener.subscription_lifetime_seconds, 3600)
+
+    def test_onvif_subscription_address_accepts_plain_string(self) -> None:
+        subscription = SimpleNamespace(
+            SubscriptionReference=SimpleNamespace(Address="http://camera/subscription")
+        )
+
+        self.assertEqual(
+            OnvifEventListener._subscription_address(subscription),
+            "http://camera/subscription",
         )
 
 

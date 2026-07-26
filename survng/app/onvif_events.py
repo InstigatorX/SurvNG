@@ -25,6 +25,9 @@ TIMEOUT_WORDS = ("timed out", "timeout", "read timed out", "operation timed out"
 PULLPOINT_NAMESPACE = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
 SUBSCRIPTION_MANAGER_BINDING = "{http://www.onvif.org/ver10/events/wsdl}SubscriptionManagerBinding"
 SUBSCRIPTION_DURATION = "PT1H"
+SUBSCRIPTION_RENEW_MAX_MARGIN_SECONDS = 300.0
+SUBSCRIPTION_RENEW_MIN_MARGIN_SECONDS = 5.0
+MAX_EVENT_MESSAGE_CHARACTERS = 16_384
 
 
 class OnvifEventListener:
@@ -45,6 +48,8 @@ class OnvifEventListener:
         self._subscription_manager: Any = None
         self.connected = False
         self.last_event_at = ""
+        self.last_camera_event_at = ""
+        self.last_motion_event_at = ""
         self.last_error = ""
         self.last_topic = ""
         self.last_connected_at = ""
@@ -55,9 +60,20 @@ class OnvifEventListener:
         self.poll_timeouts = 0
         self.poll_errors = 0
         self.resubscriptions = 0
+        self.notifications_received = 0
+        self.motion_events_received = 0
+        self.inactive_motion_events = 0
+        self.unrecognized_notifications = 0
+        self.callback_errors = 0
+        self.renewal_attempts = 0
+        self.renewals = 0
+        self.renewal_errors = 0
+        self.last_renewed_at = ""
         self.subscription_current_time = ""
         self.subscription_termination_time = ""
         self.subscription_lifetime_seconds: float | None = None
+        self._subscription_granted_lifetime_seconds: float | None = None
+        self._subscription_expires_monotonic: float | None = None
 
     @property
     def running(self) -> bool:
@@ -167,7 +183,17 @@ class OnvifEventListener:
                 continue
 
             failures = 0
+            planned_resubscription = False
             while not self._stop.is_set():
+                if self._subscription_renewal_due():
+                    if self._renew_subscription():
+                        continue
+                    planned_resubscription = True
+                    LOGGER.info(
+                        "proactively re-subscribing to ONVIF events for %s",
+                        self.camera.id,
+                    )
+                    break
                 try:
                     response = pullpoint.PullMessages(
                         {"Timeout": f"PT{PULL_TIMEOUT_SECONDS}S", "MessageLimit": 10}
@@ -180,18 +206,35 @@ class OnvifEventListener:
                     for notification in getattr(response, "NotificationMessage", []) or []:
                         topic, message = self._extract_event(notification)
                         event_at = self._event_time(notification, message)
-                        self.last_event_at = (event_at or datetime.now(timezone.utc)).isoformat()
+                        received_at = datetime.now(timezone.utc)
+                        self.notifications_received += 1
+                        self.last_event_at = received_at.isoformat()
+                        self.last_camera_event_at = event_at.isoformat() if event_at else ""
                         self.last_topic = topic
                         LOGGER.debug("ONVIF event %s: %s", topic, message[:300])
-                        if self._is_motion_event(topic, message):
+                        motion_state = self._motion_event_state(topic, message)
+                        if motion_state is True:
+                            self.motion_events_received += 1
+                            self.last_motion_event_at = received_at.isoformat()
                             try:
-                                self.on_motion(topic, message, event_at)
+                                self.on_motion(
+                                    topic[:1024],
+                                    message[:MAX_EVENT_MESSAGE_CHARACTERS],
+                                    event_at,
+                                )
                             except Exception:
+                                self.callback_errors += 1
                                 LOGGER.exception(
                                     "ONVIF motion callback failed for %s",
                                     self.camera.id,
                                 )
+                        elif motion_state is False:
+                            self.inactive_motion_events += 1
+                        else:
+                            self.unrecognized_notifications += 1
                 except Exception as exc:
+                    if self._stop.is_set():
+                        return
                     error_text = self._error_text(exc)
                     self.last_poll_error = error_text
                     self.last_poll_error_at = datetime.now(timezone.utc).isoformat()
@@ -233,6 +276,9 @@ class OnvifEventListener:
             self._close_transport()
             self.connected = False
             if not self._stop.is_set():
+                if planned_resubscription:
+                    retry_delay = RETRY_INITIAL_SECONDS
+                    continue
                 if self._stop.wait(retry_delay):
                     return
                 retry_delay = min(RETRY_MAX_SECONDS, retry_delay * 2)
@@ -280,19 +326,81 @@ class OnvifEventListener:
     def _subscription_address(subscription: Any) -> str:
         reference = getattr(subscription, "SubscriptionReference", None)
         address = getattr(reference, "Address", None)
-        return str(getattr(address, "_value_1", "") or "").strip()
+        if isinstance(address, str):
+            return address.strip()
+        return str(
+            getattr(address, "_value_1", "")
+            or getattr(address, "value", "")
+            or ""
+        ).strip()
 
     def _record_subscription_times(self, response: Any) -> None:
         current = self._parse_event_time(getattr(response, "CurrentTime", None))
         termination = self._parse_event_time(getattr(response, "TerminationTime", None))
-        self.subscription_current_time = current.isoformat() if current else ""
-        self.subscription_termination_time = termination.isoformat() if termination else ""
-        if current is not None and termination is not None:
+        if current is not None:
+            self.subscription_current_time = current.isoformat()
+        if termination is not None:
+            self.subscription_termination_time = termination.isoformat()
+        if termination is not None:
+            lifetime_reference = current or datetime.now(timezone.utc)
             self.subscription_lifetime_seconds = max(
-                0.0, (termination - current).total_seconds()
+                0.0, (termination - lifetime_reference).total_seconds()
             )
-        else:
+            self._subscription_expires_monotonic = (
+                time.monotonic() + self.subscription_lifetime_seconds
+            )
+            self._subscription_granted_lifetime_seconds = max(
+                self.subscription_lifetime_seconds,
+                self._subscription_granted_lifetime_seconds or 0.0,
+            )
+
+    def _subscription_renewal_due(self) -> bool:
+        if self._subscription_expires_monotonic is None:
+            return False
+        remaining = max(0.0, self._subscription_expires_monotonic - time.monotonic())
+        self.subscription_lifetime_seconds = remaining
+        granted = self._subscription_granted_lifetime_seconds
+        if granted is None:
+            return False
+        margin = min(
+            SUBSCRIPTION_RENEW_MAX_MARGIN_SECONDS,
+            max(SUBSCRIPTION_RENEW_MIN_MARGIN_SECONDS, granted * 0.2),
+        )
+        return remaining <= margin
+
+    def _renew_subscription(self) -> bool:
+        manager = self._subscription_manager
+        if manager is None:
+            return False
+        self.renewal_attempts += 1
+        try:
+            # The subscription manager is a raw Zeep service, not the
+            # python-onvif wrapper used by the event and pull-point services.
+            # Raw Zeep operations require keyword arguments here; a positional
+            # dict would be serialized as the literal TerminationTime value.
+            response = manager.Renew(TerminationTime=SUBSCRIPTION_DURATION)
+            self._subscription_granted_lifetime_seconds = None
+            self._subscription_expires_monotonic = None
             self.subscription_lifetime_seconds = None
+            self._record_subscription_times(response)
+            if (
+                self.subscription_lifetime_seconds is None
+                or self._subscription_expires_monotonic is None
+            ):
+                raise RuntimeError("ONVIF renewal did not return subscription times")
+            self.renewals += 1
+            self.last_renewed_at = datetime.now(timezone.utc).isoformat()
+            self.last_error = ""
+            return True
+        except Exception as exc:
+            self.renewal_errors += 1
+            self.last_error = f"renewal failed; re-subscribing: {self._error_text(exc)[:200]}"
+            LOGGER.warning(
+                "failed to renew ONVIF subscription for %s: %s",
+                self.camera.id,
+                self._error_text(exc),
+            )
+            return False
 
     def _unsubscribe(self, *, notify_camera: bool = True) -> None:
         manager = self._subscription_manager
@@ -374,17 +482,21 @@ class OnvifEventListener:
         message = self._stringify_message(getattr(notification, "Message", ""))
         return topic, message
 
-    def _is_motion_event(self, topic: str, message: str) -> bool:
+    def _motion_event_state(self, topic: str, message: str) -> bool | None:
         searchable = f"{topic} {message}".lower()
         if not any(word in searchable for word in MOTION_WORDS):
-            return False
-        explicit_state: bool | None = None
-        for tag in re.findall(r"<[^>]+>", searchable):
+            return None
+        explicit_states: list[bool] = []
+        containers = [
+            *re.findall(r"<[^>]+>", searchable),
+            *re.findall(r"\{[^{}]{0,500}\}", searchable),
+        ]
+        for container in containers:
             attributes = {
                 name.lower(): value.lower()
                 for name, value in re.findall(
-                    r"\b(name|value)\s*=\s*['\"]([^'\"]+)['\"]",
-                    tag,
+                    r"['\"]?\b(name|value)['\"]?\s*[:=]\s*['\"]?([^,'\"}\s/>]+)",
+                    container,
                     flags=re.IGNORECASE,
                 )
             }
@@ -392,11 +504,11 @@ class OnvifEventListener:
                 continue
             value = attributes.get("value", "")
             if value in {"true", "1", "on", "active"}:
-                return True
-            if value in {"false", "0", "off", "inactive"}:
-                explicit_state = False
-        if explicit_state is not None:
-            return explicit_state
+                explicit_states.append(True)
+            elif value in {"false", "0", "off", "inactive"}:
+                explicit_states.append(False)
+        if explicit_states:
+            return any(explicit_states)
         explicit_false = (
             'name="ismotion" value="false"' in searchable
             or "name='ismotion' value='false'" in searchable
@@ -414,6 +526,9 @@ class OnvifEventListener:
         if explicit_false:
             return False
         return True
+
+    def _is_motion_event(self, topic: str, message: str) -> bool:
+        return self._motion_event_state(topic, message) is True
 
     def _stringify_message(self, message: Any) -> str:
         if message is None:

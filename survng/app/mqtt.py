@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import threading
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ from .incident_utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+MQTT_COMMAND_QUEUE_SIZE = 64
+MQTT_COMMAND_STOP_TIMEOUT_SECONDS = 5.0
+MQTT_COMMAND_MAX_PAYLOAD_BYTES = 4096
 
 
 class MqttService:
@@ -37,8 +41,19 @@ class MqttService:
         self.last_connected_at = ""
         self.last_error = ""
         self.messages_published = 0
+        self.publish_failures = 0
         self.commands_received = 0
+        self.commands_rejected = 0
+        self.command_errors = 0
+        self.subscription_failures = 0
+        self.command_subscriptions_active = False
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
+        self._command_queue: queue.Queue[
+            tuple[str, str, bool, Callable[[str, bool], bool]] | None
+        ] = queue.Queue(maxsize=MQTT_COMMAND_QUEUE_SIZE)
+        self._command_stop = threading.Event()
+        self._command_thread: threading.Thread | None = None
         self._incident_lock = threading.RLock()
         self._pending_incidents: dict[str, dict[str, Any]] = {}
         self._accept_incidents = True
@@ -48,56 +63,132 @@ class MqttService:
         return self.config.topic_prefix.strip().strip("/") or "survng"
 
     def start(self) -> None:
-        self._accept_incidents = True
-        if not self.config.enabled or not self.config.host.strip() or self.client is not None:
-            return
-        try:
-            import paho.mqtt.client as mqtt
+        with self._lifecycle_lock:
+            self._accept_incidents = True
+            if not self.config.enabled or not self.config.host.strip() or self.client is not None:
+                return
+            client: Any = None
+            try:
+                import paho.mqtt.client as mqtt
 
-            client = mqtt.Client(
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-                client_id=self.config.client_id.strip() or "survng",
-                protocol=mqtt.MQTTv311,
-            )
-            if self.config.username:
-                client.username_pw_set(self.config.username, self.config.password or None)
-            if self.config.tls:
-                client.tls_set()
-            client.reconnect_delay_set(min_delay=1, max_delay=60)
-            client.will_set(
-                f"{self.prefix}/status",
-                json.dumps({"online": False}),
-                qos=self.config.qos,
-                retain=True,
-            )
-            client.on_connect = self._on_connect
-            client.on_disconnect = self._on_disconnect
-            client.on_message = self._on_message
-            self.client = client
-            client.connect_async(self.config.host.strip(), self.config.port, keepalive=45)
-            client.loop_start()
-        except Exception as exc:
-            self.last_error = str(exc)
-            LOGGER.exception("failed to start MQTT client")
+                client = mqtt.Client(
+                    callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+                    client_id=self.config.client_id.strip() or "survng",
+                    protocol=mqtt.MQTTv311,
+                )
+                if self.config.username:
+                    client.username_pw_set(self.config.username, self.config.password or None)
+                if self.config.tls:
+                    client.tls_set()
+                client.reconnect_delay_set(min_delay=1, max_delay=60)
+                client.will_set(
+                    f"{self.prefix}/status",
+                    json.dumps({"online": False}),
+                    qos=self.config.qos,
+                    retain=True,
+                )
+                client.on_connect = self._on_connect
+                client.on_disconnect = self._on_disconnect
+                client.on_message = self._on_message
+                self._start_command_worker()
+                self.client = client
+                connect_result = client.connect_async(
+                    self.config.host.strip(),
+                    self.config.port,
+                    keepalive=45,
+                )
+                if int(connect_result) != 0:
+                    raise RuntimeError(f"MQTT connect setup failed: rc={connect_result}")
+                loop_result = client.loop_start()
+                if int(loop_result) != 0:
+                    raise RuntimeError(f"MQTT network loop failed to start: rc={loop_result}")
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.connected = False
+                self.client = None
+                if client is not None:
+                    try:
+                        client.loop_stop()
+                    except Exception:
+                        LOGGER.debug("failed to roll back MQTT network loop", exc_info=True)
+                self._stop_command_worker()
+                LOGGER.exception("failed to start MQTT client")
 
     def stop(self) -> None:
-        client = self.client
-        self._accept_incidents = False
-        if client is not None and self.connected:
-            self.flush_incidents()
-        self._cancel_incident_timers()
-        if client is None:
+        with self._lifecycle_lock:
+            client = self.client
+            self._accept_incidents = False
+            was_connected = bool(client is not None and self.connected)
+            if was_connected:
+                self.flush_incidents()
+            self._cancel_incident_timers()
+            try:
+                if client is not None:
+                    if was_connected:
+                        self.publish("status", {"online": False}, retain=True)
+                    # Invalidate the client before disconnecting so callbacks
+                    # racing with shutdown cannot restore connected state or
+                    # enqueue commands for a service that is stopping.
+                    self.client = None
+                    self.connected = False
+                    self.command_subscriptions_active = False
+                    if was_connected:
+                        client.disconnect()
+                    client.loop_stop()
+            except Exception:
+                LOGGER.exception("failed to stop MQTT client cleanly")
+            finally:
+                self.connected = False
+                self.command_subscriptions_active = False
+                self.client = None
+                self._stop_command_worker()
+
+    def _start_command_worker(self) -> None:
+        thread = self._command_thread
+        if thread is not None and thread.is_alive():
             return
+        while True:
+            try:
+                self._command_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._command_stop.clear()
+        thread = threading.Thread(
+            target=self._run_commands,
+            name="mqtt-commands",
+            daemon=False,
+        )
+        self._command_thread = thread
+        thread.start()
+
+    def _stop_command_worker(self) -> None:
+        self._command_stop.set()
+        while True:
+            try:
+                self._command_queue.get_nowait()
+            except queue.Empty:
+                break
         try:
-            if self.connected:
-                self.publish("status", {"online": False}, retain=True)
-                client.disconnect()
-            client.loop_stop()
-        except Exception:
-            LOGGER.exception("failed to stop MQTT client cleanly")
-        finally:
-            self.connected = False
-            self.client = None
+            self._command_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        thread = self._command_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=MQTT_COMMAND_STOP_TIMEOUT_SECONDS)
+        if thread is not None and thread.is_alive():
+            LOGGER.error("MQTT command worker did not stop")
+        else:
+            self._command_thread = None
+
+    def _run_commands(self) -> None:
+        while not self._command_stop.is_set():
+            try:
+                command = self._command_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if command is None or self._command_stop.is_set():
+                return
+            self._apply_control(*command)
 
     def publish(self, suffix: str, payload: dict[str, Any], retain: bool = False) -> None:
         self.publish_topic(f"{self.prefix}/{suffix.strip('/')}", payload, retain=retain)
@@ -116,7 +207,13 @@ class MqttService:
             if info.rc == 0:
                 with self._lock:
                     self.messages_published += 1
+            else:
+                with self._lock:
+                    self.publish_failures += 1
+                self.last_error = f"publish failed for {topic}: rc={info.rc}"
         except Exception as exc:
+            with self._lock:
+                self.publish_failures += 1
             self.last_error = str(exc)
             LOGGER.warning("MQTT publish failed for %s: %s", topic, exc)
 
@@ -129,7 +226,13 @@ class MqttService:
             if info.rc == 0:
                 with self._lock:
                     self.messages_published += 1
+            else:
+                with self._lock:
+                    self.publish_failures += 1
+                self.last_error = f"retained-topic removal failed for {topic}: rc={info.rc}"
         except Exception as exc:
+            with self._lock:
+                self.publish_failures += 1
             self.last_error = str(exc)
             LOGGER.warning("MQTT retained-topic removal failed for %s: %s", topic, exc)
 
@@ -601,35 +704,73 @@ class MqttService:
             "last_connected_at": self.last_connected_at,
             "last_error": self.last_error,
             "messages_published": self.messages_published,
+            "publish_failures": self.publish_failures,
             "commands_received": self.commands_received,
+            "commands_rejected": self.commands_rejected,
+            "command_errors": self.command_errors,
+            "subscription_failures": self.subscription_failures,
+            "command_subscriptions_active": self.command_subscriptions_active,
+            "command_queue_depth": self._command_queue.qsize(),
+            "command_worker_running": bool(
+                self._command_thread is not None and self._command_thread.is_alive()
+            ),
             "incident_events_enabled": self.config.incident_events_enabled,
             "incident_topic": f"{self.prefix}/events/incidents",
             "pending_incidents": pending_incidents,
         }
 
     def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any) -> None:
+        if client is not self.client:
+            return
         if bool(getattr(reason_code, "is_failure", reason_code != 0)):
             self.connected = False
             self.last_error = f"broker rejected connection: {reason_code}"
             return
         self.connected = True
+        self.command_subscriptions_active = False
         self.last_error = ""
         self.last_connected_at = datetime.now(timezone.utc).isoformat()
-        client.subscribe(f"{self.prefix}/camera/+/power/set", qos=self.config.qos)
-        client.subscribe(f"{self.prefix}/camera/+/recording/set", qos=self.config.qos)
-        client.subscribe(f"{self.prefix}/camera/+/detection/set", qos=self.config.qos)
+        try:
+            subscriptions = [
+                client.subscribe(f"{self.prefix}/camera/+/power/set", qos=self.config.qos),
+                client.subscribe(f"{self.prefix}/camera/+/recording/set", qos=self.config.qos),
+                client.subscribe(f"{self.prefix}/camera/+/detection/set", qos=self.config.qos),
+            ]
+            failed = [result for result in subscriptions if int(result[0]) != 0]
+            if failed:
+                self.subscription_failures += 1
+                self.last_error = "one or more MQTT command subscriptions failed"
+            else:
+                self.command_subscriptions_active = True
+        except Exception as exc:
+            self.subscription_failures += 1
+            self.last_error = f"MQTT command subscription failed: {exc}"
+            LOGGER.exception("failed to subscribe to MQTT command topics")
         self.publish("status", {"online": True, "connected_at": self.last_connected_at}, retain=True)
         if self.connected_callback:
-            threading.Thread(target=self.connected_callback, daemon=True).start()
+            try:
+                self.connected_callback()
+            except Exception:
+                LOGGER.exception("MQTT connected callback failed")
         LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
 
     def _on_disconnect(self, client: Any, userdata: Any, disconnect_flags: Any, reason_code: Any, properties: Any) -> None:
+        if client is not self.client:
+            return
         self.connected = False
+        self.command_subscriptions_active = False
         if bool(getattr(reason_code, "is_failure", reason_code != 0)):
             self.last_error = f"disconnected: {reason_code}"
             LOGGER.warning("MQTT disconnected unexpectedly: %s", reason_code)
 
     def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
+        if client is not self.client or not self.connected:
+            return
+        if bool(getattr(message, "retain", False)):
+            with self._lock:
+                self.commands_rejected += 1
+            LOGGER.warning("ignored retained MQTT command on %s", message.topic)
+            return
         parts = message.topic.split("/")
         prefix_parts = self.prefix.split("/")
         expected_length = len(prefix_parts) + 4
@@ -647,6 +788,11 @@ class MqttService:
         callback = callbacks.get(feature)
         if callback is None:
             return
+        if len(message.payload) > MQTT_COMMAND_MAX_PAYLOAD_BYTES:
+            with self._lock:
+                self.commands_rejected += 1
+            LOGGER.warning("ignored oversized MQTT command on %s", message.topic)
+            return
         raw = message.payload.decode("utf-8", errors="replace").strip()
         try:
             decoded = json.loads(raw)
@@ -658,9 +804,17 @@ class MqttService:
             LOGGER.warning("ignored invalid MQTT camera %s command for %s: %s", feature, camera_id, raw[:100])
             return
         turn_on = normalized in {"ON", "TRUE", "1"}
+        command = (camera_id, feature, turn_on, callback)
+        try:
+            self._command_queue.put_nowait(command)
+        except queue.Full:
+            with self._lock:
+                self.commands_rejected += 1
+            self.last_error = "MQTT command queue is full"
+            LOGGER.warning("ignored MQTT camera command because the command queue is full")
+            return
         with self._lock:
             self.commands_received += 1
-        threading.Thread(target=self._apply_control, args=(camera_id, feature, turn_on, callback), daemon=True).start()
 
     def _apply_control(
         self,
@@ -675,5 +829,7 @@ class MqttService:
                 self.publish(f"camera/{camera_id}/command/error", {"error": "camera not found"})
                 return
         except Exception as exc:
+            with self._lock:
+                self.command_errors += 1
             LOGGER.exception("MQTT camera %s command failed for %s", feature, camera_id)
             self.publish(f"camera/{camera_id}/command/error", {"error": str(exc)})

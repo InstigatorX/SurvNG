@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
 class OnvifConfig(BaseModel):
     enabled: bool = False
     host: str = ""
-    port: int = 8000
+    port: int = Field(default=8000, ge=1, le=65535)
     username: str = ""
     password: str = ""
 
@@ -57,6 +57,16 @@ class MqttConfig(BaseModel):
     discovery_enabled: bool = True
     discovery_prefix: str = "homeassistant"
     incident_events_enabled: bool = True
+
+    @field_validator("topic_prefix", "discovery_prefix", mode="before")
+    @classmethod
+    def normalize_mqtt_topic_prefix(cls, value: object, info: ValidationInfo) -> str:
+        prefix = str(value or "").strip().strip("/")
+        if not prefix:
+            return "survng" if info.field_name == "topic_prefix" else "homeassistant"
+        if any(character in prefix for character in ("+", "#", "\x00")):
+            raise ValueError("MQTT topic prefix cannot contain wildcards or null bytes")
+        return prefix
 
 
 class AuditAiConfig(BaseModel):
