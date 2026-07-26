@@ -923,6 +923,35 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(len(qualifications), 1)
             self.assertEqual(qualifications[0]["trigger_count"], 2)
 
+    def test_audit_records_detector_failure_as_not_run(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(mode="audit", burst_quiet_seconds=0.1)
+        rejected = MotionQualificationResult(False, 0.2, 0.5, "low_score", 3, {})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            with (
+                patch.object(worker, "_qualify_motion_burst", return_value=(rejected, {})),
+                patch.object(
+                    worker,
+                    "_process_motion_event",
+                    return_value={"event_id": 5, "snapshot_path": "snapshot.jpg", "object_detected": None},
+                ),
+                patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
+            ):
+                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread.start()
+                worker.handle_motion_event("onvif/motion", "motion")
+                deadline = time.monotonic() + 2
+                while record_audit.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                worker._stop.set()
+                worker._motion_queue.put_nowait(None)
+                thread.join(timeout=2)
+
+            record_audit.assert_called_once()
+            self.assertIsNone(record_audit.call_args.kwargs["object_detected"])
+
     def test_all_zero_rolling_windows_fail_open_as_inconclusive(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(post_trigger_seconds=0.5, window_seconds=0.8)

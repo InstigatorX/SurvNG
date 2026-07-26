@@ -3,16 +3,31 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import signal
+import threading
 import time
 import unittest
 
 import numpy as np
+from pydantic import ValidationError
 
 from survng.app.config import DetectorConfig
-from survng.app.inference import InferenceSupervisor, IsolatedFaceRecognizer
+from survng.app.inference import (
+    InferenceSupervisor,
+    InferenceUnavailable,
+    IsolatedFaceRecognizer,
+    _InferenceWorker,
+)
 
 
 class InferenceSupervisorTest(unittest.TestCase):
+    def test_detector_threshold_configuration_is_bounded(self) -> None:
+        with self.assertRaises(ValidationError):
+            DetectorConfig(confidence_threshold=0.0)
+        with self.assertRaises(ValidationError):
+            DetectorConfig(nms_threshold=1.0)
+        with self.assertRaises(ValidationError):
+            DetectorConfig(backend="unknown")
+
     def setUp(self) -> None:
         self.supervisor = InferenceSupervisor(DetectorConfig(enabled=False))
 
@@ -114,6 +129,41 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(face_process.is_alive())
         self.assertIsNone(supervisor.worker_status()["object"]["worker_pid"])
         self.assertIsNone(supervisor.worker_status()["face"]["worker_pid"])
+
+    def test_request_timeout_includes_time_waiting_for_worker_lock(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with worker._lock:
+                acquired.set()
+                release.wait(timeout=2.0)
+
+        thread = threading.Thread(target=hold_lock)
+        thread.start()
+        self.assertTrue(acquired.wait(timeout=1.0))
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(InferenceUnavailable, "timed out waiting"):
+                worker.request("status", timeout=0.05)
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(worker.isolation_status()["pending_requests"], 0)
+
+    def test_shared_frame_contract_rejects_non_bgr_and_non_uint8_arrays(self) -> None:
+        worker = _InferenceWorker(DetectorConfig(enabled=False), "object", {})
+        with self.assertRaisesRegex(InferenceUnavailable, "uint8 BGR"):
+            worker._write_frame_locked(np.zeros((10, 10), dtype=np.uint8))
+        with self.assertRaisesRegex(InferenceUnavailable, "uint8 BGR"):
+            worker._write_frame_locked(np.zeros((10, 10, 3), dtype=np.float32))
 
 
 if __name__ == "__main__":

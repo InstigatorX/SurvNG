@@ -15,6 +15,35 @@ import numpy as np
 from .config import DetectorConfig
 
 LOGGER = logging.getLogger(__name__)
+DETECTION_FAILURE_STATUSES = frozenset({"detector_unavailable", "inference_error"})
+YOLO_END_TO_END_MAX_DETECTIONS = 1000
+
+
+def detection_failure(objects: list[dict[str, Any]]) -> str:
+    return next(
+        (
+            str(item.get("error") or item.get("status") or "object detector unavailable")
+            for item in objects
+            if item.get("status") in DETECTION_FAILURE_STATUSES
+        ),
+        "",
+    )
+
+
+def merge_manual_detection_objects(
+    existing_objects_json: str,
+    detected_objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        existing = json.loads(existing_objects_json or "[]")
+    except (TypeError, ValueError):
+        existing = []
+    preserved = [
+        item
+        for item in existing
+        if isinstance(item, dict) and item.get("status") == "motion_qualification"
+    ] if isinstance(existing, list) else []
+    return [*detected_objects, *preserved]
 
 
 class OpenVinoDetector:
@@ -155,7 +184,12 @@ class OpenVinoDetector:
                 LOGGER.exception("OpenVINO detector failed to load %s", model_path)
                 return False
             LOGGER.warning("OpenVINO failed to load %s, falling back to OpenCV DNN: %s", model_path, exc)
-            self.cv_net = cv2.dnn.readNetFromONNX(str(model_path))
+            try:
+                self.cv_net = cv2.dnn.readNetFromONNX(str(model_path))
+            except Exception:
+                LOGGER.exception("OpenCV DNN detector failed to load %s", model_path)
+                self.cv_net = None
+                return False
             self.input_shape = (640, 640)
             self.output_format = "yolo"
             self.backend = "opencv-dnn"
@@ -234,17 +268,20 @@ class OpenVinoDetector:
 
     def _detect_locked(self, frame: np.ndarray, confidence_threshold: float | None = None, queue_ms: float = 0.0) -> list[dict[str, Any]]:
         original_threshold = self.config.confidence_threshold
-        if confidence_threshold is not None:
-            self.config.confidence_threshold = max(0.01, min(0.99, float(confidence_threshold)))
-
         started = time.perf_counter()
         stages = {"queue": queue_ms, "preprocess": 0.0, "inference": 0.0, "postprocess": 0.0}
         objects: list[dict[str, Any]] = []
+        succeeded = False
         try:
+            if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0:
+                raise ValueError("detector frame must be a non-empty uint8 BGR image")
+            if confidence_threshold is not None:
+                self.config.confidence_threshold = max(0.01, min(0.99, float(confidence_threshold)))
             if self.coreml_model is not None:
                 inference_started = time.perf_counter()
                 objects = self._detect_coreml(frame)
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
+                succeeded = not any(item.get("status") == "detector_unavailable" for item in objects)
                 return objects
 
             preprocess_started = time.perf_counter()
@@ -259,6 +296,7 @@ class OpenVinoDetector:
                     outputs = [np.asarray(inference[layer]) for layer in self.output_layers]
                     objects = self._parse_yolo_seg_outputs(outputs, metadata)
                     stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
+                    succeeded = True
                     return objects
                 output = inference[self.output_layer]
             else:
@@ -273,11 +311,12 @@ class OpenVinoDetector:
             else:
                 objects = self._parse_ssd_output(output, frame.shape[1], frame.shape[0])
             stages["postprocess"] = (time.perf_counter() - postprocess_started) * 1000
+            succeeded = True
             return objects
         finally:
             self.config.confidence_threshold = original_threshold
             stages["total"] = (time.perf_counter() - started) * 1000 + queue_ms
-            self._finish_inference(stages, objects)
+            self._finish_inference(stages, objects, succeeded=succeeded)
 
     def _begin_inference(self) -> None:
         with self._stats_lock:
@@ -288,12 +327,17 @@ class OpenVinoDetector:
             self._pending_requests = max(0, self._pending_requests - 1)
             self._active_inferences += 1
 
-    def _finish_inference(self, stages: dict[str, float], objects: list[dict[str, Any]]) -> None:
+    def _finish_inference(
+        self,
+        stages: dict[str, float],
+        objects: list[dict[str, Any]],
+        *,
+        succeeded: bool,
+    ) -> None:
         now_monotonic = time.monotonic()
         now_epoch = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
         labels = sorted({str(item.get("label")) for item in objects if item.get("label")})
-        failed = any(item.get("status") == "detector_unavailable" for item in objects)
         with self._stats_lock:
             self._active_inferences = max(0, self._active_inferences - 1)
             self._total_inferences += 1
@@ -308,7 +352,7 @@ class OpenVinoDetector:
             self._completion_times.append(now_monotonic)
             while self._completion_times and now_monotonic - self._completion_times[0] > 60:
                 self._completion_times.popleft()
-            if failed:
+            if not succeeded:
                 self._failed_inferences += 1
             if labels:
                 self._object_hit_inferences += 1
@@ -325,9 +369,9 @@ class OpenVinoDetector:
             average_ms = (sum(self._durations_ms) / len(self._durations_ms)) if self._durations_ms else None
             if len(self._completion_times) >= 2:
                 span = max(1.0, self._completion_times[-1] - self._completion_times[0])
-                detections_per_second = len(self._completion_times) / span
+                detections_per_second = (len(self._completion_times) - 1) / span
             else:
-                detections_per_second = float(len(self._completion_times)) if self._completion_times else 0.0
+                detections_per_second = 0.0
             last_detection_age = (now_epoch - self._last_detection_epoch) if self._last_detection_epoch else None
             stage_averages = {
                 name: round(sum(values) / len(values), 2) if values else None
@@ -443,15 +487,16 @@ class OpenVinoDetector:
         for value in outputs.values():
             array = np.asarray(value)
             squeezed = np.squeeze(array)
-            if squeezed.ndim == 2 and min(squeezed.shape) >= 6:
-                if metadata is not None and (
+            if squeezed.ndim == 2:
+                if metadata is not None and min(squeezed.shape) >= 5 and (
                     squeezed.shape[0] == len(self.labels) + 4
                     or squeezed.shape[1] == len(self.labels) + 4
                     or max(squeezed.shape) > 100
                 ):
                     return self._parse_yolo_output(array, metadata)
-                return self._parse_ssd_output(array, image_width, image_height)
-            if squeezed.ndim == 3 and min(squeezed.shape[-2:]) >= 6 and metadata is not None:
+                if min(squeezed.shape) >= 7:
+                    return self._parse_ssd_output(array, image_width, image_height)
+            if squeezed.ndim == 3 and min(squeezed.shape[-2:]) >= 5 and metadata is not None:
                 return self._parse_yolo_output(array, metadata)
 
         return []
@@ -511,12 +556,16 @@ class OpenVinoDetector:
             if len(box_values) < 4 or index >= len(confidence):
                 continue
             scores = np.asarray(confidence[index])
+            if scores.size == 0 or not np.all(np.isfinite(scores)):
+                continue
             class_id = int(np.argmax(scores))
             score = float(scores[class_id])
             if score < self.config.confidence_threshold:
                 continue
 
             x, y, width, height = [float(value) for value in box_values[:4]]
+            if not np.all(np.isfinite([x, y, width, height])) or width <= 0 or height <= 0:
+                continue
             if max(abs(x), abs(y), abs(width), abs(height)) <= 1.5:
                 x *= image_width
                 width *= image_width
@@ -527,6 +576,8 @@ class OpenVinoDetector:
             y1 = max(0, min(image_height, y - height / 2))
             x2 = max(0, min(image_width, x + width / 2))
             y2 = max(0, min(image_height, y + height / 2))
+            if x2 <= x1 or y2 <= y1:
+                continue
             label = self.labels[class_id] if class_id < len(self.labels) else str(class_id)
             objects.append(
                 {
@@ -545,15 +596,16 @@ class OpenVinoDetector:
     def _detect_output_format(self) -> str:
         shapes = [[int(dim) for dim in layer.shape if int(dim) > 0] for layer in self.output_layers]
         if any(len(shape) == 4 and shape[1] == 32 for shape in shapes) and any(
-            len(shape) == 3 and shape[-1] >= 38 for shape in shapes
+            len(shape) == 3 and max(shape[1:]) > min(shape[1:]) >= 5 for shape in shapes
         ):
             return "yolo-seg"
         shape = [int(dim) for dim in self.output_layer.shape if int(dim) > 0]
         if len(shape) == 3:
-            if 6 in shape[1:] and max(shape[1:]) > 6:
-                return "yolo-e2e"
             channels = min(shape[1], shape[2])
-            if channels >= 6 and channels == len(self.labels) + 4:
+            anchors = max(shape[1], shape[2])
+            if channels == 6 and 6 < anchors <= YOLO_END_TO_END_MAX_DETECTIONS:
+                return "yolo-e2e"
+            if channels >= 5 and anchors > channels:
                 return "yolo"
         return "ssd"
 
@@ -568,38 +620,91 @@ class OpenVinoDetector:
             return []
         detections = np.squeeze(detections_output, axis=0)
         prototypes = np.squeeze(prototypes_output, axis=0) if prototypes_output is not None else None
+        mask_channels = int(prototypes.shape[0]) if prototypes is not None else 0
+        if detections.ndim != 2:
+            return []
+        if detections.shape[0] < detections.shape[1]:
+            detections = detections.T
         image_width = int(metadata["image_width"])
         image_height = int(metadata["image_height"])
         scale = metadata["scale"]
         pad_x = metadata["pad_x"]
         pad_y = metadata["pad_y"]
-        objects: list[dict[str, Any]] = []
+        boxes: list[list[int]] = []
+        scores: list[float] = []
+        class_ids: list[int] = []
+        input_boxes: list[tuple[float, float, float, float]] = []
+        coefficients: list[np.ndarray] = []
+
+        raw_class_count = len(self.labels) or max(0, detections.shape[1] - 4 - mask_channels)
+        raw_format = (
+            detections.shape[0] > YOLO_END_TO_END_MAX_DETECTIONS
+            and detections.shape[1] == 4 + raw_class_count + mask_channels
+            and raw_class_count > 0
+        )
 
         for detection in detections:
-            if len(detection) < 6:
+            if raw_format:
+                class_scores = np.asarray(detection[4 : 4 + raw_class_count], dtype=np.float32)
+                if class_scores.size == 0 or not np.all(np.isfinite(class_scores)):
+                    continue
+                class_id = int(np.argmax(class_scores))
+                confidence = float(class_scores[class_id])
+                center_x, center_y, width, height = [float(value) for value in detection[:4]]
+                if not np.all(np.isfinite([center_x, center_y, width, height])) or width <= 0 or height <= 0:
+                    continue
+                input_x1, input_y1 = center_x - width / 2, center_y - height / 2
+                input_x2, input_y2 = center_x + width / 2, center_y + height / 2
+                coeff = np.asarray(detection[4 + raw_class_count : 4 + raw_class_count + mask_channels])
+            else:
+                if len(detection) < 6 + mask_channels:
+                    continue
+                confidence = float(detection[4])
+                class_value = float(detection[5])
+                if not np.isfinite(class_value):
+                    continue
+                class_id = int(round(class_value))
+                if class_id < 0:
+                    continue
+                input_x1, input_y1, input_x2, input_y2 = [float(value) for value in detection[:4]]
+                coeff = np.asarray(detection[6 : 6 + mask_channels])
+            if not np.isfinite(confidence) or confidence < self.config.confidence_threshold:
                 continue
-            confidence = float(detection[4])
-            if confidence < self.config.confidence_threshold:
+            if not np.all(np.isfinite([input_x1, input_y1, input_x2, input_y2])):
                 continue
-            class_id = int(detection[5])
-            input_x1, input_y1, input_x2, input_y2 = [float(value) for value in detection[:4]]
             x1 = max(0, min(image_width, (input_x1 - pad_x) / scale))
             y1 = max(0, min(image_height, (input_y1 - pad_y) / scale))
             x2 = max(0, min(image_width, (input_x2 - pad_x) / scale))
             y2 = max(0, min(image_height, (input_y2 - pad_y) / scale))
             if x2 <= x1 or y2 <= y1:
                 continue
+            boxes.append([int(x1), int(y1), int(x2 - x1), int(y2 - y1)])
+            scores.append(confidence)
+            class_ids.append(class_id)
+            input_boxes.append((input_x1, input_y1, input_x2, input_y2))
+            coefficients.append(coeff)
+
+        if not boxes:
+            return []
+        indexes = cv2.dnn.NMSBoxes(
+            boxes, scores, self.config.confidence_threshold, self.config.nms_threshold
+        )
+        selected = np.asarray(indexes).reshape(-1).tolist() if len(indexes) else []
+        objects: list[dict[str, Any]] = []
+        for index in selected:
+            x1, y1, width, height = boxes[index]
+            class_id = class_ids[index]
             item: dict[str, Any] = {
-                "label": self.labels[class_id] if class_id < len(self.labels) else str(class_id),
-                "confidence": round(confidence, 4),
-                "box": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
+                "label": self.labels[class_id] if 0 <= class_id < len(self.labels) else str(class_id),
+                "confidence": round(scores[index], 4),
+                "box": {"x1": x1, "y1": y1, "x2": x1 + width, "y2": y1 + height},
             }
-            if prototypes is not None and len(detection) >= 6 + prototypes.shape[0]:
+            if prototypes is not None and len(coefficients[index]) == prototypes.shape[0]:
                 polygon = self._segmentation_polygon(
-                    detection[6 : 6 + prototypes.shape[0]],
+                    coefficients[index],
                     prototypes,
                     metadata,
-                    (input_x1, input_y1, input_x2, input_y2),
+                    input_boxes[index],
                 )
                 if polygon:
                     item["mask_polygon"] = polygon
@@ -656,8 +761,18 @@ class OpenVinoDetector:
         pad_x = (input_width - resized_width) / 2
         pad_y = (input_height - resized_height) / 2
 
-        resized = cv2.resize(frame, (resized_width, resized_height))
-        canvas = np.full((input_height, input_width, 3), 114, dtype=np.uint8)
+        resize_key = (resized_width, resized_height)
+        resized = self._resize_buffers.get(resize_key)
+        if resized is None:
+            resized = np.empty((resized_height, resized_width, 3), dtype=np.uint8)
+            if len(self._resize_buffers) >= 8:
+                self._resize_buffers.clear()
+            self._resize_buffers[resize_key] = resized
+        cv2.resize(frame, (resized_width, resized_height), dst=resized)
+        if self._preprocess_canvas is None or self._preprocess_canvas.shape != (input_height, input_width, 3):
+            self._preprocess_canvas = np.empty((input_height, input_width, 3), dtype=np.uint8)
+        canvas = self._preprocess_canvas
+        canvas.fill(114)
         left = int(round(pad_x - 0.1))
         top = int(round(pad_y - 0.1))
         canvas[top : top + resized_height, left : left + resized_width] = resized
@@ -685,28 +800,38 @@ class OpenVinoDetector:
         objects: list[dict[str, Any]] = []
         if detections.ndim == 1:
             detections = np.array([detections])
+        if detections.ndim != 2:
+            return []
 
         for detection in detections:
             if len(detection) < 7:
                 continue
             confidence = float(detection[2])
-            if confidence < self.config.confidence_threshold:
+            values = np.asarray(detection[1:7], dtype=np.float64)
+            if not np.all(np.isfinite(values)) or confidence < self.config.confidence_threshold:
                 continue
             label_id = int(detection[1])
-            label = (
-                self.labels[label_id]
-                if label_id < len(self.labels)
-                else str(label_id)
-            )
+            if label_id < 0:
+                continue
+            label_index = label_id
+            if label_id > 0 and self.labels and self.labels[0].strip().lower() not in {"background", "__background__"}:
+                label_index = label_id - 1
+            label = self.labels[label_index] if 0 <= label_index < len(self.labels) else str(label_id)
+            x1 = max(0, min(image_width, float(detection[3]) * image_width))
+            y1 = max(0, min(image_height, float(detection[4]) * image_height))
+            x2 = max(0, min(image_width, float(detection[5]) * image_width))
+            y2 = max(0, min(image_height, float(detection[6]) * image_height))
+            if x2 <= x1 or y2 <= y1:
+                continue
             objects.append(
                 {
                     "label": label,
                     "confidence": round(confidence, 4),
                     "box": {
-                        "x1": int(float(detection[3]) * image_width),
-                        "y1": int(float(detection[4]) * image_height),
-                        "x2": int(float(detection[5]) * image_width),
-                        "y2": int(float(detection[6]) * image_height),
+                        "x1": int(x1),
+                        "y1": int(y1),
+                        "x2": int(x2),
+                        "y2": int(y2),
                     },
                 }
             )
@@ -740,7 +865,11 @@ class OpenVinoDetector:
             if not np.isfinite(class_value):
                 continue
             class_id = int(round(class_value))
+            if class_id < 0:
+                continue
             input_x1, input_y1, input_x2, input_y2 = [float(value) for value in detection[:4]]
+            if not np.all(np.isfinite([input_x1, input_y1, input_x2, input_y2])):
+                continue
             if max(abs(input_x1), abs(input_y1), abs(input_x2), abs(input_y2)) <= 2.0:
                 input_x1 *= input_width
                 input_x2 *= input_width
@@ -767,7 +896,11 @@ class OpenVinoDetector:
         detections = np.squeeze(output)
         if detections.ndim != 2:
             return []
-        if detections.shape[0] == len(self.labels) + 4:
+        expected_channels = len(self.labels) + 4 if self.labels else 0
+        if detections.shape[0] < detections.shape[1] and (
+            detections.shape[0] == expected_channels
+            or (detections.shape[1] != expected_channels and detections.shape[1] > detections.shape[0] * 2)
+        ):
             detections = detections.T
 
         boxes: list[list[int]] = []
@@ -780,15 +913,19 @@ class OpenVinoDetector:
         pad_y = metadata["pad_y"]
 
         for detection in detections:
-            if len(detection) < 6:
+            if len(detection) < 5:
                 continue
-            class_scores = detection[4:]
+            class_scores = np.asarray(detection[4:], dtype=np.float32)
+            if class_scores.size == 0 or not np.all(np.isfinite(class_scores)):
+                continue
             class_id = int(np.argmax(class_scores))
             confidence = float(class_scores[class_id])
-            if confidence < self.config.confidence_threshold:
+            if not np.isfinite(confidence) or confidence < self.config.confidence_threshold:
                 continue
 
             center_x, center_y, width, height = [float(value) for value in detection[:4]]
+            if not np.all(np.isfinite([center_x, center_y, width, height])) or width <= 0 or height <= 0:
+                continue
             x1 = (center_x - width / 2 - pad_x) / scale
             y1 = (center_y - height / 2 - pad_y) / scale
             x2 = (center_x + width / 2 - pad_x) / scale

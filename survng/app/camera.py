@@ -1298,7 +1298,8 @@ class CameraWorker:
                 # The incident is durable once the handler returns. Later audit or
                 # notification failures must not replay detection and duplicate it.
                 self._active_motion_triggers = None
-                found_object = bool(outcome.get("object_detected"))
+                object_outcome = outcome.get("object_detected")
+                found_object = object_outcome is True
                 if borderline_candidate and found_object:
                     with self._motion_stats_lock:
                         self._motion_stats["borderline_rescues"] = self._motion_stats.get("borderline_rescues", 0) + 1
@@ -1318,7 +1319,7 @@ class CameraWorker:
                         score=result.score,
                         threshold=result.threshold,
                         reason=result.reason,
-                        object_detected=found_object,
+                        object_detected=object_outcome,
                         trigger_count=len(triggers),
                         features=self._audit_features(result),
                     )

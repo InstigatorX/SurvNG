@@ -81,9 +81,34 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             {},
         )
 
-        self.assertFalse(outcome.object_detected)
+        self.assertIsNone(outcome.object_detected)
         self.assertEqual(json.loads(events.payload["objects_json"])[0]["status"], "no_recorded_frame")
         self.assertEqual([event_type for event_type, _payload in published], ["incident"])
+
+    def test_handler_reports_detector_failure_as_not_run(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((20, 30, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{"status": "detector_unavailable", "error": "worker timed out"}],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "onvif/motion",
+            "motion",
+            datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
+            {},
+        )
+
+        self.assertIsNone(outcome.object_detected)
+        self.assertEqual(json.loads(events.payload["objects_json"])[0]["status"], "detector_unavailable")
 
     def test_handler_owns_motion_audit_persistence_and_notification(self) -> None:
         events = RecordingEventStore()

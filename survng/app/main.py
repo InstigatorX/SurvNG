@@ -36,7 +36,7 @@ import numpy as np
 
 from .config import AppConfig, CameraConfig, CameraMotionQualificationConfig, DetectionZone, camera_by_id, load_config, save_config, slugify_camera_id
 from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
-from .detector import objects_to_json
+from .detector import detection_failure, merge_manual_detection_objects, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_pipeline import (
     analysis_preset_selections,
@@ -1568,6 +1568,9 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     camera = camera_by_id(config, str(event.get("camera_id") or ""))
     effective_confidence = detection_threshold(camera, safe_confidence) if camera else safe_confidence
     objects = manager.detector.detect(frame, confidence_threshold=effective_confidence)
+    detector_error = detection_failure(objects)
+    if detector_error:
+        raise HTTPException(status_code=503, detail=detector_error)
     if camera:
         apply_detection_zones(camera, objects, int(frame.shape[1]), int(frame.shape[0]), safe_confidence)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -1575,7 +1578,12 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
         detected_object["detection_source"] = "manual_openvino"
         detected_object["manual_confidence_threshold"] = safe_confidence
-    persisted_event = manager.events.update_objects(event_id, objects_to_json(objects))
+    persisted_event = manager.events.update_objects(
+        event_id,
+        objects_to_json(
+            merge_manual_detection_objects(str(event.get("objects_json") or "[]"), objects)
+        ),
+    )
     if persisted_event is None:
         raise HTTPException(status_code=404, detail="event not found")
     detected = [
@@ -1619,18 +1627,35 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
 
 @app.post("/api/detector/frame")
 async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict:
-    content_length = int(request.headers.get("content-length") or 0)
-    if content_length > 2 * 1024 * 1024:
+    maximum_bytes = 2 * 1024 * 1024
+    try:
+        content_length = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid content-length header") from None
+    if content_length < 0:
+        raise HTTPException(status_code=400, detail="invalid content-length header")
+    if content_length > maximum_bytes:
         raise HTTPException(status_code=413, detail="debug frame is too large")
-    payload = await request.body()
-    if not payload or len(payload) > 2 * 1024 * 1024:
+    payload = bytearray()
+    async for chunk in request.stream():
+        if len(payload) + len(chunk) > maximum_bytes:
+            raise HTTPException(status_code=413, detail="debug frame is too large")
+        payload.extend(chunk)
+    if not payload:
         raise HTTPException(status_code=422, detail="invalid debug frame")
-    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    frame = cv2.imdecode(np.frombuffer(bytes(payload), dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=422, detail="failed to decode debug frame")
     safe_confidence = max(0.01, min(0.99, float(confidence)))
     started = time.perf_counter()
-    objects = manager.detector.detect(frame, confidence_threshold=safe_confidence)
+    objects = await asyncio.to_thread(
+        manager.detector.detect,
+        frame,
+        confidence_threshold=safe_confidence,
+    )
+    detector_error = detection_failure(objects)
+    if detector_error:
+        raise HTTPException(status_code=503, detail=detector_error)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     detected = [item for item in objects if item.get("label") and item.get("box")]
     return {

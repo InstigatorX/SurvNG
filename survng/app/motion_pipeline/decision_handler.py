@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Protocol
 
+from ..detector import detection_failure
 from .context import Frame
 
 
@@ -50,7 +51,7 @@ class MotionEventStore(Protocol):
 class MotionDecisionOutcome:
     event_id: int
     snapshot_path: str
-    object_detected: bool
+    object_detected: bool | None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +93,8 @@ class MotionDecisionHandler:
             snapshot_path = self.snapshot_writer(frame)
         else:
             objects = [{"status": "no_recorded_frame"}]
+
+        detection_completed = frame is not None and not detection_failure(objects)
 
         eligible_objects = [
             detected
@@ -146,7 +149,7 @@ class MotionDecisionHandler:
         return MotionDecisionOutcome(
             event_id=event_id,
             snapshot_path=snapshot_path,
-            object_detected=bool(eligible_objects),
+            object_detected=bool(eligible_objects) if detection_completed else None,
         )
 
     def record_audit(

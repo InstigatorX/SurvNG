@@ -189,7 +189,7 @@ class CameraConfig(BaseModel):
 
 class DetectorConfig(BaseModel):
     enabled: bool = False
-    backend: str = "openvino"
+    backend: Literal["openvino", "coreml"] = "openvino"
     model_path: str = ""
     model_xml: str = ""
     coreml_model_path: str = ""
@@ -206,8 +206,8 @@ class DetectorConfig(BaseModel):
     face_match_threshold: float = Field(default=0.40, ge=0.0, le=1.0)
     face_min_size: int = Field(default=48, ge=16, le=1024)
     face_max_references: int = Field(default=20, ge=1, le=200)
-    confidence_threshold: float = 0.45
-    nms_threshold: float = 0.45
+    confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
+    nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     labels: list[str] = Field(default_factory=list)
 
     def resolved_model_path(self) -> str:
