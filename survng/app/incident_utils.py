@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,13 @@ def stable_incident_id(camera_id: str, first_event_id: Any) -> str:
 
 
 def event_epoch(event: dict[str, Any]) -> float:
-    return datetime.fromisoformat(str(event["created_at"])).timestamp()
+    try:
+        parsed = datetime.fromisoformat(str(event["created_at"]))
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def incident_event_groups(

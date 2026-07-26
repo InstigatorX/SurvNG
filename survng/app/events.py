@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -18,12 +19,16 @@ class EventStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("pragma busy_timeout = 10000")
+        conn.execute("pragma foreign_keys = on")
         return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            conn.execute("pragma journal_mode = wal")
+            conn.execute("pragma synchronous = normal")
             conn.execute(
                 """
                 create table if not exists events (
@@ -44,6 +49,9 @@ class EventStore:
             )
             conn.execute(
                 "create index if not exists idx_events_camera_created_at on events(camera_id, created_at desc)"
+            )
+            conn.execute(
+                "create table if not exists survng_metadata (key text primary key, value text not null)"
             )
             conn.execute(
                 """
@@ -83,34 +91,80 @@ class EventStore:
             conn.execute(
                 "create unique index if not exists idx_motion_audits_decision on motion_audits(decision_id) where decision_id is not null and decision_id != ''"
             )
-            self._rebase_media_paths(conn)
-            self._backfill_motion_audits(conn)
+            storage_root = str(self.db_path.parent.resolve())
+            if self._metadata_value(conn, "event_storage_root") != storage_root:
+                self._rebase_media_paths(conn)
+                self._set_metadata_value(conn, "event_storage_root", storage_root)
+            try:
+                backfill_after_id = int(
+                    self._metadata_value(conn, "motion_audit_backfill_event_id") or 0
+                )
+            except ValueError:
+                backfill_after_id = 0
+            latest_event_id = int(
+                conn.execute("select coalesce(max(id), 0) from events").fetchone()[0]
+            )
+            if latest_event_id > backfill_after_id:
+                self._backfill_motion_audits(conn, after_event_id=backfill_after_id)
+                self._set_metadata_value(
+                    conn,
+                    "motion_audit_backfill_event_id",
+                    str(latest_event_id),
+                )
+
+    @staticmethod
+    def _metadata_value(conn: sqlite3.Connection, key: str) -> str:
+        row = conn.execute(
+            "select value from survng_metadata where key = ?",
+            (key,),
+        ).fetchone()
+        return str(row[0]) if row is not None else ""
+
+    @staticmethod
+    def _set_metadata_value(conn: sqlite3.Connection, key: str, value: str) -> None:
+        conn.execute(
+            """
+            insert into survng_metadata (key, value) values (?, ?)
+            on conflict(key) do update set value = excluded.value
+            """,
+            (key, value),
+        )
 
     @staticmethod
     def _qualification_from_objects(objects_json: str) -> dict[str, Any] | None:
         try:
             objects = json.loads(objects_json or "[]")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(objects, list):
             return None
         return next(
             (
                 item.get("motion_qualification")
                 for item in objects
+                if isinstance(item, dict)
                 if item.get("status") == "motion_qualification"
                 and isinstance(item.get("motion_qualification"), dict)
             ),
             None,
         )
 
-    def _backfill_motion_audits(self, conn: sqlite3.Connection) -> None:
+    def _backfill_motion_audits(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        after_event_id: int = 0,
+    ) -> None:
         rows = conn.execute(
             """
             select id, camera_id, snapshot_path, created_at, objects_json
             from events
-            where objects_json like '%\"status\":\"motion_qualification\"%'
+            where id > ?
+              and objects_json like '%motion_qualification%'
               and id not in (select event_id from motion_audits where event_id is not null)
             order by id asc
-            """
+            """,
+            (max(0, int(after_event_id)),),
         ).fetchall()
         inserts: list[tuple[Any, ...]] = []
         for row in rows:
@@ -119,12 +173,14 @@ class EventStore:
                 continue
             try:
                 objects = json.loads(str(row["objects_json"] or "[]"))
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 objects = []
             object_detected = any(
-                item.get("label") and item.get("incident_eligible") is not False
+                isinstance(item, dict)
+                and item.get("label")
+                and item.get("incident_eligible") is not False
                 for item in objects
-            )
+            ) if isinstance(objects, list) else False
             inserts.append((
                 int(row["id"]),
                 str(row["camera_id"]),
@@ -254,8 +310,18 @@ class EventStore:
             None if object_detected is None else int(object_detected)
         )
         normalized_trigger_count = max(1, int(trigger_count))
-        normalized_decision_id = str(decision_id or "").strip()[:128]
-        features_json = json.dumps(features or {}, separators=(",", ":"))
+        normalized_decision_id = str(decision_id or "").strip()
+        if len(normalized_decision_id) > 128:
+            raise ValueError("motion audit decision_id must be at most 128 characters")
+        normalized_score = float(score)
+        normalized_threshold = float(threshold)
+        if not math.isfinite(normalized_score) or not math.isfinite(normalized_threshold):
+            raise ValueError("motion audit score and threshold must be finite")
+        features_json = json.dumps(
+            features or {},
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         with self._lock, self._connect() as conn:
             audit_id: int | None = None
             if normalized_decision_id:
@@ -281,8 +347,8 @@ class EventStore:
                             created_at,
                             mode,
                             sensitivity,
-                            float(score),
-                            float(threshold),
+                            normalized_score,
+                            normalized_threshold,
                             reason,
                             normalized_object_detected,
                             normalized_trigger_count,
@@ -308,8 +374,8 @@ class EventStore:
                         sensitivity,
                         reason,
                         snapshot_path,
-                        float(score),
-                        float(threshold),
+                        normalized_score,
+                        normalized_threshold,
                         normalized_object_detected,
                         normalized_trigger_count,
                         features_json,
@@ -334,8 +400,8 @@ class EventStore:
                         created_at,
                         mode,
                         sensitivity,
-                        float(score),
-                        float(threshold),
+                        normalized_score,
+                        normalized_threshold,
                         reason,
                         normalized_object_detected,
                         normalized_trigger_count,
@@ -409,10 +475,11 @@ class EventStore:
         return dict(row) if row is not None else None
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 10000))
         with self._connect() as conn:
             rows = conn.execute(
                 "select * from events order by id desc limit ?",
-                (limit,),
+                (bounded_limit,),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -509,6 +576,7 @@ class EventStore:
         end_at: str,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 200000))
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -519,6 +587,6 @@ class EventStore:
                 order by created_at asc
                 limit ?
                 """,
-                (camera_id, start_at, end_at, limit),
+                (camera_id, start_at, end_at, bounded_limit),
             ).fetchall()
         return [dict(row) for row in rows]

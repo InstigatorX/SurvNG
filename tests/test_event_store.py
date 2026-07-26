@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
+import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +13,130 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_recent_and_camera_range_queries_reject_unbounded_negative_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            for index in range(3):
+                store.add_event(
+                    camera_id="gate",
+                    kind="motion",
+                    created_at=f"2026-07-15T12:00:0{index}+00:00",
+                )
+
+            self.assertEqual(len(store.recent(-1)), 1)
+            self.assertEqual(
+                len(store.for_camera_range("gate", "2026", "2027", limit=-1)),
+                1,
+            )
+
+    def test_parallel_store_instances_wait_for_writers_instead_of_losing_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = EventStore(Path(tmpdir))
+            second = EventStore(Path(tmpdir))
+            barrier = threading.Barrier(3)
+            failures: list[Exception] = []
+
+            def write(store: EventStore, prefix: str) -> None:
+                try:
+                    barrier.wait()
+                    for index in range(50):
+                        store.add_event(camera_id=prefix, kind="motion", message=str(index))
+                except Exception as exc:
+                    failures.append(exc)
+
+            threads = [
+                threading.Thread(target=write, args=(first, "one")),
+                threading.Thread(target=write, args=(second, "two")),
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=10)
+
+            self.assertFalse(failures)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(len(first.recent(200)), 100)
+            with sqlite3.connect(first.db_path) as connection:
+                self.assertEqual(connection.execute("pragma journal_mode").fetchone()[0], "wal")
+
+    def test_legacy_malformed_objects_do_not_break_audit_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            with sqlite3.connect(store.db_path) as connection:
+                connection.execute(
+                    """
+                    insert into events (camera_id, kind, objects_json, created_at)
+                    values (?, ?, ?, ?)
+                    """,
+                    (
+                        "gate",
+                        "motion",
+                        json.dumps(["legacy", {"motion_qualification": "invalid"}]),
+                        "2026-07-15T12:00:00+00:00",
+                    ),
+                )
+
+            reloaded = EventStore(Path(tmpdir))
+            rows, total = reloaded.motion_audits()
+
+            self.assertEqual(rows, [])
+            self.assertEqual(total, 0)
+
+    def test_motion_audit_rejects_non_finite_numeric_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            base = {
+                "camera_id": "gate",
+                "snapshot_path": "",
+                "created_at": "2026-07-15T12:00:00+00:00",
+                "mode": "audit",
+                "sensitivity": "balanced",
+                "score": 0.5,
+                "threshold": 0.4,
+                "reason": "accepted",
+                "object_detected": False,
+                "trigger_count": 1,
+                "features": {},
+            }
+            for field in ("score", "threshold"):
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(ValueError, "must be finite"):
+                        store.add_motion_audit(**{**base, field: math.nan})
+            with self.assertRaises(ValueError):
+                store.add_motion_audit(**{**base, "features": {"noise": math.inf}})
+
+    def test_motion_audit_rejects_decision_ids_that_would_collide_if_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            with self.assertRaisesRegex(ValueError, "at most 128"):
+                store.add_motion_audit(
+                    camera_id="gate",
+                    snapshot_path="",
+                    created_at="2026-07-15T12:00:00+00:00",
+                    mode="audit",
+                    sensitivity="balanced",
+                    score=0.5,
+                    threshold=0.4,
+                    reason="accepted",
+                    object_detected=False,
+                    trigger_count=1,
+                    features={},
+                    decision_id="x" * 129,
+                )
+
+    def test_completed_migrations_are_not_rescanned_on_every_store_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            EventStore(Path(tmpdir))
+            with (
+                patch.object(EventStore, "_backfill_motion_audits") as backfill,
+                patch.object(EventStore, "_rebase_media_paths") as rebase,
+            ):
+                EventStore(Path(tmpdir))
+
+            backfill.assert_not_called()
+            rebase.assert_not_called()
+
     def test_compact_queries_omit_media_fields_and_support_keyset_paging(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

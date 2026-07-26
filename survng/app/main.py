@@ -1167,17 +1167,25 @@ def probe_config(payload: dict) -> dict:
 
 @app.get("/api/events")
 def events(limit: int = 100) -> list[dict]:
-    return [_event_row(row) for row in manager.events.recent(limit)]
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        rows = active_manager.events.recent(limit)
+    return [_event_row(row) for row in rows]
 
 
-def _motion_audit_row(row: dict) -> dict:
+def _motion_audit_row(row: dict, storage_dir: Path) -> dict:
     audit = dict(row)
     try:
-        audit["features"] = json.loads(str(audit.pop("features_json", "{}") or "{}"))
-    except json.JSONDecodeError:
-        audit["features"] = {}
+        features = json.loads(str(audit.pop("features_json", "{}") or "{}"))
+    except (json.JSONDecodeError, TypeError):
+        features = {}
+    audit["features"] = features if isinstance(features, dict) else {}
     snapshot_path = str(audit.pop("snapshot_path", "") or "")
-    audit["has_snapshot"] = bool(snapshot_path and Path(snapshot_path).is_file())
+    try:
+        event_snapshot_path(storage_dir, {"snapshot_path": snapshot_path})
+        audit["has_snapshot"] = True
+    except (FileNotFoundError, PermissionError):
+        audit["has_snapshot"] = False
     raw_outcome = audit.get("object_detected")
     audit["object_detected"] = None if raw_outcome is None else bool(raw_outcome)
     return audit
@@ -1187,17 +1195,23 @@ class AuditAiApplyRequest(BaseModel):
     changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
 
 
-def _audit_ai_context(audit: dict) -> dict:
+def _audit_ai_context(
+    audit: dict,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> dict:
     camera_id = str(audit.get("camera_id") or "")
-    camera = camera_by_id(config, camera_id)
+    camera = camera_by_id(active_config, camera_id)
     if camera is None:
         raise HTTPException(status_code=404, detail="audit camera not found")
     try:
         features = json.loads(str(audit.get("features_json") or "{}"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
+        features = {}
+    if not isinstance(features, dict):
         features = {}
     pipeline_telemetry = features.pop("pipeline_telemetry", {})
-    event = manager.events.get(int(audit["event_id"])) if audit.get("event_id") else None
+    event = active_manager.events.get(int(audit["event_id"])) if audit.get("event_id") else None
     detected_objects: list[dict] = []
     qualification: dict = {}
     if event:
@@ -1205,7 +1219,9 @@ def _audit_ai_context(audit: dict) -> dict:
             entries = json.loads(str(event.get("objects_json") or "[]"))
         except json.JSONDecodeError:
             entries = []
-        for entry in entries:
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
             if entry.get("label"):
                 detected_objects.append({
                     "label": entry.get("label"),
@@ -1215,38 +1231,39 @@ def _audit_ai_context(audit: dict) -> dict:
                     "incident_eligible": entry.get("incident_eligible", True),
                 })
             if entry.get("status") == "motion_qualification":
-                qualification = entry.get("motion_qualification") or {}
+                candidate = entry.get("motion_qualification")
+                qualification = candidate if isinstance(candidate, dict) else {}
     override = camera.motion_qualification
-    graphs = resolve_motion_pipeline_graphs(config.motion_qualification, override)
+    graphs = resolve_motion_pipeline_graphs(active_config.motion_qualification, override)
     effective = {
-        "mode": config.motion_qualification.mode if override.mode == "inherit" else override.mode,
-        "sensitivity": config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
-        "frame_width": override.frame_width or config.motion_qualification.frame_width,
+        "mode": active_config.motion_qualification.mode if override.mode == "inherit" else override.mode,
+        "sensitivity": active_config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
+        "frame_width": override.frame_width or active_config.motion_qualification.frame_width,
         "borderline_rescue_enabled": (
-            config.motion_qualification.borderline_rescue_enabled
+            active_config.motion_qualification.borderline_rescue_enabled
             if override.borderline_rescue_enabled is None
             else override.borderline_rescue_enabled
         ),
         "borderline_margin": (
-            config.motion_qualification.borderline_margin
+            active_config.motion_qualification.borderline_margin
             if override.borderline_margin is None
             else override.borderline_margin
         ),
         "mog2_audit_enabled": (
-            config.motion_qualification.mog2_audit_enabled
+            active_config.motion_qualification.mog2_audit_enabled
             if override.mog2_audit_enabled is None
             else override.mog2_audit_enabled
         ),
-        "mog2_history_seconds": config.motion_qualification.mog2_history_seconds,
-        "sample_fps": config.motion_qualification.sample_fps,
-        "window_seconds": config.motion_qualification.window_seconds,
-        "post_trigger_seconds": config.motion_qualification.post_trigger_seconds,
-        "burst_quiet_seconds": config.motion_qualification.burst_quiet_seconds,
+        "mog2_history_seconds": active_config.motion_qualification.mog2_history_seconds,
+        "sample_fps": active_config.motion_qualification.sample_fps,
+        "window_seconds": active_config.motion_qualification.window_seconds,
+        "post_trigger_seconds": active_config.motion_qualification.post_trigger_seconds,
+        "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
         "analysis_preset": identify_analysis_preset(graphs.qualification),
         "fusion": guided_fusion_settings(graphs.fusion),
         "pipeline_origins": graphs.origins,
     }
-    recent, _ = manager.events.motion_audits(limit=50, camera_id=camera_id)
+    recent, _ = active_manager.events.motion_audits(limit=50, camera_id=camera_id)
     reason_counts: dict[str, int] = {}
     object_matches = 0
     for row in recent:
@@ -1331,14 +1348,17 @@ def motion_audit(
 ) -> dict:
     if outcome not in {"all", "object", "clear", "not_run"}:
         raise HTTPException(status_code=400, detail="invalid motion audit outcome")
-    rows, total = manager.events.motion_audits(
-        limit=limit,
-        offset=offset,
-        camera_id=camera_id,
-        outcome=outcome,
-    )
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        rows, total = active_manager.events.motion_audits(
+            limit=limit,
+            offset=offset,
+            camera_id=camera_id,
+            outcome=outcome,
+        )
+        storage_dir = active_manager.storage_dir
     return {
-        "items": [_motion_audit_row(row) for row in rows],
+        "items": [_motion_audit_row(row, storage_dir) for row in rows],
         "total": total,
         "limit": max(1, min(int(limit), 100)),
         "offset": max(0, int(offset)),
@@ -1347,11 +1367,13 @@ def motion_audit(
 
 @app.get("/api/motion-audit/{audit_id}/snapshot.jpg")
 def motion_audit_snapshot(audit_id: int) -> FileResponse:
-    audit = manager.events.get_motion_audit(audit_id)
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        audit = active_manager.events.get_motion_audit(audit_id)
     if audit is None:
         raise HTTPException(status_code=404, detail="motion audit entry not found")
     try:
-        snapshot_path = event_snapshot_path(manager.storage_dir, audit)
+        snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -1368,7 +1390,8 @@ def motion_audit_snapshot(audit_id: int) -> FileResponse:
 async def motion_audit_ai_analyze(audit_id: int) -> dict:
     with MANAGER_RELOAD_LOCK:
         active_manager = manager
-        audit_config = config.audit_ai.model_copy(deep=True)
+        active_config = config.model_copy(deep=True)
+        audit_config = active_config.audit_ai
         audit = active_manager.events.get_motion_audit(audit_id)
     if audit is None:
         raise HTTPException(status_code=404, detail="motion audit entry not found")
@@ -1377,7 +1400,7 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
         advice = await asyncio.to_thread(
             AuditAiAdvisor(audit_config).analyze,
             snapshot_path,
-            _audit_ai_context(audit),
+            _audit_ai_context(audit, active_config, active_manager),
         )
     except AuditAiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1428,11 +1451,13 @@ def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
 
 @app.get("/api/events/{event_id}/snapshot.jpg")
 def event_snapshot(event_id: int) -> FileResponse:
-    event = manager.events.get(event_id)
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        event = active_manager.events.get(event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
     try:
-        snapshot_path = event_snapshot_path(manager.storage_dir, event)
+        snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -2775,12 +2800,22 @@ def _event_row(row: dict) -> dict:
     event = dict(row)
     try:
         objects = json.loads(event.pop("objects_json", "[]") or "[]")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         objects = []
+    if not isinstance(objects, list):
+        objects = []
+    objects = [item for item in objects if isinstance(item, dict)]
+
+    def positive_confidence(item: dict) -> bool:
+        try:
+            return float(item.get("confidence") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
     detected_objects = [
         item for item in objects
         if item.get("label")
-        and float(item.get("confidence") or 0) > 0
+        and positive_confidence(item)
         and item.get("incident_eligible") is not False
     ]
     event["objects"] = objects
@@ -2789,7 +2824,11 @@ def _event_row(row: dict) -> dict:
     event["zones"] = sorted({
         str(zone_name)
         for item in detected_objects
-        for zone_name in item.get("zones", [])
+        for zone_name in (
+            item.get("zones", [])
+            if isinstance(item.get("zones", []), list)
+            else []
+        )
         if zone_name
     })
     return event
@@ -2801,7 +2840,15 @@ def _best_incident_event(events: list[dict]) -> dict:
 
     def score(event: dict) -> tuple[float, int]:
         objects = event.get("objects") or []
-        best_confidence = max((float(item.get("confidence") or 0) for item in objects), default=0.0)
+        confidences: list[float] = []
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            try:
+                confidences.append(float(item.get("confidence") or 0))
+            except (TypeError, ValueError):
+                continue
+        best_confidence = max(confidences, default=0.0)
         return (best_confidence, int(event.get("id") or 0))
 
     return max(candidates, key=score)

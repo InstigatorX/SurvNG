@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
@@ -12,6 +13,9 @@ MotionDetectionProvider = Callable[[datetime], tuple[Frame | None, list[dict[str
 MotionSnapshotWriter = Callable[[Frame], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
 MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MotionEventStore(Protocol):
@@ -122,7 +126,7 @@ class MotionDecisionHandler:
         )
         event_id = int(event["id"])
         if self.event_callback:
-            self.event_callback(
+            self._publish(
                 "incident",
                 {
                     "event_id": event_id,
@@ -134,7 +138,7 @@ class MotionDecisionHandler:
 
         detected_objects = [detected for detected in stored_objects if detected.get("label")]
         if self.event_callback and detected_objects:
-            self.event_callback(
+            self._publish(
                 "object",
                 {
                     "event_id": event_id,
@@ -184,8 +188,20 @@ class MotionDecisionHandler:
             features=features,
         )
         if self.event_callback:
-            self.event_callback("motion_audit", audit)
+            self._publish("motion_audit", audit)
         return audit
+
+    def _publish(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.event_callback is None:
+            return
+        try:
+            self.event_callback(event_type, payload)
+        except Exception:
+            LOGGER.exception(
+                "post-persistence %s notification failed for camera %s",
+                event_type,
+                self.camera_id,
+            )
 
 
 class MotionDecisionHandlerFactory:

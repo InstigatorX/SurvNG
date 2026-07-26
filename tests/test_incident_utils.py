@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from survng.app.incident_utils import (
+    event_epoch,
     event_snapshot_path,
     incident_event_groups,
     stable_incident_id,
@@ -48,6 +49,18 @@ class IncidentIdentityTest(unittest.TestCase):
         self.assertEqual([camera_id for camera_id, _ in groups], ["gate", "front-door", "front-door", "noisy-camera"])
         noisy_group = next(events for camera_id, events in groups if camera_id == "noisy-camera")
         self.assertEqual(len(noisy_group), 30)
+
+
+class IncidentTimeTest(unittest.TestCase):
+    def test_invalid_legacy_timestamp_sorts_as_oldest(self) -> None:
+        self.assertEqual(event_epoch({"created_at": "not-a-date"}), 0.0)
+        self.assertEqual(event_epoch({}), 0.0)
+
+    def test_naive_legacy_timestamp_is_interpreted_as_utc(self) -> None:
+        self.assertEqual(
+            event_epoch({"created_at": "1970-01-01T00:00:01"}),
+            1.0,
+        )
 
 
 class EventSnapshotPathTest(unittest.TestCase):

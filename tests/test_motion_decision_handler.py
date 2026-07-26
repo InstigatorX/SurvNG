@@ -141,6 +141,66 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(events.audit_payload["event_id"], 42)
         self.assertEqual(published, [("motion_audit", audit)])
 
+    def test_post_commit_notification_failure_does_not_replay_incident(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((20, 30, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (frame, [], ""),
+            snapshot_writer=lambda _frame: "snapshot.jpg",
+            object_serializer=json.dumps,
+            event_callback=lambda _event_type, _payload: (_ for _ in ()).throw(
+                RuntimeError("broker unavailable")
+            ),
+        )
+
+        with self.assertLogs(
+            "survng.app.motion_pipeline.decision_handler",
+            level="ERROR",
+        ):
+            outcome = handler.handle(
+                "onvif/motion",
+                "motion",
+                datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
+                {},
+            )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertIsNotNone(events.payload)
+
+    def test_post_commit_audit_notification_failure_is_nonfatal(self) -> None:
+        events = RecordingEventStore()
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (None, [], ""),
+            snapshot_writer=lambda _frame: "",
+            object_serializer=json.dumps,
+            event_callback=lambda _event_type, _payload: (_ for _ in ()).throw(
+                RuntimeError("broker unavailable")
+            ),
+        )
+
+        with self.assertLogs(
+            "survng.app.motion_pipeline.decision_handler",
+            level="ERROR",
+        ):
+            audit = handler.record_audit(
+                event_at=datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
+                snapshot_path="",
+                mode="audit",
+                sensitivity="balanced",
+                score=0.4,
+                threshold=0.48,
+                reason="edge_motion",
+                object_detected=False,
+                trigger_count=1,
+                features={},
+            )
+
+        self.assertEqual(audit["id"], 7)
+
 
 if __name__ == "__main__":
     unittest.main()

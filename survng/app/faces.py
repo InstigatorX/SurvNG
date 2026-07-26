@@ -56,11 +56,17 @@ class FaceStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.execute("pragma busy_timeout = 10000")
         connection.execute("pragma foreign_keys = on")
         return connection
 
     def _init_db(self) -> None:
         with self._connect() as connection:
+            connection.execute("pragma journal_mode = wal")
+            connection.execute("pragma synchronous = normal")
+            connection.execute(
+                "create table if not exists survng_metadata (key text primary key, value text not null)"
+            )
             connection.executescript(
                 """
                 create table if not exists face_people (
@@ -105,25 +111,38 @@ class FaceStore:
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
-            rows = connection.execute("select id, snapshot_path from face_observations").fetchall()
-            updates = []
-            for row in rows:
-                raw_path = str(row["snapshot_path"] or "")
-                parts = Path(raw_path).parts
-                if "snapshots" not in parts:
-                    continue
-                candidate = self.storage_dir.joinpath(*parts[parts.index("snapshots"):])
-                if str(candidate) != raw_path and candidate.is_file():
-                    updates.append((str(candidate), int(row["id"])))
-            if updates:
-                connection.executemany(
-                    "update face_observations set snapshot_path = ? where id = ?",
-                    updates,
+            storage_root = str(self.storage_dir)
+            metadata = connection.execute(
+                "select value from survng_metadata where key = 'face_storage_root'"
+            ).fetchone()
+            if metadata is None or str(metadata[0]) != storage_root:
+                rows = connection.execute("select id, snapshot_path from face_observations").fetchall()
+                updates = []
+                for row in rows:
+                    raw_path = str(row["snapshot_path"] or "")
+                    parts = Path(raw_path).parts
+                    if "snapshots" not in parts:
+                        continue
+                    candidate = self.storage_dir.joinpath(*parts[parts.index("snapshots"):])
+                    if str(candidate) != raw_path and candidate.is_file():
+                        updates.append((str(candidate), int(row["id"])))
+                if updates:
+                    connection.executemany(
+                        "update face_observations set snapshot_path = ? where id = ?",
+                        updates,
+                    )
+                connection.execute(
+                    """
+                    insert into survng_metadata (key, value) values ('face_storage_root', ?)
+                    on conflict(key) do update set value = excluded.value
+                    """,
+                    (storage_root,),
                 )
             self._prune_locked(connection)
 
     def ingest_events(self, events: list[dict[str, Any]]) -> int:
         inserted = 0
+        recognition_ids: list[int] = []
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
             for event in events:
@@ -134,11 +153,19 @@ class FaceStore:
                     objects = json.loads(event.get("objects_json", "[]") or "[]")
                 except (TypeError, json.JSONDecodeError):
                     continue
+                if not isinstance(objects, list):
+                    continue
                 for object_index, detected in enumerate(objects):
+                    if not isinstance(detected, dict):
+                        continue
                     if str(detected.get("label") or "").lower() != "face":
                         continue
                     box = detected.get("box")
                     if not isinstance(box, dict):
+                        continue
+                    try:
+                        confidence = float(detected.get("confidence") or 0)
+                    except (TypeError, ValueError):
                         continue
                     cursor = connection.execute(
                         """
@@ -150,14 +177,16 @@ class FaceStore:
                         (
                             int(event["id"]), object_index, str(event.get("camera_id") or ""),
                             snapshot_path, json.dumps(box, separators=(",", ":")),
-                            float(detected.get("confidence") or 0),
+                            confidence,
                             str(event.get("created_at") or now), now,
                         ),
                     )
                     if cursor.rowcount > 0:
                         inserted += 1
-                        self._queue_recognition(int(cursor.lastrowid))
+                        recognition_ids.append(int(cursor.lastrowid))
             self._prune_locked(connection)
+        for observation_id in recognition_ids:
+            self._queue_recognition(observation_id)
         return inserted
 
     def close(self) -> None:
@@ -167,6 +196,7 @@ class FaceStore:
             self._recognition_thread.join(timeout=5)
             if self._recognition_thread.is_alive():
                 LOGGER.error("face recognition worker did not stop")
+                raise RuntimeError("face recognition worker did not stop")
             else:
                 self._recognition_thread = None
 
