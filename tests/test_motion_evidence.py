@@ -153,7 +153,12 @@ class MotionEvidenceTest(unittest.TestCase):
 
         self.assertIsNone(repository.last("mog2"))
         self.assertEqual(pipeline.runtime.stage_state, {})
-        self.assertFalse(repository.status()["mog2"]["enabled"])
+        self.assertNotIn("mog2", repository.status())
+        self.assertFalse(pipeline.handles_observation("frame"))
+        self.assertEqual(pipeline.status()["execution_groups"], [{
+            "mode": "sequential",
+            "stages": ["onvif_source"],
+        }])
 
     def test_onvif_source_normalizes_motion_event_without_touching_mog2_runtime(self) -> None:
         repository = MotionEvidenceRepository("gate")

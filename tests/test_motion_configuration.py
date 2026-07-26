@@ -23,7 +23,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             MotionQualificationConfig(),
             CameraMotionQualificationConfig(),
         )
-        self.assertEqual(identify_analysis_preset(graphs.qualification), "modular")
+        self.assertEqual(identify_analysis_preset(graphs.qualification), "adaptive")
         self.assertEqual(
             analysis_preset_selections("classic")[0].implementation,
             "legacy_qualifier",
@@ -49,10 +49,9 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             "observation": "default",
             "fusion": "default",
         })
-        self.assertEqual(graphs.qualification[0].implementation, "gray_blur")
-        self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
-        self.assertFalse(graphs.observation[0].options["enabled"])
-        self.assertEqual(graphs.observation[1].implementation, "onvif_event_evidence")
+        self.assertEqual(graphs.qualification[1].implementation, "adaptive_ema_background")
+        self.assertEqual(len(graphs.observation), 1)
+        self.assertEqual(graphs.observation[0].implementation, "onvif_event_evidence")
         self.assertEqual(graphs.fusion[0].implementation, "buffered_evidence_fusion")
         self.assertEqual(graphs.fusion[0].options["sources"], ["mog2", "onvif"])
 
@@ -112,6 +111,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             CameraMotionQualificationConfig(),
         )
 
+        self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
         self.assertTrue(graphs.observation[0].options["enabled"])
 
     def test_camera_graph_cannot_explicitly_override_with_empty_list(self) -> None:

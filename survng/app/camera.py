@@ -84,6 +84,7 @@ class CameraWorker:
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
+        self._motion_analysis_lock = threading.Lock()
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stops: dict[str, threading.Event] = {}
         self._source_frames: dict[str, Any] = {}
@@ -100,6 +101,7 @@ class CameraWorker:
         )
         self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self._motion_last_sample = 0.0
+        self._motion_last_continuous_result: MotionQualificationResult | None = None
         self._motion_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=MOTION_QUEUE_SIZE)
         self._motion_thread: threading.Thread | None = None
         self._motion_stats_lock = threading.Lock()
@@ -183,9 +185,12 @@ class CameraWorker:
                 self._source_errors.clear()
                 self._motion_frames.clear()
                 self._motion_last_sample = 0.0
+                self._motion_last_continuous_result = None
                 self.last_frame_at = ""
             self.motion_evidence.clear()
             self.motion_observation_pipeline.runtime.reset()
+            self.motion_pipeline.runtime.reset()
+            self.motion_fusion_pipeline.runtime.reset()
             self._thread = self._source_threads.get("live")
 
     def close(self) -> None:
@@ -328,12 +333,14 @@ class CameraWorker:
                 "source": "manual" if topic.startswith("manual") else "onvif",
             })
 
-        trigger = {
+        self._enqueue_motion_trigger({
             "topic": topic,
             "message": message,
             "event_at": event_at,
             "received_at": received_at,
-        }
+        })
+
+    def _enqueue_motion_trigger(self, trigger: dict[str, Any]) -> None:
         with self._motion_stats_lock:
             self._motion_stats["triggers"] += 1
         try:
@@ -381,10 +388,54 @@ class CameraWorker:
             configuration={"observation_kind": "frame"},
             runtime=self.motion_observation_pipeline.runtime,
         )
-        self.motion_observation_pipeline.process(observation)
-        if self.motion_debug.enabled() and frame_clock - self._motion_debug_last_run >= 1.0:
+        if self.motion_observation_pipeline.handles_observation("frame"):
+            self.motion_observation_pipeline.process(observation)
+        if self.motion_pipeline.uses_implementation("adaptive_ema_background"):
+            self._analyze_continuous_motion(captured_at)
+        elif self.motion_debug.enabled() and frame_clock - self._motion_debug_last_run >= 1.0:
             self._motion_debug_last_run = frame_clock
             self._capture_motion_debug(captured_at)
+
+    def _analyze_continuous_motion(self, captured_at: float) -> None:
+        mode, sensitivity, _frame_width = self._motion_settings()
+        if mode == "off" or not self._detection_enabled:
+            return
+        with self._frame_lock:
+            samples = [(timestamp, frame.copy()) for timestamp, frame in list(self._motion_frames)[-2:]]
+        if len(samples) < 2:
+            return
+        try:
+            with self._motion_analysis_lock:
+                result = self._run_motion_pipeline(
+                    [frame for _timestamp, frame in samples],
+                    sensitivity,
+                    captured_at,
+                    [timestamp for timestamp, _frame in samples],
+                    isolated=False,
+                    capture_debug=self.motion_debug.enabled(),
+                )
+                fused = self._with_source_evidence(result, samples[0][0], captured_at)
+                self._motion_last_continuous_result = fused
+        except Exception as error:
+            LOGGER.warning("continuous motion analysis failed for %s: %s", self.camera.id, error)
+            return
+        if not fused.accepted:
+            return
+        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+        self.last_motion_at = event_at.isoformat()
+        if self.event_callback:
+            self.event_callback("motion", {
+                "camera_id": self.camera.id,
+                "timestamp": event_at.isoformat(),
+                "source": "adaptive",
+            })
+        self._enqueue_motion_trigger({
+            "topic": "adaptive/motion",
+            "message": "adaptive motion transition",
+            "event_at": event_at,
+            "received_at": captured_at,
+            "prequalified": fused,
+        })
 
     def _capture_motion_debug(self, captured_at: float) -> None:
         with self._frame_lock:
@@ -402,6 +453,8 @@ class CameraWorker:
                 sensitivity,
                 captured_at,
                 [timestamp for timestamp, _frame in samples],
+                isolated=True,
+                capture_debug=True,
             )
         except Exception as error:
             LOGGER.debug("motion debug capture failed for %s: %s", self.camera.id, error)
@@ -427,7 +480,8 @@ class CameraWorker:
             runtime=self.motion_observation_pipeline.runtime,
         )
         try:
-            self.motion_observation_pipeline.process(observation)
+            if self.motion_observation_pipeline.handles_observation("motion_event"):
+                self.motion_observation_pipeline.process(observation)
         except Exception as error:
             LOGGER.warning(
                 "motion event evidence failed for %s: %s",
@@ -640,8 +694,16 @@ class CameraWorker:
         sensitivity: str,
         captured_at: float,
         frame_timestamps: list[float] | None = None,
+        *,
+        isolated: bool = True,
+        capture_debug: bool = True,
     ) -> MotionQualificationResult:
         mode, _resolved_sensitivity, frame_width = self._motion_settings()
+        if isolated:
+            with self._motion_analysis_lock:
+                pipeline = self.motion_pipeline.isolated_copy(clone_runtime=True)
+        else:
+            pipeline = self.motion_pipeline
         context = MotionContext(
             camera_id=self.camera.id,
             captured_at=captured_at,
@@ -659,11 +721,22 @@ class CameraWorker:
                     for zone in self.camera.zones
                 ],
             },
-            runtime=self.motion_pipeline.runtime,
+            runtime=pipeline.runtime,
         )
-        processed = self.motion_pipeline.process(context)
-        self.motion_debug.capture(processed)
+        try:
+            processed = pipeline.process(context)
+        finally:
+            if isolated:
+                pipeline.close()
+        if capture_debug:
+            self.motion_debug.capture(processed)
         result = processed.scoring
+        result.features.setdefault(
+            "primary_motion_source",
+            "adaptive_background"
+            if self.motion_pipeline.uses_implementation("adaptive_ema_background")
+            else "frame_difference",
+        )
         return MotionQualificationResult(
             accepted=result.accepted,
             score=result.score,
@@ -724,14 +797,27 @@ class CameraWorker:
             mode, sensitivity, frame_width = self._motion_settings()
             rescue_enabled, rescue_margin = self._motion_rescue_settings()
             priority = any(self._priority_motion_topic(str(item["topic"])) for item in triggers)
+            prequalified = [
+                item["prequalified"]
+                for item in triggers
+                if isinstance(item.get("prequalified"), MotionQualificationResult)
+            ]
             diagnostics: dict[str, Any] = {
                 "windows_evaluated": 0,
                 "event_receipt_delta_seconds": round(received_at - event_at.timestamp(), 3),
             }
-            if mode == "off":
+            if prequalified:
+                result = max(prequalified, key=lambda item: item.score)
+            elif mode == "off":
                 result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
             elif priority:
-                result = MotionQualificationResult(True, 1.0, 0.0, "priority_topic", 0, {})
+                result = self._with_source_evidence(
+                    MotionQualificationResult(True, 1.0, 0.0, "priority_topic", 0, {
+                        "primary_motion_source": "onvif_priority",
+                    }),
+                    received_at - self.motion_config.window_seconds,
+                    time.time(),
+                )
             else:
                 result, diagnostics = self._qualify_motion_burst(event_at, received_at, sensitivity)
 
@@ -753,7 +839,15 @@ class CameraWorker:
                 "trigger_count": len(triggers),
                 "would_suppress": bool(mode == "audit" and not result.accepted),
             }
-            effective_accepted = mode != "enforce" or result.accepted or borderline_candidate
+            event_state_blocked = result.reason in {
+                "event_state_active",
+                "event_state_candidate",
+                "event_state_cooldown",
+            }
+            effective_accepted = (
+                not event_state_blocked
+                and (mode != "enforce" or result.accepted or borderline_candidate)
+            )
             qualification["effective_accepted"] = effective_accepted
             with self._motion_stats_lock:
                 self._motion_stats["bursts"] += 1

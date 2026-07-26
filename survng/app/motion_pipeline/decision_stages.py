@@ -144,7 +144,12 @@ class ObjectDetectionTriggerStage:
             reason = "event_state_cooldown"
         else:
             reason = context.scoring.reason
-        sources = ("frame_difference", *sorted(context.source_evidence))
+        primary_source = str(
+            context.scoring.features.get("primary_motion_source")
+            or context.configuration.get("primary_motion_source")
+            or "frame_difference"
+        )
+        sources = (primary_source, *sorted(context.source_evidence))
         context.decision = TriggerDecision(
             run_object_detection=newly_active,
             reason=reason,

@@ -8,9 +8,11 @@ import numpy as np
 from survng.app.motion_pipeline import (
     MotionContext,
     MotionPipelineFactory,
+    MotionStageConfig,
     adaptive_motion_stage_configs,
     build_builtin_motion_registry,
 )
+from survng.app.motion_types import MotionBlob, MotionFrameBlobs
 
 
 def moving_subject_frames(count: int = 10) -> list[np.ndarray]:
@@ -50,6 +52,21 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
                 "sample_fps": 5.0,
                 **(configuration or {}),
             },
+            runtime=self.pipeline.runtime,
+        ))
+
+    def process_timed(
+        self,
+        frames: list[np.ndarray],
+        timestamps: list[float],
+    ) -> MotionContext:
+        return self.pipeline.process(MotionContext(
+            camera_id="gate",
+            captured_at=timestamps[-1],
+            original_frame=frames[-1],
+            frame_history=tuple(frames),
+            frame_timestamps=tuple(timestamps),
+            configuration={"sensitivity": "balanced", "sample_fps": 5.0},
             runtime=self.pipeline.runtime,
         ))
 
@@ -154,6 +171,84 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             self.assertNotEqual(self.pipeline.runtime, other.runtime)
         finally:
             other.close()
+
+    def test_tracker_expires_motion_across_a_gap_longer_than_configured(self) -> None:
+        tracker = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "gate",
+            [MotionStageConfig(
+                "tracking",
+                "persistent_centroid_tracker",
+                {"maximum_missed_frames": 3},
+            )],
+            initial_artifacts={"filtered_blob_history"},
+        )
+        blob = MotionBlob(
+            box=(0.2, 0.2, 0.3, 0.5),
+            centroid=(0.25, 0.35),
+            area_pixels=100,
+            area_ratio=0.01,
+        )
+        visible = MotionFrameBlobs(10000, 100, 0.01, (blob,))
+        empty = MotionFrameBlobs(10000, 0, 0.0, ())
+        history = (visible, visible, empty, empty, empty, empty, empty, visible, visible, visible)
+        try:
+            result = tracker.process(MotionContext(
+                camera_id="gate",
+                captured_at=102.0,
+                original_frame=None,
+                configuration={"sample_fps": 5.0},
+                runtime=tracker.runtime,
+                filtered_blob_history=history,
+            ))
+            self.assertLessEqual(result.dominant_track.consecutive_frames, 3)
+        finally:
+            tracker.close()
+
+    def test_overlapping_replay_does_not_retrain_adaptive_threshold(self) -> None:
+        frames = moving_subject_frames(6)
+        timestamps = [100.0 + index * 0.2 for index in range(len(frames))]
+        self.process_timed(frames, timestamps)
+        threshold_state = self.pipeline.runtime.stage_state["threshold"]
+        before = (threshold_state.threshold_ema, threshold_state.noise_ema)
+
+        self.process_timed(frames, timestamps)
+
+        self.assertEqual(
+            (threshold_state.threshold_ema, threshold_state.noise_ema),
+            before,
+        )
+
+    def test_motion_score_accumulates_across_incremental_invocations(self) -> None:
+        frames = moving_subject_frames(5)
+        first = self.process_timed(frames[:3], [100.0, 100.2, 100.4])
+        second = self.process_timed(frames[2:5], [100.4, 100.6, 100.8])
+
+        self.assertGreater(
+            second.dominant_track.accumulated_score,
+            first.dominant_track.accumulated_score,
+        )
+
+    def test_blob_reports_only_the_zone_it_overlaps(self) -> None:
+        zones = [
+            {
+                "name": "left",
+                "enabled": True,
+                "behavior": "incident",
+                "points": [{"x": 0, "y": 0}, {"x": 0.5, "y": 0}, {"x": 0.5, "y": 1}, {"x": 0, "y": 1}],
+            },
+            {
+                "name": "right",
+                "enabled": True,
+                "behavior": "incident",
+                "points": [{"x": 0.5, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 1}, {"x": 0.5, "y": 1}],
+            },
+        ]
+
+        result = self.process(moving_subject_frames(4), configuration={"motion_zones": zones})
+
+        self.assertTrue(result.blobs)
+        self.assertTrue(all("right" not in blob.zone_names for blob in result.blobs))
+        self.assertTrue(any(blob.zone_names == ("left",) for blob in result.blobs))
 
 
 if __name__ == "__main__":

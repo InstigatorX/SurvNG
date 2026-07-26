@@ -27,12 +27,30 @@ class _BackgroundRuntime:
     last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+    def clone(self) -> "_BackgroundRuntime":
+        with self.lock:
+            return _BackgroundRuntime(
+                background=None if self.background is None else self.background.copy(),
+                noise_ema=self.noise_ema,
+                brightness_ema=self.brightness_ema,
+                last_processed_at=self.last_processed_at,
+            )
+
 
 @dataclass(slots=True)
 class _ThresholdRuntime:
     threshold_ema: float = 12.0
     noise_ema: float = 4.0
+    last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def clone(self) -> "_ThresholdRuntime":
+        with self.lock:
+            return _ThresholdRuntime(
+                threshold_ema=self.threshold_ema,
+                noise_ema=self.noise_ema,
+                last_processed_at=self.last_processed_at,
+            )
 
 
 @dataclass(slots=True)
@@ -55,6 +73,39 @@ class _TrackerRuntime:
     tracks: dict[int, _TrackedBlob] = field(default_factory=dict)
     last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def clone(self) -> "_TrackerRuntime":
+        with self.lock:
+            return _TrackerRuntime(
+                next_track_id=self.next_track_id,
+                tracks={key: _TrackedBlob(
+                    track_id=value.track_id,
+                    first_seen=value.first_seen,
+                    last_seen=value.last_seen,
+                    consecutive_frames=value.consecutive_frames,
+                    centroids=list(value.centroids),
+                    blobs=list(value.blobs),
+                    sizes=list(value.sizes),
+                    velocity=value.velocity,
+                    accumulated_score=value.accumulated_score,
+                    missed_frames=value.missed_frames,
+                ) for key, value in self.tracks.items()},
+                last_processed_at=self.last_processed_at,
+            )
+
+
+@dataclass(slots=True)
+class _ScoringRuntime:
+    accumulated_scores: dict[int, float] = field(default_factory=dict)
+    last_seen: dict[int, float] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def clone(self) -> "_ScoringRuntime":
+        with self.lock:
+            return _ScoringRuntime(
+                accumulated_scores=dict(self.accumulated_scores),
+                last_seen=dict(self.last_seen),
+            )
 
 
 class AdaptiveEmaBackgroundStage:
@@ -90,15 +141,9 @@ class AdaptiveEmaBackgroundStage:
         with state.lock:
             first = frames[0].astype(np.float32, copy=False)
             timestamps = context.frame_timestamps
-            overlaps_previous = bool(
-                timestamps
-                and state.last_processed_at is not None
-                and timestamps[0] <= state.last_processed_at
-            )
             if (
                 state.background is None
                 or state.background.shape != first.shape
-                or overlaps_previous
             ):
                 background = first.copy()
             else:
@@ -190,8 +235,9 @@ class AdaptiveStatisticalThresholdStage:
         masks: list[np.ndarray] = []
         thresholds: list[float] = []
         noises: list[float] = []
+        difference_timestamps = context.frame_timestamps[1:]
         with state.lock:
-            for difference in context.difference_history:
+            for index, difference in enumerate(context.difference_history):
                 flat = difference.reshape(-1).astype(np.float32, copy=False)
                 median = float(np.median(flat))
                 mad = float(np.median(np.abs(flat - median)))
@@ -199,8 +245,21 @@ class AdaptiveStatisticalThresholdStage:
                 percentile = float(np.percentile(flat, 80))
                 candidate = max(self.minimum, median + self.sigma * noise, percentile * 0.8)
                 candidate = min(self.maximum, candidate)
-                state.threshold_ema += self.smoothing * (candidate - state.threshold_ema)
-                state.noise_ema = state.noise_ema * 0.9 + noise * 0.1
+                timestamp = (
+                    difference_timestamps[index]
+                    if index < len(difference_timestamps)
+                    else None
+                )
+                is_new = (
+                    timestamp is None
+                    or state.last_processed_at is None
+                    or timestamp > state.last_processed_at
+                )
+                if is_new:
+                    state.threshold_ema += self.smoothing * (candidate - state.threshold_ema)
+                    state.noise_ema = state.noise_ema * 0.9 + noise * 0.1
+                    if timestamp is not None:
+                        state.last_processed_at = timestamp
                 threshold = min(self.maximum, max(self.minimum, state.threshold_ema))
                 masks.append(cv2.threshold(difference, threshold, 255, cv2.THRESH_BINARY)[1])
                 thresholds.append(threshold)
@@ -215,10 +274,10 @@ class AdaptiveStatisticalThresholdStage:
 
 def _motion_zones(
     configuration: Mapping[str, Any], width: int, height: int
-) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+) -> tuple[np.ndarray, np.ndarray, tuple[tuple[str, np.ndarray], ...]]:
     included = np.zeros((height, width), dtype=np.uint8)
     ignored = np.zeros((height, width), dtype=np.uint8)
-    names: list[str] = []
+    named_included: list[tuple[str, np.ndarray]] = []
     raw_zones = configuration.get("motion_zones", [])
     if not isinstance(raw_zones, list):
         return included, ignored, ()
@@ -241,10 +300,14 @@ def _motion_zones(
         )
         if len(polygon) < 3:
             continue
-        target = ignored if raw.get("behavior") == "ignore" else included
+        is_ignored = raw.get("behavior") == "ignore"
+        target = ignored if is_ignored else included
         cv2.fillPoly(target, [polygon], 255)
-        names.append(str(raw.get("name") or "zone"))
-    return included, ignored, tuple(names)
+        if not is_ignored:
+            zone_mask = np.zeros((height, width), dtype=np.uint8)
+            cv2.fillPoly(zone_mask, [polygon], 255)
+            named_included.append((str(raw.get("name") or "zone"), zone_mask))
+    return included, ignored, tuple(named_included)
 
 
 class ConnectedComponentBlobStage:
@@ -262,7 +325,7 @@ class ConnectedComponentBlobStage:
             return context
         height, width = context.processed_frame_history[0].shape[:2]
         frame_area = max(1, width * height)
-        included_zone, ignored_zone, zone_names = _motion_zones(context.configuration, width, height)
+        included_zone, ignored_zone, named_zones = _motion_zones(context.configuration, width, height)
         history: list[MotionFrameBlobs] = []
         for index, mask in enumerate(context.motion_mask_history):
             count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
@@ -289,6 +352,13 @@ class ConnectedComponentBlobStage:
                     np.count_nonzero(component & (ignored_zone[y:y + box_height, x:x + box_width] > 0))
                 ) / component_pixels
                 edge_distance = min(cx / width, cy / height, (width - cx) / width, (height - cy) / height)
+                overlapping_zone_names = tuple(
+                    name
+                    for name, zone_mask in named_zones
+                    if np.count_nonzero(
+                        component & (zone_mask[y:y + box_height, x:x + box_width] > 0)
+                    ) > 0
+                )
                 blobs.append(MotionBlob(
                     box=(x / width, y / height, (x + box_width) / width, (y + box_height) / height),
                     centroid=(float(cx) / width, float(cy) / height),
@@ -301,7 +371,7 @@ class ConnectedComponentBlobStage:
                     edge_distance=float(edge_distance),
                     zone_overlap=included_overlap,
                     ignored_zone_overlap=ignored_overlap,
-                    zone_names=zone_names if included_overlap > 0 else (),
+                    zone_names=overlapping_zone_names,
                 ))
             changed = int(cv2.countNonZero(mask))
             history.append(MotionFrameBlobs(
@@ -403,7 +473,7 @@ class PersistentCentroidTrackerStage:
             if (
                 timestamps
                 and runtime.last_processed_at is not None
-                and timestamps[0] <= runtime.last_processed_at
+                and timestamps[-1] <= runtime.last_processed_at
             ):
                 runtime.tracks.clear()
             runtime.tracks = {
@@ -449,6 +519,8 @@ class PersistentCentroidTrackerStage:
                             sizes=[],
                         )
                     track = runtime.tracks[best_id]
+                    if track.missed_frames:
+                        track.consecutive_frames = 0
                     if track.centroids:
                         elapsed = max(1.0 / sample_fps, timestamp - track.last_seen)
                         track.velocity = (
@@ -468,11 +540,14 @@ class PersistentCentroidTrackerStage:
                     unmatched.discard(best_id)
                 for track_id in unmatched:
                     runtime.tracks[track_id].missed_frames += 1
-            runtime.tracks = {
-                key: value
-                for key, value in runtime.tracks.items()
-                if value.missed_frames <= self.maximum_missed_frames
-            }
+                expired = {
+                    track_id
+                    for track_id, track in runtime.tracks.items()
+                    if track.missed_frames > self.maximum_missed_frames
+                }
+                for track_id in expired:
+                    runtime.tracks.pop(track_id, None)
+                    visible_ids.discard(track_id)
             tracks = [
                 self._publish(track, frame_count)
                 for track_id, track in runtime.tracks.items()
@@ -553,6 +628,7 @@ class AdaptiveMotionScoringStage:
                 - features["insect_penalty"] * 0.28
             )
             scores.append((min(1.0, max(0.0, score)), track, features))
+        score_state = context.runtime.state_for(self.stage_id, _ScoringRuntime)
         if scores:
             score, best, features = max(scores, key=lambda item: item[0])
             persistence_ok = best.consecutive_frames >= self.minimum_persistence_frames
@@ -563,7 +639,18 @@ class AdaptiveMotionScoringStage:
                 "insect_like_motion" if insect_like else
                 "low_score"
             )
-            scored = replace(best, score=round(score, 4), accumulated_score=best.accumulated_score + score)
+            with score_state.lock:
+                accumulated = score_state.accumulated_scores.get(best.track_id, 0.0) + score
+                score_state.accumulated_scores[best.track_id] = accumulated
+                score_state.last_seen[best.track_id] = context.captured_at
+                expired = [
+                    track_id for track_id, last_seen in score_state.last_seen.items()
+                    if context.captured_at - last_seen > 30.0
+                ]
+                for track_id in expired:
+                    score_state.last_seen.pop(track_id, None)
+                    score_state.accumulated_scores.pop(track_id, None)
+            scored = replace(best, score=round(score, 4), accumulated_score=accumulated)
             context.dominant_track = scored
             context.tracked_objects = [scored if item.track_id == scored.track_id else item for item in context.tracked_objects]
         else:

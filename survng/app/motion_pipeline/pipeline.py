@@ -144,6 +144,34 @@ class MotionPipeline:
                 current = self._process_parallel_group(group, current)
         return current
 
+    def isolated_copy(self, *, clone_runtime: bool = False) -> "MotionPipeline":
+        """Create a disposable pipeline that cannot mutate this pipeline's runtime or metrics."""
+        pipeline = MotionPipeline(
+            camera_id=self.camera_id,
+            stages=self.stages,
+            observer=self.observer,
+            error_policy=self.error_policy,
+            stage_configuration=self.stage_configuration,
+            execution_groups=self.execution_groups,
+            stage_provides=self.stage_provides,
+        )
+        if clone_runtime:
+            pipeline.runtime = self.runtime.clone()
+        return pipeline
+
+    def uses_implementation(self, implementation: str) -> bool:
+        return any(
+            item.get("implementation") == implementation
+            for item in self.stage_configuration
+        )
+
+    def handles_observation(self, kind: str) -> bool:
+        return any(
+            kinds is None or kind in kinds
+            for stage in self.stages
+            for kinds in (getattr(stage, "observation_kinds", None),)
+        )
+
     def _process_stage(self, stage: MotionStage, context: MotionContext) -> MotionContext:
         self.observer.stage_started(stage.stage_id, context)
         started_ns = time.perf_counter_ns()

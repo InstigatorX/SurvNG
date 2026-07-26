@@ -196,6 +196,40 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker.status()["motion_qualification"]["mog2_audit_enabled"])
             self.assertIsNotNone(worker.status()["motion_qualification"]["mog2_last"])
 
+    def test_continuous_adaptive_transition_enqueues_prequalified_trigger(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        accepted = MotionQualificationResult(
+            True, 0.8, 0.5, "qualified", 2, {}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(worker, "_run_motion_pipeline", return_value=accepted) as analyze,
+                patch.object(worker, "_with_source_evidence", return_value=accepted),
+            ):
+                worker._remember_motion_frame(np.zeros((180, 320, 3), dtype=np.uint8), 1.0)
+                worker._remember_motion_frame(np.zeros((180, 320, 3), dtype=np.uint8), 2.0)
+
+            self.assertEqual(analyze.call_count, 1)
+            trigger = worker._motion_queue.get_nowait()
+            self.assertEqual(trigger["topic"], "adaptive/motion")
+            self.assertIs(trigger["prequalified"], accepted)
+
+    def test_priority_results_still_use_event_state_deduplication(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            priority = MotionQualificationResult(
+                True, 1.0, 0.0, "priority_topic", 0, {"primary_motion_source": "onvif_priority"}
+            )
+
+            first = worker._with_source_evidence(priority, 10.0, 11.0)
+            second = worker._with_source_evidence(priority, 11.0, 12.0)
+
+            self.assertTrue(first.accepted)
+            self.assertFalse(second.accepted)
+            self.assertEqual(second.reason, "event_state_active")
+
     def test_powered_off_worker_does_not_start_snapshot_source(self) -> None:
         camera = CameraConfig(
             id="back-middle",

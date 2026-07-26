@@ -96,8 +96,9 @@ def default_motion_observation_stage_configs(
     sample_fps: float,
     mog2_history_seconds: float,
 ) -> list[MotionStageConfig]:
-    return [
-        MotionStageConfig(
+    stages: list[MotionStageConfig] = []
+    if mog2_enabled:
+        stages.append(MotionStageConfig(
             stage_id="mog2_source",
             implementation="opencv_mog2_evidence",
             options={
@@ -105,9 +106,8 @@ def default_motion_observation_stage_configs(
                 "sample_fps": sample_fps,
                 "history_seconds": mog2_history_seconds,
             },
-            parallel_group="evidence_sources",
-        ),
-        MotionStageConfig(
+        ))
+    stages.append(MotionStageConfig(
             stage_id="onvif_source",
             implementation="onvif_event_evidence",
             options={
@@ -124,9 +124,8 @@ def default_motion_observation_stage_configs(
                     "face",
                 ],
             },
-            parallel_group="evidence_sources",
-        ),
-    ]
+        ))
+    return stages
 
 
 def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:

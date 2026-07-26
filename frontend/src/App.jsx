@@ -3756,7 +3756,7 @@ function EfficientMotionSetup({ active, inherited = false, disabled = false, onA
     <div className={`efficient-motion-setup ${active ? "active" : ""}`}>
       <div>
         <strong>Efficient ONVIF + SurvNG analysis</strong>
-        <span>The camera's ONVIF notice starts the check. SurvNG analyzes recent frames and skips weak events. Continuous background monitoring stays off to save CPU.</span>
+        <span>SurvNG continuously learns the scene at low resolution. Camera notices accelerate confirmation, while SurvNG can still detect motion if the camera misses it.</span>
       </div>
       {active ? <span className="efficient-motion-status">{inherited ? "Using global setup" : "Currently selected"}</span> : (
         <button type="button" className="primary" disabled={disabled} onClick={onApply}>Use this setup</button>

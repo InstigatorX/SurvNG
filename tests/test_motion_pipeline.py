@@ -220,6 +220,33 @@ class MotionPipelineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "per-camera runtime"):
             gate.process(context)
 
+    def test_isolated_pipeline_clones_runtime_without_mutating_production_state(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="record",
+            builder=build_recording_stage,
+            provides=frozenset({"debug"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("record", "record")],
+        )
+        pipeline.runtime.state_for("record", list).append(1.0)
+        replay = pipeline.isolated_copy(clone_runtime=True)
+        try:
+            replay.process(MotionContext(
+                camera_id="gate",
+                captured_at=2.0,
+                original_frame=None,
+                configuration={},
+                runtime=replay.runtime,
+            ))
+            self.assertEqual(pipeline.runtime.state_for("record", list), [1.0])
+            self.assertEqual(replay.runtime.state_for("record", list), [1.0, 2.0])
+        finally:
+            replay.close()
+            pipeline.close()
+
     def test_factory_validates_stage_artifact_dependencies(self) -> None:
         registry = MotionStageRegistry()
         registry.register(

@@ -8,9 +8,9 @@ from ..config import (
     MotionStageSelection,
 )
 from .defaults import (
+    adaptive_motion_stage_configs,
     default_motion_fusion_stage_configs,
     default_motion_observation_stage_configs,
-    default_motion_stage_configs,
 )
 from .factory import MotionStageConfig
 
@@ -79,7 +79,7 @@ def resolve_motion_pipeline_graphs(
         "qualification",
         global_config.pipeline.qualification,
         camera_config.pipeline.qualification,
-        default_motion_stage_configs(),
+        adaptive_motion_stage_configs(),
     )
     fusion, fusion_origin = _resolve_graph(
         "fusion",

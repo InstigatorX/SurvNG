@@ -17,6 +17,8 @@ EVIDENCE_REPOSITORY_SERVICE = "motion_evidence_repository"
 
 
 class Mog2EvidenceSourceStage:
+    observation_kinds = frozenset({"frame"})
+
     def __init__(
         self,
         stage_id: str,
@@ -60,6 +62,8 @@ class Mog2EvidenceSourceStage:
 
 
 class OnvifEventEvidenceStage:
+    observation_kinds = frozenset({"motion_event"})
+
     def __init__(
         self,
         stage_id: str,
