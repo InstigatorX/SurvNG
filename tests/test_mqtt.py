@@ -271,6 +271,26 @@ class MqttServiceTest(unittest.TestCase):
         client.loop_stop.assert_called_once_with()
         self.assertIn("network loop failed", service.last_error)
 
+    def test_paho_two_connect_async_none_result_starts_network_loop(self) -> None:
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+        )
+        client = Mock()
+        client.connect_async.return_value = None
+        client.loop_start.return_value = 0
+        with patch("paho.mqtt.client.Client", return_value=client):
+            service.start()
+        self.addCleanup(service.stop)
+
+        self.assertIs(service.client, client)
+        self.assertIsNotNone(service._command_thread)
+        self.assertTrue(service._command_thread.is_alive())
+        client.connect_async.assert_called_once_with("broker", 1883, keepalive=45)
+        client.loop_start.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

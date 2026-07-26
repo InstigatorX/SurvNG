@@ -98,10 +98,16 @@ class MqttService:
                     self.config.port,
                     keepalive=45,
                 )
-                if int(connect_result) != 0:
+                # Paho 2.x documents connect_async() as returning None after it
+                # validates and stores the connection parameters. Older client
+                # releases and test doubles may return MQTT_ERR_SUCCESS instead.
+                if (
+                    connect_result is not None
+                    and int(connect_result) != int(mqtt.MQTT_ERR_SUCCESS)
+                ):
                     raise RuntimeError(f"MQTT connect setup failed: rc={connect_result}")
                 loop_result = client.loop_start()
-                if int(loop_result) != 0:
+                if int(loop_result) != int(mqtt.MQTT_ERR_SUCCESS):
                     raise RuntimeError(f"MQTT network loop failed to start: rc={loop_result}")
             except Exception as exc:
                 self.last_error = redact_secret_text(exc)
