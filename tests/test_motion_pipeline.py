@@ -294,6 +294,33 @@ class MotionPipelineTest(unittest.TestCase):
                 ],
             )
 
+    def test_factory_rejects_unrestricted_consumer_of_conditional_artifact(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="frame_provider",
+            builder=build_frame_observer,
+            provides=frozenset({"scoring"}),
+            observation_kinds=frozenset({"frame"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="unrestricted_consumer",
+            builder=build_recording_stage,
+            requires=frozenset({"scoring"}),
+            provides=frozenset({"decision"}),
+        ))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires unavailable artifacts for unrestricted observations: scoring",
+        ):
+            MotionPipelineFactory(registry).create(
+                "gate",
+                [
+                    MotionStageConfig("provider", "frame_provider"),
+                    MotionStageConfig("consumer", "unrestricted_consumer"),
+                ],
+            )
+
     def test_pipeline_close_waits_for_active_stage_before_releasing_it(self) -> None:
         entered = threading.Event()
         release = threading.Event()
@@ -468,6 +495,17 @@ class MotionPipelineTest(unittest.TestCase):
                 ))
             self.assertEqual(pipeline.status()["stages"]["frame"]["calls"], 0)
             self.assertEqual(pipeline.status()["stages"]["event"]["calls"], 0)
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsupported observation_kind 'fram'",
+            ):
+                pipeline.process(MotionContext(
+                    camera_id="gate",
+                    captured_at=9.5,
+                    original_frame=None,
+                    configuration={"observation_kind": "fram"},
+                    runtime=pipeline.runtime,
+                ))
 
             frame_result = pipeline.process(MotionContext(
                 camera_id="gate",
@@ -486,6 +524,46 @@ class MotionPipelineTest(unittest.TestCase):
 
             self.assertEqual(frame_result.debug.values["observed_by"], ["frame"])
             self.assertEqual(event_result.debug.values["observed_by"], ["event"])
+        finally:
+            pipeline.close()
+
+    def test_sequential_disjoint_writers_require_observation_kind(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="frame_observer",
+            builder=build_frame_observer,
+            provides=frozenset({"scoring"}),
+            observation_kinds=frozenset({"frame"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="event_observer",
+            builder=build_event_observer,
+            provides=frozenset({"scoring"}),
+            observation_kinds=frozenset({"motion_event"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("frame", "frame_observer"),
+                MotionStageConfig("event", "event_observer"),
+            ],
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "must define observation_kind for a restricted pipeline",
+            ):
+                pipeline.process(MotionContext(
+                    camera_id="gate",
+                    captured_at=10.0,
+                    original_frame=None,
+                    configuration={},
+                    runtime=pipeline.runtime,
+                ))
+
+            self.assertTrue(pipeline.requires_observation_kind)
+            self.assertEqual(pipeline.status()["stages"]["frame"]["calls"], 0)
+            self.assertEqual(pipeline.status()["stages"]["event"]["calls"], 0)
         finally:
             pipeline.close()
 

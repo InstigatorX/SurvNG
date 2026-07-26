@@ -123,6 +123,18 @@ class MotionPipeline:
         self.stage_provides = dict(stage_provides or {})
         self.stage_observation_kinds = dict(stage_observation_kinds or {})
         self.requires_observation_kind = bool(requires_observation_kind)
+        resolved_observation_kinds = tuple(
+            self._observation_kinds_for_stage(stage)
+            for stage in self.stages
+        )
+        self.supported_observation_kinds = frozenset(
+            kind
+            for kinds in resolved_observation_kinds
+            for kind in (kinds or ())
+        )
+        self.has_unrestricted_stages = any(
+            kinds is None for kinds in resolved_observation_kinds
+        )
         self.continuous_analysis = bool(continuous_analysis)
         self.motion_sources = tuple(dict.fromkeys(str(source) for source in motion_sources if source))
         self._stage_factory = stage_factory
@@ -177,6 +189,15 @@ class MotionPipeline:
         if not observation_kind and self.requires_observation_kind:
             raise ValueError(
                 "motion context must define observation_kind for a restricted pipeline"
+            )
+        if (
+            observation_kind
+            and self.requires_observation_kind
+            and not self.has_unrestricted_stages
+            and observation_kind not in self.supported_observation_kinds
+        ):
+            raise ValueError(
+                f"motion context defines unsupported observation_kind {observation_kind!r}"
             )
 
         current = context

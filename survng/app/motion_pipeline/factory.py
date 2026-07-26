@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .contracts import MotionPipelineObserver, MotionStage
 from .pipeline import MotionErrorPolicy, MotionPipeline
@@ -10,6 +10,9 @@ from .registry import (
     MotionStageRegistration,
     MotionStageRegistry,
 )
+
+
+_MERGEABLE_PARALLEL_OUTPUTS = frozenset({"source_evidence", "debug"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +76,7 @@ class MotionPipelineFactory:
         current_parallel_group = ""
         current_group_available = set(available_artifacts)
         requires_observation_kind = False
+        artifact_providers: dict[str, list[frozenset[str] | None]] = {}
         for stage_config in stage_configs:
             stage_id = stage_config.stage_id.strip()
             if not stage_id:
@@ -94,15 +98,19 @@ class MotionPipelineFactory:
             stage = registration.builder(stage_id, stage_config.options, self.dependencies)
             stages.append(stage)
             registrations.append(registration)
-            effective_observation_kinds.append(
-                _effective_observation_kinds(stage, registration)
-            )
+            stage_observation_kinds = _effective_observation_kinds(stage, registration)
+            effective_observation_kinds.append(stage_observation_kinds)
+            for artifact in registration.provides - _MERGEABLE_PARALLEL_OUTPUTS:
+                previous_providers = artifact_providers.setdefault(artifact, [])
+                if any(
+                    not _observation_kinds_overlap(previous, stage_observation_kinds)
+                    for previous in previous_providers
+                ):
+                    requires_observation_kind = True
+                previous_providers.append(stage_observation_kinds)
             stage_ids.add(stage_id)
             available_artifacts.update(registration.provides)
             if continues_parallel_group:
-                all_existing_provides = set().union(
-                    *(registrations[index].provides for index in execution_groups[-1])
-                )
                 overlapping_stages = (
                     index
                     for index in execution_groups[-1]
@@ -114,21 +122,14 @@ class MotionPipelineFactory:
                 existing_provides = set().union(
                     *(registrations[index].provides for index in overlapping_stages)
                 )
-                conflicting = (existing_provides & registration.provides) - {
-                    "source_evidence",
-                    "debug",
-                }
+                conflicting = (
+                    existing_provides & registration.provides
+                ) - _MERGEABLE_PARALLEL_OUTPUTS
                 if conflicting:
                     raise ValueError(
                         f"parallel motion group {parallel_group!r} has conflicting outputs: "
                         + ", ".join(sorted(conflicting))
                     )
-                disjoint_conflicts = (
-                    all_existing_provides & registration.provides
-                ) - existing_provides - {"source_evidence", "debug"}
-                requires_observation_kind = bool(
-                    requires_observation_kind or disjoint_conflicts
-                )
                 execution_groups[-1].append(len(stages) - 1)
             else:
                 execution_groups.append([len(stages) - 1])
@@ -144,7 +145,10 @@ class MotionPipelineFactory:
             for kinds in effective_observation_kinds
             for kind in (kinds or ())
         })
-        for observation_kind in observation_kinds:
+        def validate_observation_graph(
+            label: str,
+            runnable_for: Callable[[int], bool],
+        ) -> None:
             kind_available = {
                 "original_frame",
                 "frame_history",
@@ -157,8 +161,7 @@ class MotionPipelineFactory:
                 runnable = [
                     index
                     for index in group
-                    if effective_observation_kinds[index] is None
-                    or observation_kind in effective_observation_kinds[index]
+                    if runnable_for(index)
                 ]
                 if not runnable:
                     continue
@@ -169,7 +172,7 @@ class MotionPipelineFactory:
                         stage_id = stage_configs[index].stage_id.strip()
                         raise ValueError(
                             f"motion stage {stage_id!r} requires unavailable artifacts "
-                            f"for observation {observation_kind!r}: "
+                            f"for {label}: "
                             + ", ".join(sorted(missing))
                         )
                 for index in runnable:
@@ -177,10 +180,23 @@ class MotionPipelineFactory:
             kind_missing_outputs = set(required_artifacts) - kind_available
             if has_runnable_stage and kind_missing_outputs:
                 raise ValueError(
-                    f"motion pipeline does not provide required artifacts for observation "
-                    f"{observation_kind!r}: "
+                    f"motion pipeline does not provide required artifacts for {label}: "
                     + ", ".join(sorted(kind_missing_outputs))
                 )
+
+        for observation_kind in observation_kinds:
+            validate_observation_graph(
+                f"observation {observation_kind!r}",
+                lambda index, kind=observation_kind: (
+                    effective_observation_kinds[index] is None
+                    or kind in effective_observation_kinds[index]
+                ),
+            )
+        if any(kinds is None for kinds in effective_observation_kinds):
+            validate_observation_graph(
+                "unrestricted observations",
+                lambda index: effective_observation_kinds[index] is None,
+            )
         stage_blueprint = tuple(
             (
                 stage_config.stage_id.strip(),
