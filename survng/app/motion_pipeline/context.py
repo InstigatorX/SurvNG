@@ -76,6 +76,7 @@ class MotionContext:
     runtime: MotionRuntimeState
 
     frame_history: tuple[Frame, ...] = ()
+    frame_timestamps: tuple[float, ...] = ()
     processed_frame_history: tuple[Frame, ...] = ()
     difference_history: tuple[Frame, ...] = ()
     threshold_mask_history: tuple[Frame, ...] = ()

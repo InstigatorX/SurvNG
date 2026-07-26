@@ -115,6 +115,7 @@ class AuditAiTest(unittest.TestCase):
 
     def test_pipeline_recommendations_are_high_level_and_bounded(self) -> None:
         self.assertEqual(validate_tuning_value("analysis_preset", "MODULAR"), "modular")
+        self.assertEqual(validate_tuning_value("analysis_preset", "ADAPTIVE"), "adaptive")
         self.assertEqual(validate_tuning_value("fusion_policy", "weighted"), "weighted")
         self.assertEqual(
             validate_tuning_value("fusion_sources", ["mog2", "onvif", "mog2"]),

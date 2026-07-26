@@ -1173,7 +1173,7 @@ def _audit_ai_context(audit: dict) -> dict:
             "borderline_margin": [0, 0.10],
             "mog2_history_seconds": [5, 300],
             "sensitivity": ["high", "balanced", "low"],
-            "analysis_preset": ["modular", "classic"],
+            "analysis_preset": ["adaptive", "modular", "classic"],
             "fusion_policy": ["audit", "any", "all", "weighted"],
             "fusion_sources": ["mog2", "onvif"],
         },

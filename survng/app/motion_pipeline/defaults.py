@@ -3,6 +3,61 @@ from __future__ import annotations
 from .factory import MotionStageConfig
 
 
+def adaptive_motion_stage_configs() -> list[MotionStageConfig]:
+    return [
+        MotionStageConfig(stage_id="preprocess", implementation="gray_blur"),
+        MotionStageConfig(
+            stage_id="background",
+            implementation="adaptive_ema_background",
+            options={
+                "learning_rate": 0.025,
+                "fast_learning_rate": 0.18,
+                "motion_learning_scale": 0.03,
+                "global_change_ratio": 0.55,
+            },
+        ),
+        MotionStageConfig(
+            stage_id="threshold",
+            implementation="adaptive_statistical_threshold",
+            options={"sigma": 4.0, "minimum": 7.0, "maximum": 72.0, "smoothing": 0.25},
+        ),
+        MotionStageConfig(
+            stage_id="morphology",
+            implementation="open_close",
+            options={"kernel_size": 3, "close_iterations": 2},
+        ),
+        MotionStageConfig(
+            stage_id="blob_extract",
+            implementation="connected_component_blobs",
+            options={"edge_margin_ratio": 0.06},
+        ),
+        MotionStageConfig(
+            stage_id="blob_filter",
+            implementation="adaptive_blob_filter",
+            options={
+                "minimum_area_ratio": 0.00025,
+                "minimum_fill_ratio": 0.12,
+                "maximum_aspect_ratio": 12.0,
+                "ignored_zone_overlap": 0.6,
+            },
+        ),
+        MotionStageConfig(
+            stage_id="tracking",
+            implementation="persistent_centroid_tracker",
+            options={
+                "maximum_distance": 0.18,
+                "maximum_missed_frames": 3,
+                "maximum_track_age_seconds": 8.0,
+            },
+        ),
+        MotionStageConfig(
+            stage_id="scoring",
+            implementation="adaptive_motion_score",
+            options={"minimum_persistence_frames": 2},
+        ),
+    ]
+
+
 def default_motion_stage_configs() -> list[MotionStageConfig]:
     return [
         MotionStageConfig(stage_id="preprocess", implementation="gray_blur"),

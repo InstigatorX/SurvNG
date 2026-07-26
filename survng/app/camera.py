@@ -388,12 +388,21 @@ class CameraWorker:
 
     def _capture_motion_debug(self, captured_at: float) -> None:
         with self._frame_lock:
-            frames = [frame.copy() for _timestamp, frame in self._motion_frames]
+            samples = [
+                (timestamp, frame.copy())
+                for timestamp, frame in self._motion_frames
+            ]
+        frames = [frame for _timestamp, frame in samples]
         if len(frames) < 2:
             return
         _mode, sensitivity, _frame_width = self._motion_settings()
         try:
-            self._run_motion_pipeline(frames, sensitivity, captured_at)
+            self._run_motion_pipeline(
+                frames,
+                sensitivity,
+                captured_at,
+                [timestamp for timestamp, _frame in samples],
+            )
         except Exception as error:
             LOGGER.debug("motion debug capture failed for %s: %s", self.camera.id, error)
 
@@ -567,6 +576,7 @@ class CameraWorker:
                     [item[1] for item in window],
                     sensitivity,
                     window_end,
+                    [item[0] for item in window],
                 )
                 if best_result is None or result.score > best_result.score:
                     best_result = result
@@ -629,6 +639,7 @@ class CameraWorker:
         frames: list[np.ndarray],
         sensitivity: str,
         captured_at: float,
+        frame_timestamps: list[float] | None = None,
     ) -> MotionQualificationResult:
         mode, _resolved_sensitivity, frame_width = self._motion_settings()
         context = MotionContext(
@@ -636,12 +647,17 @@ class CameraWorker:
             captured_at=captured_at,
             original_frame=frames[-1] if frames else None,
             frame_history=tuple(frames),
+            frame_timestamps=tuple(frame_timestamps or ()),
             configuration={
                 **self.motion_config.model_dump(mode="python"),
                 "camera_id": self.camera.id,
                 "mode": mode,
                 "sensitivity": sensitivity,
                 "frame_width": frame_width,
+                "motion_zones": [
+                    zone.model_dump(mode="python")
+                    for zone in self.camera.zones
+                ],
             },
             runtime=self.motion_pipeline.runtime,
         )
@@ -722,6 +738,7 @@ class CameraWorker:
             borderline_candidate = bool(
                 rescue_enabled
                 and not result.accepted
+                and not result.reason.startswith("event_state_")
                 and result.score >= max(0.0, result.threshold - rescue_margin)
             )
             qualification = {

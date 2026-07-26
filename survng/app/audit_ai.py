@@ -108,8 +108,8 @@ class AuditAiAdvice(BaseModel):
 def validate_tuning_value(setting: str, value: Any) -> Any:
     if setting == "analysis_preset":
         normalized = str(value).strip().lower()
-        if normalized not in {"modular", "classic"}:
-            raise ValueError("analysis_preset must be modular or classic")
+        if normalized not in {"adaptive", "modular", "classic"}:
+            raise ValueError("analysis_preset must be adaptive, modular, or classic")
         return normalized
     if setting == "fusion_policy":
         normalized = str(value).strip().lower()
@@ -182,7 +182,7 @@ SYSTEM_PROMPT = """You are a conservative video-motion calibration advisor for S
 Analyze the supplied audit frame together with deterministic motion metrics and object detections.
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed. Prefer camera-scoped changes over global changes.
-Use analysis_preset only to choose modular or classic analysis. Prefer modular unless the
+Use analysis_preset only to choose adaptive, modular, or classic analysis. Prefer adaptive unless the
 telemetry shows a compatibility problem. Use fusion_policy and fusion_sources only when
 the audit-time source evidence supports that recommendation. An audit policy observes
 supporting sources without changing the primary decision; any, all, and weighted policies

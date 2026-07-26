@@ -15,11 +15,20 @@ separate `MotionPipeline` for every camera from an instance-scoped stage
 registry. The pipeline owns per-camera runtime state, executes stages in order,
 and records call, failure, last, average, and maximum timing for each stage.
 
-The production frame-difference qualification graph now uses independently
+The adaptive qualification preset uses independently registered grayscale
+preprocessing, a selective EMA scene model, background difference, robust
+statistical thresholding, morphology, connected-component measurements,
+noise-aware blob filtering, persistent multi-region tracking, and adaptive
+credibility scoring. It learns per-camera noise and brightness, accelerates
+learning for whole-scene illumination changes, protects moving pixels from
+immediate absorption, and penalizes tiny erratic edge motion. The prior
+production frame-difference qualification graph remains available as the
+fixed-threshold modular rollback preset and uses independently
 registered preprocessing, frame-difference, threshold, morphology, contour
 extraction, minimum-area filtering, dominant-centroid tracking, and scoring
 stages. The final graph then runs evidence fusion, the persistent event-state
-machine, and trigger decision. Each stage consumes and publishes typed context
+machine, and a transition-only trigger decision so continuous activity does
+not create repeated incidents. Each stage consumes and publishes typed context
 artifacts without invoking or depending on concrete neighboring stages. The
 original all-in-one `legacy_qualifier` and combined `legacy_motion_scorer`
 remain registered as parity/reference implementations.

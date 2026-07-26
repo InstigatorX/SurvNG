@@ -96,8 +96,8 @@ class MotionEventStateTest(unittest.TestCase):
 
         self.assertEqual(held.event_state.phase, MotionEventPhase.ACTIVE)
         self.assertEqual(held.event_state.transition_reason, "release_pending")
-        self.assertTrue(held.decision.run_object_detection)
-        self.assertEqual(held.decision.reason, "event_state_hold")
+        self.assertFalse(held.decision.run_object_detection)
+        self.assertEqual(held.decision.reason, "event_state_active")
         self.assertEqual(released.event_state.phase, MotionEventPhase.REJECTED)
         self.assertFalse(released.decision.run_object_detection)
 
@@ -143,6 +143,17 @@ class MotionEventStateTest(unittest.TestCase):
         self.assertEqual(foyer_candidate.event_state.phase, MotionEventPhase.CANDIDATE)
         self.assertEqual(gate_active.event_state.phase, MotionEventPhase.ACTIVE)
         self.assertIsNot(gate.runtime, foyer.runtime)
+
+    def test_continuous_activity_triggers_object_detection_only_once(self) -> None:
+        pipeline = state_pipeline("gate")
+
+        first = process_score(pipeline, 10.0, True)
+        continuous = process_score(pipeline, 11.0, True)
+
+        self.assertTrue(first.decision.run_object_detection)
+        self.assertFalse(continuous.decision.run_object_detection)
+        self.assertEqual(continuous.event_state.phase, MotionEventPhase.ACTIVE)
+        self.assertEqual(continuous.decision.reason, "event_state_active")
 
 
 if __name__ == "__main__":

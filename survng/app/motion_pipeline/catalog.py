@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .defaults import default_motion_stage_configs
+from .defaults import adaptive_motion_stage_configs, default_motion_stage_configs
 from .factory import MotionStageConfig
 from .registry import MotionStageRegistry
 
@@ -51,15 +51,25 @@ class MotionPipelinePreset:
 def builtin_motion_pipeline_presets() -> tuple[MotionPipelinePreset, ...]:
     return (
         MotionPipelinePreset(
+            preset_id="adaptive",
+            label="Adaptive motion analysis",
+            description=(
+                "Learns each camera scene and automatically adjusts for lighting, "
+                "sensor noise, nuisance regions, and insect-like motion."
+            ),
+            graph="qualification",
+            stages=tuple(adaptive_motion_stage_configs()),
+            recommended=True,
+        ),
+        MotionPipelinePreset(
             preset_id="modular",
             label="Modular motion analysis",
             description=(
-                "Recommended multi-stage analysis with mask cleanup, blob filtering, "
-                "tracking, and independent timing for every step."
+                "Original fixed-threshold multi-stage analysis retained for comparison "
+                "and rollback."
             ),
             graph="qualification",
             stages=tuple(default_motion_stage_configs()),
-            recommended=True,
         ),
         MotionPipelinePreset(
             preset_id="classic",

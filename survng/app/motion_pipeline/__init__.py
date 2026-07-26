@@ -12,6 +12,15 @@ from .context import (
     StageTiming,
     TriggerDecision,
 )
+from .adaptive_stages import (
+    AdaptiveBlobFilterStage,
+    AdaptiveEmaBackgroundStage,
+    AdaptiveMotionScoringStage,
+    AdaptiveStatisticalThresholdStage,
+    ConnectedComponentBlobStage,
+    PersistentCentroidTrackerStage,
+    register_adaptive_motion_stages,
+)
 from .contracts import MotionPipelineObserver, MotionStage
 from .configuration import ResolvedMotionPipelineGraphs, resolve_motion_pipeline_graphs
 from .catalog import (
@@ -20,6 +29,7 @@ from .catalog import (
     motion_pipeline_catalog,
 )
 from .defaults import (
+    adaptive_motion_stage_configs,
     default_motion_fusion_stage_configs as motion_fusion_stage_configs,
     default_motion_observation_stage_configs as motion_observation_stage_configs,
     default_motion_stage_configs,
@@ -78,6 +88,7 @@ def build_builtin_motion_registry() -> MotionStageRegistry:
     registry = MotionStageRegistry()
     register_legacy_motion_stage(registry)
     register_image_motion_stages(registry)
+    register_adaptive_motion_stages(registry)
     register_evidence_stages(registry)
     register_decision_stages(registry)
     return registry
@@ -103,11 +114,16 @@ def build_default_motion_pipeline(camera_id: str) -> MotionPipeline:
 
 
 __all__ = [
+    "AdaptiveBlobFilterStage",
+    "AdaptiveEmaBackgroundStage",
+    "AdaptiveMotionScoringStage",
+    "AdaptiveStatisticalThresholdStage",
     "LegacyQualificationStage",
     "LegacyMotionScoringStage",
     "BlobExtractionStage",
     "BlobFilteringStage",
     "BufferedMotionFusionStage",
+    "ConnectedComponentBlobStage",
     "DominantCentroidTrackingStage",
     "LoggingMotionPipelineObserver",
     "MotionBlob",
@@ -144,6 +160,7 @@ __all__ = [
     "OnvifEventEvidenceStage",
     "OpenCloseMorphologyStage",
     "ObjectDetectionTriggerStage",
+    "PersistentCentroidTrackerStage",
     "RecordedMotionObjectDetector",
     "RecordedMotionObjectDetectorFactory",
     "ResolvedMotionPipelineGraphs",
@@ -152,6 +169,7 @@ __all__ = [
     "StageTiming",
     "TriggerDecision",
     "EVIDENCE_REPOSITORY_SERVICE",
+    "adaptive_motion_stage_configs",
     "build_builtin_motion_registry",
     "builtin_motion_pipeline_presets",
     "build_default_motion_pipeline",
@@ -164,6 +182,7 @@ __all__ = [
     "motion_observation_stage_configs",
     "register_legacy_motion_stage",
     "register_image_motion_stages",
+    "register_adaptive_motion_stages",
     "register_evidence_stages",
     "register_decision_stages",
     "resolve_motion_pipeline_graphs",

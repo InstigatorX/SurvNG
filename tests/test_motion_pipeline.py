@@ -143,7 +143,7 @@ class MotionPipelineTest(unittest.TestCase):
         self.assertTrue(all(preset["available"] for preset in catalog["presets"]))
         self.assertEqual(
             next(preset for preset in catalog["presets"] if preset["recommended"])["id"],
-            "modular",
+            "adaptive",
         )
 
     def test_legacy_pipeline_helper_builds_reference_stage(self) -> None:

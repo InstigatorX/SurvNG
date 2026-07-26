@@ -133,10 +133,11 @@ class ObjectDetectionTriggerStage:
 
     def process(self, context: MotionContext) -> MotionContext:
         active = context.event_state.phase == MotionEventPhase.ACTIVE
-        if active and context.scoring.accepted:
+        newly_active = active and context.event_state.transition_reason == "activation_threshold"
+        if newly_active and context.scoring.accepted:
             reason = context.scoring.reason
         elif active:
-            reason = "event_state_hold"
+            reason = "event_state_active"
         elif context.event_state.phase == MotionEventPhase.CANDIDATE:
             reason = "event_state_candidate"
         elif context.event_state.phase == MotionEventPhase.COOLDOWN:
@@ -145,7 +146,7 @@ class ObjectDetectionTriggerStage:
             reason = context.scoring.reason
         sources = ("frame_difference", *sorted(context.source_evidence))
         context.decision = TriggerDecision(
-            run_object_detection=active,
+            run_object_detection=newly_active,
             reason=reason,
             score=context.scoring.score,
             evidence_sources=tuple(dict.fromkeys(sources)),

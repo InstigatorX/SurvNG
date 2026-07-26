@@ -3744,7 +3744,7 @@ function isEfficientMotionSetup({ mode, mog2Enabled, qualification, fusion, cata
   const decision = readMotionDecisionFusion(fusion);
   return mode === "enforce"
     && mog2Enabled === false
-    && analysis.preset?.id === "modular"
+    && analysis.preset?.id === "adaptive"
     && !analysis.custom
     && decision.settings.policy === "audit"
     && !decision.settings.sources.includes("mog2")
@@ -4621,7 +4621,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                       && selectedCamera.motion_qualification?.pipeline?.fusion == null}
                     disabled={!availableQualificationPresets(motionCatalog).length}
                     onApply={() => {
-                      const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.id === "modular" || preset.recommended);
+                      const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.recommended) || availableQualificationPresets(motionCatalog)[0];
                       updateCamera(selectedCamera.id, ["motion_qualification", "mode"], "enforce");
                       updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], false);
                       updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], {
@@ -5012,7 +5012,7 @@ const motionAiSettingLabels = {
 };
 
 function formatMotionAiValue(setting, value) {
-  if (setting === "analysis_preset") return value === "modular" ? "Modular motion analysis" : "Classic compatibility";
+  if (setting === "analysis_preset") return ({ adaptive: "Adaptive motion analysis", modular: "Fixed-threshold modular analysis", classic: "Classic compatibility" })[value] || String(value);
   if (setting === "fusion_policy") return ({ audit: "Observe only", any: "Any source can confirm", all: "All sources must agree", weighted: "Weighted agreement" })[value] || String(value);
   if (setting === "fusion_sources") {
     const labels = { mog2: "Background model", onvif: "Camera motion events" };
@@ -5381,7 +5381,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           })}
           disabled={!availableQualificationPresets(motionCatalog).length}
           onApply={() => {
-            const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.id === "modular" || preset.recommended);
+            const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.recommended) || availableQualificationPresets(motionCatalog)[0];
             updateConfig(["motion_qualification", "mode"], "enforce");
             updateConfig(["motion_qualification", "mog2_audit_enabled"], false);
             updateConfig(["motion_qualification", "pipeline"], {
