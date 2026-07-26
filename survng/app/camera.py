@@ -150,30 +150,49 @@ class CameraWorker:
         self.last_frame_at = ""
         self.last_motion_at = ""
         self._detection_enabled = True
-        self.onvif = OnvifEventListener(camera, self.handle_motion_event)
+        self.onvif = OnvifEventListener(
+            camera,
+            self.handle_motion_event,
+            cache_dir=storage_dir / "onvif",
+        )
 
     def start(self) -> None:
         with self._lifecycle_lock:
             self._enabled = True
             self._stop.clear()
-            if self._motion_analysis_thread is None or not self._motion_analysis_thread.is_alive():
-                self._clear_motion_analysis_queue()
-                self._motion_analysis_thread = threading.Thread(
-                    target=self._run_motion_analysis,
-                    name=f"motion-analysis-{self.camera.id}",
-                    daemon=False,
-                )
-                self._motion_analysis_thread.start()
-            self._start_source("live")
-            if self._motion_thread is None or not self._motion_thread.is_alive():
-                self._clear_motion_queue()
-                self._motion_thread = threading.Thread(
-                    target=self._run_motion_events,
-                    name=f"motion-{self.camera.id}",
-                    daemon=False,
-                )
-                self._motion_thread.start()
-            self.onvif.start()
+            try:
+                if self._motion_analysis_thread is None or not self._motion_analysis_thread.is_alive():
+                    self._clear_motion_analysis_queue()
+                    analysis_thread = threading.Thread(
+                        target=self._run_motion_analysis,
+                        name=f"motion-analysis-{self.camera.id}",
+                        daemon=False,
+                    )
+                    self._motion_analysis_thread = analysis_thread
+                    try:
+                        analysis_thread.start()
+                    except BaseException:
+                        self._motion_analysis_thread = None
+                        raise
+                if not self._start_source("live"):
+                    raise RuntimeError(f"camera source did not start for {self.camera.id}")
+                if self._motion_thread is None or not self._motion_thread.is_alive():
+                    self._clear_motion_queue()
+                    motion_thread = threading.Thread(
+                        target=self._run_motion_events,
+                        name=f"motion-{self.camera.id}",
+                        daemon=False,
+                    )
+                    self._motion_thread = motion_thread
+                    try:
+                        motion_thread.start()
+                    except BaseException:
+                        self._motion_thread = None
+                        raise
+                self.onvif.start()
+            except BaseException:
+                self.stop()
+                raise
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -1369,7 +1388,13 @@ class CameraWorker:
             if self._stop.is_set():
                 return False
             thread = self._source_threads.get(source)
-            if thread is not None and thread.is_alive():
+            existing_stop = self._source_stops.get(source)
+            if (
+                thread is not None
+                and thread.is_alive()
+                and existing_stop is not None
+                and not existing_stop.is_set()
+            ):
                 return True
             stop_event = threading.Event()
             thread = threading.Thread(
@@ -1382,7 +1407,15 @@ class CameraWorker:
             self._source_threads[source] = thread
             if source == "live":
                 self._thread = thread
-            thread.start()
+            try:
+                thread.start()
+            except BaseException:
+                if self._source_threads.get(source) is thread:
+                    self._source_threads.pop(source, None)
+                    self._source_stops.pop(source, None)
+                    if source == "live":
+                        self._thread = None
+                raise
         return True
 
     def _source_is_idle(self, source: str) -> bool:
@@ -1443,6 +1476,8 @@ class CameraWorker:
                                 failure_reason = "stream read failed"
                                 self._set_source_error(source, failure_reason)
                                 break
+                            if self._stop.is_set() or stop_event.is_set():
+                                break
                             retry_delay = CAPTURE_RETRY_INITIAL_SECONDS
                             stamp = datetime.now(timezone.utc).isoformat()
                             frame_clock = time.monotonic()
@@ -1501,7 +1536,12 @@ class CameraWorker:
             return None
         with self._frame_lock:
             frame = self._source_frames.get(source)
-            if frame is None:
+            frame_clock = self._source_frame_monotonic.get(source)
+            if (
+                frame is None
+                or frame_clock is None
+                or time.monotonic() - frame_clock > FRAME_STALE_SECONDS
+            ):
                 return None
             return frame.copy()
 

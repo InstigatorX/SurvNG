@@ -52,6 +52,20 @@ class RecorderTest(unittest.TestCase):
         self.assertIn("PREV_OUTPTS", repair_args[1])
         self.assertIn("PREV_OUTDTS", repair_args[1])
 
+    def test_native_recording_allows_ffmpeg_to_probe_h264_or_h265(self) -> None:
+        camera = CameraConfig.model_validate(
+            {
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "reolink://admin:password@camera.local?channel=0",
+            }
+        )
+
+        args = ffmpeg_input_args(camera, "main")
+
+        self.assertEqual(args[-2:], ["-i", "pipe:0"])
+        self.assertNotIn("h264", args)
+
     def test_persistent_non_monotonic_dts_restarts_recorder(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

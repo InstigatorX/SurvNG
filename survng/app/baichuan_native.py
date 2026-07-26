@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
+from typing import BinaryIO
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -96,8 +97,14 @@ class BaichuanNativeClient:
         if not self.host or not self.username:
             raise BaichuanError("baichuan host and username are required")
         stop = stop or threading.Event()
+        if stop.is_set():
+            return
         with self:
+            if stop.is_set():
+                return
             self.login()
+            if stop.is_set():
+                return
             self.start_video()
             reader = MediaFrameReader(self._binary_chunks(stop))
             while not stop.is_set():
@@ -120,11 +127,20 @@ class BaichuanNativeClient:
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        if self._sock is not None:
+        self.close()
+
+    def close(self) -> None:
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
             try:
-                self._sock.close()
-            finally:
-                self._sock = None
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def login(self) -> None:
         legacy = BcMessage(
@@ -307,20 +323,67 @@ class BaichuanFfmpegPipe:
         self.source = source
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self._client: BaichuanNativeClient | None = None
+        self._stdin: BinaryIO | None = None
+        self._lock = threading.Lock()
 
-    def start(self, stdin) -> None:
-        self.thread = threading.Thread(target=self._run, args=(stdin,), daemon=True)
-        self.thread.start()
+    def start(self, stdin: BinaryIO) -> None:
+        with self._lock:
+            if self.thread is not None and self.thread.is_alive():
+                raise BaichuanError("native Baichuan video pump is already running")
+            self.stop_event.clear()
+            self._stdin = stdin
+            thread = threading.Thread(
+                target=self._run,
+                args=(stdin,),
+                name=f"baichuan-{self.camera.id}-{self.source}",
+                daemon=False,
+            )
+            self.thread = thread
+            try:
+                thread.start()
+            except BaseException:
+                self.thread = None
+                self._stdin = None
+                raise
 
     def stop(self) -> None:
         self.stop_event.set()
-        if self.thread is not None:
-            self.thread.join(timeout=3)
-            self.thread = None
+        with self._lock:
+            thread = self.thread
+            client = self._client
+            stdin = self._stdin
+        if client is not None:
+            client.close()
+        if stdin is not None:
+            try:
+                stdin.close()
+            except (OSError, ValueError):
+                pass
+        if thread is not None:
+            thread.join(timeout=3)
+            if thread.is_alive():
+                LOGGER.error(
+                    "native Baichuan video pump did not stop for %s/%s",
+                    self.camera.id,
+                    self.source,
+                )
+        with self._lock:
+            stopped = thread is None or not thread.is_alive()
+            if self.thread is thread and stopped:
+                self.thread = None
+            if self._client is client and stopped:
+                self._client = None
+            if self._stdin is stdin and stopped:
+                self._stdin = None
 
-    def _run(self, stdin) -> None:
+    def _run(self, stdin: BinaryIO) -> None:
         try:
             client = BaichuanNativeClient(self.camera, self.source)
+            with self._lock:
+                self._client = client
+            if self.stop_event.is_set():
+                return
             for chunk in client.video_bytes(self.stop_event):
                 if self.stop_event.is_set():
                     break
@@ -331,10 +394,20 @@ class BaichuanFfmpegPipe:
         except Exception:
             LOGGER.exception("native Baichuan video pump failed for %s", self.camera.id)
         finally:
+            with self._lock:
+                client = self._client
+                self._client = None
+            if client is not None:
+                client.close()
             try:
                 stdin.close()
             except Exception:
                 pass
+            with self._lock:
+                if self.thread is threading.current_thread():
+                    self.thread = None
+                if self._stdin is stdin:
+                    self._stdin = None
 
 
 class MediaFrameReader:
@@ -378,6 +451,10 @@ class MediaFrameReader:
         payload_size = struct.unpack_from("<I", head, 4)[0]
         additional_header_size = struct.unpack_from("<I", head, 8)[0]
         microseconds = struct.unpack_from("<I", head, 12)[0]
+        if additional_header_size > 1024 * 1024:
+            raise BaichuanError(
+                f"implausible video extension length {additional_header_size}"
+            )
         self._read(4)
         if additional_header_size:
             self._read(additional_header_size)
@@ -439,8 +516,6 @@ def ffmpeg_input_args(camera: CameraConfig, source: str) -> list[str]:
         "1",
         "-fflags",
         "+genpts",
-        "-f",
-        "h264",
         "-probesize",
         "512k",
         "-analyzeduration",

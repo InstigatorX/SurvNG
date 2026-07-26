@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
@@ -31,11 +32,15 @@ class OnvifEventListener:
         self,
         camera: CameraConfig,
         on_motion: Callable[[str, str, datetime | None], None],
+        *,
+        cache_dir: Path | None = None,
     ) -> None:
         self.camera = camera
         self.on_motion = on_motion
+        self._cache_dir = cache_dir or Path("survng/storage")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
         self._transport: Any = None
         self._subscription_manager: Any = None
         self.connected = False
@@ -57,43 +62,61 @@ class OnvifEventListener:
     def start(self) -> None:
         if not self.camera.onvif.enabled:
             return
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"onvif-{self.camera.id}",
-            daemon=False,
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            thread = threading.Thread(
+                target=self._run,
+                name=f"onvif-{self.camera.id}",
+                daemon=False,
+            )
+            self._thread = thread
+            try:
+                thread.start()
+            except BaseException:
+                self._thread = None
+                self._stop.set()
+                raise
 
     def stop(self) -> None:
         self._stop.set()
-        thread = self._thread
+        with self._lifecycle_lock:
+            thread = self._thread
+        self._close_transport()
         if thread is not None:
             thread.join(timeout=PULL_TIMEOUT_SECONDS + 5)
             if thread.is_alive():
-                transport = self._transport
-                if transport is not None:
-                    try:
-                        transport.session.close()
-                    except Exception:
-                        LOGGER.debug("failed to close ONVIF transport for %s", self.camera.id, exc_info=True)
+                self._close_transport()
                 thread.join(timeout=STOP_JOIN_SECONDS)
                 if thread.is_alive():
                     LOGGER.error("ONVIF worker did not stop for %s", self.camera.id)
         self.connected = False
-        self._thread = thread if thread is not None and thread.is_alive() else None
-        self._transport = None
+        with self._lifecycle_lock:
+            if self._thread is thread and (thread is None or not thread.is_alive()):
+                self._thread = None
+        if thread is None or not thread.is_alive():
+            self._transport = None
 
     def _run(self) -> None:
+        try:
+            self._run_until_stopped()
+        finally:
+            self._unsubscribe(notify_camera=not self._stop.is_set())
+            self._close_transport()
+            self.connected = False
+            current = threading.current_thread()
+            with self._lifecycle_lock:
+                if self._thread is current:
+                    self._thread = None
+
+    def _run_until_stopped(self) -> None:
         try:
             from onvif import ONVIFCamera
             from zeep import Transport
             from zeep.cache import SqliteCache
         except ImportError:
             LOGGER.warning("onvif-zeep is not installed; ONVIF events disabled")
-            self.connected = False
             self.last_error = "onvif-zeep is not installed"
             return
 
@@ -125,6 +148,8 @@ class OnvifEventListener:
                 self.connected = False
                 self.retry_attempts += 1
                 self.last_error = f"subscription failed: {str(exc)[:200]}"
+                self._unsubscribe(notify_camera=not self._stop.is_set())
+                self._close_transport()
                 LOGGER.warning(
                     "failed to subscribe to ONVIF events for %s, retrying in %.0fs: %s",
                     self.camera.id,
@@ -154,7 +179,13 @@ class OnvifEventListener:
                         self.last_topic = topic
                         LOGGER.debug("ONVIF event %s: %s", topic, message[:300])
                         if self._is_motion_event(topic, message):
-                            self.on_motion(topic, message, event_at)
+                            try:
+                                self.on_motion(topic, message, event_at)
+                            except Exception:
+                                LOGGER.exception(
+                                    "ONVIF motion callback failed for %s",
+                                    self.camera.id,
+                                )
                 except Exception as exc:
                     error_text = self._error_text(exc)
                     self.last_poll_error = error_text
@@ -193,7 +224,8 @@ class OnvifEventListener:
                     if self._stop.wait(POLL_RETRY_SECONDS):
                         return
 
-            self._unsubscribe()
+            self._unsubscribe(notify_camera=not self._stop.is_set())
+            self._close_transport()
             self.connected = False
             if not self._stop.is_set():
                 if self._stop.wait(retry_delay):
@@ -201,9 +233,11 @@ class OnvifEventListener:
                 retry_delay = min(RETRY_MAX_SECONDS, retry_delay * 2)
 
     def _subscribe(self, ONVIFCamera: Any, Transport: Any, SqliteCache: Any) -> Any:
-        cache_path = f"survng/storage/onvif-zeep-{self.camera.id}.sqlite3"
+        self._close_transport()
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = self._cache_dir / f"onvif-zeep-{self.camera.id}.sqlite3"
         transport = Transport(
-            cache=SqliteCache(path=cache_path),
+            cache=SqliteCache(path=str(cache_path)),
             operation_timeout=TRANSPORT_OPERATION_TIMEOUT_SECONDS,
         )
         self._transport = transport
@@ -255,16 +289,30 @@ class OnvifEventListener:
         else:
             self.subscription_lifetime_seconds = None
 
-    def _unsubscribe(self) -> None:
+    def _unsubscribe(self, *, notify_camera: bool = True) -> None:
         manager = self._subscription_manager
         self._subscription_manager = None
-        if manager is None:
+        if manager is None or not notify_camera:
             return
         try:
             manager.Unsubscribe()
         except Exception:
             LOGGER.debug(
                 "failed to release ONVIF subscription for %s",
+                self.camera.id,
+                exc_info=True,
+            )
+
+    def _close_transport(self) -> None:
+        transport = self._transport
+        self._transport = None
+        if transport is None:
+            return
+        try:
+            transport.session.close()
+        except Exception:
+            LOGGER.debug(
+                "failed to close ONVIF transport for %s",
                 self.camera.id,
                 exc_info=True,
             )
@@ -325,6 +373,25 @@ class OnvifEventListener:
         searchable = f"{topic} {message}".lower()
         if not any(word in searchable for word in MOTION_WORDS):
             return False
+        explicit_state: bool | None = None
+        for tag in re.findall(r"<[^>]+>", searchable):
+            attributes = {
+                name.lower(): value.lower()
+                for name, value in re.findall(
+                    r"\b(name|value)\s*=\s*['\"]([^'\"]+)['\"]",
+                    tag,
+                    flags=re.IGNORECASE,
+                )
+            }
+            if attributes.get("name") not in {"ismotion", "motion", "state"}:
+                continue
+            value = attributes.get("value", "")
+            if value in {"true", "1", "on", "active"}:
+                return True
+            if value in {"false", "0", "off", "inactive"}:
+                explicit_state = False
+        if explicit_state is not None:
+            return explicit_state
         explicit_false = (
             'name="ismotion" value="false"' in searchable
             or "name='ismotion' value='false'" in searchable

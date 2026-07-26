@@ -858,6 +858,69 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker._source_is_idle("main"))
             self.assertFalse(worker._source_is_idle("live"))
 
+    def test_snapshot_rejects_a_stale_cached_frame(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            worker._source_threads["live"] = Mock(is_alive=lambda: True)
+            worker._source_stops["live"] = threading.Event()
+            worker._source_frames["live"] = np.zeros((10, 10, 3), dtype=np.uint8)
+            worker._source_frame_monotonic["live"] = time.monotonic() - 60
+
+            self.assertIsNone(worker.snapshot())
+
+    def test_start_source_replaces_a_stopping_capture_thread(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            old_thread = Mock(is_alive=lambda: True)
+            old_stop = threading.Event()
+            old_stop.set()
+            worker._source_threads["live"] = old_thread
+            worker._source_stops["live"] = old_stop
+            with patch.object(worker, "_run_source"):
+                self.assertTrue(worker._start_source("live"))
+                replacement = worker._source_threads["live"]
+                replacement.join(timeout=1)
+
+        self.assertIsNot(replacement, old_thread)
+        self.assertIsNot(worker._source_stops.get("live"), old_stop)
+
+    def test_capture_does_not_publish_a_read_completed_after_stop(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        capture = Mock()
+        capture.open.return_value = True
+        capture.isOpened.return_value = True
+        stop_event = threading.Event()
+
+        def stop_during_read():
+            stop_event.set()
+            return True, np.ones((10, 10, 3), dtype=np.uint8)
+
+        capture.read.side_effect = stop_during_read
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            with patch("survng.app.camera.cv2.VideoCapture", return_value=capture):
+                worker._run_source("live", stop_event)
+
+        self.assertNotIn("live", worker._source_frames)
+        self.assertEqual(worker.last_frame_at, "")
+
+    def test_start_rolls_back_workers_when_capture_start_fails(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with patch.object(worker, "_start_source", side_effect=RuntimeError("no threads")):
+                with self.assertRaisesRegex(RuntimeError, "no threads"):
+                    worker.start()
+
+            self.assertFalse(worker.status()["running"])
+            self.assertIsNone(worker._motion_analysis_thread)
+            self.assertIsNone(worker._motion_thread)
+
     def test_disabled_detection_ignores_motion_event(self) -> None:
         camera = CameraConfig(
             id="back-middle",
