@@ -455,6 +455,20 @@ class MotionPipelineTest(unittest.TestCase):
             required_artifacts={"scoring"},
         )
         try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "must define observation_kind for a restricted pipeline",
+            ):
+                pipeline.process(MotionContext(
+                    camera_id="gate",
+                    captured_at=9.0,
+                    original_frame=None,
+                    configuration={},
+                    runtime=pipeline.runtime,
+                ))
+            self.assertEqual(pipeline.status()["stages"]["frame"]["calls"], 0)
+            self.assertEqual(pipeline.status()["stages"]["event"]["calls"], 0)
+
             frame_result = pipeline.process(MotionContext(
                 camera_id="gate",
                 captured_at=10.0,
@@ -472,6 +486,41 @@ class MotionPipelineTest(unittest.TestCase):
 
             self.assertEqual(frame_result.debug.values["observed_by"], ["frame"])
             self.assertEqual(event_result.debug.values["observed_by"], ["event"])
+        finally:
+            pipeline.close()
+
+    def test_parallel_group_can_read_artifact_that_a_sibling_also_provides(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="score_writer",
+            builder=build_recording_stage,
+            provides=frozenset({"scoring"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="score_reader",
+            builder=build_recording_stage,
+            requires=frozenset({"scoring"}),
+            provides=frozenset({"decision"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("writer", "score_writer", parallel_group="branches"),
+                MotionStageConfig("reader", "score_reader", parallel_group="branches"),
+            ],
+            initial_artifacts={"scoring"},
+            required_artifacts={"decision"},
+        )
+        try:
+            result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={},
+                runtime=pipeline.runtime,
+            ))
+
+            self.assertEqual(set(result.timings), {"writer", "reader"})
         finally:
             pipeline.close()
 

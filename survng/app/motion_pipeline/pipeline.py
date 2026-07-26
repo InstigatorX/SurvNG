@@ -97,6 +97,7 @@ class MotionPipeline:
         execution_groups: Sequence[Sequence[int]] = (),
         stage_provides: Mapping[str, frozenset[str]] | None = None,
         stage_observation_kinds: Mapping[str, frozenset[str] | None] | None = None,
+        requires_observation_kind: bool = False,
         continuous_analysis: bool = False,
         motion_sources: Sequence[str] = (),
         stage_factory: Callable[[], Sequence[MotionStage]] | None = None,
@@ -121,6 +122,7 @@ class MotionPipeline:
             raise ValueError("motion execution groups must contain every stage exactly once in order")
         self.stage_provides = dict(stage_provides or {})
         self.stage_observation_kinds = dict(stage_observation_kinds or {})
+        self.requires_observation_kind = bool(requires_observation_kind)
         self.continuous_analysis = bool(continuous_analysis)
         self.motion_sources = tuple(dict.fromkeys(str(source) for source in motion_sources if source))
         self._stage_factory = stage_factory
@@ -171,6 +173,11 @@ class MotionPipeline:
             )
         if context.runtime is not self.runtime:
             raise ValueError("motion context must use the pipeline's per-camera runtime state")
+        observation_kind = context.configuration.get("observation_kind")
+        if not observation_kind and self.requires_observation_kind:
+            raise ValueError(
+                "motion context must define observation_kind for a restricted pipeline"
+            )
 
         current = context
         for group in self.execution_groups:
@@ -193,11 +200,17 @@ class MotionPipeline:
         context: MotionContext,
     ) -> bool:
         kind = context.configuration.get("observation_kind")
-        kinds = self.stage_observation_kinds.get(
+        kinds = self._observation_kinds_for_stage(stage)
+        return not kind or kinds is None or kind in kinds
+
+    def _observation_kinds_for_stage(
+        self,
+        stage: MotionStage,
+    ) -> frozenset[str] | None:
+        return self.stage_observation_kinds.get(
             stage.stage_id,
             getattr(stage, "observation_kinds", None),
         )
-        return not kind or kinds is None or kind in kinds
 
     def isolated_copy(self, *, clone_runtime: bool = False) -> "MotionPipeline":
         """Create a disposable pipeline that cannot mutate this pipeline's runtime or metrics."""
@@ -212,6 +225,7 @@ class MotionPipeline:
             execution_groups=self.execution_groups,
             stage_provides=self.stage_provides,
             stage_observation_kinds=self.stage_observation_kinds,
+            requires_observation_kind=self.requires_observation_kind,
             continuous_analysis=self.continuous_analysis,
             motion_sources=self.motion_sources,
             stage_factory=self._stage_factory,
@@ -228,12 +242,7 @@ class MotionPipeline:
         return any(
             kinds is None or kind in kinds
             for stage in self.stages
-            for kinds in (
-                self.stage_observation_kinds.get(
-                    stage.stage_id,
-                    getattr(stage, "observation_kinds", None),
-                ),
-            )
+            for kinds in (self._observation_kinds_for_stage(stage),)
         )
 
     def _process_stage(self, stage: MotionStage, context: MotionContext) -> MotionContext:

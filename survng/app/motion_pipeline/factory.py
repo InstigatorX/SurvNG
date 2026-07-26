@@ -71,6 +71,8 @@ class MotionPipelineFactory:
         effective_observation_kinds: list[frozenset[str] | None] = []
         execution_groups: list[list[int]] = []
         current_parallel_group = ""
+        current_group_available = set(available_artifacts)
+        requires_observation_kind = False
         for stage_config in stage_configs:
             stage_id = stage_config.stage_id.strip()
             if not stage_id:
@@ -79,13 +81,12 @@ class MotionPipelineFactory:
                 raise ValueError(f"duplicate motion stage ID: {stage_id}")
             registration = self.registry.registration(stage_config.implementation)
             parallel_group = stage_config.parallel_group.strip()
-            if parallel_group and parallel_group == current_parallel_group:
-                group_available = available_artifacts - set().union(
-                    *(registrations[index].provides for index in execution_groups[-1])
-                )
-            else:
-                group_available = available_artifacts
-            missing = registration.requires - group_available
+            continues_parallel_group = bool(
+                parallel_group and parallel_group == current_parallel_group
+            )
+            if not continues_parallel_group:
+                current_group_available = set(available_artifacts)
+            missing = registration.requires - current_group_available
             if missing:
                 raise ValueError(
                     f"motion stage {stage_id!r} requires unavailable artifacts: {', '.join(sorted(missing))}"
@@ -98,7 +99,10 @@ class MotionPipelineFactory:
             )
             stage_ids.add(stage_id)
             available_artifacts.update(registration.provides)
-            if parallel_group and parallel_group == current_parallel_group:
+            if continues_parallel_group:
+                all_existing_provides = set().union(
+                    *(registrations[index].provides for index in execution_groups[-1])
+                )
                 overlapping_stages = (
                     index
                     for index in execution_groups[-1]
@@ -119,6 +123,12 @@ class MotionPipelineFactory:
                         f"parallel motion group {parallel_group!r} has conflicting outputs: "
                         + ", ".join(sorted(conflicting))
                     )
+                disjoint_conflicts = (
+                    all_existing_provides & registration.provides
+                ) - existing_provides - {"source_evidence", "debug"}
+                requires_observation_kind = bool(
+                    requires_observation_kind or disjoint_conflicts
+                )
                 execution_groups[-1].append(len(stages) - 1)
             else:
                 execution_groups.append([len(stages) - 1])
@@ -217,6 +227,7 @@ class MotionPipelineFactory:
                 stage.stage_id: kinds
                 for stage, kinds in zip(stages, effective_observation_kinds, strict=True)
             },
+            requires_observation_kind=requires_observation_kind,
             continuous_analysis=any(
                 registration.continuous_analysis
                 for registration in registrations
