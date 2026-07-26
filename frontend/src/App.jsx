@@ -5449,7 +5449,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Compiled Model Cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
           <label className="check-field"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /> Cache compiled model</label>
           <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
-          <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
+          <label>Saved Face Limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest faces are removed first; one confirmed reference is kept for each person.</small></label>
         </div>
         <h3>Motion Triggers &amp; Filtering</h3>
         <EfficientMotionSetup
@@ -5808,7 +5808,10 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ person_id: nextPersonId ? Number(nextPersonId) : null }),
       });
-      if (!response.ok) throw new Error("Could not update this face");
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "Could not update this face");
+      }
       await onUpdated?.();
     } catch (requestError) {
       setError(requestError.message || "Could not update this face");
@@ -5828,7 +5831,10 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, observation_id: observation.id }),
       });
-      if (!response.ok) throw new Error("Could not create this person");
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "Could not create this person");
+      }
       await onUpdated?.(`${name} enrolled`);
     } catch (requestError) {
       setError(requestError.message || "Could not create this person");
@@ -5906,7 +5912,10 @@ function FacesPage({ timeZone }) {
   async function deletePerson(person) {
     if (!window.confirm(`Delete ${person.name}? Their observations will return to Unknown.`)) return;
     const response = await fetch(`/api/faces/people/${person.id}`, { method: "DELETE" });
-    if (!response.ok) return setNotice("Could not delete this person");
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      return setNotice(payload.detail || "Could not delete this person");
+    }
     setPersonId("");
     await load();
   }
@@ -5926,7 +5935,9 @@ function FacesPage({ timeZone }) {
           {people.map((person) => (
             <div className={`face-person-row ${String(person.id) === personId ? "active" : ""}`} key={person.id}>
               <button type="button" className="face-person-select" onClick={() => { setPersonId(String(person.id)); setPage(0); }}>
-                <img src={appUrl(`/api/faces/observations/${person.preview_observation_id}/crop.jpg`)} alt="" />
+                {person.preview_observation_id
+                  ? <img src={appUrl(`/api/faces/observations/${person.preview_observation_id}/crop.jpg`)} alt="" />
+                  : <span className="face-avatar unknown"><ScanFace size={20} /></span>}
                 <span><strong>{person.name}</strong><small>{person.observation_count} observations</small></span>
               </button>
               <button type="button" className="icon-button subtle" onClick={() => deletePerson(person)} title="Delete person" aria-label={`Delete ${person.name}`}><Trash2 size={15} /></button>
@@ -5949,7 +5960,7 @@ function FacesPage({ timeZone }) {
           <span className="shown-bubble">{totalObservations} faces</span>
         </div>
         <div className="face-messages">
-          {!status?.recognition_ready ? <div className="face-readiness"><Activity size={16} /><span>{status?.recognition_message || "Automatic recognition is not configured."}</span></div> : null}
+          {!status?.recognition_ready || status?.recognition?.pending > 0 || status?.recognition?.failed > 0 ? <div className="face-readiness"><Activity size={16} /><span>{status?.recognition_message || "Automatic recognition is not configured."}</span></div> : null}
           {notice ? <div className="save-status">{notice}</div> : null}
         </div>
         <div className="face-observation-grid">

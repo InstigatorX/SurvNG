@@ -204,11 +204,11 @@ class OpenVinoFaceRecognizer:
     def embed(self, face: np.ndarray) -> np.ndarray:
         if self._infer_request is None:
             raise RuntimeError(self.error or "Face recognition is unavailable.")
-        aligned = self._align(face)
-        if self.input_color_order == "RGB":
-            aligned = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
-        tensor = self._image_tensor(aligned, self.input_shape, self.input_layout)
         with self._lock:
+            aligned = self._align(face)
+            if self.input_color_order == "RGB":
+                aligned = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
+            tensor = self._image_tensor(aligned, self.input_shape, self.input_layout)
             result = self._infer_request.infer({self._input: tensor})[self._output]
         vector = np.asarray(result, dtype=np.float32).reshape(-1)
         norm = float(np.linalg.norm(vector))

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-from queue import Empty, Queue
+import math
+from queue import Empty, Full, Queue
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -13,10 +14,27 @@ import cv2
 import numpy as np
 
 from .face_recognition import OpenVinoFaceRecognizer
-from .inference import InferenceUnavailable
+from .inference import INFERENCE_REQUEST_TIMEOUT_SECONDS, InferenceUnavailable
+from .incident_utils import event_snapshot_path
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def parse_face_box(value: object) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        box = {name: float(value[name]) for name in ("x1", "y1", "x2", "y2")}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(coordinate) for coordinate in box.values()):
+        return None
+    if box["x1"] < 0 or box["y1"] < 0:
+        return None
+    if box["x2"] <= box["x1"] or box["y2"] <= box["y1"]:
+        return None
+    return box
 
 
 class FaceStore:
@@ -32,7 +50,10 @@ class FaceStore:
         self.max_observations = max(100, int(max_observations))
         self.recognizer = recognizer
         self._lock = threading.Lock()
-        self._recognition_queue: Queue[int | None] = Queue()
+        self._lifecycle_lock = threading.RLock()
+        self._recognition_queue: Queue[int | None] = Queue(maxsize=self.max_observations + 1)
+        self._recognition_pending: set[int] = set()
+        self._recognition_pending_lock = threading.Lock()
         self._recognition_stop = threading.Event()
         self._recognition_thread: threading.Thread | None = None
         self._init_db()
@@ -40,18 +61,22 @@ class FaceStore:
             self.start()
 
     def start(self) -> None:
-        if self._recognition_thread is not None and self._recognition_thread.is_alive():
-            return
-        if self.recognizer is None or not self.recognizer.ready:
-            return
-        self._recognition_stop.clear()
-        self._recognition_thread = threading.Thread(
-            target=self._recognition_loop,
-            name="survng-face-recognition",
-            daemon=False,
-        )
-        self._recognition_thread.start()
-        self._queue_pending_recognition()
+        with self._lifecycle_lock:
+            if self._recognition_thread is not None and self._recognition_thread.is_alive():
+                return
+            if self.recognizer is None or not self.recognizer.enabled:
+                return
+            self._recognition_stop.clear()
+            self._recognition_thread = threading.Thread(
+                target=self._recognition_loop,
+                name="survng-face-recognition",
+                daemon=False,
+            )
+            self._recognition_thread.start()
+        try:
+            self._queue_pending_recognition()
+        except Exception:
+            LOGGER.exception("Could not restore pending face recognition work")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=10)
@@ -96,6 +121,14 @@ class FaceStore:
                     on face_observations(observed_at desc);
                 create index if not exists idx_face_observations_person
                     on face_observations(person_id, observed_at desc);
+                create table if not exists face_rejections (
+                    observation_id integer not null,
+                    person_id integer not null,
+                    created_at text not null,
+                    primary key(observation_id, person_id),
+                    foreign key(observation_id) references face_observations(id) on delete cascade,
+                    foreign key(person_id) references face_people(id) on delete cascade
+                );
                 """
             )
             columns = {str(row[1]) for row in connection.execute("pragma table_info(face_observations)")}
@@ -107,10 +140,47 @@ class FaceStore:
                 "rejected_person_id": "alter table face_observations add column rejected_person_id integer",
                 "recognition_error": "alter table face_observations add column recognition_error text not null default ''",
                 "recognized_at": "alter table face_observations add column recognized_at text not null default ''",
+                "recognition_pending": "alter table face_observations add column recognition_pending integer not null default 1",
             }
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
+            connection.execute(
+                """
+                insert or ignore into face_rejections (observation_id, person_id, created_at)
+                select o.id, o.rejected_person_id, coalesce(nullif(o.recognized_at, ''), o.created_at)
+                from face_observations o
+                join face_people p on p.id = o.rejected_person_id
+                where o.rejected_person_id is not null
+                """
+            )
+            connection.execute(
+                """
+                update face_observations
+                set candidate_person_id = null, candidate_confidence = null
+                where candidate_person_id is not null
+                    and not exists (
+                        select 1 from face_people p where p.id = candidate_person_id
+                    )
+                """
+            )
+            connection.execute(
+                """
+                update face_observations
+                set rejected_person_id = null
+                where rejected_person_id is not null
+                    and not exists (
+                        select 1 from face_people p where p.id = rejected_person_id
+                    )
+                """
+            )
+            connection.execute(
+                """
+                update face_observations
+                set review_status = 'unknown', match_confidence = null
+                where person_id is null and review_status = 'confirmed'
+                """
+            )
             storage_root = str(self.storage_dir)
             metadata = connection.execute(
                 "select value from survng_metadata where key = 'face_storage_root'"
@@ -146,8 +216,15 @@ class FaceStore:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
             for event in events:
-                snapshot_path = str(event.get("snapshot_path") or "")
-                if not snapshot_path:
+                try:
+                    event_id = int(event["id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if event_id <= 0:
+                    continue
+                try:
+                    snapshot_path = str(event_snapshot_path(self.storage_dir, event))
+                except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                     continue
                 try:
                     objects = json.loads(event.get("objects_json", "[]") or "[]")
@@ -160,12 +237,14 @@ class FaceStore:
                         continue
                     if str(detected.get("label") or "").lower() != "face":
                         continue
-                    box = detected.get("box")
-                    if not isinstance(box, dict):
+                    box = parse_face_box(detected.get("box"))
+                    if box is None:
                         continue
                     try:
                         confidence = float(detected.get("confidence") or 0)
                     except (TypeError, ValueError):
+                        continue
+                    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
                         continue
                     cursor = connection.execute(
                         """
@@ -175,7 +254,7 @@ class FaceStore:
                         ) values (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            int(event["id"]), object_index, str(event.get("camera_id") or ""),
+                            event_id, object_index, str(event.get("camera_id") or ""),
                             snapshot_path, json.dumps(box, separators=(",", ":")),
                             confidence,
                             str(event.get("created_at") or now), now,
@@ -185,20 +264,37 @@ class FaceStore:
                         inserted += 1
                         recognition_ids.append(int(cursor.lastrowid))
             self._prune_locked(connection)
+            if recognition_ids:
+                inserted_ids = set(recognition_ids)
+                recognition_ids = [
+                    int(row["id"])
+                    for row in connection.execute(
+                        "select id from face_observations order by observed_at desc, id desc limit ?",
+                        (self.max_observations,),
+                    ).fetchall()
+                    if int(row["id"]) in inserted_ids
+                ]
         for observation_id in recognition_ids:
             self._queue_recognition(observation_id)
         return inserted
 
     def close(self) -> None:
-        self._recognition_stop.set()
-        if self._recognition_thread is not None:
-            self._recognition_queue.put(None)
-            self._recognition_thread.join(timeout=5)
-            if self._recognition_thread.is_alive():
+        with self._lifecycle_lock:
+            self._recognition_stop.set()
+            thread = self._recognition_thread
+            if thread is not None:
+                try:
+                    self._recognition_queue.put_nowait(None)
+                except Full:
+                    pass
+        if thread is not None:
+            thread.join(timeout=INFERENCE_REQUEST_TIMEOUT_SECONDS + 5.0)
+            if thread.is_alive():
                 LOGGER.error("face recognition worker did not stop")
                 raise RuntimeError("face recognition worker did not stop")
-            else:
-                self._recognition_thread = None
+            with self._lifecycle_lock:
+                if self._recognition_thread is thread:
+                    self._recognition_thread = None
 
     def recognition_status(self) -> dict[str, Any]:
         recognizer_status = self.recognizer.status() if self.recognizer is not None else {
@@ -209,10 +305,10 @@ class FaceStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                select count(*) as embedded,
-                    sum(case when embedding_model = ? and embedding_blob is not null then 1 else 0 end) as embedded_current,
+                select sum(case when embedding_model = ? and embedding_blob is not null then 1 else 0 end) as embedded_current,
                     sum(case when candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested,
-                    sum(case when recognition_error != '' then 1 else 0 end) as failed
+                    sum(case when recognition_error != '' then 1 else 0 end) as failed,
+                    sum(case when recognition_pending = 1 then 1 else 0 end) as pending
                 from face_observations
                 """,
                 (str(recognizer_status.get("model_fingerprint") or ""),),
@@ -223,71 +319,175 @@ class FaceStore:
             "embedded": int(row["embedded_current"] or 0),
             "suggested": int(row["suggested"] or 0),
             "failed": int(row["failed"] or 0),
+            "pending": int(row["pending"] or 0),
         }
 
     def _queue_recognition(self, observation_id: int) -> None:
-        if self.recognizer is not None and self.recognizer.ready:
-            self._recognition_queue.put(observation_id)
+        if self.recognizer is None or self._recognition_stop.is_set():
+            return
+        observation_id = int(observation_id)
+        with self._recognition_pending_lock:
+            if observation_id in self._recognition_pending:
+                return
+            try:
+                self._recognition_queue.put_nowait(observation_id)
+            except Full:
+                LOGGER.warning("face recognition queue is full; deferred observation %s", observation_id)
+                return
+            self._recognition_pending.add(observation_id)
 
     def _queue_pending_recognition(self) -> None:
-        if self.recognizer is None or not self.recognizer.ready:
+        if self.recognizer is None or not self.recognizer.enabled:
             return
+        recognizer_status = self.recognizer.status()
+        model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 select id from face_observations
+                where recognition_pending = 1
+                    or (embedding_blob is not null and ? != '' and embedding_model != ?)
                 order by case when person_id is not null then 0 else 1 end,
                     observed_at desc limit ?
                 """,
-                (self.max_observations,),
+                (model_fingerprint, model_fingerprint, self.max_observations),
             ).fetchall()
         for row in rows:
-            self._recognition_queue.put(int(row["id"]))
+            self._queue_recognition(int(row["id"]))
 
-    def _queue_unknown_recognition(self) -> None:
-        if self.recognizer is None or not self.recognizer.ready:
+    def _refresh_unknown_recognition(self) -> None:
+        if self.recognizer is None or not self.recognizer.enabled:
             return
-        with self._connect() as connection:
-            rows = connection.execute(
-                "select id from face_observations where person_id is null order by observed_at desc limit ?",
-                (self.max_observations,),
+        recognizer_status = self.recognizer.status()
+        model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return
+        with self._lock, self._connect() as connection:
+            embedded_rows = connection.execute(
+                """
+                select id, embedding_blob from face_observations
+                where person_id is null and recognition_pending = 0
+                    and embedding_model = ? and embedding_blob is not null
+                order by observed_at desc limit ?
+                """,
+                (model_fingerprint, self.max_observations),
             ).fetchall()
-        for row in rows:
-            self._recognition_queue.put(int(row["id"]))
+            for row in embedded_rows:
+                try:
+                    embedding = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+                except (TypeError, ValueError):
+                    continue
+                norm = float(np.linalg.norm(embedding))
+                if (
+                    embedding.size == 0
+                    or not np.all(np.isfinite(embedding))
+                    or not math.isfinite(norm)
+                    or norm <= 1e-9
+                ):
+                    continue
+                candidate_id, candidate_confidence = self._best_match(
+                    connection,
+                    int(row["id"]),
+                    embedding / norm,
+                    model_fingerprint,
+                )
+                connection.execute(
+                    """
+                    update face_observations
+                    set candidate_person_id = ?, candidate_confidence = ?
+                    where id = ? and person_id is null
+                    """,
+                    (candidate_id, candidate_confidence, int(row["id"])),
+                )
+            pending_rows = connection.execute(
+                """
+                select id from face_observations
+                where person_id is null and (
+                    recognition_pending = 1
+                    or (embedding_blob is not null and embedding_model != ?)
+                )
+                order by observed_at desc limit ?
+                """,
+                (model_fingerprint, self.max_observations),
+            ).fetchall()
+        for row in pending_rows:
+            self._queue_recognition(int(row["id"]))
+
+    def _try_refresh_unknown_recognition(self) -> bool:
+        try:
+            self._refresh_unknown_recognition()
+            return True
+        except Exception:
+            LOGGER.exception("Could not refresh unknown face matches")
+            return False
 
     def _recognition_loop(self) -> None:
-        while not self._recognition_stop.is_set():
+        references_changed = False
+        while True:
             try:
                 observation_id = self._recognition_queue.get(timeout=1)
             except Empty:
+                if self._recognition_stop.is_set():
+                    break
+                if references_changed and self._try_refresh_unknown_recognition():
+                    references_changed = False
                 continue
             if observation_id is None:
+                self._recognition_queue.task_done()
                 break
+            if self._recognition_stop.is_set():
+                self._recognition_queue.task_done()
+                with self._recognition_pending_lock:
+                    self._recognition_pending.discard(observation_id)
+                continue
+            retry = False
             try:
-                self._recognize_observation(observation_id)
+                references_changed = (
+                    self._recognize_observation(observation_id) or references_changed
+                )
             except InferenceUnavailable as exc:
                 if not self._recognition_stop.is_set():
-                    self._recognition_queue.put(observation_id)
+                    retry = True
                     LOGGER.warning("Face recognition deferred while inference recovers: %s", exc)
-                    self._recognition_stop.wait(1.0)
             except Exception:
                 LOGGER.exception("Face recognition failed for observation %s", observation_id)
             finally:
                 self._recognition_queue.task_done()
+                with self._recognition_pending_lock:
+                    self._recognition_pending.discard(observation_id)
+            if retry and not self._recognition_stop.wait(1.0):
+                self._queue_recognition(observation_id)
 
-    def _recognize_observation(self, observation_id: int) -> None:
+    def _recognize_observation(self, observation_id: int) -> bool:
         recognizer = self.recognizer
-        if recognizer is None or not recognizer.ready:
-            return
+        if recognizer is None:
+            return False
+        recognizer_status = recognizer.status()
+        if not recognizer_status.get("ready"):
+            isolation = recognizer_status.get("isolation") or {}
+            if recognizer.enabled and not isolation.get("worker_alive", True):
+                raise InferenceUnavailable(
+                    str(isolation.get("last_error") or "face inference worker is unavailable")
+                )
+            return False
+        model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
+        if not model_fingerprint:
+            return False
         with self._connect() as connection:
             row = connection.execute(
                 "select * from face_observations where id = ?", (observation_id,)
             ).fetchone()
         if row is None:
-            return
+            return False
         try:
-            box = json.loads(row["box_json"] or "{}")
-            frame = cv2.imread(str(row["snapshot_path"] or ""))
+            box = parse_face_box(json.loads(row["box_json"] or "{}"))
+            if box is None:
+                raise ValueError("Face box is invalid.")
+            snapshot_path = event_snapshot_path(
+                self.storage_dir,
+                {"snapshot_path": str(row["snapshot_path"] or "")},
+            )
+            frame = cv2.imread(str(snapshot_path))
             if frame is None:
                 raise ValueError("Snapshot is unavailable.")
             height, width = frame.shape[:2]
@@ -301,106 +501,158 @@ class FaceStore:
             right, bottom = min(width, int(x2 + pad_x)), min(height, int(y2 + pad_y))
             if right <= left or bottom <= top:
                 raise ValueError("Face crop is invalid.")
-            embedding = recognizer.embed(frame[top:bottom, left:right])
-            candidate_id, candidate_confidence = self._best_match(
-                observation_id,
-                embedding,
-                int(row["rejected_person_id"]) if row["rejected_person_id"] is not None else None,
-            )
+            embedding = np.asarray(
+                recognizer.embed(frame[top:bottom, left:right]),
+                dtype=np.float32,
+            ).reshape(-1)
+            expected_size = int(recognizer_status.get("embedding_size") or 0)
+            if embedding.size == 0 or embedding.size > 16384:
+                raise ValueError("Face embedding size was invalid.")
+            if expected_size and embedding.size != expected_size:
+                raise ValueError(
+                    f"Face embedding had {embedding.size} values; expected {expected_size}."
+                )
+            norm = float(np.linalg.norm(embedding))
+            if not math.isfinite(norm) or norm <= 1e-9 or not np.all(np.isfinite(embedding)):
+                raise ValueError("Face embedding was empty or invalid.")
+            embedding = embedding / norm
             now = datetime.now(timezone.utc).isoformat()
             with self._lock, self._connect() as connection:
+                candidate_id, candidate_confidence = self._best_match(
+                    connection,
+                    observation_id,
+                    embedding,
+                    model_fingerprint,
+                )
                 connection.execute(
                     """
                     update face_observations
                     set embedding_blob = ?, embedding_model = ?,
                         candidate_person_id = case when person_id is null then ? else null end,
                         candidate_confidence = case when person_id is null then ? else null end,
-                        recognition_error = '', recognized_at = ?
+                        recognition_error = '', recognized_at = ?, recognition_pending = 0
                     where id = ?
                     """,
                     (
                         embedding.astype(np.float32).tobytes(),
-                        recognizer.model_fingerprint,
+                        model_fingerprint,
                         candidate_id,
                         candidate_confidence,
                         now,
                         observation_id,
                     ),
                 )
+                current = connection.execute(
+                    "select person_id from face_observations where id = ?",
+                    (observation_id,),
+                ).fetchone()
+            return current is not None and current["person_id"] is not None
         except InferenceUnavailable:
             raise
         except Exception as exc:
             with self._lock, self._connect() as connection:
                 connection.execute(
-                    "update face_observations set recognition_error = ?, recognized_at = ? where id = ?",
+                    """
+                    update face_observations
+                    set recognition_error = ?, recognized_at = ?, recognition_pending = 0
+                    where id = ?
+                    """,
                     (str(exc)[:500], datetime.now(timezone.utc).isoformat(), observation_id),
                 )
+            return False
 
     def _best_match(
         self,
+        connection: sqlite3.Connection,
         observation_id: int,
         embedding: np.ndarray,
-        rejected_person_id: int | None = None,
+        model_fingerprint: str,
     ) -> tuple[int | None, float | None]:
         recognizer = self.recognizer
         if recognizer is None:
             return None, None
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                select id, person_id, embedding_blob from face_observations
+        if embedding.ndim != 1 or embedding.size == 0 or not np.all(np.isfinite(embedding)):
+            return None, None
+        rows = connection.execute(
+            """
+            select id, person_id, embedding_blob from (
+                select id, person_id, embedding_blob, observed_at,
+                    row_number() over (
+                        partition by person_id order by observed_at desc, id desc
+                    ) as reference_position
+                from face_observations
                 where person_id is not null and embedding_blob is not null
                     and embedding_model = ? and id != ?
-                order by observed_at desc
-                """,
-                (recognizer.model_fingerprint, observation_id),
+            ) where reference_position <= ?
+            order by observed_at desc, id desc
+            """,
+            (
+                model_fingerprint,
+                observation_id,
+                recognizer.config.face_max_references,
+            ),
+        ).fetchall()
+        rejected_people = {
+            int(row["person_id"])
+            for row in connection.execute(
+                "select person_id from face_rejections where observation_id = ?",
+                (observation_id,),
             ).fetchall()
+        }
         scores: dict[int, list[float]] = {}
         for row in rows:
             person_scores = scores.setdefault(int(row["person_id"]), [])
-            if len(person_scores) >= recognizer.config.face_max_references:
+            try:
+                reference = np.frombuffer(row["embedding_blob"], dtype=np.float32)
+            except (TypeError, ValueError):
                 continue
-            reference = np.frombuffer(row["embedding_blob"], dtype=np.float32)
-            if reference.shape != embedding.shape:
+            if reference.shape != embedding.shape or not np.all(np.isfinite(reference)):
                 continue
-            person_scores.append(float(np.dot(embedding, reference)))
+            reference_norm = float(np.linalg.norm(reference))
+            if not math.isfinite(reference_norm) or reference_norm <= 1e-9:
+                continue
+            score = float(np.dot(embedding, reference / reference_norm))
+            if math.isfinite(score):
+                person_scores.append(score)
         ranked: list[tuple[float, int]] = []
         for person_id, values in scores.items():
-            if person_id == rejected_person_id:
+            if person_id in rejected_people:
                 continue
             top = sorted(values, reverse=True)[:3]
             ranked.append((float(sum(top) / len(top)), person_id))
         if not ranked:
             return None, None
         score, person_id = max(ranked)
+        score = max(0.0, min(1.0, score))
         if score < recognizer.config.face_match_threshold:
             return None, round(score, 4)
         return person_id, round(score, 4)
 
     def _prune_locked(self, connection: sqlite3.Connection) -> int:
-        rows = connection.execute(
-            "select id, person_id from face_observations order by observed_at asc, id asc"
-        ).fetchall()
-        excess = len(rows) - self.max_observations
+        total = int(connection.execute("select count(*) from face_observations").fetchone()[0])
+        excess = total - self.max_observations
         if excess <= 0:
             return 0
-        protected = {
+        remove_ids = [
             int(row["id"])
             for row in connection.execute(
                 """
-                select id from (
-                    select id, row_number() over (
-                        partition by person_id order by observed_at desc, id desc
-                    ) as position
-                    from face_observations
-                    where person_id is not null
-                ) where position = 1
-                """
+                select id from face_observations
+                where id not in (
+                    select id from (
+                        select id, row_number() over (
+                            partition by person_id order by observed_at desc, id desc
+                        ) as position
+                        from face_observations
+                        where person_id is not null
+                    ) where position = 1
+                )
+                order by observed_at asc, id asc
+                limit ?
+                """,
+                (excess,),
             ).fetchall()
-        }
-        unknown = [int(row["id"]) for row in rows if row["person_id"] is None]
-        older_known = [int(row["id"]) for row in rows if row["person_id"] is not None and int(row["id"]) not in protected]
-        remove_ids = (unknown + older_known)[:excess]
+        ]
         if remove_ids:
             connection.executemany("delete from face_observations where id = ?", ((item,) for item in remove_ids))
         return len(remove_ids)
@@ -550,11 +802,29 @@ class FaceStore:
         return observations
 
     def create_person(self, name: str, observation_id: int | None = None, notes: str = "") -> dict[str, Any]:
+        name = name.strip()
+        notes = notes.strip()
+        if not name:
+            raise ValueError("person name is required")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
+            if connection.execute(
+                "select 1 from face_people where lower(name) = lower(?)",
+                (name,),
+            ).fetchone() is not None:
+                raise ValueError("person name already exists")
+            if observation_id is not None:
+                observation = connection.execute(
+                    "select person_id from face_observations where id = ?",
+                    (observation_id,),
+                ).fetchone()
+                if observation is None:
+                    raise ValueError("face observation not found")
+                if observation["person_id"] is not None:
+                    raise ValueError("face observation is already assigned")
             cursor = connection.execute(
                 "insert into face_people (name, notes, created_at, updated_at) values (?, ?, ?, ?)",
-                (name.strip(), notes.strip(), now, now),
+                (name, notes, now, now),
             )
             person_id = int(cursor.lastrowid)
             if observation_id is not None:
@@ -565,9 +835,13 @@ class FaceStore:
                         where id = ?""",
                     (person_id, observation_id),
                 )
+                connection.execute(
+                    "delete from face_rejections where observation_id = ?",
+                    (observation_id,),
+                )
         if observation_id is not None:
             self._queue_recognition(observation_id)
-            self._queue_unknown_recognition()
+            self._try_refresh_unknown_recognition()
         return next(person for person in self.people() if person["id"] == person_id)
 
     def assign(self, observation_id: int, person_id: int | None) -> dict[str, Any] | None:
@@ -577,11 +851,26 @@ class FaceStore:
             current = connection.execute(
                 "select candidate_person_id from face_observations where id = ?", (observation_id,)
             ).fetchone()
+            if current is None:
+                return None
             rejected_person_id = (
                 int(current["candidate_person_id"])
-                if person_id is None and current is not None and current["candidate_person_id"] is not None
+                if person_id is None and current["candidate_person_id"] is not None
                 else None
             )
+            if person_id is not None:
+                connection.execute(
+                    "delete from face_rejections where observation_id = ?",
+                    (observation_id,),
+                )
+            elif rejected_person_id is not None:
+                connection.execute(
+                    """
+                    insert or ignore into face_rejections (observation_id, person_id, created_at)
+                    values (?, ?, ?)
+                    """,
+                    (observation_id, rejected_person_id, datetime.now(timezone.utc).isoformat()),
+                )
             connection.execute(
                 """update face_observations set person_id = ?, review_status = ?, match_confidence = ?,
                     candidate_person_id = null, candidate_confidence = null, rejected_person_id = ?
@@ -594,9 +883,9 @@ class FaceStore:
                     observation_id,
                 ),
             )
-        self._queue_recognition(observation_id)
         if person_id is not None:
-            self._queue_unknown_recognition()
+            self._queue_recognition(observation_id)
+        self._try_refresh_unknown_recognition()
         return self.observation(observation_id)
 
     def delete_person(self, person_id: int) -> bool:
@@ -609,26 +898,39 @@ class FaceStore:
                 "update face_observations set rejected_person_id = null where rejected_person_id = ?",
                 (person_id,),
             )
+            connection.execute(
+                """
+                update face_observations
+                set person_id = null, review_status = 'unknown', match_confidence = null
+                where person_id = ?
+                """,
+                (person_id,),
+            )
             cursor = connection.execute("delete from face_people where id = ?", (person_id,))
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+        if deleted:
+            self._try_refresh_unknown_recognition()
+        return deleted
 
     def snapshot_path(self, observation_id: int) -> tuple[Path, dict[str, float]] | None:
         observation = self.observation(observation_id)
         if not observation:
             return None
-        path = Path(observation["snapshot_path"]).resolve()
         try:
-            path.relative_to(self.storage_dir)
-        except ValueError:
+            path = event_snapshot_path(self.storage_dir, observation)
+        except (FileNotFoundError, PermissionError, OSError, RuntimeError):
             return None
-        return path, observation["box"]
+        box = parse_face_box(observation["box"])
+        if box is None:
+            return None
+        return path, box
 
     @staticmethod
     def _observation_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item.pop("embedding_blob", None)
         try:
-            item["box"] = json.loads(item.pop("box_json"))
+            item["box"] = parse_face_box(json.loads(item.pop("box_json"))) or {}
         except (TypeError, json.JSONDecodeError):
             item["box"] = {}
         return item

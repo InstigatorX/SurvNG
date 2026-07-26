@@ -10,6 +10,12 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_face_crop_rejects_non_finite_padding_before_storage_access(self) -> None:
+        with self.assertRaises(HTTPException) as invalid:
+            main.face_crop(1, padding=float("nan"))
+
+        self.assertEqual(invalid.exception.status_code, 422)
+
     def test_incident_search_rejects_unsafe_timezone_paths(self) -> None:
         with self.assertRaises(HTTPException) as invalid:
             main.incident_search(time_zone="../../etc/passwd")

@@ -1869,11 +1869,11 @@ def incident_search(
 class FacePersonCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     notes: str = Field(default="", max_length=1000)
-    observation_id: int | None = None
+    observation_id: int | None = Field(default=None, gt=0)
 
 
 class FaceAssignment(BaseModel):
-    person_id: int | None = None
+    person_id: int | None = Field(default=None, gt=0)
 
 
 def _sync_face_observations(limit: int = 5000) -> int:
@@ -1895,10 +1895,13 @@ def face_status() -> dict:
     stats = manager.faces.stats()
     recognition = manager.faces.recognition_status()
     if recognition.get("ready"):
+        pending = int(recognition.get("pending") or 0)
+        failed = int(recognition.get("failed") or 0)
         recognition_message = (
             f"Recognition ready on {recognition.get('device') or 'OpenVINO'}; "
             f"{recognition.get('embedded', 0)} faces embedded and "
-            f"{recognition.get('suggested', 0)} suggestions awaiting review."
+            f"{recognition.get('suggested', 0)} suggestions awaiting review"
+            f"; {pending} pending and {failed} unable to process."
         )
     else:
         recognition_message = str(recognition.get("error") or "Configure an OpenVINO face embedding model.")
@@ -1924,7 +1927,11 @@ def _public_face_observation(observation: dict) -> dict:
 
 @app.post("/api/faces/people")
 def create_face_person(payload: FacePersonCreate) -> dict:
-    return manager.faces.create_person(payload.name, payload.observation_id, payload.notes)
+    try:
+        return manager.faces.create_person(payload.name, payload.observation_id, payload.notes)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 409
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @app.delete("/api/faces/people/{person_id}")
@@ -1990,6 +1997,8 @@ def assign_face_observation(observation_id: int, payload: FaceAssignment) -> dic
 
 @app.get("/api/faces/observations/{observation_id}/crop.jpg")
 def face_crop(observation_id: int, padding: float = 0.2) -> Response:
+    if not math.isfinite(padding):
+        raise HTTPException(status_code=422, detail="padding must be finite")
     result = manager.faces.snapshot_path(observation_id)
     if result is None:
         raise HTTPException(status_code=404, detail="face observation not found")

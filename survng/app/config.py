@@ -231,9 +231,9 @@ class DetectorConfig(BaseModel):
     warmup_enabled: bool = True
     face_max_observations: int = Field(default=1000, ge=100, le=100000)
     face_recognition_enabled: bool = False
-    face_embedding_model_path: str = ""
-    face_landmark_model_path: str = ""
-    face_recognition_device: str = "AUTO"
+    face_embedding_model_path: str = Field(default="", max_length=4096)
+    face_landmark_model_path: str = Field(default="", max_length=4096)
+    face_recognition_device: str = Field(default="AUTO", min_length=1, max_length=64)
     face_match_threshold: float = Field(default=0.40, ge=0.0, le=1.0)
     face_min_size: int = Field(default=48, ge=16, le=1024)
     face_max_references: int = Field(default=20, ge=1, le=200)
