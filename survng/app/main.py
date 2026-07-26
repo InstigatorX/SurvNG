@@ -1746,7 +1746,8 @@ def zone_snapshot(camera_id: str, source: str = "live") -> Response:
 
 
 @app.get("/api/cameras/{camera_id}/live-info")
-def live_info(camera_id: str, source: str = "live") -> dict:
+def live_info(camera_id: str, response: Response, source: str = "live") -> dict:
+    response.headers["Cache-Control"] = "no-store"
     camera = manager.camera(camera_id)
     if camera is None:
         raise HTTPException(status_code=404, detail="camera not found")
@@ -1790,6 +1791,10 @@ async def stream(
     return StreamingResponse(
         frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -1799,7 +1804,8 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
         camera = manager.camera(camera_id)
         if camera is None:
             raise Go2RtcError("camera not found")
-        upstream_url = manager.go2rtc.websocket_url(
+        upstream_url = await asyncio.to_thread(
+            manager.go2rtc.websocket_url,
             camera,
             websocket.query_params.get("source", "live"),
             websocket.query_params.get("compat", "native"),
@@ -1808,6 +1814,7 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
         await websocket.close(code=1008)
         return
     await websocket.accept()
+    tasks: list[asyncio.Task] = []
     try:
         async with websockets.connect(
             upstream_url,
@@ -1815,7 +1822,9 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
             close_timeout=2,
             ping_interval=20,
             ping_timeout=10,
-            max_size=2 * 1024 * 1024,
+            max_size=8 * 1024 * 1024,
+            max_queue=4,
+            compression=None,
         ) as upstream:
             async def browser_to_go2rtc() -> None:
                 while True:
@@ -1847,6 +1856,11 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
     except Exception as exc:
         logging.getLogger(__name__).warning("%s relay failed for %s: %s", transport, camera_id, exc)
     finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         try:
             await websocket.close()
         except RuntimeError:

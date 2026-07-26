@@ -55,6 +55,12 @@ import {
   presetQualificationGraph,
   readMotionAnalysisPreset,
 } from "./motionAnalysisConfig.mjs";
+import {
+  clearWebRtcFailure,
+  initialLiveTransport,
+  rememberWebRtcFailure,
+  webRtcRetryDelay,
+} from "./liveTransport.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -253,13 +259,13 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   onStageChange,
 }, forwardedRef) {
   const videoRef = useRef(null);
-  const [stage, setStage] = useState("webrtc");
+  const [stage, setStage] = useState(() => initialLiveTransport(cameraId, source));
   const [compatibility, setCompatibility] = useState("detect");
   const [snapshotToken, setSnapshotToken] = useState(() => Date.now());
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
-    setStage("webrtc");
+    setStage(initialLiveTransport(cameraId, source));
     setCompatibility("detect");
   }, [cameraId, source]);
 
@@ -268,7 +274,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   }, [stage, onStageChange]);
 
   useEffect(() => {
-    if (stage !== "webrtc" || compatibility !== "detect") return undefined;
+    if (!["webrtc", "mse"].includes(stage) || compatibility !== "detect") return undefined;
     const controller = new AbortController();
     fetch(`/api/cameras/${encodeURIComponent(cameraId)}/live-info?source=${encodeURIComponent(source)}`, {
       signal: controller.signal,
@@ -283,15 +289,28 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   useEffect(() => {
     if (stage !== "webrtc" || compatibility === "detect") return undefined;
     let disposed = false;
-    let connected = false;
+    let mediaReady = false;
     let socket = null;
     let peer = null;
     let disconnectTimer = null;
+    const outgoingCandidates = [];
+    const incomingCandidates = [];
+    const video = videoRef.current;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const fallback = () => {
-      if (!disposed) setStage("mse");
+      if (!disposed) {
+        rememberWebRtcFailure(cameraId, source);
+        setStage("mse");
+      }
     };
-    const failTimer = window.setTimeout(() => !connected && fallback(), 3000);
+    const failTimer = window.setTimeout(() => !mediaReady && fallback(), 2500);
+
+    const markMediaReady = () => {
+      mediaReady = true;
+      window.clearTimeout(failTimer);
+      clearWebRtcFailure(cameraId, source);
+    };
+    video?.addEventListener("loadeddata", markMediaReady);
 
     try {
       peer = new RTCPeerConnection({
@@ -306,14 +325,15 @@ const WebRtcLive = forwardRef(function WebRtcLive({
         if (videoRef.current) videoRef.current.srcObject = media;
       });
       peer.addEventListener("icecandidate", (event) => {
+        const candidate = event.candidate?.candidate || "";
         if (socket?.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "webrtc/candidate", value: event.candidate?.candidate || "" }));
+          socket.send(JSON.stringify({ type: "webrtc/candidate", value: candidate }));
+        } else {
+          outgoingCandidates.push(candidate);
         }
       });
       peer.addEventListener("connectionstatechange", () => {
         if (peer.connectionState === "connected") {
-          connected = true;
-          window.clearTimeout(failTimer);
           window.clearTimeout(disconnectTimer);
           disconnectTimer = null;
         } else if (peer.connectionState === "failed" && !disposed) {
@@ -324,9 +344,17 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       });
       socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(source)}&compat=${compatibility}`)}`);
       socket.addEventListener("open", async () => {
-        const offer = await peer.createOffer();
-        await peer.setLocalDescription(offer);
-        socket.send(JSON.stringify({ type: "webrtc/offer", value: offer.sdp }));
+        try {
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          if (socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify({ type: "webrtc/offer", value: offer.sdp }));
+          outgoingCandidates.splice(0).forEach((candidate) => {
+            socket.send(JSON.stringify({ type: "webrtc/candidate", value: candidate }));
+          });
+        } catch (_error) {
+          fallback();
+        }
       });
       socket.addEventListener("message", (event) => {
         let message;
@@ -337,10 +365,18 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           return;
         }
         if (message.type === "webrtc/answer") {
-          peer.setRemoteDescription({ type: "answer", sdp: message.value }).catch(fallback);
+          peer.setRemoteDescription({ type: "answer", sdp: message.value }).then(async () => {
+            for (const candidate of incomingCandidates.splice(0)) {
+              await peer.addIceCandidate({ candidate, sdpMid: "0" });
+            }
+          }).catch(fallback);
         } else if (message.type === "webrtc/candidate" && message.value) {
-          peer.addIceCandidate({ candidate: message.value, sdpMid: "0" }).catch(() => {});
-        } else if (message.type === "error" && String(message.value).includes("webrtc")) {
+          if (peer.remoteDescription) {
+            peer.addIceCandidate({ candidate: message.value, sdpMid: "0" }).catch(fallback);
+          } else {
+            incomingCandidates.push(message.value);
+          }
+        } else if (message.type === "error") {
           fallback();
         }
       });
@@ -356,12 +392,13 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       window.clearTimeout(disconnectTimer);
       socket?.close();
       peer?.close();
+      video?.removeEventListener("loadeddata", markMediaReady);
       if (videoRef.current) videoRef.current.srcObject = null;
     };
   }, [cameraId, source, stage, compatibility]);
 
   useEffect(() => {
-    if (stage !== "mse") return undefined;
+    if (stage !== "mse" || compatibility === "detect") return undefined;
     const MediaSourceApi = window.ManagedMediaSource || window.MediaSource;
     if (!MediaSourceApi) {
       setStage("mjpeg");
@@ -384,7 +421,15 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const fallback = () => {
       if (!disposed) setStage("mjpeg");
     };
-    const failTimer = window.setTimeout(() => !ready && fallback(), 12_000);
+    const markReady = () => {
+      ready = true;
+      window.clearTimeout(failTimer);
+    };
+    let lastDataAt = Date.now();
+    const failTimer = window.setTimeout(() => !ready && fallback(), 6000);
+    const stallTimer = window.setInterval(() => {
+      if (ready && Date.now() - lastDataAt > 8000) fallback();
+    }, 2000);
     const codecs = [
       "avc1.640029",
       "avc1.64002A",
@@ -398,6 +443,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 
     if (!video || !codecs) {
       window.clearTimeout(failTimer);
+      window.clearInterval(stallTimer);
       fallback();
       return undefined;
     }
@@ -410,21 +456,21 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 
     function pump() {
       if (!sourceBuffer || sourceBuffer.updating || mediaSource?.readyState !== "open") return;
-      if (sourceBuffer.buffered.length) {
-        const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-        const start = sourceBuffer.buffered.start(0);
-        if (end - start > 10) {
-          sourceBuffer.remove(start, end - 5);
-          return;
-        }
-        const gap = end - video.currentTime;
-        if (gap > 5) video.currentTime = Math.max(start, end - 1);
-        video.playbackRate = gap > 1 ? 1.1 : 1;
-      }
-      const data = queue.shift();
-      if (!data) return;
-      queuedBytes -= data.byteLength;
       try {
+        if (sourceBuffer.buffered.length) {
+          const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+          const start = sourceBuffer.buffered.start(0);
+          if (end - start > 10) {
+            sourceBuffer.remove(start, end - 5);
+            return;
+          }
+          const gap = end - video.currentTime;
+          if (gap > 5) video.currentTime = Math.max(start, end - 1);
+          video.playbackRate = gap > 1 ? 1.1 : 1;
+        }
+        const data = queue.shift();
+        if (!data) return;
+        queuedBytes -= data.byteLength;
         sourceBuffer.appendBuffer(data);
       } catch (_error) {
         fallback();
@@ -445,10 +491,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
         video.src = objectUrl;
       }
       video.play().catch(() => {});
-      video.addEventListener("loadeddata", () => {
-        ready = true;
-        window.clearTimeout(failTimer);
-      }, { once: true });
+      video.addEventListener("loadeddata", markReady, { once: true });
 
       socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/mse?source=${encodeURIComponent(source)}&compat=${compatibility}`)}`);
       socket.binaryType = "arraybuffer";
@@ -482,6 +525,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
         }
         const data = event.data;
         if (!(data instanceof ArrayBuffer)) return;
+        lastDataAt = Date.now();
         queue.push(data);
         queuedBytes += data.byteLength;
         if (queuedBytes > 8 * 1024 * 1024) {
@@ -499,9 +543,11 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     return () => {
       disposed = true;
       window.clearTimeout(failTimer);
+      window.clearInterval(stallTimer);
       socket?.close();
       queue.length = 0;
       if (video) {
+        video.removeEventListener("loadeddata", markReady);
         video.pause();
         video.removeAttribute("src");
         video.srcObject = null;
@@ -513,13 +559,14 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 
   useEffect(() => {
     if (stage === "webrtc") return undefined;
+    const delay = Math.max(1000, webRtcRetryDelay(cameraId, source));
     const timer = window.setTimeout(() => {
       setCompatibility("detect");
       setStage("webrtc");
       setSnapshotToken(Date.now());
-    }, 60_000);
+    }, delay);
     return () => window.clearTimeout(timer);
-  }, [stage]);
+  }, [cameraId, source, stage]);
 
   useEffect(() => {
     if (stage !== "snapshot") return undefined;
