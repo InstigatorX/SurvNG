@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 
 from survng.app.recording_media import (
+    concatenated_clip_timing,
+    event_clip_window,
     hls_map_transition,
     mp4_stream_fingerprint,
     playback_segment_duration,
@@ -55,6 +57,24 @@ def recording_file(video_entry: bytes, audio_entry: bytes | None = None, noise: 
 
 
 class RecordingMediaTest(unittest.TestCase):
+    def test_concatenated_clip_timing_excludes_recording_gaps(self) -> None:
+        rows = [
+            {"start_epoch": 100.0, "end_epoch": 110.0, "duration_seconds": 10.0},
+            {"start_epoch": 120.0, "end_epoch": 130.0, "duration_seconds": 10.0},
+        ]
+
+        self.assertEqual(concatenated_clip_timing(rows, 105.0, 125.0), (5.0, 10.0))
+
+    def test_event_clip_window_preserves_explicit_zero(self) -> None:
+        self.assertEqual(event_clip_window(5.0, 5.0, 0.0, 2.0), (0.0, 2.0))
+        self.assertEqual(event_clip_window(5.0, 5.0, 2.0, 0.0), (2.0, 0.0))
+
+    def test_event_clip_window_rejects_empty_and_non_finite_values(self) -> None:
+        with self.assertRaises(ValueError):
+            event_clip_window(5.0, 5.0, 0.0, 0.0)
+        with self.assertRaises(ValueError):
+            event_clip_window(5.0, 5.0, float("nan"), 1.0)
+
     def test_event_fragment_duration_trims_only_at_window_end(self) -> None:
         self.assertEqual(playback_segment_duration(100.0, 10.0, 107.25, True), 7.25)
         self.assertEqual(playback_segment_duration(100.0, 10.0, 115.0, True), 10.0)

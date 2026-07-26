@@ -1,9 +1,46 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import struct
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
+
+def event_clip_window(
+    configured_before: float,
+    configured_after: float,
+    before: float | None,
+    after: float | None,
+) -> tuple[float, float]:
+    before_value = float(configured_before if before is None else before)
+    after_value = float(configured_after if after is None else after)
+    if not math.isfinite(before_value) or not math.isfinite(after_value):
+        raise ValueError("event clip window must be finite")
+    safe_before = max(0.0, min(before_value, 3600.0))
+    safe_after = max(0.0, min(after_value, 3600.0))
+    if safe_before + safe_after <= 0:
+        raise ValueError("event clip window is empty")
+    return safe_before, safe_after
+
+
+def concatenated_clip_timing(
+    rows: list[dict[str, Any]],
+    window_start: float,
+    window_end: float,
+) -> tuple[float, float]:
+    if not rows:
+        raise ValueError("recording window is empty")
+    first_start = float(rows[0]["start_epoch"])
+    last_end = float(rows[-1]["end_epoch"])
+    local_start = max(0.0, window_start - first_start)
+    available_duration = sum(max(0.0, float(row["duration_seconds"])) for row in rows)
+    tail_trim = max(0.0, last_end - window_end)
+    duration = available_duration - local_start - tail_trim
+    if duration <= 0:
+        raise ValueError("recording window has no playable duration")
+    return local_start, duration
 
 
 def playback_segment_duration(

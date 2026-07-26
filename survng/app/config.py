@@ -223,8 +223,8 @@ class AppConfig(BaseModel):
     recording_index_dir: str = ""
     ffmpeg_path: str = "ffmpeg"
     hardware_acceleration: str = "auto"
-    event_clip_before_seconds: float = 5.0
-    event_clip_after_seconds: float = 5.0
+    event_clip_before_seconds: float = Field(default=5.0, ge=0.0, le=3600.0)
+    event_clip_after_seconds: float = Field(default=5.0, ge=0.0, le=3600.0)
     incident_thumbnail_annotations: bool = True
     recording_segment_seconds: float = Field(default=10.0, ge=2.0, le=300.0)
     recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
@@ -245,6 +245,12 @@ class AppConfig(BaseModel):
         if "?" in path or "#" in path:
             raise ValueError("base_path must contain only a URL path")
         return f"/{path.strip('/')}"
+
+    @model_validator(mode="after")
+    def validate_event_clip_window(self) -> "AppConfig":
+        if self.event_clip_before_seconds + self.event_clip_after_seconds <= 0:
+            raise ValueError("event clip window must include time before or after the event")
+        return self
 
 
 

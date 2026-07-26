@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 import math
+import mmap
 import mimetypes
 import asyncio
 import queue
@@ -55,7 +56,13 @@ from .incident_utils import (
     stable_incident_id,
     stable_incident_key,
 )
-from .recording_media import hls_map_transition, playback_segment_duration, resolve_stream_fingerprints
+from .recording_media import (
+    concatenated_clip_timing,
+    event_clip_window,
+    hls_map_transition,
+    playback_segment_duration,
+    resolve_stream_fingerprints,
+)
 from .zones import apply_detection_zones, detection_threshold
 
 config = load_config()
@@ -182,6 +189,28 @@ def normalize_source(source: str) -> str:
 
 def recording_source(source: str = "main") -> str:
     return "live" if source == "live" else "main"
+
+
+def _require_recording_camera(camera_id: str) -> None:
+    if manager.camera(camera_id) is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+
+
+def _validate_recording_range(
+    start_epoch: float,
+    end_epoch: float,
+    maximum_seconds: float,
+    detail: str,
+) -> None:
+    if not math.isfinite(start_epoch) or not math.isfinite(end_epoch):
+        raise HTTPException(status_code=400, detail=detail)
+    try:
+        datetime.fromtimestamp(start_epoch, timezone.utc)
+        datetime.fromtimestamp(end_epoch, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail=detail) from None
+    if end_epoch <= start_epoch or end_epoch - start_epoch > maximum_seconds:
+        raise HTTPException(status_code=400, detail=detail)
 
 
 def reload_manager(next_config: AppConfig) -> None:
@@ -548,41 +577,41 @@ def _offset_fmp4_timestamps(init_path: Path, media_path: Path, seconds: float) -
     timescales = _mp4_track_timescales(init_path.read_bytes())
     if not timescales:
         raise RuntimeError("fragment init has no track timescales")
-    data = bytearray(media_path.read_bytes())
     adjusted = 0
-    for box_type, _, payload, box_end in _mp4_boxes(data):
-        if box_type != b"moof":
-            continue
-        for child_type, _, child_payload, child_end in _mp4_boxes(data, payload, box_end):
-            if child_type != b"traf":
+    with media_path.open("r+b") as media_file, mmap.mmap(media_file.fileno(), 0) as data:
+        for box_type, _, payload, box_end in _mp4_boxes(data):
+            if box_type != b"moof":
                 continue
-            track_id = None
-            tfdt = None
-            for traf_type, _, traf_payload, traf_end in _mp4_boxes(data, child_payload, child_end):
-                if traf_type == b"tfhd" and traf_payload + 8 <= traf_end:
-                    track_id = struct.unpack_from(">I", data, traf_payload + 4)[0]
-                elif traf_type == b"tfdt":
-                    tfdt = (traf_payload, traf_end)
-            if not track_id or not tfdt or track_id not in timescales:
-                continue
-            tfdt_payload, tfdt_end = tfdt
-            version = data[tfdt_payload]
-            value_offset = tfdt_payload + 4
-            increment = round(seconds * timescales[track_id])
-            if version == 1 and value_offset + 8 <= tfdt_end:
-                current = struct.unpack_from(">Q", data, value_offset)[0]
-                struct.pack_into(">Q", data, value_offset, current + increment)
-                adjusted += 1
-            elif version == 0 and value_offset + 4 <= tfdt_end:
-                current = struct.unpack_from(">I", data, value_offset)[0]
-                next_value = current + increment
-                if next_value > 0xFFFFFFFF:
-                    raise RuntimeError("fragment timestamp exceeds version 0 tfdt")
-                struct.pack_into(">I", data, value_offset, next_value)
-                adjusted += 1
+            for child_type, _, child_payload, child_end in _mp4_boxes(data, payload, box_end):
+                if child_type != b"traf":
+                    continue
+                track_id = None
+                tfdt = None
+                for traf_type, _, traf_payload, traf_end in _mp4_boxes(data, child_payload, child_end):
+                    if traf_type == b"tfhd" and traf_payload + 8 <= traf_end:
+                        track_id = struct.unpack_from(">I", data, traf_payload + 4)[0]
+                    elif traf_type == b"tfdt":
+                        tfdt = (traf_payload, traf_end)
+                if not track_id or not tfdt or track_id not in timescales:
+                    continue
+                tfdt_payload, tfdt_end = tfdt
+                version = data[tfdt_payload]
+                value_offset = tfdt_payload + 4
+                increment = round(seconds * timescales[track_id])
+                if version == 1 and value_offset + 8 <= tfdt_end:
+                    current = struct.unpack_from(">Q", data, value_offset)[0]
+                    struct.pack_into(">Q", data, value_offset, current + increment)
+                    adjusted += 1
+                elif version == 0 and value_offset + 4 <= tfdt_end:
+                    current = struct.unpack_from(">I", data, value_offset)[0]
+                    next_value = current + increment
+                    if next_value > 0xFFFFFFFF:
+                        raise RuntimeError("fragment timestamp exceeds version 0 tfdt")
+                    struct.pack_into(">I", data, value_offset, next_value)
+                    adjusted += 1
+        data.flush()
     if not adjusted:
         raise RuntimeError("fragment has no adjustable tfdt boxes")
-    media_path.write_bytes(data)
 
 
 def _event_clip_cache_suffix(source_codec: str, backend: str) -> str:
@@ -865,7 +894,7 @@ def recording_cache_status() -> dict:
         try:
             total_bytes += path.stat().st_size
             existing_files.append(path)
-        except FileNotFoundError:
+        except OSError:
             continue
     with RECORDING_CACHE_METRICS_LOCK:
         metrics = dict(RECORDING_CACHE_METRICS)
@@ -1920,11 +1949,13 @@ def set_camera_detection(camera_id: str, state: CameraFeatureState) -> dict:
 
 @app.get("/api/cameras/{camera_id}/recordings")
 def recordings(camera_id: str, limit: int = 200, source: str = "main") -> list[dict]:
+    _require_recording_camera(camera_id)
     return _recording_rows(camera_id, limit=max(1, min(limit, RECORDING_LOOKUP_LIMIT)), source=recording_source(source))
 
 
 @app.get("/api/cameras/{camera_id}/recordings/events")
 def recording_events(camera_id: str, limit: int = 1000, source: str = "main") -> list[dict]:
+    _require_recording_camera(camera_id)
     rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT, source=recording_source(source))
     if not rows:
         return []
@@ -1949,8 +1980,8 @@ def recording_day(
     end_epoch: float,
     source: str = "main",
 ) -> dict:
-    if end_epoch <= start_epoch or end_epoch - start_epoch > 90000:
-        raise HTTPException(status_code=400, detail="invalid recording day range")
+    _require_recording_camera(camera_id)
+    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
     selected_source = recording_source(source)
     source_availability = {
         candidate: manager.recorder.recording_availability_between(
@@ -1989,8 +2020,8 @@ def recording_window(
     end_epoch: float,
     source: str = "main",
 ) -> dict:
-    if end_epoch <= start_epoch or end_epoch - start_epoch > 3600:
-        raise HTTPException(status_code=400, detail="invalid recording window range")
+    _require_recording_camera(camera_id)
+    _validate_recording_range(start_epoch, end_epoch, 3600, "invalid recording window range")
     selected_source = recording_source(source)
     window_start, window_end = _recording_playback_window(start_epoch)
     rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
@@ -2011,8 +2042,10 @@ def recording_updates(
     after_epoch: float,
     source: str = "main",
 ) -> dict:
-    if end_epoch <= start_epoch or end_epoch - start_epoch > 90000:
-        raise HTTPException(status_code=400, detail="invalid recording day range")
+    _require_recording_camera(camera_id)
+    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
+    if not math.isfinite(after_epoch):
+        raise HTTPException(status_code=400, detail="invalid recording update position")
     selected_source = recording_source(source)
     overlap_seconds = max(5.0, float(config.recording_segment_seconds) * 2)
     update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
@@ -2141,24 +2174,14 @@ def _recording_fmp4_files(
     cache_dir = manager.storage_dir / "playback-cache" / "fmp4" / cache_key
     init_path = cache_dir / "init.mp4"
     media_path = cache_dir / "media.m4s"
-    if (
-        init_path.exists()
-        and init_path.stat().st_size > 0
-        and media_path.exists()
-        and media_path.stat().st_size > 0
-    ):
+    if _recording_cache_files_ready(init_path, media_path, touch=True):
         _recording_cache_metric(origin, "hits")
         return init_path, media_path
 
     with RECORDING_FMP4_LOCKS_GUARD:
         lock = RECORDING_FMP4_LOCKS.setdefault(cache_key, threading.Lock())
     with lock:
-        if (
-            init_path.exists()
-            and init_path.stat().st_size > 0
-            and media_path.exists()
-            and media_path.stat().st_size > 0
-        ):
+        if _recording_cache_files_ready(init_path, media_path, touch=True):
             _recording_cache_metric(origin, "hits")
             return init_path, media_path
         _recording_cache_metric(origin, "misses")
@@ -2206,6 +2229,14 @@ def _recording_fmp4_files(
         except RecordingPrewarmCancelled:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
+        except subprocess.TimeoutExpired as exc:
+            _recording_cache_metric(origin, "failures")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise HTTPException(status_code=504, detail="recording fragment remux timed out") from exc
+        except OSError as exc:
+            _recording_cache_metric(origin, "failures")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"recording fragment remux failed: {exc}") from exc
         generated_init = temp_dir / "init.mp4"
         generated_media = temp_dir / "media_0.m4s"
         if result.returncode != 0 or not generated_init.exists() or not generated_media.exists():
@@ -2213,7 +2244,7 @@ def _recording_fmp4_files(
             error = (result.stderr or b"").decode("utf-8", errors="replace").strip()
             shutil.rmtree(temp_dir, ignore_errors=True)
             if time.time() - stat.st_mtime >= float(config.recording_segment_seconds) * 2:
-                manager.recorder.mark_unplayable(path, error or "recording fragment failed")
+                manager.recorder.schedule_revalidation(path, error or "recording fragment failed")
             with RECORDING_DAY_CACHE_LOCK:
                 RECORDING_DAY_CACHE.clear()
             raise HTTPException(status_code=500, detail=f"recording fragment failed: {error[-300:]}")
@@ -2223,8 +2254,13 @@ def _recording_fmp4_files(
             _recording_cache_metric(origin, "failures")
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise HTTPException(status_code=500, detail=f"recording fragment timestamp repair failed: {exc}") from exc
-        os.replace(generated_init, init_path)
-        os.replace(generated_media, media_path)
+        try:
+            os.replace(generated_init, init_path)
+            os.replace(generated_media, media_path)
+        except OSError as exc:
+            _recording_cache_metric(origin, "failures")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"recording fragment cache write failed: {exc}") from exc
         remux_ms = (time.monotonic() - remux_started) * 1000
         _recording_cache_metric(origin, "remuxes")
         _recording_cache_metric(origin, "remux_ms", remux_ms)
@@ -2233,6 +2269,31 @@ def _recording_fmp4_files(
         shutil.rmtree(temp_dir, ignore_errors=True)
         _maintain_recording_cache(cache_dir)
         return init_path, media_path
+
+
+def _recording_cache_files_ready(init_path: Path, media_path: Path, *, touch: bool = False) -> bool:
+    try:
+        ready = init_path.is_file() and init_path.stat().st_size > 0 and media_path.is_file() and media_path.stat().st_size > 0
+        if ready and touch:
+            now = time.time()
+            os.utime(init_path, (now, now))
+            os.utime(media_path, (now, now))
+        return ready
+    except OSError:
+        return False
+
+
+def _recording_file_response(path: Path, media_type: str) -> FileResponse:
+    try:
+        now = time.time()
+        os.utime(path, (now, now))
+    except OSError:
+        raise HTTPException(status_code=404, detail="recording fragment cache entry disappeared")
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 def _maintain_recording_cache(active_dir: Path) -> None:
@@ -2252,21 +2313,46 @@ def _maintain_recording_cache(active_dir: Path) -> None:
         for directory in root.iterdir():
             if not directory.is_dir() or directory == active_dir:
                 continue
-            files = [item for item in directory.iterdir() if item.is_file()]
-            modified_at = max((item.stat().st_mtime for item in files), default=directory.stat().st_mtime)
-            size = sum(item.stat().st_size for item in files)
-            max_age_seconds = int(config.recording_cache_max_days) * 24 * 60 * 60
-            if now_epoch - modified_at > max_age_seconds:
-                shutil.rmtree(directory, ignore_errors=True)
-            else:
-                entries.append((modified_at, size, directory))
+            with RECORDING_FMP4_LOCKS_GUARD:
+                entry_lock = RECORDING_FMP4_LOCKS.setdefault(directory.name, threading.Lock())
+            if not entry_lock.acquire(blocking=False):
+                continue
+            try:
+                for child in directory.iterdir():
+                    if child.is_dir() and child.name.startswith("fmp4-"):
+                        try:
+                            if now_epoch - child.stat().st_mtime > 300:
+                                shutil.rmtree(child, ignore_errors=True)
+                        except OSError:
+                            continue
+                files = [item for item in directory.iterdir() if item.is_file()]
+                modified_at = max((item.stat().st_mtime for item in files), default=directory.stat().st_mtime)
+                size = sum(item.stat().st_size for item in files)
+                max_age_seconds = int(config.recording_cache_max_days) * 24 * 60 * 60
+                if now_epoch - modified_at > max_age_seconds:
+                    shutil.rmtree(directory, ignore_errors=True)
+                else:
+                    entries.append((modified_at, size, directory))
+            except OSError:
+                continue
+            finally:
+                entry_lock.release()
         total_size = sum(size for _, size, _ in entries)
         max_bytes = int(float(config.recording_cache_max_gb) * 1024 * 1024 * 1024)
-        for _, size, directory in sorted(entries):
+        for modified_at, size, directory in sorted(entries):
             if total_size <= max_bytes:
                 break
-            shutil.rmtree(directory, ignore_errors=True)
-            total_size -= size
+            if now_epoch - modified_at < 300:
+                continue
+            with RECORDING_FMP4_LOCKS_GUARD:
+                entry_lock = RECORDING_FMP4_LOCKS.setdefault(directory.name, threading.Lock())
+            if not entry_lock.acquire(blocking=False):
+                continue
+            try:
+                shutil.rmtree(directory, ignore_errors=True)
+                total_size -= size
+            finally:
+                entry_lock.release()
     finally:
         RECORDING_CACHE_MAINTENANCE_LOCK.release()
 
@@ -2363,8 +2449,8 @@ def recording_day_hls_playlist(
     end_epoch: float,
     source: str = "main",
 ) -> Response:
-    if end_epoch <= start_epoch or end_epoch - start_epoch > 90000:
-        raise HTTPException(status_code=400, detail="invalid recording day range")
+    _require_recording_camera(camera_id)
+    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
     selected_source = recording_source(source)
     rows = _recording_day_rows(camera_id, start_epoch, end_epoch, selected_source)
     if not rows:
@@ -2414,6 +2500,10 @@ def _recording_day_fmp4_paths(
     media_offset: float = 0.0,
     trim_end: bool = False,
 ) -> tuple[Path, Path]:
+    _require_recording_camera(camera_id)
+    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
+    if not math.isfinite(media_offset) or media_offset < 0:
+        raise HTTPException(status_code=400, detail="invalid recording media offset")
     rows = _recording_day_rows(camera_id, start_epoch, end_epoch, source)
     if not segment_name or Path(segment_name).name != segment_name:
         raise HTTPException(status_code=404, detail="recording segment not found")
@@ -2452,7 +2542,7 @@ def recording_day_hls_init(
     init_path, _ = _recording_day_fmp4_paths(
         camera_id, segment_name, start_epoch, end_epoch, source, media_offset, trim_end
     )
-    return FileResponse(init_path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=86400"})
+    return _recording_file_response(init_path, "video/mp4")
 
 
 @app.get("/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/media.m4s")
@@ -2468,7 +2558,7 @@ def recording_day_hls_segment(
     _, media_path = _recording_day_fmp4_paths(
         camera_id, segment_name, start_epoch, end_epoch, source, media_offset, trim_end
     )
-    return FileResponse(media_path, media_type="video/iso.segment", headers={"Cache-Control": "private, max-age=86400"})
+    return _recording_file_response(media_path, "video/iso.segment")
 
 
 
@@ -2492,7 +2582,7 @@ def event_clip(event_id: int, before: float | None = None, after: float | None =
     return FileResponse(
         clip_path,
         media_type="video/mp4",
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "private, max-age=3600"},
     )
 
 
@@ -2767,18 +2857,22 @@ def _recording_event_row(event: dict, recordings: list[dict]) -> dict:
 
 
 def _event_clip_window(before: float | None, after: float | None) -> tuple[float, float]:
-    configured_before = config.event_clip_before_seconds if before is None else before
-    configured_after = config.event_clip_after_seconds if after is None else after
-    safe_before = max(0.0, min(float(configured_before or 0.0), 3600.0))
-    safe_after = max(0.0, min(float(configured_after or 0.0), 3600.0))
-    return safe_before, safe_after
+    try:
+        return event_clip_window(
+            config.event_clip_before_seconds,
+            config.event_clip_after_seconds,
+            before,
+            after,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 def _event_clip_path(event: dict, before: float, after: float, source: str = "main") -> Path:
     event_id = int(event.get("id") or 0)
-    camera_id = str(event.get("camera_id") or "camera").replace("/", "_").replace("\\", "_")
-    safe_before = int(max(0.0, min(float(before or 5.0), 3600.0)) * 1000)
-    safe_after = int(max(0.0, min(float(after or 5.0), 3600.0)) * 1000)
+    camera_id = slugify_camera_id(str(event.get("camera_id") or "camera"))
+    safe_before = int(max(0.0, min(float(before), 3600.0)) * 1000)
+    safe_after = int(max(0.0, min(float(after), 3600.0)) * 1000)
     clip_source = recording_source(source)
     clip_dir = manager.storage_dir / "event_clips" / camera_id / clip_source
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -2792,16 +2886,21 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
         raise HTTPException(status_code=400, detail="event is missing camera")
 
     event_created_epoch = event_epoch(event)
-    window_before = max(0.0, min(float(before or 5.0), 3600.0))
-    window_after = max(0.0, min(float(after or 5.0), 3600.0))
+    window_before = max(0.0, min(float(before), 3600.0))
+    window_after = max(0.0, min(float(after), 3600.0))
     window_start = event_created_epoch - window_before
     window_end = event_created_epoch + window_after
 
     rows = [
-        row for row in _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT, source=recording_source(source))
+        row for row in manager.recorder.recording_rows_between(
+            camera_id,
+            window_start,
+            window_end,
+            recording_source(source),
+        )
         if row.get("start_epoch") is not None
         and row.get("end_epoch") is not None
-        and Path(str(row.get("path") or "")).exists()
+        and Path(str(row.get("path") or "")).is_file()
     ]
     rows.sort(key=lambda row: float(row["start_epoch"]))
     selected = [
@@ -2811,11 +2910,10 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     if not selected:
         raise HTTPException(status_code=404, detail="no recording window found")
 
-    concat_start_epoch = float(selected[0]["start_epoch"])
-    concat_end_epoch = max(float(row["end_epoch"]) for row in selected)
-    local_start = max(0.0, window_start - concat_start_epoch)
-    local_end = min(window_end, concat_end_epoch)
-    duration = max(0.1, local_end - (concat_start_epoch + local_start))
+    try:
+        local_start, duration = concatenated_clip_timing(selected, window_start, window_end)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
 
     concat_path = _write_concat_file(selected)
     tmp_path = output_path.with_name(f".{output_path.stem}.{os.getpid()}.tmp.mp4")
@@ -2867,6 +2965,9 @@ def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def _write_concat_file(rows: list[dict]) -> Path:
+    paths = [str(Path(row["path"]).resolve()) for row in rows]
+    if any("\n" in path or "\r" in path for path in paths):
+        raise HTTPException(status_code=400, detail="recording path is invalid")
     handle = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -2875,9 +2976,8 @@ def _write_concat_file(rows: list[dict]) -> Path:
         delete=False,
     )
     with handle:
-        for row in rows:
-            path = Path(row["path"]).resolve()
-            escaped = str(path).replace("'", "'\\''")
+        for path_value in paths:
+            escaped = path_value.replace("\\", "\\\\").replace("'", "'\\''")
             handle.write(f"file '{escaped}'\n")
     return Path(handle.name)
 

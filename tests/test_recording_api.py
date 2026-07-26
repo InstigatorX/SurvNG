@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import tempfile
+import struct
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi import HTTPException
+
+from survng.app import main
+
+
+class RecordingApiTest(unittest.TestCase):
+    @staticmethod
+    def _box(box_type: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I4s", len(payload) + 8, box_type) + payload
+
+    def test_fragment_timestamp_offset_updates_media_in_place(self) -> None:
+        tkhd = bytearray(16)
+        struct.pack_into(">I", tkhd, 12, 1)
+        mdhd = bytearray(16)
+        struct.pack_into(">I", mdhd, 12, 1000)
+        init_data = self._box(
+            b"moov",
+            self._box(b"trak", self._box(b"tkhd", bytes(tkhd)) + self._box(b"mdia", self._box(b"mdhd", bytes(mdhd)))),
+        )
+        tfhd = bytes(4) + struct.pack(">I", 1)
+        tfdt = bytes(4) + struct.pack(">I", 100)
+        media_data = self._box(b"moof", self._box(b"traf", self._box(b"tfhd", tfhd) + self._box(b"tfdt", tfdt)))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            init_path = Path(tmpdir) / "init.mp4"
+            media_path = Path(tmpdir) / "media.m4s"
+            init_path.write_bytes(init_data)
+            media_path.write_bytes(media_data)
+
+            main._offset_fmp4_timestamps(init_path, media_path, 2.0)
+            updated = media_path.read_bytes()
+
+        tfdt_position = updated.index(b"tfdt") + 8
+        self.assertEqual(struct.unpack_from(">I", updated, tfdt_position)[0], 2100)
+
+    def test_recording_range_rejects_non_finite_and_out_of_bounds_epochs(self) -> None:
+        with self.assertRaises(HTTPException) as non_finite:
+            main._validate_recording_range(float("nan"), 100.0, 90_000, "invalid range")
+        self.assertEqual(non_finite.exception.status_code, 400)
+
+        with self.assertRaises(HTTPException) as out_of_bounds:
+            main._validate_recording_range(0.0, 100_000.0, 90_000, "invalid range")
+        self.assertEqual(out_of_bounds.exception.status_code, 400)
+
+    def test_direct_fragment_lookup_validates_range_before_scanning_recordings(self) -> None:
+        manager = SimpleNamespace(camera=lambda _camera_id: object())
+        with patch.object(main, "manager", manager), patch.object(main, "_recording_day_rows") as recording_rows:
+            with self.assertRaises(HTTPException) as invalid:
+                main._recording_day_fmp4_paths(
+                    "gate",
+                    "segment.mp4",
+                    100.0,
+                    float("inf"),
+                )
+
+        self.assertEqual(invalid.exception.status_code, 400)
+        recording_rows.assert_not_called()
+
+    def test_event_clip_cache_key_preserves_explicit_zero_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SimpleNamespace(storage_dir=Path(tmpdir))
+            with patch.object(main, "manager", manager):
+                path = main._event_clip_path(
+                    {"id": 42, "camera_id": "Front Door"},
+                    before=0.0,
+                    after=2.0,
+                )
+
+        self.assertTrue(path.name.startswith("42-0-2000-a3-"))
+        self.assertIn("front-door", path.parts)
+
+
+if __name__ == "__main__":
+    unittest.main()

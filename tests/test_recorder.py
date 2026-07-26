@@ -95,6 +95,45 @@ class RecorderTest(unittest.TestCase):
             popen.assert_not_called()
             self.assertNotIn((camera.id, "main"), recorder.processes)
 
+    def test_recorder_maps_only_primary_media_and_normalizes_audio_for_mp4(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            with patch(
+                "survng.app.recorder.subprocess.Popen",
+                side_effect=RuntimeError("capture command"),
+            ) as popen:
+                recorder.start(camera, "main")
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-map") + 1], "0:v:0")
+        second_map = command.index("-map", command.index("-map") + 1)
+        self.assertEqual(command[second_map + 1], "0:a:0?")
+        self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+
+    @patch.object(Recorder, "_owned_ffmpeg_recorders", return_value={})
+    def test_stop_during_start_cancels_new_recorder_before_registration(self, _owned_recorders) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            process = Mock(pid=4321, stderr=iter(()))
+            process.poll.return_value = None
+
+            def cancel_start(*_args):
+                recorder.stop(camera.id, "main")
+                return None
+
+            with (
+                patch("survng.app.recorder.subprocess.Popen", return_value=process),
+                patch("survng.app.recorder.start_ffmpeg_pipe", side_effect=cancel_start),
+                patch.object(recorder, "_kill_pid") as kill_pid,
+            ):
+                recorder.start(camera, "main")
+
+        self.assertNotIn((camera.id, "main"), recorder.processes)
+        kill_pid.assert_called_once_with(4321)
+
     @patch.object(Recorder, "_owned_ffmpeg_recorders", return_value={})
     def test_stopping_one_source_does_not_target_the_other_source(self, owned_recorders) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -119,6 +158,19 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(rows[0]["duration_seconds"], 10.0)
         self.assertEqual(rows[1]["duration_seconds"], 10.0)
 
+    def test_timezone_qualified_segment_names_are_unambiguous_across_dst(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            daylight = Path(tmpdir) / "20261101-013000-0400.mp4"
+            standard = Path(tmpdir) / "20261101-013000-0500.mp4"
+
+            daylight_epoch = recorder.recording_start_epoch(daylight)
+            standard_epoch = recorder.recording_start_epoch(standard)
+
+        self.assertIsNotNone(daylight_epoch)
+        self.assertIsNotNone(standard_epoch)
+        self.assertEqual(float(standard_epoch) - float(daylight_epoch), 3600.0)
+
     def test_recording_rows_can_read_sub_stream_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -132,6 +184,20 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["name"], "20260711-113000.mp4")
         self.assertEqual(rows[0]["source"], "live")
+
+    def test_recording_range_can_discover_legacy_main_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour_dir = Path(tmpdir) / "recordings" / "back-middle" / "2026-07-11" / "11"
+            hour_dir.mkdir(parents=True)
+            clip = hour_dir / "20260711-113000.mp4"
+            clip.write_bytes(b"x" * 2048)
+            start = recorder.recording_start_epoch(clip)
+            self.assertIsNotNone(start)
+
+            rows = recorder.recording_rows_between("back-middle", float(start) - 1, float(start) + 11)
+
+        self.assertEqual([row["name"] for row in rows], [clip.name])
 
     def test_recording_range_removes_missing_index_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -152,6 +218,43 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertEqual(indexed, 0)
+
+    def test_recording_range_discovers_files_missing_from_partial_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour_dir = Path(tmpdir) / "recordings" / "front-door" / "main" / "2026-07-11" / "11"
+            hour_dir.mkdir(parents=True)
+            first = hour_dir / "20260711-113000.mp4"
+            second = hour_dir / "20260711-113010.mp4"
+            first.write_bytes(b"x" * 2048)
+            second.write_bytes(b"y" * 2048)
+            start = recorder.recording_start_epoch(first)
+            self.assertIsNotNone(start)
+            recorder._store_recording_rows("front-door", "main", [self._row(first, float(start))])
+
+            rows = recorder.recording_rows_between(
+                "front-door",
+                float(start) - 1,
+                float(start) + 21,
+            )
+
+        self.assertEqual([row["name"] for row in rows], [first.name, second.name])
+
+    def test_active_recorder_does_not_hide_last_historical_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            hour_dir = Path(tmpdir) / "recordings" / "front-door" / "main" / "2020-01-02" / "03"
+            hour_dir.mkdir(parents=True)
+            clips = [hour_dir / "20200102-030000.mp4", hour_dir / "20200102-030010.mp4"]
+            for clip in clips:
+                clip.write_bytes(b"x")
+            process = Mock()
+            process.poll.return_value = None
+            recorder.processes[("front-door", "main")] = (process, None, Mock(), Mock())
+
+            rows = recorder._recording_rows_for_files("front-door", "main", clips)
+
+        self.assertEqual([row["name"] for row in rows], [clip.name for clip in clips])
 
     def test_recording_availability_merges_segments_but_preserves_gaps(self) -> None:
         rows = [
@@ -359,6 +462,28 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["playable"], 1)
         self.assertEqual(indexed["validated"], 1)
 
+    def test_transient_playback_failure_is_revalidated_and_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "recoverable.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            row["validated"] = True
+            recorder._store_recording_rows("front-door", "main", [row])
+
+            recorder.schedule_revalidation(clip, "temporary remux failure")
+            with patch.object(recorder, "_probe_recording", return_value=(9.75, "")):
+                recorder._validate_index_batch(limit=1)
+            with recorder._index_connection() as connection:
+                indexed = dict(connection.execute(
+                    "SELECT playable, validated, health_error FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        self.assertEqual(indexed["playable"], 1)
+        self.assertEqual(indexed["validated"], 1)
+        self.assertEqual(indexed["health_error"], "")
+
     def test_fingerprint_backfill_is_independent_of_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -385,6 +510,50 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["stream_fingerprint"], "stream-v1")
         self.assertEqual(indexed["fingerprint_checked"], 1)
         self.assertEqual(indexed["validated"], 1)
+
+    def test_maintenance_discovers_unqueued_validation_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "unqueued.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            recorder._store_recording_rows("front-door", "main", [row])
+
+            with (
+                patch.object(recorder, "_probe_recording", return_value=(9.0, "")),
+                patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v2"),
+            ):
+                self.assertEqual(recorder._validate_index_batch(limit=1), 1)
+            with recorder._index_connection() as connection:
+                indexed = dict(connection.execute(
+                    "SELECT validated, fingerprint_checked, stream_fingerprint FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        self.assertEqual(indexed["validated"], 1)
+        self.assertEqual(indexed["fingerprint_checked"], 1)
+        self.assertEqual(indexed["stream_fingerprint"], "stream-v2")
+
+    def test_maintenance_discovers_unqueued_fingerprint_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "fingerprint.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            row["validated"] = True
+            recorder._store_recording_rows("front-door", "main", [row])
+
+            with patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v3"):
+                self.assertEqual(recorder._backfill_stream_fingerprints(limit=1), 1)
+            with recorder._index_connection() as connection:
+                indexed = dict(connection.execute(
+                    "SELECT validated, fingerprint_checked, stream_fingerprint FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        self.assertEqual(indexed["validated"], 1)
+        self.assertEqual(indexed["fingerprint_checked"], 1)
+        self.assertEqual(indexed["stream_fingerprint"], "stream-v3")
 
 
 if __name__ == "__main__":

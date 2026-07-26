@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import math
 import signal
 import sqlite3
 import subprocess
@@ -151,7 +152,7 @@ class Recorder:
             self._ensure_recording_dirs(camera_dir)
             keeper = threading.Thread(target=self._keep_recording_dirs, args=(camera_dir, stop_event), daemon=True)
             keeper.start()
-            output = str(camera_dir / "%Y-%m-%d" / "%H" / "%Y%m%d-%H%M%S.mp4")
+            output = str(camera_dir / "%Y-%m-%d" / "%H" / "%Y%m%d-%H%M%S%z.mp4")
             command = [
                 self.ffmpeg_path,
                 "-hide_banner",
@@ -159,15 +160,21 @@ class Recorder:
                 "warning",
                 *ffmpeg_input_args(camera, source),
                 "-map",
-                "0",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
                 "-metadata",
                 f"survng_owner={self.owner_token}",
                 "-metadata",
                 f"survng_camera={camera.id}",
                 "-metadata",
                 f"survng_source={source}",
-                "-c",
+                "-c:v",
                 "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
                 *ffmpeg_timestamp_repair_args(camera),
                 "-f",
                 "segment",
@@ -195,8 +202,18 @@ class Recorder:
             ).start()
             pipe = start_ffmpeg_pipe(camera, source, process)
             with self._lock:
-                self.processes[key] = (process, pipe, stop_event, keeper)
-                self._retry_after.pop(key, None)
+                keep_process = key in self._starting and camera.id not in self._disabled_cameras
+                if keep_process:
+                    self.processes[key] = (process, pipe, stop_event, keeper)
+                    self._retry_after.pop(key, None)
+            if not keep_process:
+                stop_event.set()
+                if pipe is not None:
+                    pipe.stop()
+                if process.poll() is None:
+                    self._kill_pid(process.pid)
+                keeper.join(timeout=1)
+                return
         except Exception as error:
             stop_event.set()
             if pipe is not None:
@@ -245,6 +262,13 @@ class Recorder:
     def _camera_dir(self, camera_id: str, source: str = "main") -> Path:
         source = "main" if source == "main" else "live"
         return self.recordings_dir / camera_id / source
+
+    def _recording_search_dirs(self, camera_id: str, source: str) -> list[Path]:
+        normalized = "main" if source == "main" else "live"
+        directories = [self._camera_dir(camera_id, normalized)]
+        if normalized == "main":
+            directories.append(self.recordings_dir / camera_id)
+        return directories
 
     def _keep_recording_dirs(self, camera_dir: Path, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -340,8 +364,10 @@ class Recorder:
             self._watchdog_thread.join(timeout=2)
             self._watchdog_thread = None
         with self._lock:
+            stopped_keys = set(self.processes)
             items = list(self.processes.values())
             self.processes.clear()
+            self._starting.clear()
         shutdowns = [
             threading.Thread(
                 target=self._stop_item,
@@ -355,6 +381,9 @@ class Recorder:
             thread.start()
         for thread in shutdowns:
             thread.join()
+        for pids in self._owned_ffmpeg_recorders(stopped_keys).values():
+            for pid in pids:
+                self._kill_pid(pid)
 
     def start_watchdog(self, cameras: list[CameraConfig], interval: float = 15.0) -> None:
         self._watchdog_stop.clear()
@@ -452,8 +481,8 @@ class Recorder:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 return
-        deadline = datetime.now() + timedelta(seconds=5)
-        while datetime.now() < deadline:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
@@ -471,11 +500,7 @@ class Recorder:
 
     def recent_files(self, camera_id: str, limit: int = 20, source: str = "main") -> list[str]:
         source = "main" if source == "main" else "live"
-        search_dirs = [self._camera_dir(camera_id, source)]
-        if source == "main":
-            legacy_dir = self.recordings_dir / camera_id
-            if legacy_dir != search_dirs[0]:
-                search_dirs.append(legacy_dir)
+        search_dirs = self._recording_search_dirs(camera_id, source)
         files = []
         for camera_dir in search_dirs:
             if camera_dir.exists():
@@ -499,45 +524,76 @@ class Recorder:
         source: str = "main",
     ) -> list[dict]:
         source = "main" if source == "main" else "live"
-        with self._index_connection() as connection:
-            indexed = connection.execute(
-                """
-                SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source,
-                       playable, health_error, stream_fingerprint, fingerprint_checked
-                FROM recordings
-                WHERE camera_id = ? AND source = ? AND playable = 1 AND end_epoch > ? AND start_epoch < ?
-                ORDER BY start_epoch
-                """,
-                (camera_id, source, start_epoch, end_epoch),
-            ).fetchall()
-        rows = [dict(row) for row in indexed]
+        def indexed_rows() -> list[dict]:
+            with self._index_connection() as connection:
+                indexed = connection.execute(
+                    """
+                    SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source,
+                           playable, health_error, stream_fingerprint, fingerprint_checked
+                    FROM recordings
+                    WHERE camera_id = ? AND source = ? AND playable = 1 AND end_epoch > ? AND start_epoch < ?
+                    ORDER BY start_epoch
+                    """,
+                    (camera_id, source, start_epoch, end_epoch),
+                ).fetchall()
+            return [dict(row) for row in indexed]
+
+        rows = indexed_rows()
         stale_paths = {str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()}
         if stale_paths:
             self._delete_index_paths(list(stale_paths))
             rows = [row for row in rows if str(row["path"]) not in stale_paths]
-        if rows:
-            for row in rows:
-                row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
-            return rows
 
         start_date = datetime.fromtimestamp(start_epoch).date() - timedelta(days=1)
         end_date = datetime.fromtimestamp(end_epoch).date() + timedelta(days=1)
         files: list[Path] = []
-        camera_dir = self._camera_dir(camera_id, source)
         current_date = start_date
         while current_date <= end_date:
-            day_dir = camera_dir / current_date.isoformat()
-            if day_dir.exists():
-                files.extend(day_dir.glob("??/*.mp4"))
+            for camera_dir in self._recording_search_dirs(camera_id, source):
+                day_dir = camera_dir / current_date.isoformat()
+                if day_dir.exists():
+                    files.extend(day_dir.glob("??/*.mp4"))
             current_date += timedelta(days=1)
-        rows = [
-            row for row in self._recording_rows_for_files(camera_id, source, files)
-            if row.get("start_epoch") is not None
-            and row.get("end_epoch") is not None
-            and float(row["end_epoch"]) > start_epoch
-            and float(row["start_epoch"]) < end_epoch
+        with self._index_connection() as connection:
+            indexed_paths = {
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT path FROM recordings
+                    WHERE camera_id = ? AND source = ? AND end_epoch > ? AND start_epoch < ?
+                    """,
+                    (camera_id, source, start_epoch, end_epoch),
+                )
+            }
+        relevant_files = [
+            path
+            for path in files
+            if (file_start := self.recording_start_epoch(path)) is not None
+            and file_start < end_epoch
+            and file_start + self.segment_seconds > start_epoch
         ]
-        self._store_recording_rows(camera_id, source, rows)
+        with self._lock:
+            active_item = self.processes.get((camera_id, source))
+            recorder_active = active_item is not None and active_item[0].poll() is None
+        if recorder_active and relevant_files:
+            now = datetime.now()
+            current_hour = self._camera_dir(camera_id, source) / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            active_tail = max(relevant_files, key=lambda path: self.recording_start_epoch(path) or 0.0)
+            if active_tail.parent == current_hour:
+                relevant_files.remove(active_tail)
+        if any(str(path) not in indexed_paths for path in relevant_files):
+            discovered = [
+                row for row in self._recording_rows_for_files(camera_id, source, files)
+                if row.get("start_epoch") is not None
+                and row.get("end_epoch") is not None
+                and float(row["end_epoch"]) > start_epoch
+                and float(row["start_epoch"]) < end_epoch
+            ]
+            self._store_recording_rows(camera_id, source, discovered)
+            self.queue_recording_validation(discovered)
+            rows = indexed_rows()
+        for row in rows:
+            row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
         return rows
 
     def recording_availability_between(
@@ -548,28 +604,16 @@ class Recorder:
         source: str = "main",
     ) -> dict:
         source = "main" if source == "main" else "live"
-        with self._index_connection() as connection:
-            indexed = connection.execute(
-                """
-                SELECT start_epoch, end_epoch
-                FROM recordings
-                WHERE camera_id = ? AND source = ? AND playable = 1
-                  AND size_bytes > 1024 AND end_epoch > ? AND start_epoch < ?
-                ORDER BY start_epoch
-                """,
-                (camera_id, source, start_epoch, end_epoch),
-            ).fetchall()
-        rows = [dict(row) for row in indexed]
-        if not rows:
-            rows = [
-                row for row in self.recording_rows_between(
-                    camera_id,
-                    start_epoch,
-                    end_epoch,
-                    source,
-                )
-                if int(row.get("size_bytes") or 0) > 1024
-            ]
+        rows = [
+            {"start_epoch": row["start_epoch"], "end_epoch": row["end_epoch"]}
+            for row in self.recording_rows_between(
+                camera_id,
+                start_epoch,
+                end_epoch,
+                source,
+            )
+            if int(row.get("size_bytes") or 0) > 1024
+        ]
         return {
             "ranges": self._merge_availability_rows(
                 rows,
@@ -635,17 +679,35 @@ class Recorder:
         return ranges
 
     def _recording_rows_for_files(self, camera_id: str, source: str, files: list[Path]) -> list[dict]:
-        files = list(set(files))
-        files.sort(key=lambda path: self.recording_start_epoch(path) or path.stat().st_mtime)
+        files = list({path for path in files if path.is_file()})
+        def file_order(path: Path) -> float:
+            start_epoch = self.recording_start_epoch(path)
+            if start_epoch is not None:
+                return start_epoch
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return float("inf")
+
+        files.sort(key=file_order)
         all_files = files
         with self._lock:
             item = self.processes.get((camera_id, source))
             recorder_active = item is not None and item[0].poll() is None
         if recorder_active and files:
-            files = files[:-1]
+            now = datetime.now()
+            current_hour = self._camera_dir(camera_id, source) / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            if files[-1].parent == current_hour:
+                files = files[:-1]
         rows: list[dict] = []
         for index, file_path in enumerate(files):
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
             start_epoch = self.recording_start_epoch(file_path)
+            if start_epoch is None:
+                continue
             next_start_epoch = self.recording_start_epoch(all_files[index + 1]) if index + 1 < len(all_files) else None
             duration_seconds = self.segment_seconds
             if start_epoch is not None and next_start_epoch is not None:
@@ -654,8 +716,8 @@ class Recorder:
                 {
                     "path": str(file_path),
                     "name": file_path.name,
-                    "size_bytes": file_path.stat().st_size,
-                    "modified_at": file_path.stat().st_mtime,
+                    "size_bytes": stat.st_size,
+                    "modified_at": stat.st_mtime,
                     "start_epoch": start_epoch,
                     "start_at": (
                         datetime.fromtimestamp(start_epoch, timezone.utc).isoformat()
@@ -663,7 +725,7 @@ class Recorder:
                         else ""
                     ),
                     "duration_seconds": duration_seconds,
-                    "end_epoch": start_epoch + duration_seconds if start_epoch is not None else None,
+                    "end_epoch": start_epoch + duration_seconds,
                     "source": source,
                 }
             )
@@ -776,8 +838,12 @@ class Recorder:
                 return
 
     def _reconcile_recording_source(self, camera_id: str, source: str) -> None:
-        camera_dir = self._camera_dir(camera_id, source)
-        files = list(camera_dir.glob("????-??-??/??/*.mp4")) if camera_dir.exists() else []
+        files = [
+            path
+            for camera_dir in self._recording_search_dirs(camera_id, source)
+            if camera_dir.exists()
+            for path in camera_dir.glob("????-??-??/??/*.mp4")
+        ]
         rows = self._recording_rows_for_files(camera_id, source, files)
         self._store_recording_rows(camera_id, source, rows)
         self._prune_recording_index(camera_id, source, files)
@@ -793,7 +859,12 @@ class Recorder:
         for camera_id, source in wanted:
             camera_dir = self._camera_dir(camera_id, source)
             if full:
-                files = list(camera_dir.glob("????-??-??/??/*.mp4")) if camera_dir.exists() else []
+                files = [
+                    path
+                    for search_dir in self._recording_search_dirs(camera_id, source)
+                    if search_dir.exists()
+                    for path in search_dir.glob("????-??-??/??/*.mp4")
+                ]
             else:
                 files = []
                 for hours_back in (1, 0):
@@ -846,12 +917,27 @@ class Recorder:
                     self._validation_pending_set.add(path)
 
     def _backfill_stream_fingerprints(self, limit: int = 20) -> int:
+        batch_limit = max(1, limit)
         paths: list[str] = []
         with self._fingerprint_lock:
-            while self._fingerprint_pending and len(paths) < max(1, limit):
+            while self._fingerprint_pending and len(paths) < batch_limit:
                 path = self._fingerprint_pending.popleft()
                 self._fingerprint_pending_set.discard(path)
                 paths.append(path)
+        if len(paths) < batch_limit:
+            with self._index_connection() as connection:
+                paths.extend(
+                    str(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT path FROM recordings
+                        WHERE fingerprint_checked = 0
+                        ORDER BY start_epoch DESC LIMIT ?
+                        """,
+                        (batch_limit - len(paths),),
+                    )
+                    if str(row[0]) not in paths
+                )
         updated = 0
         for path_value in paths:
             if self._index_stop.is_set():
@@ -913,12 +999,27 @@ class Recorder:
         return len(stale_paths)
 
     def _validate_index_batch(self, limit: int = 20) -> int:
+        batch_limit = max(1, limit)
         paths: list[str] = []
         with self._validation_lock:
-            while self._validation_pending and len(paths) < max(1, limit):
+            while self._validation_pending and len(paths) < batch_limit:
                 path = self._validation_pending.popleft()
                 self._validation_pending_set.discard(path)
                 paths.append(path)
+        if len(paths) < batch_limit:
+            with self._index_connection() as connection:
+                paths.extend(
+                    str(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT path FROM recordings
+                        WHERE validated = 0
+                        ORDER BY start_epoch DESC LIMIT ?
+                        """,
+                        (batch_limit - len(paths),),
+                    )
+                    if str(row[0]) not in paths
+                )
         validated = 0
         for path_value in paths:
             if self._index_stop.is_set():
@@ -973,18 +1074,23 @@ class Recorder:
             flags = str(((payload.get("packets") or [{}])[0]).get("flags") or "")
         except (ValueError, TypeError, IndexError) as exc:
             return None, f"probe metadata invalid: {exc}"
-        if duration <= 0:
+        if not math.isfinite(duration) or duration <= 0 or duration > max(60.0, self.segment_seconds * 3):
             return None, "recording duration is invalid"
         if "K" not in flags:
             return duration, "recording does not start on a video keyframe"
         return duration, ""
 
-    def mark_unplayable(self, path: Path, error: str) -> None:
+    def schedule_revalidation(self, path: Path, error: str) -> None:
+        path_value = str(path)
         with self._index_connection() as connection:
             connection.execute(
-                "UPDATE recordings SET playable = 0, health_error = ?, validated = 1 WHERE path = ?",
-                (str(error)[-500:], str(path)),
+                "UPDATE recordings SET playable = 0, health_error = ?, validated = 0 WHERE path = ?",
+                (str(error)[-500:], path_value),
             )
+        with self._validation_lock:
+            if path_value not in self._validation_pending_set:
+                self._validation_pending.append(path_value)
+                self._validation_pending_set.add(path_value)
 
     def latest_indexed_row(self, camera_id: str, source: str) -> dict | None:
         source = "main" if source == "main" else "live"
@@ -1013,7 +1119,11 @@ class Recorder:
 
     def recording_start_epoch(self, path: Path) -> float | None:
         try:
-            value = datetime.strptime(path.stem, "%Y%m%d-%H%M%S")
+            value = datetime.strptime(path.stem, "%Y%m%d-%H%M%S%z")
+            return value.timestamp()
         except ValueError:
-            return None
+            try:
+                value = datetime.strptime(path.stem, "%Y%m%d-%H%M%S")
+            except ValueError:
+                return None
         return value.astimezone(timezone.utc).timestamp()

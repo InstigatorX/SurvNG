@@ -23,6 +23,15 @@ class AppConfigTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             AppConfig(base_path="/survng#remote")
 
+    def test_event_clip_window_requires_a_bounded_nonempty_duration(self) -> None:
+        self.assertEqual(AppConfig(event_clip_before_seconds=0, event_clip_after_seconds=2).event_clip_before_seconds, 0)
+        with self.assertRaises(ValidationError):
+            AppConfig(event_clip_before_seconds=0, event_clip_after_seconds=0)
+        with self.assertRaises(ValidationError):
+            AppConfig(event_clip_before_seconds=-1)
+        with self.assertRaises(ValidationError):
+            AppConfig(event_clip_after_seconds=3601)
+
     def test_motion_qualification_width_defaults_and_camera_override(self) -> None:
         config = AppConfig.model_validate({
             "cameras": [{
