@@ -48,6 +48,8 @@ import "./styles.css";
 import {
   buildMotionDecisionFusion,
   defaultMotionDecisionSettings,
+  MOTION_MODE_OPTIONS,
+  motionModeInfo,
   readMotionDecisionFusion,
 } from "./motionDecisionConfig.mjs";
 import {
@@ -3802,8 +3804,8 @@ function EfficientMotionSetup({ active, inherited = false, disabled = false, onA
   return (
     <div className={`efficient-motion-setup ${active ? "active" : ""}`}>
       <div>
-        <strong>Efficient ONVIF + SurvNG analysis</strong>
-        <span>SurvNG continuously learns the scene at low resolution. Camera notices accelerate confirmation, while SurvNG can still detect motion if the camera misses it.</span>
+        <strong>SurvNG smart motion + camera notices</strong>
+        <span>Recommended: SurvNG uses low-resolution visual motion to start object detection without depending on ONVIF. Camera notices remain available as supporting signals.</span>
       </div>
       {active ? <span className="efficient-motion-status">{inherited ? "Using global setup" : "Currently selected"}</span> : (
         <button type="button" className="primary" disabled={disabled} onClick={onApply}>Use this setup</button>
@@ -3884,19 +3886,28 @@ function MotionDecisionEditor({
   const settings = effective.settings;
   const policy = MOTION_DECISION_POLICIES[settings.policy] || MOTION_DECISION_POLICIES.audit;
   const effectiveMode = mode === "inherit" ? globalMode : mode;
+  const modeInfo = motionModeInfo(effectiveMode);
   const modeControl = (
-    <label>What should SurvNG do?<select value={mode} onChange={(event) => onModeChange(event.target.value)}>
+    <label>What starts object detection?<select value={mode} onChange={(event) => onModeChange(event.target.value)}>
       {onSetInherited ? <option value="inherit">Use global setting</option> : null}
-      <option value="audit">Preview filtering without skipping events</option>
-      <option value="enforce">Skip events that fail motion analysis</option>
-      <option value="off">Send every event to object detection</option>
+      {MOTION_MODE_OPTIONS.map((option) => (
+        <option key={option.value} value={option.value}>{option.label}</option>
+      ))}
     </select></label>
   );
-  const modeExplanation = effectiveMode === "enforce"
-    ? "Active filtering: object detection runs only after motion analysis accepts the event."
-    : effectiveMode === "off"
-      ? "No filtering: every camera motion event is sent to object detection."
-      : "Preview only: SurvNG records what it would skip, but still sends every event to object detection.";
+  const modeExplanation = (
+    <>
+      <strong>{modeInfo.status}</strong>
+      <span>{modeInfo.description}</span>
+    </>
+  );
+  const processingNote = (
+    <div className="motion-processing-note">
+      <span><strong>Analysis feed:</strong> each camera&apos;s live feed—its substream when configured, otherwise its main URL—sampled at the configured width and FPS.</span>
+      <span><strong>CPU control:</strong> all cameras remain enabled, but at most two run visual analysis simultaneously. A bounded latest-frame queue replaces stale pending work instead of building a backlog.</span>
+      <span><strong>After a trigger:</strong> object detection samples the high-resolution main recording; continuous recording and live view are not limited to two cameras.</span>
+    </div>
+  );
 
   function updateSettings(patch) {
     onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
@@ -3929,6 +3940,7 @@ function MotionDecisionEditor({
         </div>
         {modeControl}
         <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+        {processingNote}
       </div>
     );
   }
@@ -3948,6 +3960,7 @@ function MotionDecisionEditor({
         </div>
         {modeControl}
         <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+        {processingNote}
         <button type="button" onClick={() => onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()))}>
           Replace with recommended settings
         </button>
@@ -3970,6 +3983,7 @@ function MotionDecisionEditor({
 
       {modeControl}
       <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+      {processingNote}
 
       <details className="motion-decision-options">
         <summary>Advanced decision options</summary>
@@ -4653,7 +4667,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   <label>Password<input type="password" value={selectedCamera.onvif?.password || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
                 </div>
                 <div className="sub-panel">
-                  <h3>Motion Filtering</h3>
+                  <h3>Motion Triggers &amp; Filtering</h3>
                   <EfficientMotionSetup
                     active={isEfficientMotionSetup({
                       mode: selectedCamera.motion_qualification?.mode === "inherit" ? config.motion_qualification?.mode : selectedCamera.motion_qualification?.mode,
@@ -5418,7 +5432,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
           <label>Maximum Saved Faces<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /></label>
         </div>
-        <h3>Motion Filtering</h3>
+        <h3>Motion Triggers &amp; Filtering</h3>
         <EfficientMotionSetup
           active={isEfficientMotionSetup({
             mode: config.motion_qualification?.mode,
@@ -5708,19 +5722,26 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
   }
+  const onvifEvidence = status.motion_qualification?.evidence_sources?.onvif;
+  const cameraAlertsOnly = status.motion_qualification?.mode !== "enforce";
+  const missingMotionNotices = cameraAlertsOnly
+    && status.onvif_enabled
+    && Number(onvifEvidence?.sample_count || 0) === 0;
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
       <span>Stream worker: {status.running ? "running" : "not running"}</span>
       <span>Recording: {status.recording ? "running" : "stopped"}</span>
       <span>ONVIF: {status.onvif_enabled ? (status.onvif_connected ? "connected" : `not connected${status.onvif_last_error ? `: ${status.onvif_last_error}` : ""}`) : "disabled"}</span>
-      {status.onvif_last_event_at ? <span>Last ONVIF message: {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
+      {status.onvif_last_event_at ? <span>Last ONVIF notification (any type): {formatDateTime(status.onvif_last_event_at, timeZone)}</span> : null}
       {status.motion_qualification ? (
         <div className="motion-runtime-status">
           <div className="motion-runtime-summary">
             <strong>Motion processing</strong>
-            <span>{status.motion_qualification.mode === "enforce" ? "Using decisions" : status.motion_qualification.mode === "off" ? "Filtering off" : "Monitoring only"} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
+            <span>{motionModeInfo(status.motion_qualification.mode).status} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
             <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} monitor-only rejects · {status.motion_qualification.suppressed || 0} filtered</span>
+            <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
+            {missingMotionNotices ? <span className="motion-runtime-warning">No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident.</span> : null}
           </div>
           <div className="motion-pipeline-runtime-grid">
             <MotionPipelineRuntimeCard label="Motion analysis" pipeline={status.motion_qualification.pipeline} origin={status.motion_qualification.pipeline_origins?.qualification} motionCatalog={motionCatalog} />

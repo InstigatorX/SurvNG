@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import {
   buildMotionDecisionFusion,
+  MOTION_MODE_OPTIONS,
+  motionModeInfo,
   readMotionDecisionFusion,
 } from "../src/motionDecisionConfig.mjs";
+
+assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["enforce", "audit", "off"]);
+assert.match(motionModeInfo("enforce").description, /start object detection/);
+assert.match(motionModeInfo("audit").description, /visual analysis alone cannot create an event/);
+assert.match(motionModeInfo("off").description, /Only camera ONVIF or manual notices/);
+assert.equal(motionModeInfo("unknown").value, "audit");
 
 const defaults = readMotionDecisionFusion(undefined);
 assert.equal(defaults.custom, false);

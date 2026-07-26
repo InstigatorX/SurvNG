@@ -10,6 +10,32 @@ const DEFAULT_SETTINGS = Object.freeze({
   stateTimeoutSeconds: 10,
 });
 
+export const MOTION_MODE_OPTIONS = Object.freeze([
+  Object.freeze({
+    value: "enforce",
+    label: "SurvNG smart motion (Recommended)",
+    status: "SurvNG visual triggers + filtering",
+    description: "SurvNG can start object detection from credible visual motion, even when the camera sends no ONVIF motion notice. Routine camera motion notices are analyzed and may be filtered; semantic person, vehicle, animal, face, and manual notices bypass filtering.",
+  }),
+  Object.freeze({
+    value: "audit",
+    label: "Camera alerts + decision preview",
+    status: "Camera alerts only · previewing decisions",
+    description: "Only camera ONVIF or manual notices start object detection. SurvNG still analyzes the video and previews its decisions, but visual analysis alone cannot create an event and camera notices are not skipped.",
+  }),
+  Object.freeze({
+    value: "off",
+    label: "Camera alerts without filtering",
+    status: "Camera alerts only · filtering off",
+    description: "Only camera ONVIF or manual notices start object detection, and every notice is passed through. Adaptive scene learning remains warm but does not create events or filter camera notices.",
+  }),
+]);
+
+export function motionModeInfo(mode) {
+  return MOTION_MODE_OPTIONS.find((option) => option.value === mode)
+    || MOTION_MODE_OPTIONS.find((option) => option.value === "audit");
+}
+
 const GUIDED_IMPLEMENTATIONS = [
   "buffered_evidence_fusion",
   "score_event_state",

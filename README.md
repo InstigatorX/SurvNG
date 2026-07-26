@@ -10,7 +10,7 @@ document synchronized with changes to any video-processing stage.
 
 - Connects to RTSP, RTMP, HTTP, or file streams through OpenCV/FFmpeg.
 - Records streams to segmented MP4 files with FFmpeg.
-- Listens for ONVIF pull-point events when the camera supports them.
+- Listens for ONVIF pull-point events when the camera supports them, and can use SurvNG adaptive visual motion as an independent trigger.
 - Runs an OpenVINO detection pass on the latest frame when motion is reported.
 - Serves a React bento-style GUI for live streams, event history, recordings, and camera controls.
 
@@ -18,7 +18,7 @@ document synchronized with changes to any video-processing stage.
 
 ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.
 
-If ONVIF events are not available on your exact camera, the app can still record and view streams; the next fallback to add is periodic frame-difference motion detection.
+If ONVIF motion events are missing or unreliable, select **SurvNG smart motion** so adaptive visual analysis can trigger object detection independently.
 
 ## Requirements
 
@@ -246,13 +246,25 @@ The detector is optional. If OpenVINO or the model is missing, the app records a
 
 SurvNG learns each scene from a bounded, latest-frame analysis worker that is isolated from the live capture loop. It can qualify noisy ONVIF motion before starting the recorded-frame OpenVINO cycle and, in enforce mode, can independently trigger object detection for credible motion that the camera missed.
 
-Set `motion_qualification.mode` to `off`, `audit`, or `enforce`. Audit mode is the default: it keeps scene learning warm and exposes the latest adaptive decision in camera telemetry, but neither suppresses camera events nor creates adaptive-only incidents. Enforce mode suppresses rejected motion bursts and enables independent adaptive triggers. Semantic ONVIF topics such as person, vehicle, animal, and manual triggers always bypass image qualification. Off mode preserves scene learning while sending every camera event to object detection. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
+The GUI labels the three modes by their actual trigger behavior:
+
+| GUI option | Configuration | What starts object detection? | Filtering behavior |
+| --- | --- | --- | --- |
+| **SurvNG smart motion (Recommended)** | `enforce` | Accepted adaptive visual motion or camera/manual notices | Routine camera motion may be rejected; semantic person, vehicle, animal, face, and manual notices bypass filtering |
+| **Camera alerts + decision preview** | `audit` | Camera ONVIF or manual notices only | No camera notice is skipped; adaptive decisions are telemetry only and cannot create an event |
+| **Camera alerts without filtering** | `off` | Camera ONVIF or manual notices only | Every camera notice is sent to object detection |
+
+This distinction matters: `audit` does not provide an adaptive fallback when a camera fails to send an ONVIF motion notice. Use `enforce` when SurvNG visual motion should replace or supplement ONVIF. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
+
+Adaptive analysis uses the camera's live feed: `live_stream_url` when a substream is configured, otherwise `stream_url`. Frames are downscaled to `frame_width` (320 px by default), converted to grayscale, and sampled at `sample_fps` (5 FPS by default). Object detection after a trigger uses high-resolution frames from the main recording.
+
+All cameras remain eligible for analysis, but a shared application semaphore permits at most two cameras to execute the CPU-heavy visual pipeline simultaneously. Each camera has a bounded latest-frame queue, so stale pending analysis is replaced instead of accumulating. This limit does not restrict capture, continuous recording, live view, or the number of cameras with motion detection enabled.
 
 The built-in fusion policy is observational and preserves existing decisions. Configured final graphs may select `any`, `all`, or weighted source consensus and add activation/release hysteresis or cooldown; incomplete graphs are rejected before config is saved.
 
 Use the guided **Motion decision** panel under **Config > Detection** to choose a global policy without editing stage graphs. Each camera also has a Motion decision panel that either inherits the global policy or creates a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
 
-For the normal setup, select **Efficient ONVIF + SurvNG analysis** and click **Use this setup**. This enables low-resolution adaptive analysis, keeps ONVIF as a supporting trigger, and disables the redundant MOG2 monitor. Analysis uses a latest-frame queue outside capture threads so a slow motion frame cannot delay live video. Detailed thresholds, supporting-signal policies, and camera-specific overrides remain available under the advanced sections.
+For the normal setup, select **SurvNG smart motion + camera notices** and click **Use this setup**. This enables low-resolution adaptive triggers, keeps ONVIF as a supporting signal, and disables the redundant MOG2 monitor. Detailed thresholds, supporting-signal policies, and camera-specific overrides remain available under the advanced sections. See [Adaptive motion triggers](docs/adaptive-motion.md) for the complete data flow and performance model.
 
 The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 

@@ -3001,12 +3001,39 @@ button.status-pill.hud-toggle:disabled {
 }
 
 .motion-decision-mode {
+  display: grid;
+  gap: 3px;
   border-radius: 6px;
   background: var(--control-muted);
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
   padding: 8px 10px;
+}
+
+.motion-decision-mode strong,
+.motion-processing-note strong {
+  color: var(--ink);
+}
+
+.motion-processing-note {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--control-muted) 72%, transparent);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 10px 11px;
+}
+
+.motion-runtime-warning {
+  border-left: 3px solid var(--warning, #d98b25);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--warning, #d98b25) 9%, transparent);
+  color: var(--ink) !important;
+  padding: 6px 8px;
 }
 
 .motion-decision-mode.mode-enforce {
