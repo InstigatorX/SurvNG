@@ -5,7 +5,11 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .contracts import MotionPipelineObserver, MotionStage
 from .pipeline import MotionErrorPolicy, MotionPipeline
-from .registry import MotionStageDependencies, MotionStageRegistry
+from .registry import (
+    MotionStageDependencies,
+    MotionStageRegistration,
+    MotionStageRegistry,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +18,25 @@ class MotionStageConfig:
     implementation: str
     options: Mapping[str, Any] = field(default_factory=dict)
     parallel_group: str = ""
+
+
+def _effective_observation_kinds(
+    stage: MotionStage,
+    registration: MotionStageRegistration,
+) -> frozenset[str] | None:
+    if registration.observation_kinds is not None:
+        return registration.observation_kinds
+    declared = getattr(stage, "observation_kinds", None)
+    if declared is None:
+        return None
+    return frozenset(str(kind) for kind in declared)
+
+
+def _observation_kinds_overlap(
+    left: frozenset[str] | None,
+    right: frozenset[str] | None,
+) -> bool:
+    return left is None or right is None or bool(left & right)
 
 
 class MotionPipelineFactory:
@@ -45,6 +68,7 @@ class MotionPipelineFactory:
         }
         stages = []
         registrations = []
+        effective_observation_kinds: list[frozenset[str] | None] = []
         execution_groups: list[list[int]] = []
         current_parallel_group = ""
         for stage_config in stage_configs:
@@ -66,13 +90,25 @@ class MotionPipelineFactory:
                 raise ValueError(
                     f"motion stage {stage_id!r} requires unavailable artifacts: {', '.join(sorted(missing))}"
                 )
-            stages.append(registration.builder(stage_id, stage_config.options, self.dependencies))
+            stage = registration.builder(stage_id, stage_config.options, self.dependencies)
+            stages.append(stage)
             registrations.append(registration)
+            effective_observation_kinds.append(
+                _effective_observation_kinds(stage, registration)
+            )
             stage_ids.add(stage_id)
             available_artifacts.update(registration.provides)
             if parallel_group and parallel_group == current_parallel_group:
+                overlapping_stages = (
+                    index
+                    for index in execution_groups[-1]
+                    if _observation_kinds_overlap(
+                        effective_observation_kinds[index],
+                        effective_observation_kinds[-1],
+                    )
+                )
                 existing_provides = set().union(
-                    *(registrations[index].provides for index in execution_groups[-1])
+                    *(registrations[index].provides for index in overlapping_stages)
                 )
                 conflicting = (existing_provides & registration.provides) - {
                     "source_evidence",
@@ -95,8 +131,8 @@ class MotionPipelineFactory:
             )
         observation_kinds = sorted({
             kind
-            for registration in registrations
-            for kind in (registration.observation_kinds or ())
+            for kinds in effective_observation_kinds
+            for kind in (kinds or ())
         })
         for observation_kind in observation_kinds:
             kind_available = {
@@ -111,8 +147,8 @@ class MotionPipelineFactory:
                 runnable = [
                     index
                     for index in group
-                    if registrations[index].observation_kinds is None
-                    or observation_kind in registrations[index].observation_kinds
+                    if effective_observation_kinds[index] is None
+                    or observation_kind in effective_observation_kinds[index]
                 ]
                 if not runnable:
                     continue
@@ -178,8 +214,8 @@ class MotionPipelineFactory:
                 for stage, registration in zip(stages, registrations, strict=True)
             },
             stage_observation_kinds={
-                stage.stage_id: registration.observation_kinds
-                for stage, registration in zip(stages, registrations, strict=True)
+                stage.stage_id: kinds
+                for stage, kinds in zip(stages, effective_observation_kinds, strict=True)
             },
             continuous_analysis=any(
                 registration.continuous_analysis

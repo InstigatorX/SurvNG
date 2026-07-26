@@ -230,6 +230,42 @@ class MotionPipelineTest(unittest.TestCase):
         finally:
             pipeline.close()
 
+    def test_factory_preserves_stage_declared_observation_kinds_for_plugins(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="event_observer",
+            builder=build_event_observer,
+            provides=frozenset({"debug"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("event", "event_observer")],
+        )
+        try:
+            frame_result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={"observation_kind": "frame"},
+                runtime=pipeline.runtime,
+            ))
+            event_result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=11.0,
+                original_frame=None,
+                configuration={"observation_kind": "motion_event"},
+                runtime=pipeline.runtime,
+            ))
+
+            self.assertNotIn("observed_by", frame_result.debug.values)
+            self.assertEqual(event_result.debug.values["observed_by"], ["event"])
+            self.assertEqual(
+                pipeline.stage_observation_kinds["event"],
+                frozenset({"motion_event"}),
+            )
+        finally:
+            pipeline.close()
+
     def test_factory_rejects_dependency_provided_only_by_another_observation_kind(self) -> None:
         registry = MotionStageRegistry()
         registry.register(MotionStageRegistration(
@@ -311,6 +347,133 @@ class MotionPipelineTest(unittest.TestCase):
         self.assertFalse(process_thread.is_alive())
         self.assertFalse(close_thread.is_alive())
         self.assertTrue(stage.closed)
+
+    def test_pipeline_close_from_observer_fails_instead_of_deadlocking(self) -> None:
+        class ClosingObserver:
+            pipeline = None
+
+            def stage_started(self, stage_id, context):
+                del stage_id, context
+
+            def stage_completed(self, timing, context):
+                del timing, context
+                self.pipeline.close()
+
+            def stage_failed(self, timing, context, error):
+                del timing, context, error
+
+        observer = ClosingObserver()
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="record",
+            builder=build_recording_stage,
+        ))
+        pipeline = MotionPipelineFactory(registry, observer=observer).create(
+            "gate",
+            [MotionStageConfig("record", "record")],
+        )
+        observer.pipeline = pipeline
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "cannot be closed from an active processing thread",
+        ):
+            pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={},
+                runtime=pipeline.runtime,
+            ))
+
+        pipeline.close()
+
+    def test_pipeline_close_from_parallel_observer_fails_instead_of_deadlocking(self) -> None:
+        class ClosingObserver:
+            pipeline = None
+
+            def stage_started(self, stage_id, context):
+                del stage_id, context
+
+            def stage_completed(self, timing, context):
+                del timing, context
+                self.pipeline.close()
+
+            def stage_failed(self, timing, context, error):
+                del timing, context, error
+
+        observer = ClosingObserver()
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="record",
+            builder=build_recording_stage,
+            provides=frozenset({"debug"}),
+        ))
+        pipeline = MotionPipelineFactory(registry, observer=observer).create(
+            "gate",
+            [
+                MotionStageConfig("first", "record", parallel_group="branches"),
+                MotionStageConfig("second", "record", parallel_group="branches"),
+            ],
+        )
+        observer.pipeline = pipeline
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "cannot be closed from an active processing thread",
+        ):
+            pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={},
+                runtime=pipeline.runtime,
+            ))
+
+        pipeline.close()
+
+    def test_parallel_group_allows_disjoint_observations_to_provide_same_artifact(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="frame_observer",
+            builder=build_frame_observer,
+            provides=frozenset({"scoring"}),
+            observation_kinds=frozenset({"frame"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="event_observer",
+            builder=build_event_observer,
+            provides=frozenset({"scoring"}),
+            observation_kinds=frozenset({"motion_event"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("frame", "frame_observer", parallel_group="sources"),
+                MotionStageConfig("event", "event_observer", parallel_group="sources"),
+            ],
+            required_artifacts={"scoring"},
+        )
+        try:
+            frame_result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={"observation_kind": "frame"},
+                runtime=pipeline.runtime,
+            ))
+            event_result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=11.0,
+                original_frame=None,
+                configuration={"observation_kind": "motion_event"},
+                runtime=pipeline.runtime,
+            ))
+
+            self.assertEqual(frame_result.debug.values["observed_by"], ["frame"])
+            self.assertEqual(event_result.debug.values["observed_by"], ["event"])
+        finally:
+            pipeline.close()
 
     def test_parallel_group_waits_for_siblings_before_raising_failure(self) -> None:
         completed = threading.Event()

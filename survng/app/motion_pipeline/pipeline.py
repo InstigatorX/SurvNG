@@ -137,21 +137,32 @@ class MotionPipeline:
         self._metrics_lock = threading.Lock()
         self._lifecycle_condition = threading.Condition()
         self._active_invocations = 0
+        self._active_threads: dict[int, int] = {}
         self._closing = False
         self._closed = False
 
     def process(self, context: MotionContext) -> MotionContext:
+        thread_id = threading.get_ident()
         with self._lifecycle_condition:
             if self._closing or self._closed:
                 raise RuntimeError("motion pipeline is closed")
             self._active_invocations += 1
+            self._active_threads[thread_id] = self._active_threads.get(thread_id, 0) + 1
         try:
             return self._process_active(context)
         finally:
             with self._lifecycle_condition:
                 self._active_invocations -= 1
+                self._leave_processing_thread_locked(thread_id)
                 if self._active_invocations == 0:
                     self._lifecycle_condition.notify_all()
+
+    def _leave_processing_thread_locked(self, thread_id: int) -> None:
+        remaining = self._active_threads[thread_id] - 1
+        if remaining:
+            self._active_threads[thread_id] = remaining
+        else:
+            del self._active_threads[thread_id]
 
     def _process_active(self, context: MotionContext) -> MotionContext:
         if context.camera_id != self.camera_id:
@@ -226,6 +237,20 @@ class MotionPipeline:
         )
 
     def _process_stage(self, stage: MotionStage, context: MotionContext) -> MotionContext:
+        thread_id = threading.get_ident()
+        with self._lifecycle_condition:
+            self._active_threads[thread_id] = self._active_threads.get(thread_id, 0) + 1
+        try:
+            return self._process_stage_active(stage, context)
+        finally:
+            with self._lifecycle_condition:
+                self._leave_processing_thread_locked(thread_id)
+
+    def _process_stage_active(
+        self,
+        stage: MotionStage,
+        context: MotionContext,
+    ) -> MotionContext:
         self.observer.stage_started(stage.stage_id, context)
         started_ns = time.perf_counter_ns()
         try:
@@ -335,6 +360,10 @@ class MotionPipeline:
         with self._lifecycle_condition:
             if self._closed:
                 return
+            if threading.get_ident() in self._active_threads:
+                raise RuntimeError(
+                    "motion pipeline cannot be closed from an active processing thread"
+                )
             if self._closing:
                 while not self._closed:
                     self._lifecycle_condition.wait()
