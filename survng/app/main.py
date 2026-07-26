@@ -7,6 +7,7 @@ import math
 import mmap
 import mimetypes
 import asyncio
+import functools
 import queue
 import os
 import re
@@ -24,12 +25,12 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import cv2
@@ -64,11 +65,12 @@ from .recording_media import (
     resolve_stream_fingerprints,
 )
 from .zones import apply_detection_zones, detection_threshold
+from .security import redact_secret_text
 
 config = load_config()
 manager = AppManager(config)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
-SECRET_URL_RE = re.compile(r"(\b(?:rtsp|rtmp|http|https|reolink)://)([^:/@\s]+):([^@\s]+)@", re.IGNORECASE)
+SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
 RECORDING_LOOKUP_LIMIT = 20000
 RECORDING_FMP4_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 RECORDING_FMP4_LOCKS_GUARD = threading.Lock()
@@ -102,6 +104,9 @@ RECORDING_PREWARM_PROCESS: subprocess.Popen | None = None
 FACE_OBSERVATIONS_SYNCED = False
 FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
 MANAGER_RELOAD_LOCK = threading.RLock()
+CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
+AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
+EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 
 
 class RecordingPrewarmCancelled(Exception):
@@ -120,6 +125,103 @@ class ConfiguredBasePathMiddleware:
             scope["path"] = path[len(base_path):] or "/"
             scope["raw_path"] = scope["path"].encode("utf-8")
         await self.app(scope, receive, send)
+
+
+def _scope_header(scope: dict, name: bytes) -> str:
+    for header_name, value in scope.get("headers", []):
+        if header_name.lower() == name:
+            return value.decode("latin-1").strip()
+    return ""
+
+
+def _same_origin_request(scope: dict) -> bool:
+    origin = _scope_header(scope, b"origin")
+    if not origin:
+        return _scope_header(scope, b"sec-fetch-site").lower() != "cross-site"
+    host = _scope_header(scope, b"host").lower()
+    if not host:
+        return False
+    try:
+        parsed = urlsplit(origin)
+        parsed_host = urlsplit(f"//{host}")
+        origin_port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        forwarded_scheme = _scope_header(scope, b"x-forwarded-proto").split(",", 1)[0].strip().lower()
+        request_scheme = forwarded_scheme or str(scope.get("scheme") or "").lower()
+        request_scheme = {"ws": "http", "wss": "https"}.get(request_scheme, request_scheme)
+        request_port = parsed_host.port or (443 if request_scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() in {"http", "https"}
+        and (not request_scheme or parsed.scheme.lower() == request_scheme)
+        and parsed.hostname is not None
+        and parsed.hostname.lower() == str(parsed_host.hostname or "").lower()
+        and origin_port == request_port
+        and not parsed.username
+        and not parsed.password
+        and not parsed_host.username
+        and not parsed_host.password
+        and parsed.path == ""
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _api_scope_path(scope: dict) -> str:
+    path = str(scope.get("path") or "")
+    base_path = config.base_path
+    if base_path and (path == base_path or path.startswith(f"{base_path}/")):
+        path = path[len(base_path):] or "/"
+    return path
+
+
+class SecurityBoundaryMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        scope_type = scope.get("type")
+        if scope_type == "websocket" and not _same_origin_request(scope):
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        if (
+            scope_type == "http"
+            and _api_scope_path(scope).startswith("/api/")
+            and not _same_origin_request(scope)
+        ):
+            response = JSONResponse(
+                {"detail": "cross-origin API requests are not allowed"},
+                status_code=403,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                    "Referrer-Policy": "same-origin",
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        async def send_with_security_headers(message: dict) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                existing = {name.lower() for name, _value in headers}
+                additions = {
+                    b"x-content-type-options": b"nosniff",
+                    b"referrer-policy": b"same-origin",
+                    b"permissions-policy": b"camera=(), microphone=(), geolocation=()",
+                    b"x-frame-options": b"SAMEORIGIN",
+                }
+                if _api_scope_path(scope).startswith("/api/"):
+                    additions[b"cache-control"] = b"no-store"
+                headers.extend(
+                    (name, value)
+                    for name, value in additions.items()
+                    if name not in existing
+                )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
 
 
 def public_url(path: str) -> str:
@@ -147,7 +249,174 @@ class MemoryLogHandler(logging.Handler):
 
 
 def redact_log_message(message: str) -> str:
-    return SECRET_URL_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}:***@", str(message))
+    return redact_secret_text(message)
+
+
+def _mask_url_password(value: str | None) -> str | None:
+    if not value:
+        return value
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    userinfo, separator, host = parsed.netloc.rpartition("@")
+    if not separator or ":" not in userinfo:
+        return value
+    username, _password = userinfo.split(":", 1)
+    return urlunsplit(parsed._replace(netloc=f"{username}:{SECRET_PLACEHOLDER}@{host}"))
+
+
+def _encoded_url_password(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    userinfo, separator, _host = parsed.netloc.rpartition("@")
+    if not separator or ":" not in userinfo:
+        return None
+    return userinfo.split(":", 1)[1]
+
+
+def _restore_url_password(masked: str | None, current: str | None, field: str) -> str | None:
+    if not masked or _encoded_url_password(masked) != SECRET_PLACEHOLDER:
+        return masked
+    current_password = _encoded_url_password(current)
+    if current_password is None:
+        raise ValueError(f"{field} contains a masked secret without an existing value")
+    parsed = urlsplit(masked)
+    userinfo, _separator, host = parsed.netloc.rpartition("@")
+    username, _masked_password = userinfo.split(":", 1)
+    return urlunsplit(parsed._replace(netloc=f"{username}:{current_password}@{host}"))
+
+
+def _restore_secret(masked: str, current: str, field: str) -> str:
+    if masked != SECRET_PLACEHOLDER:
+        return masked
+    if not current:
+        raise ValueError(f"{field} contains a masked secret without an existing value")
+    return current
+
+
+def _camera_uses_masked_secret(camera: CameraConfig) -> bool:
+    return (
+        _encoded_url_password(camera.stream_url) == SECRET_PLACEHOLDER
+        or _encoded_url_password(camera.live_stream_url) == SECRET_PLACEHOLDER
+        or camera.onvif.password == SECRET_PLACEHOLDER
+        or camera.baichuan.password == SECRET_PLACEHOLDER
+    )
+
+
+def _restore_camera_secrets(
+    incoming: CameraConfig,
+    current: CameraConfig | None,
+) -> CameraConfig:
+    restored = incoming.model_copy(deep=True)
+    if not _camera_uses_masked_secret(restored):
+        return restored
+    if current is None:
+        raise ValueError("new cameras must provide their own credentials")
+    restored.stream_url = str(
+        _restore_url_password(restored.stream_url, current.stream_url, "stream_url")
+        or ""
+    )
+    restored.live_stream_url = _restore_url_password(
+        restored.live_stream_url,
+        current.live_stream_url,
+        "live_stream_url",
+    )
+    restored.onvif.password = _restore_secret(
+        restored.onvif.password,
+        current.onvif.password,
+        "onvif.password",
+    )
+    restored.baichuan.password = _restore_secret(
+        restored.baichuan.password,
+        current.baichuan.password,
+        "baichuan.password",
+    )
+    return restored
+
+
+def _camera_secret_identity_matches(incoming: CameraConfig, current: CameraConfig) -> bool:
+    if _mask_url_password(incoming.stream_url) == _mask_url_password(current.stream_url):
+        return True
+    if (
+        incoming.live_stream_url
+        and _mask_url_password(incoming.live_stream_url)
+        == _mask_url_password(current.live_stream_url)
+    ):
+        return True
+    return any(
+        incoming_host
+        and incoming_host == current_host
+        and incoming_user == current_user
+        for incoming_host, current_host, incoming_user, current_user in (
+            (
+                incoming.onvif.host,
+                current.onvif.host,
+                incoming.onvif.username,
+                current.onvif.username,
+            ),
+            (
+                incoming.baichuan.host,
+                current.baichuan.host,
+                incoming.baichuan.username,
+                current.baichuan.username,
+            ),
+        )
+    )
+
+
+def _restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig:
+    restored = incoming.model_copy(deep=True)
+    restored.mqtt.password = _restore_secret(
+        restored.mqtt.password,
+        current.mqtt.password,
+        "mqtt.password",
+    )
+    restored.audit_ai.api_key = _restore_secret(
+        restored.audit_ai.api_key,
+        current.audit_ai.api_key,
+        "audit_ai.api_key",
+    )
+    current_by_id = {camera.id: camera for camera in current.cameras}
+    same_shape = len(restored.cameras) == len(current.cameras)
+    restored.cameras = [
+        _restore_camera_secrets(
+            camera,
+            current_by_id.get(camera.id)
+            or (
+                current.cameras[index]
+                if same_shape
+                and _camera_secret_identity_matches(camera, current.cameras[index])
+                else None
+            ),
+        )
+        for index, camera in enumerate(restored.cameras)
+    ]
+    return AppConfig.model_validate(restored.model_dump(mode="json"))
+
+
+def _redacted_camera_payload(camera: CameraConfig) -> dict:
+    payload = camera.model_dump(mode="json")
+    payload["stream_url"] = _mask_url_password(camera.stream_url)
+    payload["live_stream_url"] = _mask_url_password(camera.live_stream_url)
+    payload["onvif"]["password"] = SECRET_PLACEHOLDER if camera.onvif.password else ""
+    payload["baichuan"]["password"] = SECRET_PLACEHOLDER if camera.baichuan.password else ""
+    return payload
+
+
+def _redacted_config_payload(active_config: AppConfig) -> dict:
+    payload = active_config.model_dump(mode="json")
+    payload["mqtt"]["password"] = SECRET_PLACEHOLDER if active_config.mqtt.password else ""
+    payload["audit_ai"]["api_key"] = SECRET_PLACEHOLDER if active_config.audit_ai.api_key else ""
+    payload["cameras"] = [
+        _redacted_camera_payload(camera)
+        for camera in active_config.cameras
+    ]
+    return payload
 
 
 def install_memory_log_handler() -> None:
@@ -166,6 +435,15 @@ install_memory_log_handler()
 
 class CameraFeatureState(BaseModel):
     enabled: bool
+
+
+class ConfigProbeRequest(BaseModel):
+    camera_id: str = Field(default="", max_length=128)
+    host: str = Field(min_length=1, max_length=255, pattern=r"^[^\s/@?#]+$")
+    username: str = Field(default="", max_length=256)
+    password: str = Field(default="", max_length=1024)
+    onvif_port: int = Field(default=8000, ge=1, le=65535)
+    baichuan_port: int = Field(default=9000, ge=1, le=65535)
 
 
 
@@ -282,6 +560,8 @@ def reload_manager(
         FACE_OBSERVATIONS_SYNCED = False
         with RECORDING_DAY_CACHE_LOCK:
             RECORDING_DAY_CACHE.clear()
+        _ffmpeg_qsv_info.cache_clear()
+        _ffmpeg_vaapi_info.cache_clear()
         if prewarmer_was_running:
             _start_recording_prewarmer()
         return effective_config
@@ -302,6 +582,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
 app.add_middleware(ConfiguredBasePathMiddleware)
+app.add_middleware(SecurityBoundaryMiddleware)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
 
 
@@ -412,7 +693,7 @@ async def application_event_stream(request: Request) -> StreamingResponse:
 
 @app.get("/api/config")
 def get_config() -> dict:
-    return config.model_dump(mode="json")
+    return _redacted_config_payload(config)
 
 
 @app.get("/api/motion/pipeline/catalog")
@@ -458,6 +739,7 @@ def _dri_render_devices() -> list[str]:
     return sorted(str(path) for path in Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").exists() else []
 
 
+@functools.lru_cache(maxsize=1)
 def _ffmpeg_qsv_info() -> dict:
     hwaccels = _run_ffmpeg_list(["-hwaccels"])
     encoders = _run_ffmpeg_list(["-encoders"])
@@ -497,6 +779,7 @@ def _ffmpeg_qsv_info() -> dict:
     }
 
 
+@functools.lru_cache(maxsize=1)
 def _ffmpeg_vaapi_info() -> dict:
     hwaccels = _run_ffmpeg_list(["-hwaccels"])
     encoders = _run_ffmpeg_list(["-encoders"])
@@ -972,7 +1255,6 @@ def recording_cache_status() -> dict:
         metrics[f"{origin}_last_remux_ms"] = round(float(metrics[f"{origin}_last_remux_ms"]), 1)
         metrics.pop(f"{origin}_remux_ms", None)
     return {
-        "path": str(root),
         "entries": len({path.parent for path in existing_files}),
         "bytes": total_bytes,
         "max_bytes": int(float(config.recording_cache_max_gb) * 1024 * 1024 * 1024),
@@ -991,7 +1273,6 @@ def system_status() -> dict:
     detector = manager.detector_status()
     return {
         "storage": {
-            "path": str(storage_path),
             "total_bytes": usage.total,
             "used_bytes": usage.used,
             "free_bytes": usage.free,
@@ -1010,6 +1291,10 @@ def system_status() -> dict:
 
 @app.put("/api/config")
 def put_config(next_config: AppConfig) -> dict:
+    try:
+        next_config = _restore_config_secrets(next_config, config)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     try:
         validate_motion_pipeline_configuration(next_config)
     except ValueError as error:
@@ -1085,6 +1370,10 @@ def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
         next_config = config.model_copy(deep=True)
         existing_index = next((index for index, item in enumerate(next_config.cameras) if item.id == camera_id), None)
         existing = next_config.cameras[existing_index] if existing_index is not None else None
+        try:
+            camera_settings = _restore_camera_secrets(camera_settings, existing)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         used_ids = {item.id for item in next_config.cameras if item.id != camera_id}
         base_id = slugify_camera_id(camera_settings.name or camera_settings.id)
         next_id = base_id
@@ -1103,7 +1392,7 @@ def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         reload_manager(next_config)
-    return {"ok": True, "camera": camera_settings.model_dump(mode="json")}
+    return {"ok": True, "camera": _redacted_camera_payload(camera_settings)}
 
 
 @app.delete("/api/config/cameras/{camera_id}")
@@ -1119,50 +1408,68 @@ def delete_camera(camera_id: str) -> dict:
 
 
 @app.post("/api/config/probe")
-def probe_config(payload: dict) -> dict:
-    host = str(payload.get("host") or "").strip()
-    username = str(payload.get("username") or "").strip()
-    password = str(payload.get("password") or "").strip()
-    onvif_port = int(payload.get("onvif_port") or 8000)
-    baichuan_port = int(payload.get("baichuan_port") or 9000)
-    if not host:
-        raise HTTPException(status_code=400, detail="host is required")
+def probe_config(payload: ConfigProbeRequest) -> dict:
+    if not CONFIG_PROBE_LIMITER.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="too many camera probes are already running",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        host = payload.host.strip()
+        username = payload.username.strip()
+        password = payload.password
+        if password == SECRET_PLACEHOLDER:
+            existing = camera_by_id(config, payload.camera_id)
+            if existing is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="masked probe credentials require an existing camera",
+                )
+            password = existing.onvif.password or existing.baichuan.password
+        result = {
+            "host": host,
+            "onvif": {
+                "port": payload.onvif_port,
+                "reachable": _tcp_reachable(host, payload.onvif_port),
+                "capabilities": {},
+                "error": "",
+            },
+            "baichuan": {
+                "port": payload.baichuan_port,
+                "reachable": _tcp_reachable(host, payload.baichuan_port),
+            },
+            "reolink_likely": False,
+        }
+        result["reolink_likely"] = bool(result["baichuan"]["reachable"])
 
-    result = {
-        "host": host,
-        "onvif": {
-            "port": onvif_port,
-            "reachable": _tcp_reachable(host, onvif_port),
-            "capabilities": {},
-            "error": "",
-        },
-        "baichuan": {
-            "port": baichuan_port,
-            "reachable": _tcp_reachable(host, baichuan_port),
-        },
-        "reolink_likely": False,
-    }
-    result["reolink_likely"] = bool(result["baichuan"]["reachable"])
+        if result["onvif"]["reachable"] and username and password:
+            try:
+                from onvif import ONVIFCamera
+                from zeep import Transport
 
-    if result["onvif"]["reachable"] and username and password:
-        try:
-            from onvif import ONVIFCamera
-            from zeep import Transport
-
-            transport = Transport(operation_timeout=5)
-            camera = ONVIFCamera(host, onvif_port, username, password, transport=transport)
-            device = camera.create_devicemgmt_service()
-            capabilities = device.GetCapabilities({"Category": "All"})
-            result["onvif"]["capabilities"] = {
-                "media": bool(getattr(capabilities, "Media", None)),
-                "events": bool(getattr(capabilities, "Events", None)),
-                "ptz": bool(getattr(capabilities, "PTZ", None)),
-                "analytics": bool(getattr(capabilities, "Analytics", None)),
-            }
-        except Exception as exc:
-            error = str(exc) or "ONVIF capability probe failed"
-            result["onvif"]["error"] = error[:500]
-    return result
+                transport = Transport(operation_timeout=5)
+                camera = ONVIFCamera(
+                    host,
+                    payload.onvif_port,
+                    username,
+                    password,
+                    transport=transport,
+                )
+                device = camera.create_devicemgmt_service()
+                capabilities = device.GetCapabilities({"Category": "All"})
+                result["onvif"]["capabilities"] = {
+                    "media": bool(getattr(capabilities, "Media", None)),
+                    "events": bool(getattr(capabilities, "Events", None)),
+                    "ptz": bool(getattr(capabilities, "PTZ", None)),
+                    "analytics": bool(getattr(capabilities, "Analytics", None)),
+                }
+            except Exception as exc:
+                error = redact_log_message(str(exc) or "ONVIF capability probe failed")
+                result["onvif"]["error"] = error[:500]
+        return result
+    finally:
+        CONFIG_PROBE_LIMITER.release()
 
 
 @app.get("/api/events")
@@ -1395,6 +1702,12 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
         audit = active_manager.events.get_motion_audit(audit_id)
     if audit is None:
         raise HTTPException(status_code=404, detail="motion audit entry not found")
+    if not AUDIT_AI_LIMITER.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="an AI audit request is already running",
+            headers={"Retry-After": "5"},
+        )
     try:
         snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
         advice = await asyncio.to_thread(
@@ -1403,9 +1716,13 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
             _audit_ai_context(audit, active_config, active_manager),
         )
     except AuditAiError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=redact_secret_text(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    finally:
+        AUDIT_AI_LIMITER.release()
     return {
         "audit_id": audit_id,
         "camera_id": audit.get("camera_id"),
@@ -1492,7 +1809,7 @@ def incident_search(
 ) -> dict:
     try:
         selected_zone = ZoneInfo(time_zone)
-    except ZoneInfoNotFoundError as exc:
+    except (ZoneInfoNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="unknown timezone") from exc
     if day:
         try:
@@ -1599,6 +1916,12 @@ def face_people() -> list[dict]:
     return manager.faces.people()
 
 
+def _public_face_observation(observation: dict) -> dict:
+    payload = dict(observation)
+    payload.pop("snapshot_path", None)
+    return payload
+
+
 @app.post("/api/faces/people")
 def create_face_person(payload: FacePersonCreate) -> dict:
     return manager.faces.create_person(payload.name, payload.observation_id, payload.notes)
@@ -1620,13 +1943,14 @@ def face_observations(
     offset: int = 0,
 ) -> list[dict]:
     _sync_face_observations()
-    return manager.faces.observations(
+    observations = manager.faces.observations(
         person_id=person_id,
         camera_id=camera_id,
         status=status if status in {"all", "known", "unknown", "suggested"} else "all",
         limit=limit,
         offset=offset,
     )
+    return [_public_face_observation(observation) for observation in observations]
 
 
 @app.get("/api/faces/observations/count")
@@ -1650,7 +1974,7 @@ def face_observation(observation_id: int) -> dict:
     observation = manager.faces.observation(observation_id)
     if observation is None:
         raise HTTPException(status_code=404, detail="face observation not found")
-    return observation
+    return _public_face_observation(observation)
 
 
 @app.put("/api/faces/observations/{observation_id}")
@@ -1661,7 +1985,7 @@ def assign_face_observation(observation_id: int, payload: FaceAssignment) -> dic
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if observation is None:
         raise HTTPException(status_code=404, detail="face observation not found")
-    return observation
+    return _public_face_observation(observation)
 
 
 @app.get("/api/faces/observations/{observation_id}/crop.jpg")
@@ -1701,6 +2025,8 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     except ValueError:
         raise HTTPException(status_code=403, detail="snapshot outside storage directory") from None
 
+    if not math.isfinite(confidence):
+        raise HTTPException(status_code=422, detail="confidence must be finite")
     safe_confidence = max(0.01, min(0.99, float(confidence)))
     frame = cv2.imread(str(snapshot_path))
     if frame is None:
@@ -1746,7 +2072,7 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     return {
         "event_id": event_id,
         "camera_id": event.get("camera_id"),
-        "snapshot_path": str(snapshot_path),
+        "snapshot_path": "available",
         "snapshot_width": int(frame.shape[1]),
         "snapshot_height": int(frame.shape[0]),
         "confidence": safe_confidence,
@@ -1788,6 +2114,8 @@ async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict
     frame = cv2.imdecode(np.frombuffer(bytes(payload), dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=422, detail="failed to decode debug frame")
+    if not math.isfinite(confidence):
+        raise HTTPException(status_code=422, detail="confidence must be finite")
     safe_confidence = max(0.01, min(0.99, float(confidence)))
     started = time.perf_counter()
     objects = await asyncio.to_thread(
@@ -2077,7 +2405,12 @@ def set_camera_detection(camera_id: str, state: CameraFeatureState) -> dict:
 @app.get("/api/cameras/{camera_id}/recordings")
 def recordings(camera_id: str, limit: int = 200, source: str = "main") -> list[dict]:
     _require_recording_camera(camera_id)
-    return _recording_rows(camera_id, limit=max(1, min(limit, RECORDING_LOOKUP_LIMIT)), source=recording_source(source))
+    rows = _recording_rows(
+        camera_id,
+        limit=max(1, min(limit, RECORDING_LOOKUP_LIMIT)),
+        source=recording_source(source),
+    )
+    return [_public_recording_row(row) for row in rows]
 
 
 @app.get("/api/cameras/{camera_id}/recordings/events")
@@ -2157,7 +2490,7 @@ def recording_window(
         "source": selected_source,
         "start_epoch": window_start,
         "end_epoch": window_end,
-        "recordings": rows,
+        "recordings": [_public_recording_row(row) for row in rows],
     }
 
 
@@ -2648,9 +2981,7 @@ def _recording_day_fmp4_paths(
     if segment_index is None:
         raise HTTPException(status_code=404, detail="recording segment not found")
     row = rows[segment_index]
-    path = Path(row["path"])
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=404, detail="recording file not found")
+    path = _recording_storage_path(row.get("path"))
     segment_duration = playback_segment_duration(
         float(row["start_epoch"]),
         float(row["duration_seconds"]),
@@ -2712,7 +3043,22 @@ def event_clip(event_id: int, before: float | None = None, after: float | None =
             lock = EVENT_CLIP_LOCKS.setdefault(cache_key, threading.Lock())
         with lock:
             if not clip_path.exists() or clip_path.stat().st_size == 0:
-                _build_event_clip(enriched, before=before_seconds, after=after_seconds, output_path=clip_path, source=clip_source)
+                if not EVENT_CLIP_BUILD_LIMITER.acquire(blocking=False):
+                    raise HTTPException(
+                        status_code=429,
+                        detail="too many event clips are already being generated",
+                        headers={"Retry-After": "3"},
+                    )
+                try:
+                    _build_event_clip(
+                        enriched,
+                        before=before_seconds,
+                        after=after_seconds,
+                        output_path=clip_path,
+                        source=clip_source,
+                    )
+                finally:
+                    EVENT_CLIP_BUILD_LIMITER.release()
     return FileResponse(
         clip_path,
         media_type="video/mp4",
@@ -2796,8 +3142,31 @@ def _recording_rows(camera_id: str, limit: int, source: str = "main") -> list[di
     return manager.recorder.recording_rows(camera_id, limit=limit, source=recording_source(source))
 
 
+def _recording_storage_path(value: object) -> Path:
+    if not value:
+        raise HTTPException(status_code=404, detail="recording file not found")
+    try:
+        path = Path(str(value)).resolve(strict=True)
+        path.relative_to(manager.recorder.recordings_dir.resolve())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="recording file not found") from None
+    except (OSError, ValueError):
+        raise HTTPException(status_code=403, detail="recording file is outside storage") from None
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="recording file not found")
+    return path
+
+
+def _public_recording_row(row: dict) -> dict:
+    payload = dict(row)
+    payload.pop("path", None)
+    return payload
+
+
 def _event_row(row: dict) -> dict:
     event = dict(row)
+    event["snapshot_path"] = "available" if event.get("snapshot_path") else ""
+    event["recording_path"] = "available" if event.get("recording_path") else ""
     try:
         objects = json.loads(event.pop("objects_json", "[]") or "[]")
     except (json.JSONDecodeError, TypeError):
@@ -3047,17 +3416,20 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     window_start = event_created_epoch - window_before
     window_end = event_created_epoch + window_after
 
-    rows = [
-        row for row in manager.recorder.recording_rows_between(
+    rows: list[dict] = []
+    for candidate in manager.recorder.recording_rows_between(
             camera_id,
             window_start,
             window_end,
             recording_source(source),
-        )
-        if row.get("start_epoch") is not None
-        and row.get("end_epoch") is not None
-        and Path(str(row.get("path") or "")).is_file()
-    ]
+        ):
+        if candidate.get("start_epoch") is None or candidate.get("end_epoch") is None:
+            continue
+        try:
+            candidate = {**candidate, "path": str(_recording_storage_path(candidate.get("path")))}
+        except HTTPException:
+            continue
+        rows.append(candidate)
     rows.sort(key=lambda row: float(row["start_epoch"]))
     selected = [
         row for row in rows
@@ -3104,7 +3476,12 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
                     output_path.name,
                     last_error,
                 )
-        raise HTTPException(status_code=500, detail=last_error or "event clip generation failed")
+        logging.getLogger(__name__).error(
+            "event clip generation failed for %s: %s",
+            output_path.name,
+            redact_secret_text(last_error),
+        )
+        raise HTTPException(status_code=500, detail="event clip generation failed")
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail="event clip generation timed out") from exc
     finally:
@@ -3121,7 +3498,7 @@ def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def _write_concat_file(rows: list[dict]) -> Path:
-    paths = [str(Path(row["path"]).resolve()) for row in rows]
+    paths = [str(_recording_storage_path(row.get("path"))) for row in rows]
     if any("\n" in path or "\r" in path for path in paths):
         raise HTTPException(status_code=400, detail="recording path is invalid")
     handle = tempfile.NamedTemporaryFile(

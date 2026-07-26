@@ -17,6 +17,7 @@ import numpy as np
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
+from .security import redact_secret_text
 from .motion_pipeline import (
     MotionContext,
     MotionDecisionHandlerFactory,
@@ -1518,9 +1519,14 @@ class CameraWorker:
                             if source == "live":
                                 self._remember_motion_frame(frame, frame_clock)
                 except Exception as exc:
-                    failure_reason = f"stream error: {str(exc)[:160]}"
+                    failure_reason = f"stream error: {redact_secret_text(exc)[:160]}"
                     self._set_source_error(source, failure_reason)
-                    LOGGER.warning("camera stream failed for %s/%s: %s", self.camera.id, source, exc)
+                    LOGGER.warning(
+                        "camera stream failed for %s/%s: %s",
+                        self.camera.id,
+                        source,
+                        failure_reason,
+                    )
                 finally:
                     capture.release()
                 if self._stop.is_set() or stop_event.is_set() or self._source_is_idle(source):
@@ -1549,6 +1555,7 @@ class CameraWorker:
             self._source_finished(source)
 
     def _set_source_error(self, source: str, message: str) -> None:
+        message = redact_secret_text(message)
         with self._frame_lock:
             self._source_errors[source] = message
             if source == "live":

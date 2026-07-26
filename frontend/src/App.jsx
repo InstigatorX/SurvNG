@@ -119,6 +119,24 @@ const fetch = (resource, options) => window.fetch(
   typeof resource === "string" ? appUrl(resource) : resource,
   options,
 );
+const SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__";
+
+function clearMaskedUrlPassword(value) {
+  if (!value || !value.includes(SECRET_PLACEHOLDER)) return value || "";
+  return value.replace(`:${SECRET_PLACEHOLDER}@`, "@");
+}
+
+function clearMaskedSecret(value) {
+  return value === SECRET_PLACEHOLDER ? "" : value || "";
+}
+
+function secretInputValue(value) {
+  return value === SECRET_PLACEHOLDER ? "" : value || "";
+}
+
+function secretInputHint(value, fallback = "") {
+  return value === SECRET_PLACEHOLDER ? "Saved — type to replace" : fallback;
+}
 
 let shakaImport;
 function loadShaka() {
@@ -873,8 +891,8 @@ function defaultCamera(cameras, seed = {}) {
     id,
     name: seed.name ? `${seed.name} Copy` : "New Camera",
     video_backend: seed.video_backend || "url",
-    stream_url: seed.stream_url || "",
-    live_stream_url: seed.live_stream_url || "",
+    stream_url: clearMaskedUrlPassword(seed.stream_url),
+    live_stream_url: clearMaskedUrlPassword(seed.live_stream_url),
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
     motion_qualification: {
@@ -892,14 +910,14 @@ function defaultCamera(cameras, seed = {}) {
       host,
       port: seed.onvif?.port || 8000,
       username: seed.onvif?.username || "",
-      password: seed.onvif?.password || "",
+      password: clearMaskedSecret(seed.onvif?.password),
     },
     baichuan: {
       enabled: seed.baichuan?.enabled || false,
       host,
       port: seed.baichuan?.port || 9000,
       username: seed.baichuan?.username || "",
-      password: seed.baichuan?.password || "",
+      password: clearMaskedSecret(seed.baichuan?.password),
       channel: seed.baichuan?.channel || 0,
     },
   };
@@ -3731,7 +3749,7 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
       <div className="recordings-v2-track">
         {recordings.map((item) => (
           <span
-            key={item.path || `${item.start_epoch}:${item.end_epoch}`}
+            key={`${item.start_epoch}:${item.end_epoch}`}
             style={{
               left: `${((Math.max(startEpoch, item.start_epoch) - startEpoch) / duration) * 100}%`,
               width: `${((Math.min(endEpoch, item.end_epoch) - Math.max(startEpoch, item.start_epoch)) / duration) * 100}%`,
@@ -4426,6 +4444,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        camera_id: probeCameraConfig.id,
         host,
         username,
         password,
@@ -4664,7 +4683,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   <label>Host<input value={selectedCamera.onvif?.host || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "host"], event.target.value)} /></label>
                   <label>Port<input type="number" value={selectedCamera.onvif?.port || 8000} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "port"], Number(event.target.value))} /></label>
                   <label>Username<input value={selectedCamera.onvif?.username || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "username"], event.target.value)} /></label>
-                  <label>Password<input type="password" value={selectedCamera.onvif?.password || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
+                  <label>Password<input type="password" value={secretInputValue(selectedCamera.onvif?.password)} placeholder={secretInputHint(selectedCamera.onvif?.password)} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
                 </div>
                 <div className="sub-panel">
                   <h3>Motion Triggers &amp; Filtering</h3>
@@ -5394,7 +5413,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Broker Host<input value={config.mqtt?.host || ""} onChange={(event) => updateConfig(["mqtt", "host"], event.target.value)} placeholder="mqtt.local" /></label>
           <label>Port<input type="number" min="1" max="65535" value={config.mqtt?.port || 1883} onChange={(event) => updateConfig(["mqtt", "port"], Number(event.target.value))} /></label>
           <label>Username<input value={config.mqtt?.username || ""} onChange={(event) => updateConfig(["mqtt", "username"], event.target.value)} /></label>
-          <label>Password<input type="password" value={config.mqtt?.password || ""} onChange={(event) => updateConfig(["mqtt", "password"], event.target.value)} /></label>
+          <label>Password<input type="password" value={secretInputValue(config.mqtt?.password)} placeholder={secretInputHint(config.mqtt?.password)} onChange={(event) => updateConfig(["mqtt", "password"], event.target.value)} /></label>
           <label>Client ID<input value={config.mqtt?.client_id || "survng"} onChange={(event) => updateConfig(["mqtt", "client_id"], event.target.value)} /></label>
           <label>Topic Prefix<input value={config.mqtt?.topic_prefix || "survng"} onChange={(event) => updateConfig(["mqtt", "topic_prefix"], event.target.value)} /></label>
           <label className="check-field"><input type="checkbox" checked={config.mqtt?.incident_events_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "incident_events_enabled"], event.target.checked)} /> Publish incident events</label>
@@ -5495,7 +5514,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <option value="openai_compatible">OpenAI compatible</option>
           </select></label>
           <label>Model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /></label>
-          <label>API Key<input type="password" value={config.audit_ai?.api_key || ""} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
+          <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
           <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
           <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
           <label className="check-field"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /> Allow confirmed recommendation apply</label>

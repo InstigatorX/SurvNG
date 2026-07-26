@@ -15,6 +15,7 @@ from .incident_utils import (
     stable_incident_id,
     stable_incident_key,
 )
+from .security import redact_secret_text
 
 LOGGER = logging.getLogger(__name__)
 MQTT_COMMAND_QUEUE_SIZE = 64
@@ -103,7 +104,7 @@ class MqttService:
                 if int(loop_result) != 0:
                     raise RuntimeError(f"MQTT network loop failed to start: rc={loop_result}")
             except Exception as exc:
-                self.last_error = str(exc)
+                self.last_error = redact_secret_text(exc)
                 self.connected = False
                 self.client = None
                 if client is not None:
@@ -214,8 +215,8 @@ class MqttService:
         except Exception as exc:
             with self._lock:
                 self.publish_failures += 1
-            self.last_error = str(exc)
-            LOGGER.warning("MQTT publish failed for %s: %s", topic, exc)
+            self.last_error = redact_secret_text(exc)
+            LOGGER.warning("MQTT publish failed for %s: %s", topic, self.last_error)
 
     def remove_retained_topic(self, topic: str) -> None:
         client = self.client
@@ -233,8 +234,8 @@ class MqttService:
         except Exception as exc:
             with self._lock:
                 self.publish_failures += 1
-            self.last_error = str(exc)
-            LOGGER.warning("MQTT retained-topic removal failed for %s: %s", topic, exc)
+            self.last_error = redact_secret_text(exc)
+            LOGGER.warning("MQTT retained-topic removal failed for %s: %s", topic, self.last_error)
 
     @staticmethod
     def _slug(value: str, fallback: str) -> str:
@@ -744,7 +745,7 @@ class MqttService:
                 self.command_subscriptions_active = True
         except Exception as exc:
             self.subscription_failures += 1
-            self.last_error = f"MQTT command subscription failed: {exc}"
+            self.last_error = f"MQTT command subscription failed: {redact_secret_text(exc)}"
             LOGGER.exception("failed to subscribe to MQTT command topics")
         self.publish("status", {"online": True, "connected_at": self.last_connected_at}, retain=True)
         if self.connected_callback:
@@ -831,5 +832,6 @@ class MqttService:
         except Exception as exc:
             with self._lock:
                 self.command_errors += 1
-            LOGGER.exception("MQTT camera %s command failed for %s", feature, camera_id)
-            self.publish(f"camera/{camera_id}/command/error", {"error": str(exc)})
+            error = redact_secret_text(exc)
+            LOGGER.error("MQTT camera %s command failed for %s: %s", feature, camera_id, error)
+            self.publish(f"camera/{camera_id}/command/error", {"error": error})

@@ -13,19 +13,19 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 
 class OnvifConfig(BaseModel):
     enabled: bool = False
-    host: str = ""
+    host: str = Field(default="", max_length=255)
     port: int = Field(default=8000, ge=1, le=65535)
-    username: str = ""
-    password: str = ""
+    username: str = Field(default="", max_length=256)
+    password: str = Field(default="", max_length=1024)
 
 
 class BaichuanConfig(BaseModel):
     enabled: bool = False
-    host: str = ""
-    port: int = 9000
-    username: str = ""
-    password: str = ""
-    channel: int = 0
+    host: str = Field(default="", max_length=255)
+    port: int = Field(default=9000, ge=1, le=65535)
+    username: str = Field(default="", max_length=256)
+    password: str = Field(default="", max_length=1024)
+    channel: int = Field(default=0, ge=0, le=255)
 
 
 class ZonePoint(BaseModel):
@@ -46,10 +46,10 @@ class DetectionZone(BaseModel):
 
 class MqttConfig(BaseModel):
     enabled: bool = False
-    host: str = ""
+    host: str = Field(default="", max_length=255)
     port: int = Field(default=1883, ge=1, le=65535)
-    username: str = ""
-    password: str = ""
+    username: str = Field(default="", max_length=256)
+    password: str = Field(default="", max_length=1024)
     client_id: str = "survng"
     topic_prefix: str = "survng"
     qos: int = Field(default=0, ge=0, le=2)
@@ -72,9 +72,9 @@ class MqttConfig(BaseModel):
 class AuditAiConfig(BaseModel):
     enabled: bool = False
     provider: Literal["openai", "gemini", "openai_compatible"] = "openai"
-    api_key: str = ""
-    base_url: str = ""
-    model: str = ""
+    api_key: str = Field(default="", max_length=4096)
+    base_url: str = Field(default="", max_length=2048)
+    model: str = Field(default="", max_length=256)
     timeout_seconds: float = Field(default=45.0, ge=5.0, le=120.0)
     allow_apply_recommendations: bool = False
 
@@ -172,10 +172,10 @@ class CameraMotionQualificationConfig(BaseModel):
 
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-    name: str
+    name: str = Field(min_length=1, max_length=128)
     video_backend: str = "url"
-    stream_url: str
-    live_stream_url: str | None = None
+    stream_url: str = Field(max_length=4096)
+    live_stream_url: str | None = Field(default=None, max_length=4096)
     record: bool = True
     record_sub: bool = False
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)

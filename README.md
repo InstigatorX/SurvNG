@@ -151,6 +151,13 @@ uvicorn survng.app.main:app --reload --host 0.0.0.0 --port 8088
 
 Open http://127.0.0.1:8088/survng/ on this machine, or use the server's LAN address from another device, for example `http://192.168.82.12:8088/survng/`.
 
+SurvNG's HTTP API is an administrative interface and does not provide its own
+user authentication. Keep port `8088` limited to trusted LAN/VPN clients with a
+host firewall, or place it behind an authenticated reverse proxy. Do not expose
+the port directly to the public internet. SurvNG rejects cross-origin state
+changes and masks stored credentials in API responses, but those protections do
+not replace network access control and authentication.
+
 ### Reverse proxy subpath
 
 `base_path` controls the browser-visible path and defaults to `/survng`. Set it to an empty string to serve browser URLs from `/` instead. SurvNG continues to accept unprefixed backend routes for local API clients.

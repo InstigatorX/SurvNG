@@ -6,9 +6,16 @@ import unittest
 from pathlib import Path
 
 from survng.app import main
+from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_incident_search_rejects_unsafe_timezone_paths(self) -> None:
+        with self.assertRaises(HTTPException) as invalid:
+            main.incident_search(time_zone="../../etc/passwd")
+
+        self.assertEqual(invalid.exception.status_code, 422)
+
     def test_event_row_tolerates_malformed_legacy_object_entries(self) -> None:
         row = main._event_row({
             "id": 1,

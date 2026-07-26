@@ -11,6 +11,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 from .config import CameraConfig
+from .security import redact_secret_text
 
 LOGGER = logging.getLogger("uvicorn.error")
 MOTION_WORDS = ("motion", "cellmotion", "person", "vehicle", "animal", "alarm")
@@ -168,14 +169,14 @@ class OnvifEventListener:
             except Exception as exc:
                 self.connected = False
                 self.retry_attempts += 1
-                self.last_error = f"subscription failed: {str(exc)[:200]}"
+                self.last_error = f"subscription failed: {self._error_text(exc)[:200]}"
                 self._unsubscribe(notify_camera=not self._stop.is_set())
                 self._close_transport()
                 LOGGER.warning(
                     "failed to subscribe to ONVIF events for %s, retrying in %.0fs: %s",
                     self.camera.id,
                     retry_delay,
-                    str(exc)[:300],
+                    self._error_text(exc),
                 )
                 if self._stop.wait(retry_delay):
                     return
@@ -441,7 +442,7 @@ class OnvifEventListener:
     @staticmethod
     def _error_text(exc: Exception) -> str:
         detail = str(exc).strip() or repr(exc)
-        return f"{type(exc).__name__}: {detail}"[:300]
+        return redact_secret_text(f"{type(exc).__name__}: {detail}")[:300]
 
     def _event_time(self, notification: Any, message: str) -> datetime | None:
         for name in ("UtcTime", "utcTime", "timestamp", "Timestamp"):
