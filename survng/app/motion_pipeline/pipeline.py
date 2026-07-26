@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from .context import MotionContext, StageTiming
 from .contracts import MotionPipelineObserver, MotionStage, NullMotionPipelineObserver
@@ -96,6 +96,9 @@ class MotionPipeline:
         stage_configuration: Sequence[Mapping[str, Any]] = (),
         execution_groups: Sequence[Sequence[int]] = (),
         stage_provides: Mapping[str, frozenset[str]] | None = None,
+        continuous_analysis: bool = False,
+        motion_sources: Sequence[str] = (),
+        stage_factory: Callable[[], Sequence[MotionStage]] | None = None,
     ) -> None:
         if not stages:
             raise ValueError("motion pipeline requires at least one stage")
@@ -116,6 +119,9 @@ class MotionPipeline:
         if flattened != list(range(len(stages))):
             raise ValueError("motion execution groups must contain every stage exactly once in order")
         self.stage_provides = dict(stage_provides or {})
+        self.continuous_analysis = bool(continuous_analysis)
+        self.motion_sources = tuple(dict.fromkeys(str(source) for source in motion_sources if source))
+        self._stage_factory = stage_factory
         parallel_workers = max((len(group) for group in self.execution_groups), default=1)
         self._executor = (
             ThreadPoolExecutor(
@@ -127,8 +133,13 @@ class MotionPipeline:
         )
         self._metrics = {stage.stage_id: _StageMetrics() for stage in self.stages}
         self._metrics_lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._closed = False
 
     def process(self, context: MotionContext) -> MotionContext:
+        with self._close_lock:
+            if self._closed:
+                raise RuntimeError("motion pipeline is closed")
         if context.camera_id != self.camera_id:
             raise ValueError(
                 f"pipeline for {self.camera_id!r} cannot process context for {context.camera_id!r}"
@@ -138,32 +149,51 @@ class MotionPipeline:
 
         current = context
         for group in self.execution_groups:
-            if len(group) == 1:
-                current = self._process_stage(self.stages[group[0]], current)
+            runnable = tuple(
+                index
+                for index in group
+                if self._stage_handles_observation(self.stages[index], current)
+            )
+            if not runnable:
+                continue
+            if len(runnable) == 1:
+                current = self._process_stage(self.stages[runnable[0]], current)
             else:
-                current = self._process_parallel_group(group, current)
+                current = self._process_parallel_group(runnable, current)
         return current
+
+    @staticmethod
+    def _stage_handles_observation(
+        stage: MotionStage,
+        context: MotionContext,
+    ) -> bool:
+        kind = context.configuration.get("observation_kind")
+        kinds = getattr(stage, "observation_kinds", None)
+        return not kind or kinds is None or kind in kinds
 
     def isolated_copy(self, *, clone_runtime: bool = False) -> "MotionPipeline":
         """Create a disposable pipeline that cannot mutate this pipeline's runtime or metrics."""
+        if self._stage_factory is None:
+            raise RuntimeError("motion pipeline does not define an isolated stage factory")
         pipeline = MotionPipeline(
             camera_id=self.camera_id,
-            stages=self.stages,
+            stages=self._stage_factory(),
             observer=self.observer,
             error_policy=self.error_policy,
             stage_configuration=self.stage_configuration,
             execution_groups=self.execution_groups,
             stage_provides=self.stage_provides,
+            continuous_analysis=self.continuous_analysis,
+            motion_sources=self.motion_sources,
+            stage_factory=self._stage_factory,
         )
         if clone_runtime:
             pipeline.runtime = self.runtime.clone()
         return pipeline
 
-    def uses_implementation(self, implementation: str) -> bool:
-        return any(
-            item.get("implementation") == implementation
-            for item in self.stage_configuration
-        )
+    @property
+    def primary_motion_source(self) -> str:
+        return self.motion_sources[0] if self.motion_sources else "frame_difference"
 
     def handles_observation(self, kind: str) -> bool:
         return any(
@@ -207,6 +237,10 @@ class MotionPipeline:
             self._executor.submit(self._process_stage, self.stages[index], branch)
             for index, branch in zip(group, branches, strict=True)
         ]
+        # A failed branch must not escape while a sibling is still mutating its
+        # runtime or injected services. Preserve configured-order error reporting
+        # after every submitted branch has reached a terminal state.
+        wait(futures)
         results = [future.result() for future in futures]
         for index, result in zip(group, results, strict=True):
             self._merge_branch(context, result, self.stage_provides.get(self.stages[index].stage_id, frozenset()))
@@ -275,6 +309,24 @@ class MotionPipeline:
         }
 
     def close(self) -> None:
-        if self._executor is not None:
-            self._executor.shutdown(wait=True, cancel_futures=True)
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            executor = self._executor
             self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        for stage in self.stages:
+            close = getattr(stage, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:
+                LOGGER.exception(
+                    "Motion stage cleanup failed camera=%s stage=%s",
+                    self.camera_id,
+                    stage.stage_id,
+                )
+        self.runtime.close()

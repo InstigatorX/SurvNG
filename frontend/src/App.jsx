@@ -4946,7 +4946,7 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
               <button type="button" className="motion-audit-media" onClick={() => onOpen(item)} aria-label={`Open ${item.camera_id} motion audit image`}>
                 {item.has_snapshot
                   ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} loading="lazy" />
-                  : <div className="empty-thumb"><Camera size={28} /><span>No sampled frame</span></div>}
+                  : <div className="empty-thumb"><Camera size={28} /><span>Audit image unavailable</span></div>}
                 <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
               </button>
               <div className="motion-audit-body">
@@ -5102,7 +5102,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   }, [imageSize]);
 
   async function analyzeWithAi() {
-    if (aiLoading) return;
+    if (aiLoading || !item.has_snapshot) return;
     setAiLoading(true);
     setAiError("");
     try {
@@ -5177,7 +5177,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
           <div className="motion-audit-overlay-media" ref={mediaRef}>
             {item.has_snapshot
               ? <><img ref={imageRef} src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{showMog2Tracks ? <Mog2TrackOverlay tracks={mog2Tracks} bounds={trackBounds} /> : null}</>
-              : <div className="empty-thumb"><Camera size={42} /><span>No sampled frame</span></div>}
+              : <div className="empty-thumb"><Camera size={42} /><span>Audit image unavailable</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
             <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
@@ -5194,8 +5194,9 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
             <div className="motion-audit-ai">
               <div className="motion-audit-ai-head">
                 <strong><Sparkles size={15} /> AI Advisor</strong>
-                <button type="button" onClick={analyzeWithAi} disabled={aiLoading || aiApplying}><Sparkles size={15} /> {aiLoading ? "Analyzing..." : "Analyze"}</button>
+                <button type="button" onClick={analyzeWithAi} disabled={aiLoading || aiApplying || !item.has_snapshot} title={item.has_snapshot ? "Analyze this rejected motion image" : "AI analysis requires a saved audit image"}><Sparkles size={15} /> {aiLoading ? "Analyzing..." : "Analyze"}</button>
               </div>
+              {!item.has_snapshot ? <span className="motion-audit-ai-none">AI analysis requires an audit image. This older rejection was not sampled or has passed the retention limit.</span> : null}
               {aiError ? <div className="motion-audit-ai-error">{aiError}</div> : null}
               {aiAdvice?.advice ? (
                 <div className="motion-audit-ai-result">
@@ -5408,7 +5409,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Window Seconds<input type="number" min="0.8" max="4" step="0.1" value={config.motion_qualification?.window_seconds ?? 1.6} onChange={(event) => updateConfig(["motion_qualification", "window_seconds"], Number(event.target.value))} /></label>
           <label>Post-trigger Seconds<input type="number" min="0.5" max="6" step="0.1" value={config.motion_qualification?.post_trigger_seconds ?? 2.5} onChange={(event) => updateConfig(["motion_qualification", "post_trigger_seconds"], Number(event.target.value))} /></label>
           <label>Burst Quiet Seconds<input type="number" min="0.1" max="2" step="0.1" value={config.motion_qualification?.burst_quiet_seconds ?? 0.5} onChange={(event) => updateConfig(["motion_qualification", "burst_quiet_seconds"], Number(event.target.value))} /></label>
-          <label>Rejected Sample Rate<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.rejected_sample_rate ?? 0.05} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))} /></label>
+          <label>Save rejected motion images<select value={String(config.motion_qualification?.rejected_sample_rate ?? 1)} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))}><option value="1">Every rejection (Recommended)</option><option value="0.5">About half</option><option value="0.1">About 1 in 10</option><option value="0.05">About 1 in 20</option><option value="0">Never</option></select><small>Used by Motion Audit and the AI Advisor. SurvNG keeps the latest 100 per camera.</small></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
           <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> Continuous background monitor (MOG2, higher CPU)</label>

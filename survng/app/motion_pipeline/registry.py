@@ -58,6 +58,8 @@ class MotionStageRegistration:
     display_name: str = ""
     description: str = ""
     options: tuple[MotionStageOption, ...] = ()
+    continuous_analysis: bool = False
+    motion_source: str = ""
 
 
 class MotionStageRegistry:
@@ -95,6 +97,8 @@ class MotionStageRegistry:
                 "description": registration.description,
                 "requires": sorted(registration.requires),
                 "provides": sorted(registration.provides),
+                "continuous_analysis": registration.continuous_analysis,
+                "motion_source": registration.motion_source,
                 "options": [option.as_dict() for option in registration.options],
             }
             for name, registration in sorted(self._registrations.items())

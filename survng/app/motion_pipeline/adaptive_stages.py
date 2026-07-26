@@ -27,7 +27,7 @@ class _BackgroundRuntime:
     last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def clone(self) -> "_BackgroundRuntime":
+    def snapshot(self) -> "_BackgroundRuntime":
         with self.lock:
             return _BackgroundRuntime(
                 background=None if self.background is None else self.background.copy(),
@@ -44,7 +44,7 @@ class _ThresholdRuntime:
     last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def clone(self) -> "_ThresholdRuntime":
+    def snapshot(self) -> "_ThresholdRuntime":
         with self.lock:
             return _ThresholdRuntime(
                 threshold_ema=self.threshold_ema,
@@ -74,7 +74,7 @@ class _TrackerRuntime:
     last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def clone(self) -> "_TrackerRuntime":
+    def snapshot(self) -> "_TrackerRuntime":
         with self.lock:
             return _TrackerRuntime(
                 next_track_id=self.next_track_id,
@@ -100,7 +100,7 @@ class _ScoringRuntime:
     last_seen: dict[int, float] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def clone(self) -> "_ScoringRuntime":
+    def snapshot(self) -> "_ScoringRuntime":
         with self.lock:
             return _ScoringRuntime(
                 accumulated_scores=dict(self.accumulated_scores),
@@ -204,6 +204,7 @@ class AdaptiveEmaBackgroundStage:
             "scene_brightness": round(brightness, 2),
             "scene_mode": "night" if brightness < 55 else "day",
             "global_change_ratios": [round(value, 4) for value in global_changes],
+            "global_change_threshold": self.global_change_ratio,
         })
         return context
 
@@ -669,7 +670,14 @@ class AdaptiveMotionScoringStage:
             }
         global_changes = context.debug.values.get("global_change_ratios", [])
         global_change = max(global_changes, default=0.0) if isinstance(global_changes, list) else 0.0
-        if global_change >= 0.55:
+        global_change_threshold = min(
+            1.0,
+            max(
+                0.05,
+                float(context.debug.values.get("global_change_threshold", 0.55)),
+            ),
+        )
+        if global_change >= global_change_threshold:
             accepted = False
             score = min(score, threshold * 0.5)
             reason = "global_illumination_change"
@@ -679,6 +687,7 @@ class AdaptiveMotionScoringStage:
             "scene_mode": "night" if night else "day",
             "adaptive_threshold": round(threshold, 4),
             "global_change": round(global_change, 4),
+            "global_change_threshold": round(global_change_threshold, 4),
             "track_count": len(context.tracked_objects),
         }
         context.scoring = MotionScoring(
@@ -799,6 +808,8 @@ def register_adaptive_motion_stages(registry: MotionStageRegistry) -> None:
         category="background",
         display_name="Adaptive scene background",
         description="Learns the normal scene while protecting moving regions from immediate absorption.",
+        continuous_analysis=True,
+        motion_source="adaptive_background",
         options=(
             MotionStageOption("learning_rate", "Normal learning speed", "number", 0.025, minimum=0.0001, maximum=1, advanced=True),
             MotionStageOption("fast_learning_rate", "Scene-change learning speed", "number", 0.18, minimum=0.001, maximum=1, advanced=True),

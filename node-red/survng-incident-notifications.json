@@ -4,14 +4,14 @@
     "type": "tab",
     "label": "SurvNG incident notifications",
     "disabled": false,
-    "info": "Receives SurvNG incident lifecycle messages, caches snapshots in Home Assistant media, and updates one Companion notification per incident."
+    "info": "Receives SurvNG object-incident lifecycle messages, publishes snapshots to Home Assistant MQTT Image entities, and updates one Companion notification per incident without a shared media mount. Plain motion incidents are ignored."
   },
   {
     "id": "712ba870f0914ca1",
     "type": "comment",
     "z": "4b5aa3eef3c64e11",
     "name": "SETUP: MQTT credentials, HA server, and notify action",
-    "info": "1. Open the SurvNG MQTT broker node and add the same credentials used by SurvNG.\n2. Open the final Home Assistant Action node and select your existing HA server.\n3. In the Prepare HA notification function, replace notify.mobile_app_CHANGE_ME or set SURVNG_NOTIFY_ACTION in Node-RED.\n4. The flow writes to /media/survng-notifications. If Node-RED is not the HA add-on, mount HA's media directory at /media.\n5. Override SURVNG_INTERNAL_URL if SurvNG is not reachable at http://192.168.86.243:8088.",
+    "info": "1. Open the SurvNG MQTT broker node and add the same credentials used by SurvNG.\n2. Open the final Home Assistant Action node and select your existing HA server.\n3. In the Prepare HA notification function, replace notify.mobile_app_CHANGE_ME or set SURVNG_NOTIFY_ACTION in Node-RED.\n4. No Home Assistant media mount is required. Snapshots are retained as per-camera MQTT Image entities and served through Home Assistant's authenticated image proxy.\n5. Override SURVNG_INTERNAL_URL if SurvNG is not reachable at http://192.168.86.243:8088.\n6. Optional environment overrides: SURVNG_MQTT_PREFIX (default survng) and HA_MQTT_DISCOVERY_PREFIX (default homeassistant).",
     "x": 310,
     "y": 60,
     "wires": []
@@ -42,7 +42,7 @@
     "type": "function",
     "z": "4b5aa3eef3c64e11",
     "name": "Validate + prepare snapshot",
-    "func": "let incident = msg.payload;\ntry {\n    if (Buffer.isBuffer(incident)) incident = JSON.parse(incident.toString('utf8'));\n    if (typeof incident === 'string') incident = JSON.parse(incident);\n} catch (error) {\n    node.warn(`Invalid SurvNG incident JSON: ${error.message}`);\n    return null;\n}\n\nif (!incident || incident.type !== 'incident' || Number(incident.schema_version) !== 1) return null;\nif (!['new', 'updated', 'complete'].includes(incident.state)) return null;\nif (!incident.incident_id || !incident.camera_id || !incident.representative_event_id) return null;\n\nconst internalOrigin = (env.get('SURVNG_INTERNAL_URL') || 'http://192.168.86.243:8088').replace(/\\/$/, '');\nconst safeIncident = String(incident.incident_id).replace(/[^a-zA-Z0-9_-]/g, '_');\nconst representative = Number(incident.representative_event_id);\nconst revisionKey = `survng_notification_revision_${safeIncident}`;\nconst revision = Number(flow.get(revisionKey) || 0) + 1;\nflow.set(revisionKey, revision);\n\nmsg.incident = incident;\nmsg.incidentRevision = revision;\nmsg.revisionKey = revisionKey;\nmsg.method = 'GET';\nmsg.url = internalOrigin + incident.snapshot_url;\nmsg.headers = { Accept: 'image/jpeg,image/*;q=0.9' };\nmsg.filename = `/media/survng-notifications/${safeIncident}-${representative}.jpg`;\nmsg.notificationImage = `/media/local/survng-notifications/${safeIncident}-${representative}.jpg?v=${incident.event_count || 1}`;\ndelete msg.payload;\nreturn msg;",
+    "func": "let incident = msg.payload;\ntry {\n    if (Buffer.isBuffer(incident)) incident = JSON.parse(incident.toString('utf8'));\n    if (typeof incident === 'string') incident = JSON.parse(incident);\n} catch (error) {\n    node.warn(`Invalid SurvNG incident JSON: ${error.message}`);\n    return null;\n}\n\nif (!incident || incident.type !== 'incident' || Number(incident.schema_version) !== 1) return null;\nif (!['new', 'updated', 'complete'].includes(incident.state)) return null;\nif (!incident.incident_id || !incident.camera_id || !incident.representative_event_id) return null;\nconst objects = Array.isArray(incident.objects) ? incident.objects : [];\nif (incident.has_objects !== true && objects.length === 0) return null;\n\nconst internalOrigin = (env.get('SURVNG_INTERNAL_URL') || 'http://192.168.86.243:8088').replace(/\\/$/, '');\nconst safeIncident = String(incident.incident_id).replace(/[^a-zA-Z0-9_-]/g, '_');\nconst revisionKey = `survng_notification_revision_${safeIncident}`;\nconst revision = Number(flow.get(revisionKey) || 0) + 1;\nflow.set(revisionKey, revision);\n\nmsg.incident = incident;\nmsg.incidentRevision = revision;\nmsg.revisionKey = revisionKey;\nmsg.method = 'GET';\nmsg.url = internalOrigin + incident.snapshot_url;\nmsg.headers = { Accept: 'image/jpeg,image/*;q=0.9' };\ndelete msg.payload;\nreturn msg;",
     "outputs": 1,
     "timeout": 0,
     "noerr": 0,
@@ -116,17 +116,67 @@
   },
   {
     "id": "8494a5209aef4184",
-    "type": "file",
+    "type": "function",
     "z": "4b5aa3eef3c64e11",
-    "name": "Cache in HA media",
-    "filename": "filename",
-    "filenameType": "msg",
-    "appendNewline": false,
-    "createDir": true,
-    "overwriteFile": "true",
-    "encoding": "none",
+    "name": "Publish snapshot as MQTT Image",
+    "func": "const incident = msg.incident;\nif (!incident || !Buffer.isBuffer(msg.payload)) return [null, null, null];\n\n// Do not let a slower fetch from an older lifecycle revision overwrite a newer image.\nif (Number(flow.get(msg.revisionKey) || 0) !== Number(msg.incidentRevision)) {\n    return [null, null, null];\n}\n\nconst cameraId = String(incident.camera_id);\nconst cameraSlug = cameraId.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'camera';\nconst cameraName = String(incident.camera_name || cameraId);\nconst mqttPrefix = String(env.get('SURVNG_MQTT_PREFIX') || 'survng').replace(/^\\/+|\\/+$/g, '');\nconst discoveryPrefix = String(env.get('HA_MQTT_DISCOVERY_PREFIX') || 'homeassistant').replace(/^\\/+|\\/+$/g, '');\nconst imageTopic = `${mqttPrefix}/notifications/${cameraId}/image`;\nconst objectId = `survng_${cameraSlug}_incident`;\nconst imageEntityId = `image.${objectId}`;\nconst discoveryTopic = `${discoveryPrefix}/image/${objectId}/config`;\nconst discovery = {\n    name: 'Incident Image',\n    unique_id: `${objectId}_image`,\n    default_entity_id: imageEntityId,\n    image_topic: imageTopic,\n    content_type: 'image/jpeg',\n    availability_topic: `${mqttPrefix}/status`,\n    availability_template: '{{ value_json.online }}',\n    payload_available: 'True',\n    payload_not_available: 'False',\n    device: {\n        identifiers: [`survng_${cameraId}`],\n        name: cameraName,\n        manufacturer: 'SurvNG',\n        model: 'Network Camera'\n    }\n};\n\nconst discoveryMessage = {\n    topic: discoveryTopic,\n    payload: JSON.stringify(discovery),\n    qos: 1,\n    retain: true\n};\nconst imageMessage = {\n    topic: imageTopic,\n    payload: msg.payload,\n    qos: 1,\n    retain: true\n};\n\nmsg.notificationImage = `/api/image_proxy/${imageEntityId}`;\nmsg.imageEntityId = imageEntityId;\ndelete msg.payload;\ndelete msg.headers;\ndelete msg.method;\nreturn [discoveryMessage, imageMessage, msg];",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
     "x": 1170,
     "y": 120,
+    "wires": [
+      [
+        "2c4e6d88c28048ce"
+      ],
+      [
+        "2c4e6d88c28048ce"
+      ],
+      [
+        "b4626d67d6f746f9"
+      ]
+    ]
+  },
+  {
+    "id": "2c4e6d88c28048ce",
+    "type": "mqtt out",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Publish retained discovery/image",
+    "topic": "",
+    "qos": "",
+    "retain": "",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "ebc34ac315db497d",
+    "x": 1430,
+    "y": 90,
+    "wires": []
+  },
+  {
+    "id": "b4626d67d6f746f9",
+    "type": "delay",
+    "z": "4b5aa3eef3c64e11",
+    "name": "Allow HA image update",
+    "pauseType": "delay",
+    "timeout": "500",
+    "timeoutUnits": "milliseconds",
+    "rate": "1",
+    "nbRateUnits": "1",
+    "rateUnits": "second",
+    "randomFirst": "1",
+    "randomLast": "5",
+    "randomUnits": "seconds",
+    "drop": false,
+    "allowrate": false,
+    "outputs": 1,
+    "x": 1410,
+    "y": 130,
     "wires": [
       [
         "3a0bbcc030d04bb6"
@@ -190,6 +240,8 @@
       "d9c49f32317943b1",
       "87fd47fc9f9d4ef1",
       "8494a5209aef4184",
+      "2c4e6d88c28048ce",
+      "b4626d67d6f746f9",
       "3a0bbcc030d04bb6",
       "5c53644dcd1448ee"
     ],
@@ -218,45 +270,6 @@
     "x": 440,
     "y": 220,
     "wires": []
-  },
-  {
-    "id": "9972b14ea8dd4bea",
-    "type": "inject",
-    "z": "4b5aa3eef3c64e11",
-    "name": "Daily thumbnail cleanup",
-    "props": [],
-    "repeat": "",
-    "crontab": "17 3 * * *",
-    "once": false,
-    "onceDelay": 0.1,
-    "topic": "",
-    "x": 190,
-    "y": 300,
-    "wires": [
-      [
-        "5db33dcc92d3483d"
-      ]
-    ]
-  },
-  {
-    "id": "5db33dcc92d3483d",
-    "type": "exec",
-    "z": "4b5aa3eef3c64e11",
-    "command": "find /media/survng-notifications -type f -mtime +7 -delete",
-    "addpay": "",
-    "append": "",
-    "useSpawn": "false",
-    "timer": "20",
-    "winHide": false,
-    "oldrc": false,
-    "name": "Delete thumbnails older than 7 days",
-    "x": 500,
-    "y": 300,
-    "wires": [
-      [],
-      [],
-      []
-    ]
   },
   {
     "id": "ebc34ac315db497d",

@@ -130,6 +130,7 @@ class AppManager:
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
+        self._motion_analysis_limiter = threading.BoundedSemaphore(2)
         self.workers = {camera.id: self._create_camera_worker(camera) for camera in config.cameras}
 
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
@@ -182,6 +183,7 @@ class AppManager:
             motion_pipeline_origins=graphs.origins,
             motion_decision_handler_factory=self.motion_decision_handler_factory,
             motion_object_detector_factory=self.motion_object_detector_factory,
+            motion_analysis_limiter=self._motion_analysis_limiter,
         )
 
     def _unique_cameras(self):

@@ -21,7 +21,12 @@ from .adaptive_stages import (
     PersistentCentroidTrackerStage,
     register_adaptive_motion_stages,
 )
-from .contracts import MotionPipelineObserver, MotionStage
+from .contracts import (
+    MotionPipelineObserver,
+    MotionRuntimeSnapshot,
+    MotionStage,
+    MotionStageLifecycle,
+)
 from .configuration import ResolvedMotionPipelineGraphs, resolve_motion_pipeline_graphs
 from .catalog import (
     MotionPipelinePreset,
@@ -146,9 +151,11 @@ __all__ = [
     "MotionPipelineFactory",
     "MotionPipelineObserver",
     "MotionRuntimeState",
+    "MotionRuntimeSnapshot",
     "MotionScoring",
     "MotionScoringStage",
     "MotionStage",
+    "MotionStageLifecycle",
     "MotionStageOption",
     "MotionStageConfig",
     "analysis_preset_selections",

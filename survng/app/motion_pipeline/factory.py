@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
-from .contracts import MotionPipelineObserver
+from .contracts import MotionPipelineObserver, MotionStage
 from .pipeline import MotionErrorPolicy, MotionPipeline
 from .registry import MotionStageDependencies, MotionStageRegistry
 
@@ -93,6 +93,25 @@ class MotionPipelineFactory:
                 "motion pipeline does not provide required artifacts: "
                 + ", ".join(sorted(missing_outputs))
             )
+        stage_blueprint = tuple(
+            (
+                stage_config.stage_id.strip(),
+                registration.builder,
+                dict(stage_config.options),
+            )
+            for stage_config, registration in zip(
+                stage_configs,
+                registrations,
+                strict=True,
+            )
+        )
+
+        def build_isolated_stages() -> tuple[MotionStage, ...]:
+            return tuple(
+                builder(stage_id, dict(options), self.dependencies)
+                for stage_id, builder, options in stage_blueprint
+            )
+
         return MotionPipeline(
             camera_id=camera_id,
             stages=stages,
@@ -116,4 +135,16 @@ class MotionPipelineFactory:
                 stage.stage_id: registration.provides
                 for stage, registration in zip(stages, registrations, strict=True)
             },
+            continuous_analysis=any(
+                registration.continuous_analysis
+                for registration in registrations
+            ),
+            motion_sources=tuple(
+                dict.fromkeys(
+                    registration.motion_source
+                    for registration in registrations
+                    if registration.motion_source
+                )
+            ),
+            stage_factory=build_isolated_stages,
         )

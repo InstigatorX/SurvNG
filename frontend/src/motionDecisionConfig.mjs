@@ -5,8 +5,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   sourceWeights: { primary: 1, mog2: 1, onvif: 1 },
   weightedThreshold: 0.5,
   activationFrames: 1,
-  releaseFrames: 1,
-  cooldownSeconds: 0,
+  releaseFrames: 3,
+  cooldownSeconds: 5,
   stateTimeoutSeconds: 10,
 });
 
@@ -128,8 +128,8 @@ export function buildMotionDecisionFusion(settings) {
       implementation: "score_event_state",
       options: {
         activation_frames: Math.round(clamp(normalized.activationFrames, 1, 20, 1)),
-        release_frames: Math.round(clamp(normalized.releaseFrames, 1, 20, 1)),
-        cooldown_seconds: clamp(normalized.cooldownSeconds, 0, 300, 0),
+        release_frames: Math.round(clamp(normalized.releaseFrames, 1, 20, 3)),
+        cooldown_seconds: clamp(normalized.cooldownSeconds, 0, 300, 5),
         state_timeout_seconds: clamp(normalized.stateTimeoutSeconds, 0, 300, 10),
       },
     },

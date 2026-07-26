@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 import cv2
@@ -19,6 +20,7 @@ from survng.app.motion import (
 from survng.app.motion_pipeline import (
     MotionContext,
     MotionPipelineFactory,
+    MotionRuntimeState,
     MotionStageConfig,
     MotionStageDependencies,
     MotionStageRegistration,
@@ -28,6 +30,15 @@ from survng.app.motion_pipeline import (
     default_motion_stage_configs,
     motion_pipeline_catalog,
 )
+
+
+@dataclass
+class SnapshotOnlyState:
+    value: int
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def snapshot(self) -> "SnapshotOnlyState":
+        return SnapshotOnlyState(self.value)
 
 
 @dataclass
@@ -53,6 +64,55 @@ class DelayedEvidenceStage:
         return context
 
 
+@dataclass
+class ObservationStage:
+    stage_id: str
+    observation_kinds: frozenset[str]
+
+    def process(self, context: MotionContext) -> MotionContext:
+        context.debug.values.setdefault("observed_by", []).append(self.stage_id)
+        return context
+
+
+@dataclass
+class FailingStage:
+    stage_id: str
+
+    def process(self, context: MotionContext) -> MotionContext:
+        raise RuntimeError("parallel stage failed")
+
+
+@dataclass
+class CompletingStage:
+    stage_id: str
+    completed: threading.Event
+
+    def process(self, context: MotionContext) -> MotionContext:
+        time.sleep(0.05)
+        self.completed.set()
+        return context
+
+
+@dataclass
+class LifecycleStage:
+    stage_id: str
+    closed: bool = False
+
+    def process(self, context: MotionContext) -> MotionContext:
+        return context
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class LifecycleState:
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def build_recording_stage(
     stage_id: str,
     options: Mapping[str, Any],
@@ -75,7 +135,143 @@ def build_delayed_evidence_stage(
     )
 
 
+def build_frame_observer(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> ObservationStage:
+    del options, dependencies
+    return ObservationStage(stage_id, frozenset({"frame"}))
+
+
+def build_event_observer(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> ObservationStage:
+    del options, dependencies
+    return ObservationStage(stage_id, frozenset({"motion_event"}))
+
+
+def build_lifecycle_stage(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> LifecycleStage:
+    del options, dependencies
+    return LifecycleStage(stage_id)
+
+
 class MotionPipelineTest(unittest.TestCase):
+    def test_pipeline_close_releases_isolated_stage_and_runtime_resources(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="lifecycle",
+            builder=build_lifecycle_stage,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("resource", "lifecycle")],
+        )
+        replay = pipeline.isolated_copy()
+        replay_stage = replay.stages[0]
+        production_stage = pipeline.stages[0]
+        runtime_state = replay.runtime.state_for("native", LifecycleState)
+
+        replay.close()
+
+        self.assertTrue(replay_stage.closed)
+        self.assertTrue(runtime_state.closed)
+        self.assertFalse(production_stage.closed)
+        with self.assertRaisesRegex(RuntimeError, "pipeline is closed"):
+            replay.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={},
+                runtime=replay.runtime,
+            ))
+        pipeline.close()
+        self.assertTrue(production_stage.closed)
+
+    def test_observation_context_runs_only_stages_registered_for_its_kind(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="frame_observer",
+            builder=build_frame_observer,
+            provides=frozenset({"debug"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="event_observer",
+            builder=build_event_observer,
+            provides=frozenset({"debug"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("frame", "frame_observer"),
+                MotionStageConfig("event", "event_observer"),
+            ],
+        )
+        try:
+            result = pipeline.process(MotionContext(
+                camera_id="gate",
+                captured_at=10.0,
+                original_frame=None,
+                configuration={"observation_kind": "motion_event"},
+                runtime=pipeline.runtime,
+            ))
+
+            self.assertEqual(result.debug.values["observed_by"], ["event"])
+            self.assertEqual(pipeline.status()["stages"]["frame"]["calls"], 0)
+            self.assertEqual(pipeline.status()["stages"]["event"]["calls"], 1)
+        finally:
+            pipeline.close()
+
+    def test_parallel_group_waits_for_siblings_before_raising_failure(self) -> None:
+        completed = threading.Event()
+
+        def build_failure(stage_id, options, dependencies):
+            del options, dependencies
+            return FailingStage(stage_id)
+
+        def build_completion(stage_id, options, dependencies):
+            del options, dependencies
+            return CompletingStage(stage_id, completed)
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="failure",
+            builder=build_failure,
+            provides=frozenset({"source_evidence"}),
+        ))
+        registry.register(MotionStageRegistration(
+            implementation="completion",
+            builder=build_completion,
+            provides=frozenset({"source_evidence"}),
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [
+                MotionStageConfig("failure", "failure", parallel_group="sources"),
+                MotionStageConfig("completion", "completion", parallel_group="sources"),
+            ],
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "parallel stage failed"):
+                pipeline.process(MotionContext(
+                    camera_id="gate",
+                    captured_at=10.0,
+                    original_frame=None,
+                    configuration={},
+                    runtime=pipeline.runtime,
+                ))
+
+            self.assertTrue(completed.is_set())
+            self.assertEqual(pipeline.status()["stages"]["completion"]["calls"], 1)
+        finally:
+            pipeline.close()
+
     def test_parallel_group_runs_isolated_stages_concurrently_and_merges_evidence(self) -> None:
         registry = MotionStageRegistry()
         registry.register(MotionStageRegistration(
@@ -141,6 +337,8 @@ class MotionPipelineTest(unittest.TestCase):
             {option["key"] for option in stages["dominant_centroid"]["options"]},
         )
         self.assertTrue(all(preset["available"] for preset in catalog["presets"]))
+        self.assertTrue(stages["adaptive_ema_background"]["continuous_analysis"])
+        self.assertEqual(stages["adaptive_ema_background"]["motion_source"], "adaptive_background")
         self.assertEqual(
             next(preset for preset in catalog["presets"] if preset["recommended"])["id"],
             "adaptive",
@@ -234,7 +432,8 @@ class MotionPipelineTest(unittest.TestCase):
         pipeline.runtime.state_for("record", list).append(1.0)
         replay = pipeline.isolated_copy(clone_runtime=True)
         try:
-            replay.process(MotionContext(
+            self.assertIsNot(replay.stages[0], pipeline.stages[0])
+            result = replay.process(MotionContext(
                 camera_id="gate",
                 captured_at=2.0,
                 original_frame=None,
@@ -243,8 +442,41 @@ class MotionPipelineTest(unittest.TestCase):
             ))
             self.assertEqual(pipeline.runtime.state_for("record", list), [1.0])
             self.assertEqual(replay.runtime.state_for("record", list), [1.0, 2.0])
+            replay_snapshot = replay.audit_snapshot(result.timings)
+            self.assertEqual(replay_snapshot["stage_metrics"]["record"]["calls"], 1)
+            self.assertTrue(replay_snapshot["invocation_timings"]["record"]["succeeded"])
         finally:
             replay.close()
+            pipeline.close()
+
+    def test_runtime_snapshot_contract_supports_native_noncopyable_state(self) -> None:
+        runtime = MotionRuntimeState("gate")
+        original = runtime.state_for("native", lambda: SnapshotOnlyState(7))
+
+        cloned = runtime.clone()
+        snapshot = cloned.state_for("native", lambda: SnapshotOnlyState(0))
+
+        self.assertEqual(snapshot.value, 7)
+        self.assertIsNot(snapshot, original)
+        self.assertIsNot(snapshot.lock, original.lock)
+
+    def test_pipeline_capabilities_are_derived_from_stage_registration(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="continuous_custom",
+            builder=build_recording_stage,
+            provides=frozenset({"debug"}),
+            continuous_analysis=True,
+            motion_source="custom_flow",
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("custom", "continuous_custom")],
+        )
+        try:
+            self.assertTrue(pipeline.continuous_analysis)
+            self.assertEqual(pipeline.primary_motion_source, "custom_flow")
+        finally:
             pipeline.close()
 
     def test_factory_validates_stage_artifact_dependencies(self) -> None:

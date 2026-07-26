@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from survng.app.events import EventStore
 
@@ -162,6 +163,36 @@ class EventStoreTest(unittest.TestCase):
             tracks = json.loads(rows[0]["features_json"])["mog2_tracks"]
             self.assertEqual(tracks[0]["id"], 3)
             self.assertEqual(tracks[0]["path"][-1], [0.2, 0.3])
+
+    def test_suppressed_motion_audit_retry_is_idempotent_after_read_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            payload = {
+                "camera_id": "gate",
+                "snapshot_path": "snapshot.jpg",
+                "created_at": "2026-07-26T18:00:00+00:00",
+                "mode": "enforce",
+                "sensitivity": "balanced",
+                "score": 0.2,
+                "threshold": 0.48,
+                "reason": "low_score",
+                "object_detected": None,
+                "trigger_count": 1,
+                "features": {"persistence": 0.2},
+            }
+            with patch.object(
+                store,
+                "get_motion_audit",
+                side_effect=RuntimeError("post-commit read failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "post-commit read failed"):
+                    store.add_motion_audit(**payload)
+
+            retry = store.add_motion_audit(**payload)
+            rows, total = store.motion_audits(camera_id="gate")
+
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["id"], retry["id"])
 
 
 if __name__ == "__main__":

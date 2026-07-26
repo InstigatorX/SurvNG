@@ -37,6 +37,9 @@ CAPTURE_RETRY_MAX_SECONDS = 30.0
 FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
 MOTION_QUEUE_SIZE = 32
+MOTION_ANALYSIS_QUEUE_SIZE = 1
+MOTION_EVENT_MAX_RETRIES = 2
+FUSION_STALE_TOLERANCE_SECONDS = 5.0
 
 
 class CameraWorker:
@@ -54,6 +57,7 @@ class CameraWorker:
         motion_pipeline_origins: dict[str, str],
         motion_decision_handler_factory: MotionDecisionHandlerFactory,
         motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
+        motion_analysis_limiter: threading.BoundedSemaphore,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -64,6 +68,7 @@ class CameraWorker:
         self.motion_fusion_pipeline = motion_fusion_pipeline
         self.motion_evidence = motion_evidence
         self.motion_pipeline_origins = dict(motion_pipeline_origins)
+        self.motion_analysis_limiter = motion_analysis_limiter
         self.motion_debug = MotionDebugSnapshotStore()
         self._motion_debug_last_run = 0.0
         self.motion_object_detector = motion_object_detector_factory.create(
@@ -74,7 +79,7 @@ class CameraWorker:
             camera_id=camera.id,
             detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
             snapshot_writer=lambda frame: self._write_snapshot(frame),
-            event_callback=event_callback,
+            event_callback=self._publish_event_safely if event_callback is not None else None,
         )
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +90,8 @@ class CameraWorker:
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
         self._motion_analysis_lock = threading.Lock()
+        self._motion_fusion_lock = threading.Lock()
+        self._motion_fusion_last_at = 0.0
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stops: dict[str, threading.Event] = {}
         self._source_frames: dict[str, Any] = {}
@@ -102,8 +109,18 @@ class CameraWorker:
         self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self._motion_last_sample = 0.0
         self._motion_last_continuous_result: MotionQualificationResult | None = None
+        self._motion_analysis_last_processed_at = 0.0
+        self._motion_analysis_queue: queue.Queue[float | None] = queue.Queue(
+            maxsize=MOTION_ANALYSIS_QUEUE_SIZE
+        )
+        self._motion_analysis_thread: threading.Thread | None = None
         self._motion_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=MOTION_QUEUE_SIZE)
+        self._motion_retry_batches: deque[dict[str, Any]] = deque()
         self._motion_thread: threading.Thread | None = None
+        self._active_motion_triggers: list[dict[str, Any]] | None = None
+        self._adaptive_trigger_pending = False
+        self._adaptive_last_completed_at = 0.0
+        self._priority_motion_times: deque[float] = deque(maxlen=16)
         self._motion_stats_lock = threading.Lock()
         self._motion_stats: dict[str, Any] = {
             "triggers": 0,
@@ -115,6 +132,16 @@ class CameraWorker:
             "insufficient_frames": 0,
             "inconclusive": 0,
             "dropped_triggers": 0,
+            "analysis_frames_dropped": 0,
+            "continuous_frames": 0,
+            "continuous_candidates": 0,
+            "adaptive_triggers_deferred": 0,
+            "analysis_worker_errors": 0,
+            "event_worker_errors": 0,
+            "event_callback_errors": 0,
+            "event_retries": 0,
+            "event_retry_drops": 0,
+            "stale_fusion_samples": 0,
             "audit_object_matches": 0,
             "last_result": None,
         }
@@ -128,6 +155,14 @@ class CameraWorker:
         with self._lifecycle_lock:
             self._enabled = True
             self._stop.clear()
+            if self._motion_analysis_thread is None or not self._motion_analysis_thread.is_alive():
+                self._clear_motion_analysis_queue()
+                self._motion_analysis_thread = threading.Thread(
+                    target=self._run_motion_analysis,
+                    name=f"motion-analysis-{self.camera.id}",
+                    daemon=False,
+                )
+                self._motion_analysis_thread.start()
             self._start_source("live")
             if self._motion_thread is None or not self._motion_thread.is_alive():
                 self._clear_motion_queue()
@@ -149,6 +184,7 @@ class CameraWorker:
             for stop_event in stops:
                 stop_event.set()
             self.onvif.stop()
+            self._signal_motion_analysis_stop()
             try:
                 self._motion_queue.put_nowait(None)
             except queue.Full:
@@ -159,6 +195,16 @@ class CameraWorker:
                 if motion_thread.is_alive():
                     LOGGER.error("motion worker did not stop for %s", self.camera.id)
             self._motion_thread = motion_thread if motion_thread is not None and motion_thread.is_alive() else None
+            analysis_thread = self._motion_analysis_thread
+            if analysis_thread is not None:
+                analysis_thread.join(timeout=CAPTURE_STOP_TIMEOUT_SECONDS)
+                if analysis_thread.is_alive():
+                    LOGGER.error("motion analysis worker did not stop for %s", self.camera.id)
+            self._motion_analysis_thread = (
+                analysis_thread
+                if analysis_thread is not None and analysis_thread.is_alive()
+                else None
+            )
             deadline = time.monotonic() + CAPTURE_STOP_TIMEOUT_SECONDS
             for _source, thread in threads:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -186,11 +232,18 @@ class CameraWorker:
                 self._motion_frames.clear()
                 self._motion_last_sample = 0.0
                 self._motion_last_continuous_result = None
+                self._motion_analysis_last_processed_at = 0.0
                 self.last_frame_at = ""
             self.motion_evidence.clear()
             self.motion_observation_pipeline.runtime.reset()
             self.motion_pipeline.runtime.reset()
-            self.motion_fusion_pipeline.runtime.reset()
+            with self._motion_fusion_lock:
+                self.motion_fusion_pipeline.runtime.reset()
+                self._motion_fusion_last_at = 0.0
+            self._active_motion_triggers = None
+            self._adaptive_trigger_pending = False
+            self._adaptive_last_completed_at = 0.0
+            self._priority_motion_times.clear()
             self._thread = self._source_threads.get("live")
 
     def close(self) -> None:
@@ -266,6 +319,21 @@ class CameraWorker:
                 "evidence_sources": evidence_status,
                 "pipeline_origins": dict(self.motion_pipeline_origins),
                 "queue_depth": self._motion_queue.qsize(),
+                "retry_queue_depth": len(self._motion_retry_batches),
+                "analysis_queue_depth": self._motion_analysis_queue.qsize(),
+                "analysis_worker_running": bool(
+                    self._motion_analysis_thread is not None
+                    and self._motion_analysis_thread.is_alive()
+                ),
+                "event_worker_running": bool(
+                    self._motion_thread is not None
+                    and self._motion_thread.is_alive()
+                ),
+                "continuous_last_result": (
+                    self._motion_last_continuous_result.as_dict()
+                    if self._motion_last_continuous_result is not None
+                    else None
+                ),
                 "buffered_frames": motion_buffered_frames,
                 "frame_shape": motion_frame_shape,
                 "pipeline": self.motion_pipeline.status(),
@@ -307,6 +375,20 @@ class CameraWorker:
             )
             time.sleep(delay)
 
+    def _publish_event_safely(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.event_callback is None:
+            return
+        try:
+            self.event_callback(event_type, payload)
+        except Exception:
+            with self._motion_stats_lock:
+                self._motion_stats["event_callback_errors"] += 1
+            LOGGER.exception(
+                "camera event callback failed for %s event=%s",
+                self.camera.id,
+                event_type,
+            )
+
     def handle_motion_event(
         self,
         topic: str = "manual",
@@ -325,13 +407,14 @@ class CameraWorker:
             event_at = event_at.astimezone(timezone.utc)
 
         self._observe_motion_event(topic, message, event_at, received_at)
+        if self._priority_motion_topic(topic):
+            self._remember_priority_motion(received_at)
 
-        if self.event_callback:
-            self.event_callback("motion", {
-                "camera_id": self.camera.id,
-                "timestamp": event_at.isoformat(),
-                "source": "manual" if topic.startswith("manual") else "onvif",
-            })
+        self._publish_event_safely("motion", {
+            "camera_id": self.camera.id,
+            "timestamp": event_at.isoformat(),
+            "source": "manual" if topic.startswith("manual") else "onvif",
+        })
 
         self._enqueue_motion_trigger({
             "topic": topic,
@@ -340,12 +423,22 @@ class CameraWorker:
             "received_at": received_at,
         })
 
-    def _enqueue_motion_trigger(self, trigger: dict[str, Any]) -> None:
+    def _enqueue_motion_trigger(
+        self,
+        trigger: dict[str, Any],
+        *,
+        evict_oldest: bool = True,
+    ) -> bool:
         with self._motion_stats_lock:
             self._motion_stats["triggers"] += 1
         try:
             self._motion_queue.put_nowait(trigger)
+            return True
         except queue.Full:
+            if not evict_oldest:
+                with self._motion_stats_lock:
+                    self._motion_stats["dropped_triggers"] += 1
+                return False
             try:
                 self._motion_queue.get_nowait()
             except queue.Empty:
@@ -354,15 +447,49 @@ class CameraWorker:
                 self._motion_stats["dropped_triggers"] += 1
             try:
                 self._motion_queue.put_nowait(trigger)
+                return True
             except queue.Full:
-                pass
+                return False
 
     def _clear_motion_queue(self) -> None:
+        self._motion_retry_batches.clear()
         while True:
             try:
                 self._motion_queue.get_nowait()
             except queue.Empty:
                 return
+
+    def _clear_motion_analysis_queue(self) -> None:
+        while True:
+            try:
+                self._motion_analysis_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def _signal_motion_analysis_stop(self) -> None:
+        self._clear_motion_analysis_queue()
+        try:
+            self._motion_analysis_queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+    def _schedule_motion_analysis(self, captured_at: float) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            self._motion_analysis_queue.put_nowait(captured_at)
+            return
+        except queue.Full:
+            try:
+                self._motion_analysis_queue.get_nowait()
+            except queue.Empty:
+                pass
+        with self._motion_stats_lock:
+            self._motion_stats["analysis_frames_dropped"] += 1
+        try:
+            self._motion_analysis_queue.put_nowait(captured_at)
+        except queue.Full:
+            pass
 
     def _remember_motion_frame(self, frame: np.ndarray, frame_clock: float) -> None:
         interval = 1.0 / max(1.0, self.motion_config.sample_fps)
@@ -381,25 +508,49 @@ class CameraWorker:
         captured_at = time.time()
         with self._frame_lock:
             self._motion_frames.append((captured_at, gray))
-        observation = MotionContext(
-            camera_id=self.camera.id,
-            captured_at=captured_at,
-            original_frame=gray,
-            configuration={"observation_kind": "frame"},
-            runtime=self.motion_observation_pipeline.runtime,
-        )
-        if self.motion_observation_pipeline.handles_observation("frame"):
-            self.motion_observation_pipeline.process(observation)
-        if self.motion_pipeline.uses_implementation("adaptive_ema_background"):
-            self._analyze_continuous_motion(captured_at)
-        elif self.motion_debug.enabled() and frame_clock - self._motion_debug_last_run >= 1.0:
-            self._motion_debug_last_run = frame_clock
-            self._capture_motion_debug(captured_at)
+        self._schedule_motion_analysis(captured_at)
+
+    def _run_motion_analysis(self) -> None:
+        while not self._stop.is_set():
+            try:
+                _scheduled_at = self._motion_analysis_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if _scheduled_at is None or self._stop.is_set():
+                return
+            try:
+                with self.motion_analysis_limiter:
+                    if self._stop.is_set():
+                        return
+                    with self._frame_lock:
+                        if not self._motion_frames:
+                            continue
+                        captured_at, frame = self._motion_frames[-1]
+                        frame = frame.copy()
+                    if captured_at <= self._motion_analysis_last_processed_at:
+                        continue
+                    self._motion_analysis_last_processed_at = captured_at
+                    if self.motion_observation_pipeline.handles_observation("frame"):
+                        observation = MotionContext(
+                            camera_id=self.camera.id,
+                            captured_at=captured_at,
+                            original_frame=frame,
+                            configuration={"observation_kind": "frame"},
+                            runtime=self.motion_observation_pipeline.runtime,
+                        )
+                        self.motion_observation_pipeline.process(observation)
+                    if self.motion_pipeline.continuous_analysis:
+                        self._analyze_continuous_motion(captured_at)
+                    elif self.motion_debug.enabled() and time.monotonic() - self._motion_debug_last_run >= 1.0:
+                        self._motion_debug_last_run = time.monotonic()
+                        self._capture_motion_debug(captured_at)
+            except Exception:
+                with self._motion_stats_lock:
+                    self._motion_stats["analysis_worker_errors"] += 1
+                LOGGER.exception("motion analysis cycle failed for %s", self.camera.id)
 
     def _analyze_continuous_motion(self, captured_at: float) -> None:
         mode, sensitivity, _frame_width = self._motion_settings()
-        if mode == "off" or not self._detection_enabled:
-            return
         with self._frame_lock:
             samples = [(timestamp, frame.copy()) for timestamp, frame in list(self._motion_frames)[-2:]]
         if len(samples) < 2:
@@ -413,29 +564,93 @@ class CameraWorker:
                     [timestamp for timestamp, _frame in samples],
                     isolated=False,
                     capture_debug=self.motion_debug.enabled(),
+                    include_telemetry=False,
                 )
-                fused = self._with_source_evidence(result, samples[0][0], captured_at)
-                self._motion_last_continuous_result = fused
         except Exception as error:
             LOGGER.warning("continuous motion analysis failed for %s: %s", self.camera.id, error)
             return
-        if not fused.accepted:
+        self._motion_last_continuous_result = result
+        with self._motion_stats_lock:
+            self._motion_stats["continuous_frames"] += 1
+            self._motion_stats["continuous_candidates"] += int(result.accepted)
+        if mode != "enforce" or not self._detection_enabled:
+            return
+        fused = self._with_source_evidence(
+            result,
+            samples[0][0],
+            captured_at,
+            include_telemetry=False,
+        )
+        self._motion_last_continuous_result = fused
+        if not fused.accepted or not self._reserve_adaptive_trigger(captured_at):
             return
         event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        self.last_motion_at = event_at.isoformat()
-        if self.event_callback:
-            self.event_callback("motion", {
-                "camera_id": self.camera.id,
-                "timestamp": event_at.isoformat(),
-                "source": "adaptive",
-            })
-        self._enqueue_motion_trigger({
+        queued = self._enqueue_motion_trigger({
             "topic": "adaptive/motion",
             "message": "adaptive motion transition",
             "event_at": event_at,
             "received_at": captured_at,
             "prequalified": fused,
+        }, evict_oldest=False)
+        if not queued:
+            self._defer_adaptive_trigger(captured_at)
+            return
+        self.last_motion_at = event_at.isoformat()
+        self._publish_event_safely("motion", {
+            "camera_id": self.camera.id,
+            "timestamp": event_at.isoformat(),
+            "source": "adaptive",
         })
+
+    def _reserve_adaptive_trigger(self, captured_at: float) -> bool:
+        rearm_seconds = max(
+            5.0,
+            self.motion_config.window_seconds
+            + self.motion_config.post_trigger_seconds
+            + self.motion_config.burst_quiet_seconds,
+        )
+        priority_duplicate = self._matches_recent_priority_motion(captured_at)
+        with self._motion_stats_lock:
+            if (
+                self._adaptive_trigger_pending
+                or priority_duplicate
+                or captured_at - self._adaptive_last_completed_at < rearm_seconds
+            ):
+                self._motion_stats["adaptive_triggers_deferred"] += 1
+                return False
+            self._adaptive_trigger_pending = True
+            return True
+
+    def _priority_dedup_seconds(self) -> float:
+        return max(
+            2.0,
+            self.motion_config.post_trigger_seconds
+            + self.motion_config.burst_quiet_seconds,
+        )
+
+    def _remember_priority_motion(self, observed_at: float) -> None:
+        with self._motion_stats_lock:
+            self._priority_motion_times.append(observed_at)
+
+    def _matches_recent_priority_motion(self, event_at: float) -> bool:
+        tolerance = self._priority_dedup_seconds()
+        with self._motion_stats_lock:
+            return any(
+                abs(event_at - priority_at) <= tolerance
+                for priority_at in self._priority_motion_times
+            )
+
+    def _defer_adaptive_trigger(self, captured_at: float) -> None:
+        with self._motion_stats_lock:
+            self._adaptive_trigger_pending = False
+            self._adaptive_last_completed_at = captured_at
+
+    def _complete_adaptive_trigger(self, triggers: list[dict[str, Any]]) -> None:
+        if not any(item.get("topic") == "adaptive/motion" for item in triggers):
+            return
+        with self._motion_stats_lock:
+            self._adaptive_trigger_pending = False
+            self._adaptive_last_completed_at = time.time()
 
     def _capture_motion_debug(self, captured_at: float) -> None:
         with self._frame_lock:
@@ -515,26 +730,47 @@ class CameraWorker:
         result: MotionQualificationResult,
         start_epoch: float,
         end_epoch: float,
+        *,
+        include_telemetry: bool = True,
     ) -> MotionQualificationResult:
-        context = MotionContext(
-            camera_id=self.camera.id,
-            captured_at=end_epoch,
-            original_frame=None,
-            configuration={
-                "evidence_started_at": start_epoch,
-                "evidence_ended_at": end_epoch,
-            },
-            runtime=self.motion_fusion_pipeline.runtime,
-            scoring=MotionScoring(
-                accepted=result.accepted,
-                score=result.score,
-                threshold=result.threshold,
-                reason=result.reason,
-                frame_count=result.frame_count,
-                features=dict(result.features),
-            ),
-        )
-        processed = self.motion_fusion_pipeline.process(context)
+        with self._motion_fusion_lock:
+            stale_by = self._motion_fusion_last_at - end_epoch
+            if 0.0 < stale_by <= FUSION_STALE_TOLERANCE_SECONDS:
+                with self._motion_stats_lock:
+                    self._motion_stats["stale_fusion_samples"] += 1
+                return MotionQualificationResult(
+                    accepted=False,
+                    score=0.0,
+                    threshold=1.0,
+                    reason="stale_fusion_evidence",
+                    frame_count=result.frame_count,
+                    features={
+                        **result.features,
+                        "stale_fusion_seconds": round(stale_by, 3),
+                        "stale_fusion_original_score": result.score,
+                    },
+                    telemetry=dict(result.telemetry),
+                )
+            context = MotionContext(
+                camera_id=self.camera.id,
+                captured_at=end_epoch,
+                original_frame=None,
+                configuration={
+                    "evidence_started_at": start_epoch,
+                    "evidence_ended_at": end_epoch,
+                },
+                runtime=self.motion_fusion_pipeline.runtime,
+                scoring=MotionScoring(
+                    accepted=result.accepted,
+                    score=result.score,
+                    threshold=result.threshold,
+                    reason=result.reason,
+                    frame_count=result.frame_count,
+                    features=dict(result.features),
+                ),
+            )
+            processed = self.motion_fusion_pipeline.process(context)
+            self._motion_fusion_last_at = end_epoch
         scoring = processed.scoring
         decision = processed.decision
         features = dict(scoring.features)
@@ -556,15 +792,16 @@ class CameraWorker:
                 3,
             )
         telemetry = dict(result.telemetry)
-        graphs = dict(telemetry.get("graphs") or {})
-        graphs.setdefault("qualification", self.motion_pipeline.audit_snapshot())
-        graphs["observation"] = self.motion_observation_pipeline.audit_snapshot()
-        graphs["fusion"] = self.motion_fusion_pipeline.audit_snapshot(processed.timings)
-        telemetry.update({
-            "schema_version": 1,
-            "origins": dict(self.motion_pipeline_origins),
-            "graphs": graphs,
-        })
+        if include_telemetry:
+            graphs = dict(telemetry.get("graphs") or {})
+            graphs.setdefault("qualification", self.motion_pipeline.audit_snapshot())
+            graphs["observation"] = self.motion_observation_pipeline.audit_snapshot()
+            graphs["fusion"] = self.motion_fusion_pipeline.audit_snapshot(processed.timings)
+            telemetry.update({
+                "schema_version": 1,
+                "origins": dict(self.motion_pipeline_origins),
+                "graphs": graphs,
+            })
         return MotionQualificationResult(
             accepted=(
                 decision.run_object_detection
@@ -585,6 +822,30 @@ class CameraWorker:
         if result.telemetry:
             features["pipeline_telemetry"] = result.telemetry
         return features
+
+    def _with_pipeline_telemetry(
+        self,
+        result: MotionQualificationResult,
+    ) -> MotionQualificationResult:
+        if result.telemetry:
+            return result
+        return MotionQualificationResult(
+            accepted=result.accepted,
+            score=result.score,
+            threshold=result.threshold,
+            reason=result.reason,
+            frame_count=result.frame_count,
+            features=dict(result.features),
+            telemetry={
+                "schema_version": 1,
+                "origins": dict(self.motion_pipeline_origins),
+                "graphs": {
+                    "qualification": self.motion_pipeline.audit_snapshot(),
+                    "observation": self.motion_observation_pipeline.audit_snapshot(),
+                    "fusion": self.motion_fusion_pipeline.audit_snapshot(),
+                },
+            },
+        )
 
     @staticmethod
     def _priority_motion_topic(topic: str) -> bool:
@@ -697,6 +958,7 @@ class CameraWorker:
         *,
         isolated: bool = True,
         capture_debug: bool = True,
+        include_telemetry: bool = True,
     ) -> MotionQualificationResult:
         mode, _resolved_sensitivity, frame_width = self._motion_settings()
         if isolated:
@@ -733,10 +995,17 @@ class CameraWorker:
         result = processed.scoring
         result.features.setdefault(
             "primary_motion_source",
-            "adaptive_background"
-            if self.motion_pipeline.uses_implementation("adaptive_ema_background")
-            else "frame_difference",
+            self.motion_pipeline.primary_motion_source,
         )
+        telemetry: dict[str, Any] = {}
+        if include_telemetry:
+            telemetry = {
+                "schema_version": 1,
+                "origins": dict(self.motion_pipeline_origins),
+                "graphs": {
+                    "qualification": pipeline.audit_snapshot(processed.timings),
+                },
+            }
         return MotionQualificationResult(
             accepted=result.accepted,
             score=result.score,
@@ -744,13 +1013,7 @@ class CameraWorker:
             reason=result.reason,
             frame_count=result.frame_count,
             features=dict(result.features),
-            telemetry={
-                "schema_version": 1,
-                "origins": dict(self.motion_pipeline_origins),
-                "graphs": {
-                    "qualification": self.motion_pipeline.audit_snapshot(processed.timings),
-                },
-            },
+            telemetry=telemetry,
         )
 
     def set_motion_debug_enabled(self, enabled: bool) -> None:
@@ -765,58 +1028,156 @@ class CameraWorker:
     def _run_motion_events(self) -> None:
         while not self._stop.is_set():
             try:
-                first = self._motion_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
+                self._run_motion_events_until_error()
+                return
+            except Exception:
+                failed_triggers = self._active_motion_triggers
+                self._active_motion_triggers = None
+                with self._motion_stats_lock:
+                    self._motion_stats["event_worker_errors"] += 1
+                    if self._adaptive_trigger_pending:
+                        self._adaptive_trigger_pending = False
+                        self._adaptive_last_completed_at = time.time()
+                LOGGER.exception("motion event cycle failed for %s", self.camera.id)
+                if failed_triggers and not self._stop.is_set():
+                    self._retry_motion_trigger_batch(failed_triggers)
+
+    def _retry_motion_trigger_batch(self, triggers: list[dict[str, Any]]) -> None:
+        retry_count = max(
+            (int(item.get("_event_retry_count") or 0) for item in triggers),
+            default=0,
+        ) + 1
+        if retry_count > MOTION_EVENT_MAX_RETRIES:
+            with self._motion_stats_lock:
+                self._motion_stats["event_retry_drops"] += 1
+            return
+        retry_triggers = [
+            {**item, "_event_retry_count": retry_count}
+            for item in triggers
+        ]
+        if self._stop.wait(0.25 * retry_count):
+            return
+        wrapper = {
+            "topic": "internal/retry_batch",
+            "message": f"motion event retry {retry_count}",
+            "event_at": min(item["event_at"] for item in retry_triggers),
+            "received_at": min(
+                float(item.get("received_at") or time.time())
+                for item in retry_triggers
+            ),
+            "_retry_batch": retry_triggers,
+        }
+        self._motion_retry_batches.append(wrapper)
+        with self._motion_stats_lock:
+            self._motion_stats["event_retries"] += 1
+
+    def _run_motion_events_until_error(self) -> None:
+        while not self._stop.is_set():
+            if self._motion_retry_batches:
+                first = self._motion_retry_batches.popleft()
+            else:
+                try:
+                    first = self._motion_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
             if first is None or self._stop.is_set():
                 return
 
-            triggers = [first]
-            quiet_deadline = time.monotonic() + self.motion_config.burst_quiet_seconds
-            hard_deadline = time.monotonic() + max(2.0, self.motion_config.burst_quiet_seconds * 4)
-            while not self._stop.is_set():
-                remaining = min(quiet_deadline, hard_deadline) - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    item = self._motion_queue.get(timeout=remaining)
-                except queue.Empty:
-                    break
-                if item is None:
-                    return
-                triggers.append(item)
-                quiet_deadline = min(
-                    hard_deadline,
-                    time.monotonic() + self.motion_config.burst_quiet_seconds,
-                )
+            retry_batch = first.get("_retry_batch")
+            if isinstance(retry_batch, list):
+                triggers = [dict(item) for item in retry_batch]
+            else:
+                triggers = [first]
+                quiet_deadline = time.monotonic() + self.motion_config.burst_quiet_seconds
+                hard_deadline = time.monotonic() + max(2.0, self.motion_config.burst_quiet_seconds * 4)
+                while not self._stop.is_set():
+                    remaining = min(quiet_deadline, hard_deadline) - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        item = self._motion_queue.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if item is None:
+                        return
+                    triggers.append(item)
+                    quiet_deadline = min(
+                        hard_deadline,
+                        time.monotonic() + self.motion_config.burst_quiet_seconds,
+                    )
+            self._active_motion_triggers = triggers
 
-            representative = min(triggers, key=lambda item: item["event_at"])
+            priority_triggers = [
+                item
+                for item in triggers
+                if self._priority_motion_topic(str(item["topic"]))
+            ]
+            representative = min(
+                priority_triggers or triggers,
+                key=lambda item: item["event_at"],
+            )
             event_at = representative["event_at"]
             received_at = min(float(item.get("received_at") or time.time()) for item in triggers)
 
             mode, sensitivity, frame_width = self._motion_settings()
             rescue_enabled, rescue_margin = self._motion_rescue_settings()
-            priority = any(self._priority_motion_topic(str(item["topic"])) for item in triggers)
+            priority = bool(priority_triggers)
+            adaptive_only = all(
+                str(item.get("topic")) == "adaptive/motion"
+                for item in triggers
+            )
             prequalified = [
                 item["prequalified"]
                 for item in triggers
                 if isinstance(item.get("prequalified"), MotionQualificationResult)
             ]
+            retry_results = [
+                item["_retry_qualification_result"]
+                for item in triggers
+                if isinstance(
+                    item.get("_retry_qualification_result"),
+                    MotionQualificationResult,
+                )
+            ]
             diagnostics: dict[str, Any] = {
                 "windows_evaluated": 0,
                 "event_receipt_delta_seconds": round(received_at - event_at.timestamp(), 3),
             }
-            if prequalified:
-                result = max(prequalified, key=lambda item: item.score)
+            retry_diagnostics = next(
+                (
+                    dict(item["_retry_diagnostics"])
+                    for item in triggers
+                    if isinstance(item.get("_retry_diagnostics"), dict)
+                ),
+                None,
+            )
+            if adaptive_only and self._matches_recent_priority_motion(event_at.timestamp()):
+                result = MotionQualificationResult(
+                    False,
+                    0.0,
+                    1.0,
+                    "priority_event_deduplicated",
+                    0,
+                    {"primary_motion_source": "adaptive_background"},
+                )
             elif mode == "off":
                 result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
             elif priority:
-                result = self._with_source_evidence(
-                    MotionQualificationResult(True, 1.0, 0.0, "priority_topic", 0, {
-                        "primary_motion_source": "onvif_priority",
-                    }),
-                    received_at - self.motion_config.window_seconds,
-                    time.time(),
+                result = MotionQualificationResult(
+                    True,
+                    1.0,
+                    0.0,
+                    "priority_topic",
+                    0,
+                    {"primary_motion_source": "onvif_priority"},
+                )
+            elif retry_results:
+                result = max(retry_results, key=lambda item: item.score)
+                if retry_diagnostics is not None:
+                    diagnostics = retry_diagnostics
+            elif prequalified:
+                result = self._with_pipeline_telemetry(
+                    max(prequalified, key=lambda item: item.score)
                 )
             else:
                 result, diagnostics = self._qualify_motion_burst(event_at, received_at, sensitivity)
@@ -837,86 +1198,98 @@ class CameraWorker:
                 "borderline_margin": rescue_margin,
                 "borderline_candidate": borderline_candidate,
                 "trigger_count": len(triggers),
+                "retry_count": max(
+                    (int(item.get("_event_retry_count") or 0) for item in triggers),
+                    default=0,
+                ),
                 "would_suppress": bool(mode == "audit" and not result.accepted),
             }
-            event_state_blocked = result.reason in {
-                "event_state_active",
-                "event_state_candidate",
-                "event_state_cooldown",
-            }
-            effective_accepted = (
-                not event_state_blocked
-                and (mode != "enforce" or result.accepted or borderline_candidate)
-            )
+            effective_accepted = mode != "enforce" or result.accepted or borderline_candidate
             qualification["effective_accepted"] = effective_accepted
+            retry_attempt = qualification["retry_count"] > 0
+            for item in triggers:
+                item["_retry_qualification_result"] = result
+                item["_retry_diagnostics"] = dict(diagnostics)
             with self._motion_stats_lock:
-                self._motion_stats["bursts"] += 1
-                if priority:
-                    self._motion_stats["priority_bypasses"] += 1
-                if result.reason == "insufficient_frames":
-                    self._motion_stats["insufficient_frames"] += 1
-                if result.reason == "no_temporal_signal":
-                    self._motion_stats["inconclusive"] += 1
-                if result.accepted:
-                    self._motion_stats["passed"] += 1
-                elif mode == "enforce" and not borderline_candidate:
-                    self._motion_stats["suppressed"] += 1
-                elif mode == "audit":
-                    self._motion_stats["audit_rejected"] += 1
+                if not retry_attempt:
+                    self._motion_stats["bursts"] += 1
+                    if priority:
+                        self._motion_stats["priority_bypasses"] += 1
+                    if result.reason == "insufficient_frames":
+                        self._motion_stats["insufficient_frames"] += 1
+                    if result.reason == "no_temporal_signal":
+                        self._motion_stats["inconclusive"] += 1
+                    if result.accepted:
+                        self._motion_stats["passed"] += 1
+                    elif mode == "enforce" and not borderline_candidate:
+                        self._motion_stats["suppressed"] += 1
+                    elif mode == "audit":
+                        self._motion_stats["audit_rejected"] += 1
                 self._motion_stats["last_result"] = qualification
 
-            if self.event_callback:
-                self.event_callback("motion_qualification", {
+            if not retry_attempt:
+                self._publish_event_safely("motion_qualification", {
                     "camera_id": self.camera.id,
                     "timestamp": event_at.isoformat(),
                     **qualification,
                 })
             if not effective_accepted:
-                snapshot_path = self._sample_rejected_motion(event_at, result)
-                self.motion_decision_handler.record_audit(
-                    snapshot_path=snapshot_path,
-                    event_at=event_at,
-                    mode=mode,
-                    sensitivity=sensitivity,
-                    score=result.score,
-                    threshold=result.threshold,
-                    reason=result.reason,
-                    object_detected=None,
-                    trigger_count=len(triggers),
-                    features=self._audit_features(result),
-                )
+                try:
+                    snapshot_path = self._sample_rejected_motion(event_at, result)
+                    self.motion_decision_handler.record_audit(
+                        snapshot_path=snapshot_path,
+                        event_at=event_at,
+                        mode=mode,
+                        sensitivity=sensitivity,
+                        score=result.score,
+                        threshold=result.threshold,
+                        reason=result.reason,
+                        object_detected=None,
+                        trigger_count=len(triggers),
+                        features=self._audit_features(result),
+                    )
+                finally:
+                    self._complete_adaptive_trigger(triggers)
+                self._active_motion_triggers = None
                 continue
 
-            outcome = self._process_motion_event(
-                str(representative["topic"]),
-                str(representative["message"]),
-                event_at,
-                qualification,
-            )
-            found_object = bool(outcome.get("object_detected"))
-            if borderline_candidate and found_object:
-                with self._motion_stats_lock:
-                    self._motion_stats["borderline_rescues"] = self._motion_stats.get("borderline_rescues", 0) + 1
-            elif mode == "enforce" and borderline_candidate:
-                with self._motion_stats_lock:
-                    self._motion_stats["suppressed"] += 1
-            if mode == "audit" and not result.accepted and found_object:
-                with self._motion_stats_lock:
-                    self._motion_stats["audit_object_matches"] += 1
-            if mode in {"audit", "enforce"} and not result.accepted:
-                self.motion_decision_handler.record_audit(
-                    event_id=int(outcome["event_id"]),
-                    snapshot_path=str(outcome.get("snapshot_path") or ""),
-                    event_at=event_at,
-                    mode=mode,
-                    sensitivity=sensitivity,
-                    score=result.score,
-                    threshold=result.threshold,
-                    reason=result.reason,
-                    object_detected=found_object,
-                    trigger_count=len(triggers),
-                    features=self._audit_features(result),
+            try:
+                outcome = self._process_motion_event(
+                    str(representative["topic"]),
+                    str(representative["message"]),
+                    event_at,
+                    qualification,
                 )
+                # The incident is durable once the handler returns. Later audit or
+                # notification failures must not replay detection and duplicate it.
+                self._active_motion_triggers = None
+                found_object = bool(outcome.get("object_detected"))
+                if borderline_candidate and found_object:
+                    with self._motion_stats_lock:
+                        self._motion_stats["borderline_rescues"] = self._motion_stats.get("borderline_rescues", 0) + 1
+                elif mode == "enforce" and borderline_candidate:
+                    with self._motion_stats_lock:
+                        self._motion_stats["suppressed"] += 1
+                if mode == "audit" and not result.accepted and found_object:
+                    with self._motion_stats_lock:
+                        self._motion_stats["audit_object_matches"] += 1
+                if mode in {"audit", "enforce"} and not result.accepted:
+                    self.motion_decision_handler.record_audit(
+                        event_id=int(outcome["event_id"]),
+                        snapshot_path=str(outcome.get("snapshot_path") or ""),
+                        event_at=event_at,
+                        mode=mode,
+                        sensitivity=sensitivity,
+                        score=result.score,
+                        threshold=result.threshold,
+                        reason=result.reason,
+                        object_detected=found_object,
+                        trigger_count=len(triggers),
+                        features=self._audit_features(result),
+                    )
+            finally:
+                self._complete_adaptive_trigger(triggers)
+            self._active_motion_triggers = None
 
     def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
         if self.motion_config.rejected_sample_rate <= 0 or random.random() > self.motion_config.rejected_sample_rate:

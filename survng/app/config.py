@@ -139,7 +139,7 @@ class MotionQualificationConfig(BaseModel):
     window_seconds: float = Field(default=1.6, ge=0.8, le=4.0)
     post_trigger_seconds: float = Field(default=2.5, ge=0.5, le=6.0)
     burst_quiet_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
-    rejected_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    rejected_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     borderline_rescue_enabled: bool = True
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
     mog2_audit_enabled: bool = True

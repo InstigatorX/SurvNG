@@ -39,6 +39,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.motion_qualification.borderline_margin, 0.03)
         self.assertTrue(config.motion_qualification.mog2_audit_enabled)
         self.assertEqual(config.motion_qualification.mog2_history_seconds, 30.0)
+        self.assertEqual(config.motion_qualification.rejected_sample_rate, 1.0)
         self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
         self.assertEqual(config.motion_qualification.pipeline.qualification, [])
         self.assertIsNone(

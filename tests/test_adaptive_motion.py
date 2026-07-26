@@ -101,6 +101,39 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             0.1,
         )
 
+    def test_global_change_scoring_uses_background_stage_threshold(self) -> None:
+        stages = adaptive_motion_stage_configs()
+        background = stages[1]
+        stages[1] = MotionStageConfig(
+            background.stage_id,
+            background.implementation,
+            {**background.options, "global_change_ratio": 0.9},
+        )
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "gate-custom",
+            stages,
+        )
+        frames: list[np.ndarray] = []
+        for index in range(10):
+            frame = np.full((180, 320), 20, dtype=np.uint8)
+            frame[:, :190] = 20 + index * 15
+            frames.append(frame)
+        try:
+            result = pipeline.process(MotionContext(
+                camera_id="gate-custom",
+                captured_at=100.0,
+                original_frame=frames[-1],
+                frame_history=tuple(frames),
+                configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+                runtime=pipeline.runtime,
+            ))
+
+            self.assertEqual(result.debug.values["global_change_threshold"], 0.9)
+            self.assertEqual(result.scoring.features["global_change_threshold"], 0.9)
+            self.assertNotEqual(result.scoring.reason, "global_illumination_change")
+        finally:
+            pipeline.close()
+
     def test_random_sensor_noise_does_not_create_motion(self) -> None:
         random = np.random.default_rng(4)
         frames = [

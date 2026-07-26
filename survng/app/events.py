@@ -239,31 +239,75 @@ class EventStore:
         features: dict[str, Any],
         event_id: int | None = None,
     ) -> dict[str, Any]:
+        normalized_object_detected = (
+            None if object_detected is None else int(object_detected)
+        )
+        normalized_trigger_count = max(1, int(trigger_count))
+        features_json = json.dumps(features or {}, separators=(",", ":"))
         with self._lock, self._connect() as conn:
-            cursor = conn.execute(
-                """
-                insert into motion_audits (
-                    event_id, camera_id, snapshot_path, created_at, mode,
-                    sensitivity, score, threshold, reason, object_detected,
-                    trigger_count, features_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    camera_id,
-                    snapshot_path,
-                    created_at,
-                    mode,
-                    sensitivity,
-                    float(score),
-                    float(threshold),
-                    reason,
-                    None if object_detected is None else int(object_detected),
-                    max(1, int(trigger_count)),
-                    json.dumps(features or {}, separators=(",", ":")),
-                ),
-            )
-            audit_id = int(cursor.lastrowid)
+            audit_id: int | None = None
+            if event_id is None:
+                existing = conn.execute(
+                    """
+                    select id from motion_audits
+                    where event_id is null and camera_id = ? and created_at = ?
+                      and mode = ? and sensitivity = ? and reason = ?
+                      and snapshot_path = ? and score = ? and threshold = ?
+                      and object_detected is ? and trigger_count = ?
+                      and features_json = ?
+                    order by id asc limit 1
+                    """,
+                    (
+                        camera_id,
+                        created_at,
+                        mode,
+                        sensitivity,
+                        reason,
+                        snapshot_path,
+                        float(score),
+                        float(threshold),
+                        normalized_object_detected,
+                        normalized_trigger_count,
+                        features_json,
+                    ),
+                ).fetchone()
+                if existing is not None:
+                    audit_id = int(existing["id"])
+            if audit_id is None:
+                cursor = conn.execute(
+                    """
+                    insert or ignore into motion_audits (
+                        event_id, camera_id, snapshot_path, created_at, mode,
+                        sensitivity, score, threshold, reason, object_detected,
+                        trigger_count, features_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        camera_id,
+                        snapshot_path,
+                        created_at,
+                        mode,
+                        sensitivity,
+                        float(score),
+                        float(threshold),
+                        reason,
+                        normalized_object_detected,
+                        normalized_trigger_count,
+                        features_json,
+                    ),
+                )
+                if cursor.rowcount:
+                    audit_id = int(cursor.lastrowid)
+                elif event_id is not None:
+                    existing = conn.execute(
+                        "select id from motion_audits where event_id = ?",
+                        (int(event_id),),
+                    ).fetchone()
+                    if existing is not None:
+                        audit_id = int(existing["id"])
+            if audit_id is None:
+                raise RuntimeError("motion audit could not be persisted or resolved")
         return self.get_motion_audit(audit_id) or {}
 
     def motion_audits(

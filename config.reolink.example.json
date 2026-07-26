@@ -11,7 +11,7 @@
     "window_seconds": 1.6,
     "post_trigger_seconds": 2.5,
     "burst_quiet_seconds": 0.5,
-    "rejected_sample_rate": 0.05,
+    "rejected_sample_rate": 1.0,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
     "mog2_audit_enabled": true,
