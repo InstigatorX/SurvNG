@@ -44,9 +44,12 @@ class FaceStore:
         max_observations: int = 1000,
         recognizer: OpenVinoFaceRecognizer | None = None,
         start_recognition: bool = True,
+        database_dir: Path | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
-        self.db_path = self.storage_dir / "survng.sqlite3"
+        resolved_database_dir = (database_dir or self.storage_dir).resolve()
+        resolved_database_dir.mkdir(parents=True, exist_ok=True)
+        self.db_path = resolved_database_dir / "survng.sqlite3"
         self.max_observations = max(100, int(max_observations))
         self.recognizer = recognizer
         self._lock = threading.Lock()

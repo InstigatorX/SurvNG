@@ -641,6 +641,11 @@ function eventSnapshotUrl(event) {
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
 }
 
+function eventThumbnailUrl(event) {
+  const eventId = Number(event?.representative_event_id || event?.id);
+  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=720&quality=82`) : "";
+}
+
 function useStoredState(key, initialValue) {
   const [value, setValue] = useState(() => readStoredValue(browserStorage(window), key, initialValue));
   useEffect(() => {
@@ -1595,7 +1600,7 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, incidentEligibleOnly = false, onImageSize, children }) {
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, incidentEligibleOnly = false, thumbnail = false, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
@@ -1686,7 +1691,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   return (
     <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
-        {event?.snapshot_path && eventSnapshotUrl(event) ? <img src={eventSnapshotUrl(event)} alt={alt} onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
+        {event?.snapshot_path && eventSnapshotUrl(event) ? <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {showAnnotations && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
@@ -1895,6 +1900,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
           alt="incident snapshot"
           showAnnotations={expanded || thumbnailAnnotations}
           incidentEligibleOnly={!expanded}
+          thumbnail
         >
           <div className="incident-snapshot-hud">
             <div className="incident-snapshot-main">
@@ -5550,6 +5556,8 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <div className="sub-panel">
           <h3>Storage</h3>
           <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
+          <label>Metadata Database Directory<input value={config.database_dir || ""} onChange={(event) => updateConfig(["database_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
+          <label>Recording Index Directory<input value={config.recording_index_dir || ""} onChange={(event) => updateConfig(["recording_index_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
           <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
           <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
             <option value="auto">Auto (VAAPI preferred)</option>
@@ -5603,7 +5611,10 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <div className="field-row">
           <label>Detected Model<select value={detectorModels.some((model) => model.path === activeModelPath) ? activeModelPath : ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
             <option value="">Custom path</option>
-            {detectorModels.map((model) => <option key={model.path} value={model.path} disabled={!model.valid}>{model.name} ({model.task || "detect"}, {model.valid ? "ready" : "incomplete"})</option>)}
+            {detectorModels.map((model) => {
+              const directory = String(model.path || "").split("/").slice(0, -1).pop();
+              return <option key={model.path} value={model.path} disabled={!model.valid}>{directory ? `${directory} / ` : ""}{model.name} ({model.task || "detect"}, {model.valid ? "ready" : "incomplete"})</option>;
+            })}
           </select></label>
           <label>OpenVINO / ONNX Model<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
           <label>Labels Path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Optional; metadata.yaml is automatic" /></label>
@@ -5910,6 +5921,46 @@ function MotionDebugViewer({ cameraId, timeZone }) {
   );
 }
 
+function MotionEffectiveness({ cameraId, mode }) {
+  const [summary, setSummary] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/motion-effectiveness?days=7");
+        if (!response.ok) throw new Error("Effectiveness history unavailable");
+        const payload = await response.json();
+        if (active) {
+          setSummary(payload?.by_camera?.[cameraId]?.[mode] || null);
+          setError("");
+        }
+      } catch (loadError) {
+        if (active) setError(loadError.message || "Effectiveness history unavailable");
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, 60000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [cameraId, mode]);
+
+  if (error) return <span className="motion-runtime-warning">{error}</span>;
+  if (!summary) return <span>No durable motion decisions for this mode in the last 7 days.</span>;
+  return (
+    <div className="motion-effectiveness-summary">
+      <strong>Last 7 days in this mode</strong>
+      <span>{summary.allowed_events || 0} allowed · {summary.visual_filtered || 0} visually filtered · {summary.state_deduplicated || 0} merged with ongoing activity</span>
+      <span>{summary.object_events || 0} allowed events found a configured object · {summary.no_object_events || 0} found none</span>
+      <span>{Math.round(Number(summary.visual_rejection_rate || 0) * 100)}% visually filtered · {Math.round(Number(summary.object_yield_rate || 0) * 100)}% object yield · {summary.borderline_rescued || 0} borderline rescues</span>
+      {summary.unreviewed_visual_filters ? <span className="motion-runtime-warning">{summary.unreviewed_visual_filters} visual filters were not independently checked by object detection.</span> : null}
+    </div>
+  );
+}
+
 function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
@@ -5938,6 +5989,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
             <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
             {missingCameraTrigger ? <span className="motion-runtime-warning">ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection.</span> : null}
             {missingMotionNotices ? <span className="motion-runtime-warning">No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident.</span> : null}
+            <MotionEffectiveness cameraId={status.id} mode={status.motion_qualification.mode} />
           </div>
           <div className="motion-pipeline-runtime-grid">
             <MotionPipelineRuntimeCard label="Motion analysis" pipeline={status.motion_qualification.pipeline} origin={status.motion_qualification.pipeline_origins?.qualification} motionCatalog={motionCatalog} />
@@ -6064,28 +6116,33 @@ function FacesPage({ timeZone }) {
       const countQuery = new URLSearchParams(query);
       countQuery.delete("limit");
       countQuery.delete("offset");
-      const [peopleResponse, observationResponse, countResponse, cameraResponse, statusResponse] = await Promise.all([
+      const [peopleResponse, observationResponse, countResponse] = await Promise.all([
         fetch("/api/faces/people"),
         fetch(`/api/faces/observations?${query}`),
         fetch(`/api/faces/observations/count?${countQuery}`),
-        fetch("/api/cameras"),
-        fetch("/api/faces/status"),
       ]);
       if (!peopleResponse.ok || !observationResponse.ok) throw new Error("Unable to load the face database");
-      const [peoplePayload, observationPayload, countPayload, cameraPayload, statusPayload] = await Promise.all([
+      const [peoplePayload, observationPayload, countPayload] = await Promise.all([
         peopleResponse.json(),
         observationResponse.json(),
         countResponse.ok ? countResponse.json() : null,
-        cameraResponse.ok ? cameraResponse.json() : null,
-        statusResponse.ok ? statusResponse.json() : null,
       ]);
       if (sequence !== faceLoadSequence.current) return;
       setPeople(peoplePayload);
       setObservations(observationPayload);
       if (countPayload) setTotalObservations(Number(countPayload.total || 0));
-      if (cameraPayload) setCameras(cameraPayload);
-      if (statusPayload) setStatus(statusPayload);
       setNotice("");
+      void Promise.all([fetch("/api/cameras"), fetch("/api/faces/status")])
+        .then(async ([cameraResponse, statusResponse]) => {
+          const [cameraPayload, statusPayload] = await Promise.all([
+            cameraResponse.ok ? cameraResponse.json() : null,
+            statusResponse.ok ? statusResponse.json() : null,
+          ]);
+          if (sequence !== faceLoadSequence.current) return;
+          if (cameraPayload) setCameras(cameraPayload);
+          if (statusPayload) setStatus(statusPayload);
+        })
+        .catch(() => {});
     } catch (error) {
       if (sequence === faceLoadSequence.current) setNotice(error.message || "Unable to load faces");
     } finally {

@@ -18,6 +18,7 @@ from .faces import FaceStore
 from .detector import objects_to_json
 from .go2rtc import Go2RtcAdapter
 from .inference import InferenceSupervisor, IsolatedFaceRecognizer
+from .image_cache import LocalImageCache
 from .mqtt import MqttService
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
@@ -89,7 +90,10 @@ class AppManager:
         self.config = config
         self.storage_dir = Path(config.storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.events = EventStore(self.storage_dir)
+        self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
+        self.database_dir.mkdir(parents=True, exist_ok=True)
+        self.image_cache = LocalImageCache(self.database_dir / "image-cache")
+        self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.detector = InferenceSupervisor(config.detector)
         self.face_recognizer = IsolatedFaceRecognizer(self.detector)
         self.faces = FaceStore(
@@ -97,6 +101,7 @@ class AppManager:
             config.detector.face_max_observations,
             self.face_recognizer,
             start_recognition=False,
+            database_dir=self.database_dir,
         )
         recording_index_dir = Path(config.recording_index_dir) if config.recording_index_dir else None
         self.recorder = Recorder(
@@ -211,6 +216,7 @@ class AppManager:
                 motion_decision_handler_factory=self.motion_decision_handler_factory,
                 motion_object_detector_factory=self.motion_object_detector_factory,
                 motion_analysis_limiter=self._motion_analysis_limiter,
+                onvif_cache_dir=self.database_dir / "onvif",
             )
         except BaseException:
             for pipeline in reversed(pipelines):

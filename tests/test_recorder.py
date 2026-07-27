@@ -206,6 +206,64 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(rows[0]["name"], "20260711-113000.mp4")
         self.assertEqual(rows[0]["source"], "live")
 
+    def test_recording_at_uses_local_index_without_scanning_media_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "recording.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            recorder._store_recording_rows("gate", "main", [row])
+
+            with patch.object(
+                recorder,
+                "recent_files",
+                side_effect=AssertionError("media storage scan"),
+            ):
+                result = recorder.recording_at("gate", row["start_epoch"] + 5)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["path"], str(clip))
+
+    def test_near_live_recording_miss_requests_background_edge_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            event_epoch = time.time() - 2
+
+            with patch.object(
+                recorder,
+                "recent_files",
+                side_effect=AssertionError("media storage scan"),
+            ):
+                result = recorder.recording_at("gate", event_epoch)
+
+            requests = recorder._take_recording_edge_refreshes()
+
+        self.assertIsNone(result)
+        self.assertEqual(requests, {("gate", "main"): event_epoch})
+        self.assertTrue(recorder._index_wake.is_set())
+
+    def test_recording_at_removes_stale_index_row_and_requests_edge_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "missing.mp4"
+            clip.write_bytes(b"recording")
+            event_epoch = time.time() - 2
+            row = self._row(clip, start_epoch=event_epoch - 5)
+            recorder._store_recording_rows("gate", "main", [row])
+            clip.unlink()
+
+            result = recorder.recording_at("gate", event_epoch)
+            requests = recorder._take_recording_edge_refreshes()
+            with recorder._index_connection() as connection:
+                indexed = connection.execute(
+                    "SELECT COUNT(*) FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone()[0]
+
+        self.assertIsNone(result)
+        self.assertEqual(indexed, 0)
+        self.assertEqual(requests, {("gate", "main"): event_epoch})
+
     def test_recording_range_can_discover_legacy_main_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -385,6 +443,29 @@ class RecorderTest(unittest.TestCase):
                 recorder._recording_index_loop({})
 
         refresh.assert_called_once_with({}, full=False, run_maintenance=False)
+
+    def test_index_loop_services_requested_near_live_refresh_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            event_epoch = time.time()
+            recorder.request_recording_edge_refresh("gate", "main", event_epoch)
+
+            def stop_after_refresh(*_args) -> int:
+                recorder._index_stop.set()
+                return 1
+
+            with (
+                patch.object(recorder, "refresh_recording_index") as refresh_index,
+                patch.object(
+                    recorder,
+                    "refresh_recording_edge",
+                    side_effect=stop_after_refresh,
+                ) as refresh_edge,
+            ):
+                recorder._recording_index_loop({})
+
+        refresh_index.assert_called_once_with({}, full=False, run_maintenance=False)
+        refresh_edge.assert_called_once_with("gate", "main", event_epoch)
 
     def test_recent_index_discovery_defers_media_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

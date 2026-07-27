@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 
 from survng.app.config import AppConfig, CameraConfig
@@ -72,6 +73,22 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertIsNone(manager._state_monitor_thread)
         self.assertIsNone(manager.recorder._index_thread)
         self.assertIsNone(manager.recorder._watchdog_thread)
+
+    def test_manager_keeps_databases_and_onvif_caches_outside_media_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            manager = AppManager(AppConfig(
+                storage_dir=storage,
+                database_dir=database,
+                cameras=[camera],
+            ))
+
+            self.assertEqual(manager.events.db_path, Path(database) / "survng.sqlite3")
+            self.assertEqual(manager.faces.db_path, Path(database) / "survng.sqlite3")
+            self.assertEqual(manager.database_dir, Path(database))
+            self.assertEqual(manager.workers["gate"].onvif._cache_dir, Path(database) / "onvif")
+
+            manager.stop_all()
 
     def test_startup_failure_rolls_back_every_started_subsystem(self) -> None:
         manager = manager_with_mocks()

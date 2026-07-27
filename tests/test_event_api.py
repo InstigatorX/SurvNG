@@ -5,10 +5,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import cv2
+import numpy as np
 
 from survng.app import main
 from survng.app.config import AppConfig, CameraConfig
+from survng.app.image_cache import LocalImageCache
 from survng.app.state_events import StateEventBroker
 from fastapi import HTTPException
 
@@ -111,6 +116,56 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(invalid.exception.status_code, 422)
 
+    def test_event_thumbnail_is_resized_and_cached_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "1.jpg"
+            snapshot.parent.mkdir(parents=True)
+            self.assertTrue(cv2.imwrite(str(snapshot), np.zeros((600, 1200, 3), dtype=np.uint8)))
+            fake_manager = SimpleNamespace(
+                storage_dir=root,
+                image_cache=LocalImageCache(root / "cache"),
+                events=SimpleNamespace(get=lambda _event_id: {"id": 1, "snapshot_path": str(snapshot)}),
+            )
+
+            with patch.object(main, "manager", fake_manager):
+                first = main.event_thumbnail(1, width=320, quality=80)
+                with patch.object(main.cv2, "imread", side_effect=AssertionError("cache miss")):
+                    second = main.event_thumbnail(1, width=320, quality=80)
+
+            cached = cv2.imread(str(first.path))
+            self.assertIsNotNone(cached)
+            self.assertEqual(cached.shape[1], 320)
+            self.assertEqual(first.path, second.path)
+            self.assertTrue(str(first.path).startswith(str(root / "cache")))
+
+    def test_face_crop_is_cached_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "1.jpg"
+            snapshot.parent.mkdir(parents=True)
+            frame = np.zeros((300, 400, 3), dtype=np.uint8)
+            self.assertTrue(cv2.imwrite(str(snapshot), frame))
+            fake_manager = SimpleNamespace(
+                image_cache=LocalImageCache(root / "cache"),
+                faces=SimpleNamespace(
+                    snapshot_path=lambda _observation_id: (
+                        snapshot,
+                        {"x1": 100, "y1": 50, "x2": 200, "y2": 150},
+                    )
+                ),
+            )
+
+            with patch.object(main, "manager", fake_manager):
+                first = main.face_crop(7, padding=0.2)
+                with patch.object(main.cv2, "imread", side_effect=AssertionError("cache miss")):
+                    second = main.face_crop(7, padding=0.2)
+
+            crop = cv2.imread(str(first.path))
+            self.assertIsNotNone(crop)
+            self.assertEqual(crop.shape[:2], (140, 140))
+            self.assertEqual(first.path, second.path)
+
     def test_incident_search_rejects_unsafe_timezone_paths(self) -> None:
         with self.assertRaises(HTTPException) as invalid:
             main.incident_search(time_zone="../../etc/passwd")
@@ -155,6 +210,30 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(incident["duration_seconds"], 9.0)
         self.assertEqual(incident["end_at"], "2026-07-27T12:17:16+00:00")
         self.assertEqual(incident["motion_observations"][0]["id"], 3278)
+
+    def test_incident_payload_keeps_annotation_fields_without_detector_diagnostics(self) -> None:
+        payload = main._incident_event_payload({
+            "id": 42,
+            "topic": "private/topic",
+            "message": "large raw payload",
+            "objects": [{
+                "label": "person",
+                "confidence": 0.9,
+                "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+                "zones": ["yard"],
+                "mask_polygon": [[1, 2], [3, 4]],
+                "incident_eligible": True,
+                "raw_detection_tensor": [1, 2, 3],
+                "frame_source": "diagnostic-only",
+            }],
+        })
+
+        self.assertNotIn("topic", payload)
+        self.assertNotIn("message", payload)
+        self.assertEqual(payload["objects"][0]["label"], "person")
+        self.assertEqual(payload["objects"][0]["zones"], ["yard"])
+        self.assertNotIn("raw_detection_tensor", payload["objects"][0])
+        self.assertNotIn("frame_source", payload["objects"][0])
 
     def test_motion_audit_snapshot_status_is_confined_to_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as outside:

@@ -53,7 +53,15 @@ def adaptive_motion_stage_configs() -> list[MotionStageConfig]:
         MotionStageConfig(
             stage_id="scoring",
             implementation="adaptive_motion_score",
-            options={"minimum_persistence_frames": 2},
+            options={
+                "minimum_persistence_frames": 2,
+                "stationary_displacement_ratio": 0.01,
+                "stationary_path_ratio": 0.025,
+                "micro_area_ratio": 0.001,
+                "micro_displacement_ratio": 0.04,
+                "credible_displacement_ratio": 0.03,
+                "maximum_credible_track_seconds": 6.0,
+            },
         ),
     ]
 

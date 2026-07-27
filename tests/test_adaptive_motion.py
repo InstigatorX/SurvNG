@@ -12,7 +12,7 @@ from survng.app.motion_pipeline import (
     adaptive_motion_stage_configs,
     build_builtin_motion_registry,
 )
-from survng.app.motion_types import MotionBlob, MotionFrameBlobs
+from survng.app.motion_types import MotionBlob, MotionFrameBlobs, MotionTrack
 
 
 def moving_subject_frames(count: int = 10) -> list[np.ndarray]:
@@ -160,6 +160,223 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertFalse(result.scoring.accepted)
         self.assertEqual(result.scoring.reason, "insect_like_motion")
         self.assertGreaterEqual(result.scoring.features["insect_penalty"], 0.55)
+
+    def test_new_stationary_foreground_is_not_credible_motion(self) -> None:
+        base = np.full((180, 320), 30, dtype=np.uint8)
+        changed = base.copy()
+        cv2.rectangle(changed, (70, 50), (120, 140), 180, -1)
+        previous = base
+        result: MotionContext | None = None
+        for index in range(20):
+            captured_at = 100.2 + index * 0.2
+            result = self.process_timed(
+                [previous, changed],
+                [captured_at - 0.2, captured_at],
+            )
+            previous = changed
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "stationary_foreground")
+        self.assertEqual(result.scoring.features["net_displacement"], 0.0)
+
+    def test_small_subpixel_jitter_is_not_credible_motion(self) -> None:
+        frames: list[np.ndarray] = []
+        for index in range(10):
+            frame = np.full((180, 320), 30, dtype=np.uint8)
+            x = 150 + (index % 2)
+            cv2.rectangle(frame, (x, 90), (x + 6, 96), 210, -1)
+            frames.append(frame)
+
+        result = self.process(frames)
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertIn(
+            result.scoring.reason,
+            {
+                "micro_jitter",
+                "insect_like_motion",
+                "stationary_foreground",
+                "low_persistence",
+            },
+        )
+
+    def test_rejected_nuisance_track_does_not_hide_credible_motion_track(self) -> None:
+        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "multi",
+            [MotionStageConfig("scoring", "adaptive_motion_score")],
+            initial_artifacts={"tracked_objects", "processed_frame_history"},
+        )
+
+        def track(track_id: int, path: tuple[tuple[float, float], ...], area: float) -> MotionTrack:
+            blobs = tuple(
+                MotionBlob(
+                    box=(x, y, x + 0.08, y + 0.2),
+                    centroid=(x + 0.04, y + 0.1),
+                    area_pixels=area * 57600,
+                    area_ratio=area,
+                    fill_ratio=0.7,
+                    edge_distance=0.2,
+                )
+                for x, y in path
+            )
+            return MotionTrack(
+                track_id=track_id,
+                box=blobs[-1].box,
+                path=tuple(blob.centroid for blob in blobs),
+                observations=blobs,
+                observation_frames=tuple(range(len(blobs))),
+                active_history=tuple(True for _ in blobs),
+                changed_pixels=(),
+                changed_ratios=(),
+                first_seen=100.0,
+                last_seen=100.0 + (len(blobs) - 1) * 0.2,
+                consecutive_started_at=100.0,
+                consecutive_frames=len(blobs),
+                size_history=tuple(area for _ in blobs),
+            )
+
+        nuisance = track(1, ((0.3, 0.3),) * 5, 0.02)
+        moving = track(2, ((0.1, 0.4), (0.12, 0.4)), 0.005)
+        try:
+            result = scorer.process(MotionContext(
+                camera_id="multi",
+                captured_at=101.0,
+                original_frame=None,
+                configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+                runtime=scorer.runtime,
+                processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+                tracked_objects=[nuisance, moving],
+            ))
+        finally:
+            scorer.close()
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.dominant_track.track_id, 2)
+
+    def test_slow_persistent_drift_is_stationary_foreground(self) -> None:
+        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "drift",
+            [MotionStageConfig("scoring", "adaptive_motion_score")],
+            initial_artifacts={"tracked_objects", "processed_frame_history"},
+        )
+        path = tuple((0.4 + index * 0.0004, 0.4) for index in range(20))
+        blobs = tuple(
+            MotionBlob(
+                box=(x, y, x + 0.1, y + 0.2),
+                centroid=(x, y),
+                area_pixels=576,
+                area_ratio=0.01,
+                fill_ratio=0.7,
+                edge_distance=0.2,
+            )
+            for x, y in path
+        )
+        drift = MotionTrack(
+            track_id=1,
+            box=blobs[-1].box,
+            path=path,
+            observations=blobs,
+            observation_frames=tuple(range(20)),
+            active_history=tuple(True for _ in blobs),
+            changed_pixels=(),
+            changed_ratios=(),
+            first_seen=100.0,
+            last_seen=103.8,
+            consecutive_started_at=100.0,
+            consecutive_frames=20,
+            size_history=tuple(0.01 for _ in blobs),
+        )
+        try:
+            result = scorer.process(MotionContext(
+                camera_id="drift",
+                captured_at=103.8,
+                original_frame=None,
+                configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+                runtime=scorer.runtime,
+                processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+                tracked_objects=[drift],
+            ))
+        finally:
+            scorer.close()
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "stationary_foreground")
+
+    def test_long_running_motion_becomes_scene_activity_not_a_fresh_trigger(self) -> None:
+        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "persistent",
+            [MotionStageConfig("scoring", "adaptive_motion_score")],
+            initial_artifacts={"tracked_objects", "processed_frame_history"},
+        )
+        path = tuple((0.2 + index * 0.005, 0.4) for index in range(40))
+        blobs = tuple(
+            MotionBlob(
+                box=(x, y, x + 0.1, y + 0.2),
+                centroid=(x, y),
+                area_pixels=576,
+                area_ratio=0.01,
+                fill_ratio=0.7,
+                edge_distance=0.2,
+            )
+            for x, y in path
+        )
+        persistent = MotionTrack(
+            track_id=1,
+            box=blobs[-1].box,
+            path=path,
+            observations=blobs,
+            observation_frames=tuple(range(40)),
+            active_history=tuple(True for _ in blobs),
+            changed_pixels=(),
+            changed_ratios=(),
+            first_seen=100.0,
+            last_seen=107.8,
+            consecutive_started_at=100.0,
+            consecutive_frames=40,
+            size_history=tuple(0.01 for _ in blobs),
+        )
+        try:
+            result = scorer.process(MotionContext(
+                camera_id="persistent",
+                captured_at=107.8,
+                original_frame=None,
+                configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+                runtime=scorer.runtime,
+                processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+                tracked_objects=[persistent],
+            ))
+        finally:
+            scorer.close()
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "persistent_scene_motion")
+
+    def test_background_learning_rate_is_elapsed_time_based(self) -> None:
+        base = np.full((180, 320), 30, dtype=np.uint8)
+        brighter = np.full((180, 320), 90, dtype=np.uint8)
+        short = self.process_timed([base, brighter], [100.0, 100.2])
+        short_rate = short.debug.values["background_learning_rates"][-1]
+
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "elapsed",
+            adaptive_motion_stage_configs(),
+            required_artifacts={"scoring"},
+        )
+        try:
+            long = pipeline.process(MotionContext(
+                camera_id="elapsed",
+                captured_at=102.0,
+                original_frame=brighter,
+                frame_history=(base, brighter),
+                frame_timestamps=(100.0, 102.0),
+                configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+                runtime=pipeline.runtime,
+            ))
+        finally:
+            pipeline.close()
+
+        self.assertGreater(long.debug.values["background_learning_rates"][-1], short_rate)
 
     def test_ignore_zone_filters_overlapping_components(self) -> None:
         zones = [{

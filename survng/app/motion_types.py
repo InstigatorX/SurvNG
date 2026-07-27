@@ -40,6 +40,7 @@ class MotionTrack:
     score: float = 0.0
     first_seen: float = 0.0
     last_seen: float = 0.0
+    consecutive_started_at: float = 0.0
     consecutive_frames: int = 0
     velocity: tuple[float, float] = (0.0, 0.0)
     direction: float = 0.0

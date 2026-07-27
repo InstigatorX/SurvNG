@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
+import time
 from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
@@ -10,7 +11,7 @@ from .context import Frame
 
 
 MotionDetectionProvider = Callable[[datetime], tuple[Frame | None, list[dict[str, Any]], str]]
-MotionSnapshotWriter = Callable[[Frame], str]
+MotionSnapshotWriter = Callable[[Frame, datetime], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
 MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
 
@@ -92,10 +93,26 @@ class MotionDecisionHandler:
         event_at: datetime,
         qualification: dict[str, Any],
     ) -> MotionDecisionOutcome:
+        detection_started = time.monotonic()
         frame, objects, recording_path = self.detection_provider(event_at)
+        processed_at = datetime.now(timezone.utc)
+        normalized_event_at = (
+            event_at.replace(tzinfo=timezone.utc)
+            if event_at.tzinfo is None
+            else event_at.astimezone(timezone.utc)
+        )
+        qualification["object_detection_duration_ms"] = round(
+            (time.monotonic() - detection_started) * 1000,
+            3,
+        )
+        qualification["processed_at"] = processed_at.isoformat()
+        qualification["event_processing_delay_seconds"] = round(
+            max(0.0, (processed_at - normalized_event_at).total_seconds()),
+            3,
+        )
         snapshot_path = ""
         if frame is not None:
-            snapshot_path = self.snapshot_writer(frame)
+            snapshot_path = self.snapshot_writer(frame, event_at)
         else:
             objects = [{"status": "no_recorded_frame"}]
 

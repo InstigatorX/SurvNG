@@ -59,8 +59,11 @@ class Recorder:
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._index_stop = threading.Event()
+        self._index_wake = threading.Event()
         self._index_thread: threading.Thread | None = None
         self._index_maintenance_thread: threading.Thread | None = None
+        self._edge_refresh_lock = threading.Lock()
+        self._edge_refresh_requests: dict[RecorderKey, float] = {}
         self._prune_cursor = 0
         self._fingerprint_pending: deque[str] = deque()
         self._fingerprint_pending_set: set[str] = set()
@@ -356,6 +359,7 @@ class Recorder:
 
     def stop_all(self) -> None:
         self._index_stop.set()
+        self._index_wake.set()
         for thread_name in ("_index_thread", "_index_maintenance_thread"):
             thread = getattr(self, thread_name)
             if thread is not None:
@@ -820,6 +824,7 @@ class Recorder:
     def start_indexer(self, cameras: list[CameraConfig]) -> None:
         camera_map = {camera.id: camera for camera in cameras if camera.record or camera.record_sub}
         self._index_stop.clear()
+        self._index_wake.clear()
         if self._index_thread is not None and self._index_thread.is_alive():
             return
         self._index_thread = threading.Thread(
@@ -842,11 +847,29 @@ class Recorder:
             self.refresh_recording_index(camera_map, full=False, run_maintenance=False)
         except Exception:
             LOGGER.exception("Initial recording index discovery failed")
-        while not self._index_stop.wait(10):
+        next_discovery = time.monotonic() + 10.0
+        while not self._index_stop.is_set():
+            self._index_wake.wait(max(0.0, next_discovery - time.monotonic()))
+            self._index_wake.clear()
+            if self._index_stop.is_set():
+                return
+            for (camera_id, source), after_epoch in self._take_recording_edge_refreshes().items():
+                try:
+                    self.refresh_recording_edge(camera_id, source, after_epoch)
+                except Exception:
+                    LOGGER.exception(
+                        "Near-live recording index discovery failed for %s/%s",
+                        camera_id,
+                        source,
+                    )
+            if time.monotonic() < next_discovery:
+                continue
             try:
                 self.refresh_recording_index(camera_map, full=False, run_maintenance=False)
             except Exception:
                 LOGGER.exception("Recording index discovery failed")
+            finally:
+                next_discovery = time.monotonic() + 10.0
 
     def _recording_index_maintenance_loop(self, camera_map: dict[str, CameraConfig]) -> None:
         if self._index_stop.wait(30):
@@ -1139,15 +1162,46 @@ class Recorder:
         return dict(row) if row is not None else None
 
     def recording_at(self, camera_id: str, epoch: float, limit: int = 1000, source: str = "main") -> dict | None:
-        rows = self.recording_rows(camera_id, limit=limit, source=source)
-        for row in rows:
-            start_epoch = row.get("start_epoch")
-            end_epoch = row.get("end_epoch")
-            if start_epoch is None or end_epoch is None:
-                continue
-            if float(start_epoch) <= epoch <= float(end_epoch):
-                return row
+        """Return an indexed recording without scanning media storage on the request path."""
+        del limit  # Retained for API compatibility with older callers.
+        source = "main" if source == "main" else "live"
+        with self._index_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds,
+                       end_epoch, source, playable, health_error, validated,
+                       stream_fingerprint, fingerprint_checked
+                FROM recordings
+                WHERE camera_id = ? AND source = ? AND playable = 1
+                  AND start_epoch <= ? AND end_epoch >= ?
+                ORDER BY start_epoch DESC LIMIT 1
+                """,
+                (camera_id, source, epoch, epoch),
+            ).fetchone()
+        if row is not None:
+            payload = dict(row)
+            if Path(str(payload["path"])).is_file():
+                return payload
+            self._delete_index_paths([str(payload["path"])])
+        if abs(time.time() - epoch) <= max(60.0, self.segment_seconds * 6):
+            self.request_recording_edge_refresh(camera_id, source, epoch)
         return None
+
+    def request_recording_edge_refresh(self, camera_id: str, source: str, after_epoch: float) -> None:
+        """Ask the background indexer to discover a newly finalized near-live segment."""
+        key = (camera_id, "main" if source == "main" else "live")
+        with self._edge_refresh_lock:
+            previous = self._edge_refresh_requests.get(key)
+            self._edge_refresh_requests[key] = (
+                min(previous, after_epoch) if previous is not None else after_epoch
+            )
+        self._index_wake.set()
+
+    def _take_recording_edge_refreshes(self) -> dict[RecorderKey, float]:
+        with self._edge_refresh_lock:
+            requests = self._edge_refresh_requests
+            self._edge_refresh_requests = {}
+        return requests
 
     def recording_start_epoch(self, path: Path) -> float | None:
         try:

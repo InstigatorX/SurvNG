@@ -13,6 +13,79 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_motion_effectiveness_separates_visual_filters_from_state_deduplication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            created_at = "2099-07-27T12:00:00+00:00"
+
+            def qualification_objects(*, object_label: str = "", borderline: bool = False) -> str:
+                objects: list[dict] = [{
+                    "status": "motion_qualification",
+                    "motion_qualification": {
+                        "mode": "camera",
+                        "accepted": not borderline,
+                        "borderline_candidate": borderline,
+                    },
+                }]
+                if object_label:
+                    objects.append({"label": object_label, "incident_eligible": True})
+                return json.dumps(objects)
+
+            object_event = store.add_event(
+                "gate", "motion", objects_json=qualification_objects(object_label="person"),
+                created_at=created_at,
+            )
+            rescued_event = store.add_event(
+                "gate", "motion", objects_json=qualification_objects(borderline=True),
+                created_at=created_at,
+            )
+            base_audit = {
+                "camera_id": "gate",
+                "snapshot_path": "",
+                "created_at": created_at,
+                "mode": "camera",
+                "sensitivity": "balanced",
+                "score": 0.4,
+                "threshold": 0.48,
+                "object_detected": None,
+                "trigger_count": 1,
+                "features": {},
+            }
+            store.add_motion_audit(**base_audit, reason="micro_jitter")
+            store.add_motion_audit(**base_audit, reason="event_state_active")
+            store.add_motion_audit(
+                **{**base_audit, "object_detected": False},
+                reason="micro_jitter",
+                event_id=int(rescued_event["id"]),
+            )
+
+            summary = store.motion_effectiveness(days=7)["by_camera"]["gate"]["camera"]
+
+            self.assertEqual(summary["allowed_events"], 2)
+            self.assertEqual(summary["object_events"], 1)
+            self.assertEqual(summary["no_object_events"], 1)
+            self.assertEqual(summary["borderline_rescued"], 1)
+            self.assertEqual(summary["visual_filtered"], 1)
+            self.assertEqual(summary["state_deduplicated"], 1)
+            self.assertEqual(summary["unreviewed_visual_filters"], 1)
+            self.assertEqual(summary["total_decisions"], 4)
+            self.assertEqual(summary["visual_rejection_rate"], 0.3333)
+            self.assertEqual(summary["object_yield_rate"], 0.5)
+
+    def test_database_can_be_local_while_media_paths_remain_in_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:
+            snapshot = Path(storage) / "snapshots" / "gate" / "event.jpg"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"jpeg")
+            store = EventStore(Path(storage), database_dir=Path(database))
+
+            event = store.add_event("gate", "motion", snapshot_path=str(snapshot))
+            reloaded = EventStore(Path(storage), database_dir=Path(database))
+            persisted_snapshot = reloaded.get(int(event["id"]))["snapshot_path"]
+
+            self.assertEqual(store.db_path, Path(database) / "survng.sqlite3")
+            self.assertEqual(persisted_snapshot, str(snapshot))
+
     def test_recent_and_camera_range_queries_reject_unbounded_negative_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

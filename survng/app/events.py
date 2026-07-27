@@ -4,7 +4,7 @@ import json
 import math
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +12,9 @@ from typing import Any
 class EventStore:
     COMPACT_COLUMNS = "id, camera_id, kind, objects_json, created_at"
 
-    def __init__(self, storage_dir: Path) -> None:
-        self.db_path = storage_dir / "survng.sqlite3"
+    def __init__(self, storage_dir: Path, database_dir: Path | None = None) -> None:
+        self.storage_dir = storage_dir
+        self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()
@@ -122,7 +123,7 @@ class EventStore:
                 )
                 """
             )
-            storage_root = str(self.db_path.parent.resolve())
+            storage_root = str(self.storage_dir.resolve())
             if self._metadata_value(conn, "event_storage_root") != storage_root:
                 self._rebase_media_paths(conn)
                 self._set_metadata_value(conn, "event_storage_root", storage_root)
@@ -239,7 +240,7 @@ class EventStore:
             )
 
     def _rebase_media_paths(self, conn: sqlite3.Connection) -> None:
-        storage_root = self.db_path.parent.resolve()
+        storage_root = self.storage_dir.resolve()
         rows = conn.execute(
             "select id, snapshot_path, recording_path from events where snapshot_path != '' or recording_path != ''"
         ).fetchall()
@@ -507,6 +508,107 @@ class EventStore:
                 [*values, bounded_limit, bounded_offset],
             ).fetchall()
         return [dict(row) for row in rows], total
+
+    def motion_effectiveness(self, *, days: float = 7.0) -> dict[str, Any]:
+        """Summarize durable motion decisions without conflating visual filters and deduplication."""
+        bounded_days = min(90.0, max(1.0 / 24.0, float(days)))
+        since = (datetime.now(timezone.utc) - timedelta(days=bounded_days)).isoformat()
+        with self._connect() as conn:
+            event_rows = conn.execute(
+                """
+                select camera_id, objects_json
+                from events
+                where kind = 'motion' and created_at >= ?
+                  and objects_json like '%motion_qualification%'
+                """,
+                (since,),
+            ).fetchall()
+            audit_rows = conn.execute(
+                """
+                select camera_id, mode, reason, event_id, object_detected
+                from motion_audits
+                where created_at >= ?
+                """,
+                (since,),
+            ).fetchall()
+
+        summaries: dict[tuple[str, str], dict[str, Any]] = {}
+
+        def summary_for(camera_id: str, mode: str) -> dict[str, Any]:
+            return summaries.setdefault((camera_id, mode), {
+                "allowed_events": 0,
+                "object_events": 0,
+                "no_object_events": 0,
+                "borderline_rescued": 0,
+                "visual_filtered": 0,
+                "state_deduplicated": 0,
+                "unreviewed_visual_filters": 0,
+            })
+
+        for row in event_rows:
+            raw_objects = str(row["objects_json"] or "[]")
+            qualification = self._qualification_from_objects(raw_objects)
+            if not qualification:
+                continue
+            mode = str(qualification.get("mode") or "unknown")
+            summary = summary_for(str(row["camera_id"]), mode)
+            try:
+                objects = json.loads(raw_objects)
+            except (json.JSONDecodeError, TypeError):
+                objects = []
+            object_detected = bool(
+                isinstance(objects, list)
+                and any(
+                    isinstance(item, dict)
+                    and item.get("label")
+                    and item.get("incident_eligible") is not False
+                    for item in objects
+                )
+            )
+            summary["allowed_events"] += 1
+            summary["object_events" if object_detected else "no_object_events"] += 1
+            summary["borderline_rescued"] += int(
+                bool(qualification.get("borderline_candidate"))
+            )
+
+        for row in audit_rows:
+            if row["event_id"] is not None:
+                continue
+            summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
+            reason = str(row["reason"] or "")
+            if reason.startswith("event_state_"):
+                summary["state_deduplicated"] += 1
+            else:
+                summary["visual_filtered"] += 1
+                summary["unreviewed_visual_filters"] += int(
+                    row["object_detected"] is None
+                )
+
+        by_camera: dict[str, dict[str, dict[str, Any]]] = {}
+        for (camera_id, mode), summary in summaries.items():
+            decisions = (
+                summary["allowed_events"]
+                + summary["visual_filtered"]
+                + summary["state_deduplicated"]
+            )
+            visual_opportunities = summary["allowed_events"] + summary["visual_filtered"]
+            summary.update({
+                "total_decisions": decisions,
+                "visual_rejection_rate": round(
+                    summary["visual_filtered"] / max(1, visual_opportunities),
+                    4,
+                ),
+                "object_yield_rate": round(
+                    summary["object_events"] / max(1, summary["allowed_events"]),
+                    4,
+                ),
+            })
+            by_camera.setdefault(camera_id, {})[mode] = summary
+        return {
+            "days": bounded_days,
+            "since": since,
+            "by_camera": by_camera,
+        }
 
     def get_motion_audit(self, audit_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:

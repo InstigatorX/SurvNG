@@ -3806,6 +3806,14 @@ button.status-pill.hud-toggle:disabled {
   gap: 3px;
 }
 
+.motion-effectiveness-summary {
+  display: grid;
+  gap: 3px;
+  margin-top: 5px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
 .motion-pipeline-runtime-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

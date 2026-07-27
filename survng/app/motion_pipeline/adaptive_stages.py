@@ -58,6 +58,7 @@ class _TrackedBlob:
     track_id: int
     first_seen: float
     last_seen: float
+    consecutive_started_at: float
     consecutive_frames: int
     centroids: list[tuple[float, float]]
     blobs: list[MotionBlob]
@@ -82,6 +83,7 @@ class _TrackerRuntime:
                     track_id=value.track_id,
                     first_seen=value.first_seen,
                     last_seen=value.last_seen,
+                    consecutive_started_at=value.consecutive_started_at,
                     consecutive_frames=value.consecutive_frames,
                     centroids=list(value.centroids),
                     blobs=list(value.blobs),
@@ -153,7 +155,8 @@ class AdaptiveEmaBackgroundStage:
                 state.brightness_ema = float(np.mean(first))
             noise_ema = state.noise_ema
             brightness_ema = state.brightness_ema
-            for frame in frames[1:]:
+            sample_fps = max(1.0, float(context.configuration.get("sample_fps", 5.0)))
+            for frame_index, frame in enumerate(frames[1:], start=1):
                 current = frame.astype(np.float32, copy=False)
                 delta = cv2.absdiff(current, background)
                 median = float(np.median(delta))
@@ -164,20 +167,32 @@ class AdaptiveEmaBackgroundStage:
                 changed = delta > stable_limit
                 changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
 
+                elapsed = 1.0 / sample_fps
+                if frame_index < len(timestamps):
+                    previous_at = timestamps[frame_index - 1]
+                    current_at = timestamps[frame_index]
+                    if current_at > previous_at:
+                        elapsed = current_at - previous_at
+                elapsed_frames = min(sample_fps * 10.0, max(0.05, elapsed * sample_fps))
+
                 if changed_ratio >= self.global_change_ratio:
-                    rate = self.fast_learning_rate
+                    rate = 1.0 - (1.0 - self.fast_learning_rate) ** elapsed_frames
                     cv2.accumulateWeighted(current, background, rate)
                 else:
                     noise_boost = min(3.0, max(1.0, noise_ema / 6.0))
-                    rate = min(self.fast_learning_rate, self.learning_rate * noise_boost)
+                    base_rate = min(self.fast_learning_rate, self.learning_rate * noise_boost)
+                    rate = 1.0 - (1.0 - base_rate) ** elapsed_frames
                     stable = np.logical_not(changed).astype(np.uint8)
                     cv2.accumulateWeighted(current, background, rate, mask=stable)
                     if self.motion_learning_scale > 0:
                         moving = changed.astype(np.uint8)
+                        moving_rate = 1.0 - (
+                            1.0 - base_rate * self.motion_learning_scale
+                        ) ** elapsed_frames
                         cv2.accumulateWeighted(
                             current,
                             background,
-                            rate * self.motion_learning_scale,
+                            moving_rate,
                             mask=moving,
                         )
 
@@ -497,9 +512,12 @@ class PersistentCentroidTrackerStage:
                         previous = track.blobs[-1]
                         distance = math.dist(previous.centroid, blob.centroid)
                         overlap = _box_iou(previous, blob)
-                        dynamic_limit = max(
+                        dynamic_limit = min(
                             self.maximum_distance,
-                            math.sqrt(max(previous.area_ratio, blob.area_ratio)) * 2.5,
+                            max(
+                                0.015,
+                                math.sqrt(max(previous.area_ratio, blob.area_ratio)) * 2.5,
+                            ),
                         )
                         if distance > dynamic_limit and overlap <= 0:
                             continue
@@ -514,6 +532,7 @@ class PersistentCentroidTrackerStage:
                             track_id=best_id,
                             first_seen=timestamp,
                             last_seen=timestamp,
+                            consecutive_started_at=timestamp,
                             consecutive_frames=0,
                             centroids=[],
                             blobs=[],
@@ -522,6 +541,7 @@ class PersistentCentroidTrackerStage:
                     track = runtime.tracks[best_id]
                     if track.missed_frames:
                         track.consecutive_frames = 0
+                        track.consecutive_started_at = timestamp
                     if track.centroids:
                         elapsed = max(1.0 / sample_fps, timestamp - track.last_seen)
                         track.velocity = (
@@ -578,6 +598,7 @@ class PersistentCentroidTrackerStage:
             changed_ratios=(),
             first_seen=track.first_seen,
             last_seen=track.last_seen,
+            consecutive_started_at=track.consecutive_started_at,
             consecutive_frames=track.consecutive_frames,
             velocity=track.velocity,
             direction=direction,
@@ -600,9 +621,32 @@ class PersistentCentroidTrackerStage:
 
 
 class AdaptiveMotionScoringStage:
-    def __init__(self, stage_id: str, minimum_persistence_frames: int = 2) -> None:
+    def __init__(
+        self,
+        stage_id: str,
+        minimum_persistence_frames: int = 2,
+        *,
+        stationary_displacement_ratio: float = 0.01,
+        stationary_path_ratio: float = 0.025,
+        micro_area_ratio: float = 0.001,
+        micro_displacement_ratio: float = 0.04,
+        credible_displacement_ratio: float = 0.03,
+        maximum_credible_track_seconds: float = 6.0,
+    ) -> None:
         self._stage_id = stage_id
         self.minimum_persistence_frames = max(1, int(minimum_persistence_frames))
+        self.stationary_displacement_ratio = max(0.0, float(stationary_displacement_ratio))
+        self.stationary_path_ratio = max(0.0, float(stationary_path_ratio))
+        self.micro_area_ratio = max(0.0, float(micro_area_ratio))
+        self.micro_displacement_ratio = max(0.0, float(micro_displacement_ratio))
+        self.credible_displacement_ratio = max(
+            0.0001,
+            float(credible_displacement_ratio),
+        )
+        self.maximum_credible_track_seconds = max(
+            0.5,
+            float(maximum_credible_track_seconds),
+        )
 
     @property
     def stage_id(self) -> str:
@@ -616,10 +660,16 @@ class AdaptiveMotionScoringStage:
         noise_adjustment = min(0.12, max(0.0, (scene_noise - 6.0) / 80.0))
         threshold = min(0.78, base_threshold + noise_adjustment + (0.025 if night else 0.0))
         scores: list[tuple[float, MotionTrack, dict[str, float]]] = []
+        sample_fps = max(1.0, float(context.configuration.get("sample_fps", 5.0)))
         for track in context.tracked_objects:
-            features = self._track_features(track)
+            features = self._track_features(
+                track,
+                sample_fps,
+                self.credible_displacement_ratio,
+            )
             score = (
-                features["persistence"] * 0.30
+                features["persistence"] * 0.20
+                + features["translation"] * 0.10
                 + features["size"] * 0.15
                 + features["direction_consistency"] * 0.17
                 + features["speed_consistency"] * 0.12
@@ -631,14 +681,61 @@ class AdaptiveMotionScoringStage:
             scores.append((min(1.0, max(0.0, score)), track, features))
         score_state = context.runtime.state_for(self.stage_id, _ScoringRuntime)
         if scores:
-            score, best, features = max(scores, key=lambda item: item[0])
-            persistence_ok = best.consecutive_frames >= self.minimum_persistence_frames
-            insect_like = features["insect_penalty"] >= 0.55 and features["size"] < 0.25
-            accepted = score >= threshold and persistence_ok and not insect_like
-            reason = "qualified" if accepted else (
-                "low_persistence" if not persistence_ok else
-                "insect_like_motion" if insect_like else
-                "low_score"
+            minimum_persistence_seconds = self.minimum_persistence_frames / sample_fps
+            evaluations: list[
+                tuple[float, MotionTrack, dict[str, float], bool, str]
+            ] = []
+            for candidate_score, candidate_track, candidate_features in scores:
+                persistence_ok = (
+                    candidate_features["persistence_seconds"]
+                    >= minimum_persistence_seconds
+                )
+                insect_like = (
+                    candidate_features["insect_penalty"] >= 0.55
+                    and candidate_features["size"] < 0.25
+                )
+                stationary_foreground = (
+                    candidate_features["persistence"] >= 0.4
+                    and candidate_features["path_length"] < self.stationary_path_ratio
+                    and candidate_features["net_displacement"]
+                    < self.stationary_displacement_ratio
+                )
+                micro_jitter = (
+                    candidate_features["median_area_ratio"] < self.micro_area_ratio
+                    and candidate_features["net_displacement"]
+                    < self.micro_displacement_ratio
+                )
+                persistent_scene_motion = (
+                    candidate_features["persistence_seconds"]
+                    > self.maximum_credible_track_seconds
+                )
+                candidate_accepted = (
+                    candidate_score >= threshold
+                    and persistence_ok
+                    and not insect_like
+                    and not stationary_foreground
+                    and not micro_jitter
+                    and not persistent_scene_motion
+                )
+                candidate_reason = "qualified" if candidate_accepted else (
+                    "low_persistence" if not persistence_ok else
+                    "persistent_scene_motion" if persistent_scene_motion else
+                    "insect_like_motion" if insect_like else
+                    "stationary_foreground" if stationary_foreground else
+                    "micro_jitter" if micro_jitter else
+                    "low_score"
+                )
+                evaluations.append((
+                    candidate_score,
+                    candidate_track,
+                    candidate_features,
+                    candidate_accepted,
+                    candidate_reason,
+                ))
+            accepted_evaluations = [item for item in evaluations if item[3]]
+            score, best, features, accepted, reason = max(
+                accepted_evaluations or evaluations,
+                key=lambda item: item[0],
             )
             with score_state.lock:
                 accumulated = score_state.accumulated_scores.get(best.track_id, 0.0) + score
@@ -667,6 +764,11 @@ class AdaptiveMotionScoringStage:
                 "interior": 0.0,
                 "zone_weight": 0.0,
                 "insect_penalty": 0.0,
+                "persistence_seconds": 0.0,
+                "median_area_ratio": 0.0,
+                "net_displacement": 0.0,
+                "path_length": 0.0,
+                "translation": 0.0,
             }
         global_changes = context.debug.values.get("global_change_ratios", [])
         global_change = max(global_changes, default=0.0) if isinstance(global_changes, list) else 0.0
@@ -701,16 +803,36 @@ class AdaptiveMotionScoringStage:
         return context
 
     @staticmethod
-    def _track_features(track: MotionTrack) -> dict[str, float]:
+    def _track_features(
+        track: MotionTrack,
+        sample_fps: float,
+        credible_displacement_ratio: float,
+    ) -> dict[str, float]:
         observations = track.observations[-20:]
-        persistence = min(1.0, track.consecutive_frames / 5.0)
+        consecutive_started_at = track.consecutive_started_at or max(
+            track.first_seen,
+            track.last_seen - max(0, track.consecutive_frames - 1) / sample_fps,
+        )
+        persistence_seconds = max(
+            track.last_seen - consecutive_started_at + 1.0 / sample_fps,
+            track.consecutive_frames / sample_fps,
+        )
+        persistence = min(1.0, persistence_seconds / 1.0)
         median_size = float(np.median(track.size_history[-20:])) if track.size_history else 0.0
         size = min(1.0, median_size / 0.012)
         fill = float(np.mean([blob.fill_ratio for blob in observations])) if observations else 0.0
         interior = float(np.mean([not blob.touches_edge for blob in observations])) if observations else 0.0
         zone_overlap = max((blob.zone_overlap for blob in observations), default=0.0)
         zone_weight = 0.65 + min(0.35, zone_overlap * 0.35)
-        vectors = np.diff(np.asarray(track.path[-20:], dtype=np.float32), axis=0)
+        path = np.asarray(track.path[-20:], dtype=np.float32)
+        vectors = np.diff(path, axis=0)
+        path_length = float(np.sum(np.linalg.norm(vectors, axis=1))) if len(vectors) else 0.0
+        net_displacement = (
+            float(np.linalg.norm(path[-1] - path[0]))
+            if len(path) > 1
+            else 0.0
+        )
+        translation = min(1.0, net_displacement / credible_displacement_ratio)
         median_speed = 0.0
         if len(vectors):
             speeds = np.linalg.norm(vectors, axis=1)
@@ -742,6 +864,11 @@ class AdaptiveMotionScoringStage:
             "interior": interior,
             "zone_weight": zone_weight,
             "insect_penalty": insect_penalty,
+            "persistence_seconds": persistence_seconds,
+            "median_area_ratio": median_size,
+            "net_displacement": net_displacement,
+            "path_length": path_length,
+            "translation": translation,
         }
 
 
@@ -795,7 +922,24 @@ def _build_tracker(stage_id: str, options: Mapping[str, Any], dependencies: Moti
 
 def _build_scorer(stage_id: str, options: Mapping[str, Any], dependencies: MotionStageDependencies) -> AdaptiveMotionScoringStage:
     del dependencies
-    return AdaptiveMotionScoringStage(stage_id, int(options.get("minimum_persistence_frames", 2)))
+    return AdaptiveMotionScoringStage(
+        stage_id,
+        int(options.get("minimum_persistence_frames", 2)),
+        stationary_displacement_ratio=float(
+            options.get("stationary_displacement_ratio", 0.01)
+        ),
+        stationary_path_ratio=float(options.get("stationary_path_ratio", 0.025)),
+        micro_area_ratio=float(options.get("micro_area_ratio", 0.001)),
+        micro_displacement_ratio=float(
+            options.get("micro_displacement_ratio", 0.04)
+        ),
+        credible_displacement_ratio=float(
+            options.get("credible_displacement_ratio", 0.03)
+        ),
+        maximum_credible_track_seconds=float(
+            options.get("maximum_credible_track_seconds", 6.0)
+        ),
+    )
 
 
 def register_adaptive_motion_stages(registry: MotionStageRegistry) -> None:
@@ -884,5 +1028,13 @@ def register_adaptive_motion_stages(registry: MotionStageRegistry) -> None:
         category="scoring",
         display_name="Adaptive credibility score",
         description="Scores persistence, size, direction, velocity, zones, scene noise, and insect-like behavior.",
-        options=(MotionStageOption("minimum_persistence_frames", "Minimum persistent samples", "integer", 2, minimum=1, maximum=20),),
+        options=(
+            MotionStageOption("minimum_persistence_frames", "Minimum persistent samples", "integer", 2, minimum=1, maximum=20),
+            MotionStageOption("stationary_displacement_ratio", "Minimum position change", "number", 0.01, minimum=0, maximum=0.1, advanced=True),
+            MotionStageOption("stationary_path_ratio", "Minimum movement path", "number", 0.025, minimum=0, maximum=0.2, advanced=True),
+            MotionStageOption("micro_area_ratio", "Tiny disturbance size", "number", 0.001, minimum=0, maximum=0.1, advanced=True),
+            MotionStageOption("micro_displacement_ratio", "Tiny disturbance travel", "number", 0.04, minimum=0, maximum=0.5, advanced=True),
+            MotionStageOption("credible_displacement_ratio", "Full movement credit distance", "number", 0.03, minimum=0.0001, maximum=0.5, advanced=True),
+            MotionStageOption("maximum_credible_track_seconds", "Maximum single motion age", "number", 6.0, minimum=0.5, maximum=60, advanced=True),
+        ),
     ))

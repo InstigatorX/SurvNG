@@ -14,6 +14,7 @@ from survng.app.config import AppConfig, CameraConfig, MqttConfig, load_config, 
 class AppConfigTest(unittest.TestCase):
     def test_base_path_defaults_to_survng(self) -> None:
         self.assertEqual(AppConfig().base_path, "/survng")
+        self.assertEqual(AppConfig().database_dir, "")
         self.assertEqual(AppConfig().recording_index_dir, "")
 
     def test_base_path_is_normalized(self) -> None:

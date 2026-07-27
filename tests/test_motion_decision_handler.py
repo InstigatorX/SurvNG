@@ -29,6 +29,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         published = []
         frame = np.zeros((20, 30, 3), dtype=np.uint8)
         qualification = {"borderline_candidate": True, "would_suppress": True}
+        snapshot_times = []
         handler = MotionDecisionHandler(
             camera_id="gate",
             events=events,
@@ -37,7 +38,9 @@ class MotionDecisionHandlerTest(unittest.TestCase):
                 [{"label": "car", "confidence": 0.8, "incident_eligible": True}],
                 "recording.mp4",
             ),
-            snapshot_writer=lambda value: "snapshot.jpg" if value is frame else "",
+            snapshot_writer=lambda value, event_at: (
+                snapshot_times.append(event_at) or ("snapshot.jpg" if value is frame else "")
+            ),
             object_serializer=lambda objects: json.dumps(objects, separators=(",", ":")),
             event_callback=lambda event_type, payload: published.append((event_type, payload)),
         )
@@ -57,6 +60,10 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertFalse(qualification["would_suppress"])
         self.assertEqual(events.payload["camera_id"], "gate")
         self.assertEqual(events.payload["recording_path"], "recording.mp4")
+        self.assertEqual(snapshot_times, [datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc)])
+        self.assertIn("processed_at", qualification)
+        self.assertIn("object_detection_duration_ms", qualification)
+        self.assertIn("event_processing_delay_seconds", qualification)
         stored_objects = json.loads(events.payload["objects_json"])
         self.assertEqual(stored_objects[0]["label"], "car")
         self.assertEqual(stored_objects[-1]["status"], "motion_qualification")
@@ -69,7 +76,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             camera_id="foyer",
             events=events,
             detection_provider=lambda _event_at: (None, [{"label": "stale"}], ""),
-            snapshot_writer=lambda _frame: self.fail("snapshot writer should not run"),
+            snapshot_writer=lambda _frame, _event_at: self.fail("snapshot writer should not run"),
             object_serializer=json.dumps,
             event_callback=lambda event_type, payload: published.append((event_type, payload)),
         )
@@ -96,7 +103,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
                 [{"status": "detector_unavailable", "error": "worker timed out"}],
                 "recording.mp4",
             ),
-            snapshot_writer=lambda _frame: "snapshot.jpg",
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
             object_serializer=json.dumps,
         )
 
@@ -117,7 +124,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             camera_id="gate",
             events=events,
             detection_provider=lambda _event_at: (None, [], ""),
-            snapshot_writer=lambda _frame: "",
+            snapshot_writer=lambda _frame, _event_at: "",
             object_serializer=json.dumps,
             event_callback=lambda event_type, payload: published.append((event_type, payload)),
         )
@@ -149,7 +156,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             camera_id="gate",
             events=events,
             detection_provider=lambda _event_at: (frame, [], ""),
-            snapshot_writer=lambda _frame: "snapshot.jpg",
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
             object_serializer=json.dumps,
             event_callback=lambda _event_type, _payload: (_ for _ in ()).throw(
                 RuntimeError("broker unavailable")
@@ -176,7 +183,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             camera_id="gate",
             events=events,
             detection_provider=lambda _event_at: (None, [], ""),
-            snapshot_writer=lambda _frame: "",
+            snapshot_writer=lambda _frame, _event_at: "",
             object_serializer=json.dumps,
             event_callback=lambda _event_type, _payload: (_ for _ in ()).throw(
                 RuntimeError("broker unavailable")

@@ -115,6 +115,17 @@ def make_worker(
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_snapshot_filename_uses_event_time_not_processing_time(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        event_at = datetime(2026, 7, 27, 15, 56, 55, 123456, tzinfo=timezone.utc)
+        frame = np.zeros((20, 30, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            path = Path(worker._write_snapshot(frame, event_at))
+
+            self.assertTrue(path.is_file())
+            self.assertTrue(path.name.startswith("20260727-155655-123456-"))
+
     def test_isolated_qualification_telemetry_reports_replay_stage_metrics(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         frames = [
@@ -680,6 +691,23 @@ class CameraWorkerTest(unittest.TestCase):
         )
 
         self.assertFalse(CameraWorker._is_borderline_candidate(result, True, 0.03))
+
+    def test_categorical_nuisance_rejection_cannot_be_borderline_rescued(self) -> None:
+        result = MotionQualificationResult(
+            False,
+            0.8,
+            0.48,
+            "stationary_foreground",
+            4,
+            {},
+        )
+
+        self.assertFalse(CameraWorker._is_borderline_candidate(result, True, 0.03))
+
+    def test_low_score_within_margin_can_be_borderline_rescued(self) -> None:
+        result = MotionQualificationResult(False, 0.46, 0.48, "low_score", 4, {})
+
+        self.assertTrue(CameraWorker._is_borderline_candidate(result, True, 0.03))
 
     def test_fusion_failure_cannot_rescue_rejected_adaptive_trigger(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

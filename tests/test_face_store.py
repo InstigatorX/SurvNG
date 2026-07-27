@@ -17,6 +17,17 @@ from survng.app.inference import InferenceUnavailable
 
 
 class FaceStoreTest(unittest.TestCase):
+    def test_database_can_be_local_while_snapshots_remain_in_media_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:
+            store = FaceStore(
+                Path(storage),
+                start_recognition=False,
+                database_dir=Path(database),
+            )
+
+            self.assertEqual(store.storage_dir, Path(storage))
+            self.assertEqual(store.db_path, Path(database) / "survng.sqlite3")
+
     @staticmethod
     def insert_observation(
         store: FaceStore,

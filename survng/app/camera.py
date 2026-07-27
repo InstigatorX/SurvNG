@@ -61,6 +61,7 @@ class CameraWorker:
         motion_decision_handler_factory: MotionDecisionHandlerFactory,
         motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
         motion_analysis_limiter: threading.BoundedSemaphore,
+        onvif_cache_dir: Path | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -81,7 +82,7 @@ class CameraWorker:
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
             detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
-            snapshot_writer=lambda frame: self._write_snapshot(frame),
+            snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=self._publish_event_safely if event_callback is not None else None,
         )
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
@@ -158,7 +159,7 @@ class CameraWorker:
         self.onvif = OnvifEventListener(
             camera,
             self.handle_motion_event,
-            cache_dir=storage_dir / "onvif",
+            cache_dir=onvif_cache_dir or storage_dir / "onvif",
         )
 
     def start(self) -> None:
@@ -853,8 +854,7 @@ class CameraWorker:
         return bool(
             enabled
             and not result.accepted
-            and not result.reason.startswith("event_state_")
-            and result.reason != "validation_unavailable_fail_closed"
+            and result.reason == "low_score"
             and result.score >= max(0.0, result.threshold - margin)
         )
 
@@ -1754,8 +1754,14 @@ class CameraWorker:
     ) -> tuple[Any | None, list[dict[str, Any]], str]:
         return self.motion_object_detector.detect(event_at)
 
-    def _write_snapshot(self, frame: Any) -> str:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:
+        captured_at = event_at or datetime.now(timezone.utc)
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        else:
+            captured_at = captured_at.astimezone(timezone.utc)
+        event_stamp = captured_at.strftime("%Y%m%d-%H%M%S-%f")
+        stamp = f"{event_stamp}-{time.time_ns() % 1_000_000_000:09d}"
         path = self.snapshots_dir / f"{stamp}.jpg"
         if not cv2.imwrite(str(path), frame):
             LOGGER.warning("failed to write snapshot for %s to %s", self.camera.id, path)

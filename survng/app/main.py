@@ -109,6 +109,8 @@ RECORDING_PREWARM_PROCESS_LOCK = threading.Lock()
 RECORDING_PREWARM_PROCESS: subprocess.Popen | None = None
 FACE_OBSERVATIONS_SYNCED = False
 FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
+FACE_OBSERVATIONS_SYNC_THREAD_LOCK = threading.Lock()
+FACE_OBSERVATIONS_SYNC_THREAD: threading.Thread | None = None
 MANAGER_RELOAD_LOCK = threading.RLock()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
@@ -553,6 +555,7 @@ def reload_manager(
             config = previous_config
             manager = recovery
             FACE_OBSERVATIONS_SYNCED = False
+            _start_face_observation_sync()
             if prewarmer_was_running:
                 _start_recording_prewarmer()
             if not isinstance(reload_error, Exception):
@@ -564,6 +567,7 @@ def reload_manager(
         config = effective_config
         manager = candidate
         FACE_OBSERVATIONS_SYNCED = False
+        _start_face_observation_sync()
         with RECORDING_DAY_CACHE_LOCK:
             RECORDING_DAY_CACHE.clear()
         _ffmpeg_qsv_info.cache_clear()
@@ -577,6 +581,7 @@ def reload_manager(
 async def lifespan(app: FastAPI):
     manager.start_all()
     try:
+        _start_face_observation_sync()
         _start_recording_prewarmer()
         yield
     finally:
@@ -1756,6 +1761,13 @@ def motion_audit(
     }
 
 
+@app.get("/api/motion-effectiveness")
+def motion_effectiveness(days: float = 7.0) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        active_events = manager.events
+    return active_events.motion_effectiveness(days=days)
+
+
 @app.get("/api/motion-audit/{audit_id}/snapshot.jpg")
 def motion_audit_snapshot(audit_id: int) -> FileResponse:
     with MANAGER_RELOAD_LOCK:
@@ -1873,6 +1885,49 @@ def event_snapshot(event_id: int) -> FileResponse:
     )
 
 
+def _jpeg_thumbnail(frame: np.ndarray, width: int, quality: int) -> bytes:
+    frame_height, frame_width = frame.shape[:2]
+    if frame_width > width:
+        target_height = max(1, round(frame_height * width / frame_width))
+        frame = cv2.resize(frame, (width, target_height), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to encode thumbnail")
+    return encoded.tobytes()
+
+
+@app.get("/api/events/{event_id}/thumbnail.jpg")
+def event_thumbnail(event_id: int, width: int = 640, quality: int = 82) -> FileResponse:
+    safe_width = max(160, min(int(width), 1280))
+    safe_quality = max(50, min(int(quality), 92))
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        event = active_manager.events.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    try:
+        snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
+        stat = snapshot_path.stat()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    identity = f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:{safe_width}:{safe_quality}"
+
+    def build() -> bytes:
+        frame = cv2.imread(str(snapshot_path))
+        if frame is None:
+            raise HTTPException(status_code=404, detail="snapshot is unavailable")
+        return _jpeg_thumbnail(frame, safe_width, safe_quality)
+
+    cached = active_manager.image_cache.get_or_create("events", identity, build)
+    return FileResponse(
+        cached,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
+
+
 @app.get("/api/incidents")
 def incidents(limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
     bounded_limit = max(1, min(limit, 200))
@@ -1975,9 +2030,31 @@ def _sync_face_observations(limit: int = 5000) -> int:
         return inserted
 
 
+def _start_face_observation_sync() -> None:
+    global FACE_OBSERVATIONS_SYNC_THREAD
+    with FACE_OBSERVATIONS_SYNC_THREAD_LOCK:
+        if FACE_OBSERVATIONS_SYNCED:
+            return
+        if FACE_OBSERVATIONS_SYNC_THREAD is not None and FACE_OBSERVATIONS_SYNC_THREAD.is_alive():
+            return
+
+        def synchronize() -> None:
+            try:
+                _sync_face_observations()
+            except Exception:
+                logging.getLogger(__name__).exception("background face observation sync failed")
+
+        FACE_OBSERVATIONS_SYNC_THREAD = threading.Thread(
+            target=synchronize,
+            name="face-observation-sync",
+            daemon=True,
+        )
+        FACE_OBSERVATIONS_SYNC_THREAD.start()
+
+
 @app.get("/api/faces/status")
 def face_status() -> dict:
-    _sync_face_observations()
+    _start_face_observation_sync()
     stats = manager.faces.stats()
     recognition = manager.faces.recognition_status()
     if recognition.get("ready"):
@@ -2001,7 +2078,7 @@ def face_status() -> dict:
 
 @app.get("/api/faces/people")
 def face_people() -> list[dict]:
-    _sync_face_observations()
+    _start_face_observation_sync()
     return manager.faces.people()
 
 
@@ -2035,7 +2112,7 @@ def face_observations(
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict]:
-    _sync_face_observations()
+    _start_face_observation_sync()
     observations = manager.faces.observations(
         person_id=person_id,
         camera_id=camera_id,
@@ -2052,7 +2129,7 @@ def face_observation_count(
     camera_id: str = "",
     status: str = "all",
 ) -> dict:
-    _sync_face_observations()
+    _start_face_observation_sync()
     return {
         "total": manager.faces.observation_count(
             person_id=person_id,
@@ -2082,29 +2159,45 @@ def assign_face_observation(observation_id: int, payload: FaceAssignment) -> dic
 
 
 @app.get("/api/faces/observations/{observation_id}/crop.jpg")
-def face_crop(observation_id: int, padding: float = 0.2) -> Response:
+def face_crop(observation_id: int, padding: float = 0.2) -> FileResponse:
     if not math.isfinite(padding):
         raise HTTPException(status_code=422, detail="padding must be finite")
-    result = manager.faces.snapshot_path(observation_id)
+    active_manager = manager
+    result = active_manager.faces.snapshot_path(observation_id)
     if result is None:
         raise HTTPException(status_code=404, detail="face observation not found")
     snapshot_path, box = result
-    frame = cv2.imread(str(snapshot_path))
-    if frame is None:
-        raise HTTPException(status_code=404, detail="snapshot is unavailable")
-    height, width = frame.shape[:2]
-    x1, y1 = float(box.get("x1", 0)), float(box.get("y1", 0))
-    x2, y2 = float(box.get("x2", 0)), float(box.get("y2", 0))
     pad = max(0.0, min(float(padding), 1.0))
-    dx, dy = (x2 - x1) * pad, (y2 - y1) * pad
-    left, top = max(0, int(x1 - dx)), max(0, int(y1 - dy))
-    right, bottom = min(width, int(x2 + dx)), min(height, int(y2 + dy))
-    if right <= left or bottom <= top:
-        raise HTTPException(status_code=422, detail="face crop is invalid")
-    ok, encoded = cv2.imencode(".jpg", frame[top:bottom, left:right], [cv2.IMWRITE_JPEG_QUALITY, 90])
-    if not ok:
-        raise HTTPException(status_code=500, detail="failed to encode face crop")
-    return Response(encoded.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+    try:
+        stat = snapshot_path.stat()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="snapshot is unavailable") from exc
+    box_identity = json.dumps(box, sort_keys=True, separators=(",", ":"))
+    identity = f"{observation_id}:{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:{box_identity}:{pad:.3f}"
+
+    def build() -> bytes:
+        frame = cv2.imread(str(snapshot_path))
+        if frame is None:
+            raise HTTPException(status_code=404, detail="snapshot is unavailable")
+        height, width = frame.shape[:2]
+        x1, y1 = float(box.get("x1", 0)), float(box.get("y1", 0))
+        x2, y2 = float(box.get("x2", 0)), float(box.get("y2", 0))
+        dx, dy = (x2 - x1) * pad, (y2 - y1) * pad
+        left, top = max(0, int(x1 - dx)), max(0, int(y1 - dy))
+        right, bottom = min(width, int(x2 + dx)), min(height, int(y2 + dy))
+        if right <= left or bottom <= top:
+            raise HTTPException(status_code=422, detail="face crop is invalid")
+        ok, encoded = cv2.imencode(".jpg", frame[top:bottom, left:right], [cv2.IMWRITE_JPEG_QUALITY, 88])
+        if not ok:
+            raise HTTPException(status_code=500, detail="failed to encode face crop")
+        return encoded.tobytes()
+
+    cached = active_manager.image_cache.get_or_create("faces", identity, build)
+    return FileResponse(
+        cached,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @app.post("/api/events/{event_id}/detect")
@@ -3439,6 +3532,22 @@ def _incident_event_payload(event: dict) -> dict:
     payload = dict(event)
     payload.pop("topic", None)
     payload.pop("message", None)
+    payload["objects"] = [
+        {
+            key: item[key]
+            for key in (
+                "label",
+                "confidence",
+                "box",
+                "zones",
+                "mask_polygon",
+                "incident_eligible",
+            )
+            if key in item
+        }
+        for item in payload.get("objects", [])
+        if isinstance(item, dict) and item.get("label")
+    ]
     return payload
 
 
