@@ -525,7 +525,7 @@ class EventStore:
             ).fetchall()
             audit_rows = conn.execute(
                 """
-                select camera_id, mode, reason, event_id, object_detected
+                select camera_id, mode, reason, event_id, object_detected, features_json
                 from motion_audits
                 where created_at >= ?
                 """,
@@ -540,6 +540,8 @@ class EventStore:
                 "object_events": 0,
                 "no_object_events": 0,
                 "borderline_rescued": 0,
+                "suppression_verification_checks": 0,
+                "suppression_verification_rescues": 0,
                 "visual_filtered": 0,
                 "state_deduplicated": 0,
                 "unreviewed_visual_filters": 0,
@@ -570,6 +572,12 @@ class EventStore:
             summary["borderline_rescued"] += int(
                 bool(qualification.get("borderline_candidate"))
             )
+            summary["suppression_verification_checks"] += int(
+                bool(qualification.get("suppression_verification_candidate"))
+            )
+            summary["suppression_verification_rescues"] += int(
+                bool(qualification.get("suppression_verification_rescued"))
+            )
 
         for row in audit_rows:
             if row["event_id"] is not None:
@@ -580,6 +588,13 @@ class EventStore:
                 summary["state_deduplicated"] += 1
             else:
                 summary["visual_filtered"] += 1
+                try:
+                    features = json.loads(str(row["features_json"] or "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    features = {}
+                summary["suppression_verification_checks"] += int(
+                    bool(features.get("suppression_verification"))
+                )
                 summary["unreviewed_visual_filters"] += int(
                     row["object_detected"] is None
                 )

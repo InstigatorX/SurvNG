@@ -18,13 +18,20 @@ class EventStoreTest(unittest.TestCase):
             store = EventStore(Path(tmpdir))
             created_at = "2099-07-27T12:00:00+00:00"
 
-            def qualification_objects(*, object_label: str = "", borderline: bool = False) -> str:
+            def qualification_objects(
+                *,
+                object_label: str = "",
+                borderline: bool = False,
+                verification_rescue: bool = False,
+            ) -> str:
                 objects: list[dict] = [{
                     "status": "motion_qualification",
                     "motion_qualification": {
                         "mode": "camera",
                         "accepted": not borderline,
                         "borderline_candidate": borderline,
+                        "suppression_verification_candidate": verification_rescue,
+                        "suppression_verification_rescued": verification_rescue,
                     },
                 }]
                 if object_label:
@@ -37,6 +44,14 @@ class EventStoreTest(unittest.TestCase):
             )
             rescued_event = store.add_event(
                 "gate", "motion", objects_json=qualification_objects(borderline=True),
+                created_at=created_at,
+            )
+            store.add_event(
+                "gate", "motion",
+                objects_json=qualification_objects(
+                    object_label="person",
+                    verification_rescue=True,
+                ),
                 created_at=created_at,
             )
             base_audit = {
@@ -54,6 +69,10 @@ class EventStoreTest(unittest.TestCase):
             store.add_motion_audit(**base_audit, reason="micro_jitter")
             store.add_motion_audit(**base_audit, reason="event_state_active")
             store.add_motion_audit(
+                **{**base_audit, "object_detected": False, "features": {"suppression_verification": True}},
+                reason="stationary_foreground",
+            )
+            store.add_motion_audit(
                 **{**base_audit, "object_detected": False},
                 reason="micro_jitter",
                 event_id=int(rescued_event["id"]),
@@ -61,16 +80,18 @@ class EventStoreTest(unittest.TestCase):
 
             summary = store.motion_effectiveness(days=7)["by_camera"]["gate"]["camera"]
 
-            self.assertEqual(summary["allowed_events"], 2)
-            self.assertEqual(summary["object_events"], 1)
+            self.assertEqual(summary["allowed_events"], 3)
+            self.assertEqual(summary["object_events"], 2)
             self.assertEqual(summary["no_object_events"], 1)
             self.assertEqual(summary["borderline_rescued"], 1)
-            self.assertEqual(summary["visual_filtered"], 1)
+            self.assertEqual(summary["suppression_verification_checks"], 2)
+            self.assertEqual(summary["suppression_verification_rescues"], 1)
+            self.assertEqual(summary["visual_filtered"], 2)
             self.assertEqual(summary["state_deduplicated"], 1)
             self.assertEqual(summary["unreviewed_visual_filters"], 1)
-            self.assertEqual(summary["total_decisions"], 4)
-            self.assertEqual(summary["visual_rejection_rate"], 0.3333)
-            self.assertEqual(summary["object_yield_rate"], 0.5)
+            self.assertEqual(summary["total_decisions"], 6)
+            self.assertEqual(summary["visual_rejection_rate"], 0.4)
+            self.assertEqual(summary["object_yield_rate"], 0.6667)
 
     def test_database_can_be_local_while_media_paths_remain_in_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:

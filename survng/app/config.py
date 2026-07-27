@@ -151,10 +151,12 @@ class MotionQualificationConfig(BaseModel):
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
+    camera_mode_background_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     window_seconds: float = Field(default=1.6, ge=0.8, le=4.0)
     post_trigger_seconds: float = Field(default=2.5, ge=0.5, le=6.0)
     burst_quiet_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
     rejected_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    suppression_verification_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     borderline_rescue_enabled: bool = True
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
     mog2_audit_enabled: bool = False
@@ -168,6 +170,7 @@ class CameraMotionQualificationConfig(BaseModel):
     frame_width: int | None = Field(default=None, ge=240, le=960)
     borderline_rescue_enabled: bool | None = None
     borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
+    suppression_verification_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     mog2_audit_enabled: bool | None = None
     pipeline: CameraMotionPipelineConfig = Field(default_factory=CameraMotionPipelineConfig)
 

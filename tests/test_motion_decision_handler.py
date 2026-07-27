@@ -92,6 +92,41 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(json.loads(events.payload["objects_json"])[0]["status"], "no_recorded_frame")
         self.assertEqual([event_type for event_type, _payload in published], ["incident"])
 
+    def test_verification_without_eligible_object_does_not_create_incident(self) -> None:
+        events = RecordingEventStore()
+        published = []
+        frame = np.zeros((20, 30, 3), dtype=np.uint8)
+        qualification = {
+            "suppression_verification_candidate": True,
+            "effective_accepted": True,
+            "would_suppress": True,
+        }
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (frame, [], "recording.mp4"),
+            snapshot_writer=lambda _frame, _event_at: "verification.jpg",
+            object_serializer=json.dumps,
+            event_callback=lambda event_type, payload: published.append((event_type, payload)),
+        )
+
+        outcome = handler.handle(
+            "onvif/motion",
+            "motion",
+            datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
+            qualification,
+            require_eligible_object=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertEqual(outcome.snapshot_path, "")
+        self.assertFalse(outcome.object_detected)
+        self.assertFalse(qualification["suppression_verification_rescued"])
+        self.assertFalse(qualification["effective_accepted"])
+        self.assertTrue(qualification["would_suppress"])
+        self.assertIsNone(events.payload)
+        self.assertEqual(published, [])
+
     def test_handler_reports_detector_failure_as_not_run(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((20, 30, 3), dtype=np.uint8)

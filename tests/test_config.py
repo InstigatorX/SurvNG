@@ -52,12 +52,17 @@ class AppConfigTest(unittest.TestCase):
         })
 
         self.assertEqual(config.motion_qualification.frame_width, 320)
+        self.assertEqual(config.motion_qualification.camera_mode_background_fps, 2.0)
         self.assertEqual(config.cameras[0].motion_qualification.frame_width, 480)
         self.assertTrue(config.motion_qualification.borderline_rescue_enabled)
         self.assertEqual(config.motion_qualification.borderline_margin, 0.03)
         self.assertFalse(config.motion_qualification.mog2_audit_enabled)
         self.assertEqual(config.motion_qualification.mog2_history_seconds, 30.0)
         self.assertEqual(config.motion_qualification.rejected_sample_rate, 1.0)
+        self.assertEqual(config.motion_qualification.suppression_verification_rate, 0.05)
+        self.assertIsNone(
+            config.cameras[0].motion_qualification.suppression_verification_rate
+        )
         self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
         self.assertEqual(config.motion_qualification.pipeline.qualification, [])
         self.assertIsNone(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import queue
 import random
@@ -114,6 +115,7 @@ class CameraWorker:
         self._motion_last_sample = 0.0
         self._motion_last_continuous_result: MotionQualificationResult | None = None
         self._motion_analysis_last_processed_at = 0.0
+        self._motion_primary_last_processed_at = 0.0
         self._motion_analysis_queue: queue.Queue[float | None] = queue.Queue(
             maxsize=MOTION_ANALYSIS_QUEUE_SIZE
         )
@@ -150,6 +152,8 @@ class CameraWorker:
             "validation_failures": 0,
             "validation_fail_opens": 0,
             "audit_object_matches": 0,
+            "suppression_verification_checks": 0,
+            "suppression_verification_rescues": 0,
             "last_result": None,
         }
         self.last_error = ""
@@ -376,6 +380,8 @@ class CameraWorker:
                 "mode": mode,
                 "sensitivity": sensitivity,
                 "frame_width": frame_width,
+                "camera_mode_background_fps": self.motion_config.camera_mode_background_fps,
+                "suppression_verification_rate": self._suppression_verification_rate(),
                 "borderline_rescue_enabled": rescue_enabled,
                 "borderline_margin": rescue_margin,
                 "mog2_audit_enabled": bool(mog2_status.get("enabled", False)),
@@ -611,7 +617,11 @@ class CameraWorker:
                             runtime=self.motion_observation_pipeline.runtime,
                         )
                         self.motion_observation_pipeline.process(observation)
-                    if self.motion_pipeline.continuous_analysis and self._adaptive_analysis_required():
+                    if (
+                        self.motion_pipeline.continuous_analysis
+                        and self._adaptive_analysis_required()
+                        and self._continuous_primary_analysis_due(captured_at)
+                    ):
                         self._analyze_continuous_motion(captured_at)
                     elif self.motion_debug.enabled() and time.monotonic() - self._motion_debug_last_run >= 1.0:
                         self._motion_debug_last_run = time.monotonic()
@@ -642,6 +652,7 @@ class CameraWorker:
             LOGGER.warning("continuous motion analysis failed for %s: %s", self.camera.id, error)
             return
         self._motion_last_continuous_result = result
+        self._motion_primary_last_processed_at = captured_at
         with self._motion_stats_lock:
             self._motion_stats["continuous_frames"] += 1
             self._motion_stats["continuous_candidates"] += int(result.accepted)
@@ -806,6 +817,19 @@ class CameraWorker:
             and bool(options.get("include_primary", True))
         )
 
+    def _continuous_primary_analysis_due(self, captured_at: float) -> bool:
+        if self._trigger_mode() == "adaptive":
+            return True
+        background_fps = min(
+            self.motion_config.sample_fps,
+            self.motion_config.camera_mode_background_fps,
+        )
+        interval = 1.0 / max(0.5, background_fps)
+        return bool(
+            self._motion_primary_last_processed_at <= 0.0
+            or captured_at - self._motion_primary_last_processed_at >= interval * 0.85
+        )
+
     def _external_confirmation_required(self) -> bool:
         options = self._fusion_options()
         raw_sources = options.get("sources", [])
@@ -844,6 +868,26 @@ class CameraWorker:
             else override.borderline_margin
         )
         return bool(enabled), float(margin)
+
+    def _suppression_verification_rate(self) -> float:
+        override = self.camera.motion_qualification.suppression_verification_rate
+        return float(
+            self.motion_config.suppression_verification_rate
+            if override is None
+            else override
+        )
+
+    @staticmethod
+    def _should_verify_suppression(decision_id: str, rate: float) -> bool:
+        if rate <= 0.0:
+            return False
+        if rate >= 1.0:
+            return True
+        sample = int.from_bytes(
+            hashlib.sha256(decision_id.encode("utf-8")).digest()[:8],
+            "big",
+        ) / float(2**64)
+        return sample < rate
 
     @staticmethod
     def _is_borderline_candidate(
@@ -1412,6 +1456,16 @@ class CameraWorker:
                 rescue_enabled,
                 rescue_margin,
             )
+            suppression_verification_candidate = bool(
+                mode in {"camera", "adaptive", "enforce"}
+                and not result.accepted
+                and not borderline_candidate
+                and not result.reason.startswith("event_state_")
+                and self._should_verify_suppression(
+                    decision_id,
+                    self._suppression_verification_rate(),
+                )
+            )
             qualification = {
                 **result.as_dict(),
                 **diagnostics,
@@ -1421,6 +1475,8 @@ class CameraWorker:
                 "borderline_rescue_enabled": rescue_enabled,
                 "borderline_margin": rescue_margin,
                 "borderline_candidate": borderline_candidate,
+                "suppression_verification_rate": self._suppression_verification_rate(),
+                "suppression_verification_candidate": suppression_verification_candidate,
                 "trigger_count": len(triggers),
                 "retry_count": max(
                     (int(item.get("_event_retry_count") or 0) for item in triggers),
@@ -1436,7 +1492,11 @@ class CameraWorker:
             elif mode == "audit":
                 effective_accepted = True
             else:
-                effective_accepted = result.accepted or borderline_candidate
+                effective_accepted = bool(
+                    result.accepted
+                    or borderline_candidate
+                    or suppression_verification_candidate
+                )
             qualification["effective_accepted"] = effective_accepted
             retry_attempt = qualification["retry_count"] > 0
             for item in triggers:
@@ -1453,7 +1513,11 @@ class CameraWorker:
                         self._motion_stats["inconclusive"] += 1
                     if result.accepted:
                         self._motion_stats["passed"] += 1
-                    elif mode in {"camera", "adaptive", "enforce"} and not borderline_candidate:
+                    elif (
+                        mode in {"camera", "adaptive", "enforce"}
+                        and not borderline_candidate
+                        and not suppression_verification_candidate
+                    ):
                         self._motion_stats["suppressed"] += 1
                     elif mode == "audit":
                         self._motion_stats["audit_rejected"] += 1
@@ -1504,11 +1568,16 @@ class CameraWorker:
                     str(representative["message"]),
                     event_at,
                     qualification,
+                    require_eligible_object=bool(
+                        borderline_candidate or suppression_verification_candidate
+                    ),
                 )
-                self._active_incident_event_id = int(outcome["event_id"])
-                # The incident is durable once the handler returns. Later audit or
-                # notification failures must not replay detection and duplicate it.
-                self._active_motion_triggers = None
+                event_id = outcome.get("event_id")
+                if event_id is not None:
+                    self._active_incident_event_id = int(event_id)
+                    # The incident is durable once the handler returns. Later audit or
+                    # notification failures must not replay detection and duplicate it.
+                    self._active_motion_triggers = None
                 object_outcome = outcome.get("object_detected")
                 found_object = object_outcome is True
                 if borderline_candidate and found_object:
@@ -1517,13 +1586,24 @@ class CameraWorker:
                 elif mode in {"camera", "adaptive", "enforce"} and borderline_candidate:
                     with self._motion_stats_lock:
                         self._motion_stats["suppressed"] += 1
+                if suppression_verification_candidate:
+                    with self._motion_stats_lock:
+                        self._motion_stats["suppression_verification_checks"] += 1
+                        if found_object:
+                            self._motion_stats["suppression_verification_rescues"] += 1
+                        else:
+                            self._motion_stats["suppressed"] += 1
                 if mode == "audit" and not result.accepted and found_object:
                     with self._motion_stats_lock:
                         self._motion_stats["audit_object_matches"] += 1
                 if mode in {"audit", "camera", "adaptive", "enforce"} and not result.accepted:
+                    audit_snapshot_path = str(outcome.get("snapshot_path") or "")
+                    if not audit_snapshot_path and event_id is None:
+                        audit_snapshot_path = self._sample_rejected_motion(event_at, result)
                     self.motion_decision_handler.record_audit(
-                        event_id=int(outcome["event_id"]),
-                        snapshot_path=str(outcome.get("snapshot_path") or ""),
+                        event_id=int(event_id) if event_id is not None else None,
+                        decision_id=decision_id if event_id is None else "",
+                        snapshot_path=audit_snapshot_path,
                         event_at=event_at,
                         mode=mode,
                         sensitivity=sensitivity,
@@ -1532,7 +1612,10 @@ class CameraWorker:
                         reason=result.reason,
                         object_detected=object_outcome,
                         trigger_count=len(triggers),
-                        features=self._audit_features(result),
+                        features={
+                            **self._audit_features(result),
+                            "suppression_verification": suppression_verification_candidate,
+                        },
                     )
             finally:
                 self._complete_adaptive_trigger(triggers)
@@ -1564,12 +1647,15 @@ class CameraWorker:
         message: str,
         event_at: datetime,
         qualification: dict[str, Any],
+        *,
+        require_eligible_object: bool = False,
     ) -> dict[str, Any]:
         return self.motion_decision_handler.handle(
             topic,
             message,
             event_at,
             qualification,
+            require_eligible_object=require_eligible_object,
         ).as_dict()
 
     def _related_incident_event_id(self, result: MotionQualificationResult) -> int | None:

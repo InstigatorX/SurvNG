@@ -709,6 +709,119 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertTrue(CameraWorker._is_borderline_candidate(result, True, 0.03))
 
+    def test_suppression_verification_sampling_is_stable_per_decision(self) -> None:
+        decision_id = "fixed-decision"
+
+        first = CameraWorker._should_verify_suppression(decision_id, 0.5)
+
+        self.assertEqual(
+            first,
+            CameraWorker._should_verify_suppression(decision_id, 0.5),
+        )
+        self.assertFalse(CameraWorker._should_verify_suppression(decision_id, 0.0))
+        self.assertTrue(CameraWorker._should_verify_suppression(decision_id, 1.0))
+
+    def test_camera_mode_reduces_background_upkeep_without_throttling_adaptive_mode(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            camera_mode = make_worker(
+                camera,
+                Path(tmpdir),
+                motion_config=MotionQualificationConfig(
+                    mode="camera",
+                    sample_fps=5.0,
+                    camera_mode_background_fps=2.0,
+                ),
+            )
+            camera_mode._motion_primary_last_processed_at = 10.0
+            self.assertFalse(camera_mode._continuous_primary_analysis_due(10.2))
+            self.assertTrue(camera_mode._continuous_primary_analysis_due(10.5))
+
+            adaptive_mode = make_worker(
+                camera,
+                Path(tmpdir),
+                motion_config=MotionQualificationConfig(
+                    mode="adaptive",
+                    camera_mode_background_fps=0.5,
+                ),
+            )
+            adaptive_mode._motion_primary_last_processed_at = 10.0
+            self.assertTrue(adaptive_mode._continuous_primary_analysis_due(10.01))
+
+    def test_sampled_visual_rejection_runs_detector_without_creating_empty_incident(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera",
+            burst_quiet_seconds=0.1,
+            suppression_verification_rate=1.0,
+        )
+        rejected = MotionQualificationResult(False, 0.2, 0.5, "stationary_foreground", 3, {})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            with (
+                patch.object(worker, "_qualify_motion_burst", return_value=(rejected, {})),
+                patch.object(
+                    worker,
+                    "_process_motion_event",
+                    return_value={"event_id": None, "snapshot_path": "checked.jpg", "object_detected": False},
+                ) as process_event,
+                patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
+            ):
+                thread = threading.Thread(target=worker._run_motion_events)
+                thread.start()
+                worker.handle_motion_event("onvif/motion", "motion")
+                deadline = time.monotonic() + 2
+                while record_audit.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                worker._stop.set()
+                worker._motion_queue.put_nowait(None)
+                thread.join(timeout=2)
+
+            process_event.assert_called_once()
+            self.assertTrue(process_event.call_args.kwargs["require_eligible_object"])
+            record_audit.assert_called_once()
+            self.assertIsNone(record_audit.call_args.kwargs["event_id"])
+            self.assertTrue(record_audit.call_args.kwargs["features"]["suppression_verification"])
+            self.assertEqual(worker._motion_stats["suppression_verification_checks"], 1)
+            self.assertEqual(worker._motion_stats["suppression_verification_rescues"], 0)
+            self.assertEqual(worker._motion_stats["suppressed"], 1)
+
+    def test_sampled_visual_rejection_is_restored_when_detector_finds_object(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera",
+            burst_quiet_seconds=0.1,
+            suppression_verification_rate=1.0,
+        )
+        rejected = MotionQualificationResult(False, 0.2, 0.5, "micro_jitter", 3, {})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            with (
+                patch.object(worker, "_qualify_motion_burst", return_value=(rejected, {})),
+                patch.object(
+                    worker,
+                    "_process_motion_event",
+                    return_value={"event_id": 9, "snapshot_path": "person.jpg", "object_detected": True},
+                ),
+                patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
+            ):
+                thread = threading.Thread(target=worker._run_motion_events)
+                thread.start()
+                worker.handle_motion_event("onvif/motion", "motion")
+                deadline = time.monotonic() + 2
+                while record_audit.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                worker._stop.set()
+                worker._motion_queue.put_nowait(None)
+                thread.join(timeout=2)
+
+            self.assertEqual(record_audit.call_args.kwargs["event_id"], 9)
+            self.assertEqual(worker._motion_stats["suppression_verification_checks"], 1)
+            self.assertEqual(worker._motion_stats["suppression_verification_rescues"], 1)
+            self.assertEqual(worker._motion_stats["suppressed"], 0)
+
     def test_fusion_failure_cannot_rescue_rejected_adaptive_trigger(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         rejected = MotionQualificationResult(False, 0.2, 0.48, "noise", 4, {})

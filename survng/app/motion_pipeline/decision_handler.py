@@ -55,7 +55,7 @@ class MotionEventStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class MotionDecisionOutcome:
-    event_id: int
+    event_id: int | None
     snapshot_path: str
     object_detected: bool | None
 
@@ -92,6 +92,8 @@ class MotionDecisionHandler:
         message: str,
         event_at: datetime,
         qualification: dict[str, Any],
+        *,
+        require_eligible_object: bool = False,
     ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
         frame, objects, recording_path = self.detection_provider(event_at)
@@ -110,10 +112,7 @@ class MotionDecisionHandler:
             max(0.0, (processed_at - normalized_event_at).total_seconds()),
             3,
         )
-        snapshot_path = ""
-        if frame is not None:
-            snapshot_path = self.snapshot_writer(frame, event_at)
-        else:
+        if frame is None:
             objects = [{"status": "no_recorded_frame"}]
 
         detection_completed = frame is not None and not detection_failure(objects)
@@ -123,10 +122,26 @@ class MotionDecisionHandler:
             for detected in objects
             if detected.get("label") and detected.get("incident_eligible") is not False
         ]
+        verification_candidate = bool(qualification.get("suppression_verification_candidate"))
         if qualification.get("borderline_candidate"):
             qualification["rescued_by_object"] = bool(eligible_objects)
             qualification["effective_accepted"] = bool(eligible_objects)
             qualification["would_suppress"] = not bool(eligible_objects)
+        if verification_candidate:
+            qualification["suppression_verification_rescued"] = bool(eligible_objects)
+            qualification["effective_accepted"] = bool(eligible_objects)
+            qualification["would_suppress"] = not bool(eligible_objects)
+
+        if require_eligible_object and not eligible_objects:
+            return MotionDecisionOutcome(
+                event_id=None,
+                snapshot_path="",
+                object_detected=False if detection_completed else None,
+            )
+
+        snapshot_path = ""
+        if frame is not None:
+            snapshot_path = self.snapshot_writer(frame, event_at)
 
         stored_objects = [
             *objects,
