@@ -17,6 +17,7 @@ from survng.app.audit_ai import (
     AuditAiChange,
     AuditAiError,
     SYSTEM_PROMPT,
+    motion_audit_interpretation,
     motion_paradigm_context,
     validate_tuning_value,
 )
@@ -24,6 +25,23 @@ from survng.app.config import AuditAiConfig
 
 
 class AuditAiTest(unittest.TestCase):
+    def test_active_and_cooldown_audits_are_duplicate_control_not_detector_misses(self) -> None:
+        active = motion_audit_interpretation(
+            reason="event_state_active",
+            event_id=None,
+            object_detected=None,
+        )
+        cooldown = motion_audit_interpretation(
+            reason="event_state_cooldown",
+            event_id=None,
+            object_detected=None,
+        )
+
+        self.assertEqual(active["category"], "duplicate_active_event")
+        self.assertEqual(cooldown["category"], "duplicate_event_cooldown")
+        self.assertFalse(active["object_detection_miss"])
+        self.assertFalse(cooldown["object_detection_miss"])
+
     def test_prompt_describes_current_trigger_validator_paradigm(self) -> None:
         self.assertIn("camera_triggered", SYSTEM_PROMPT)
         self.assertIn("visual_triggered", SYSTEM_PROMPT)

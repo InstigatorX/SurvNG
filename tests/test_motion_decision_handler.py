@@ -123,7 +123,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         )
 
         audit = handler.record_audit(
-            event_id=42,
+            related_event_id=42,
             event_at=datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc),
             snapshot_path="snapshot.jpg",
             mode="audit",
@@ -138,7 +138,8 @@ class MotionDecisionHandlerTest(unittest.TestCase):
 
         self.assertEqual(audit["id"], 7)
         self.assertEqual(events.audit_payload["camera_id"], "gate")
-        self.assertEqual(events.audit_payload["event_id"], 42)
+        self.assertIsNone(events.audit_payload["event_id"])
+        self.assertEqual(events.audit_payload["related_event_id"], 42)
         self.assertEqual(published, [("motion_audit", audit)])
 
     def test_post_commit_notification_failure_does_not_replay_incident(self) -> None:

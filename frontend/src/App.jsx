@@ -1818,7 +1818,8 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const preview = selectedPreview || incident;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
-  const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}`;
+  const observationCount = Number(incident.motion_observation_count || incident.motion_observations?.length || 0);
+  const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} linked observation${observationCount === 1 ? "" : "s"}` : ""}`;
   const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
     ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
     : formatDateTime(incident.created_at, timeZone);
@@ -1989,6 +1990,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
         <h3>Incident</h3>
         <dl>
           <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
+          <div><dt>Linked observations</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
           <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
           <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
           <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
@@ -5167,6 +5169,9 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
 }
 
 function motionAuditOutcome(item) {
+  if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
+  if (item.interpretation?.category === "duplicate_event_cooldown") return { label: "Duplicate · cooldown", className: "not-run" };
+  if (item.interpretation?.category === "filtered_before_object_detection") return { label: "Filtered before detection", className: "not-run" };
   if (item.object_detected === true) return { label: "Object found", className: "object" };
   if (item.object_detected === false) return { label: "No object", className: "clear" };
   return { label: "Not run", className: "not-run" };
@@ -5415,6 +5420,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
           <aside className="motion-audit-overlay-details">
             <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
             <div className="motion-audit-overlay-score"><span>{String(item.reason || "rejected").replaceAll("_", " ")}</span><strong>{Number(item.score || 0).toFixed(3)} / {Number(item.threshold || 0).toFixed(3)}</strong></div>
+            {item.interpretation?.explanation ? <div className="motion-analysis-warning">{item.interpretation.explanation}</div> : null}
             <div className="motion-audit-meter"><i style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0) * 100))}%` }} /><b style={{ left: `${Math.max(0, Math.min(100, Number(item.threshold || 0) * 100))}%` }} /></div>
             <dl>
               {Object.entries(item.features || {}).filter(([, value]) => typeof value === "number").map(([name, value]) => <div key={name}><dt>{name.replaceAll("_", " ")}</dt><dd>{Number(value).toFixed(3)}</dd></div>)}

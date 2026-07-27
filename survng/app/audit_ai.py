@@ -175,6 +175,10 @@ An audit can represent motion suppressed before object detection, or a borderlin
 that proceeded to object detection. Use decision_outcome.object_detection_ran and object_detected
 to distinguish those cases. A null object_detected value means detection did not run, not that the
 frame contained no real subject. Likewise, no detected object is not definitive visual ground truth.
+event_state_active and event_state_cooldown mean a repeated notification was suppressed while an
+event was already active or cooling down; they are duplicate-control outcomes, not motion failures.
+Check related_prior_event before claiming an incident was missed. Never claim object detection used
+the motion frame width: frame_width describes the adaptive motion-analysis copy, not detector input.
 
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed and prefer camera-scoped changes over global changes. Recommend
@@ -185,6 +189,57 @@ explain relevant evidence, but never recommend changing their topology. Do not r
 sensitivity merely because an object exists.
 Do not invent settings, alter model confidence, or recommend values outside the supplied bounds.
 Return only the requested JSON structure."""
+
+
+def motion_audit_interpretation(
+    *,
+    reason: object,
+    event_id: object,
+    object_detected: object,
+) -> dict[str, Any]:
+    normalized_reason = str(reason or "unknown").strip().lower()
+    detection_ran = bool(event_id)
+    if normalized_reason == "event_state_active" and not detection_ran:
+        return {
+            "category": "duplicate_active_event",
+            "label": "Duplicate while event active",
+            "object_detection_miss": False,
+            "explanation": "A repeated motion notice was suppressed because the event state was already active.",
+        }
+    if normalized_reason == "event_state_cooldown" and not detection_ran:
+        return {
+            "category": "duplicate_event_cooldown",
+            "label": "Duplicate during cooldown",
+            "object_detection_miss": False,
+            "explanation": "A repeated motion notice was suppressed during the post-event cooldown period.",
+        }
+    if not detection_ran:
+        return {
+            "category": "filtered_before_object_detection",
+            "label": "Filtered before object detection",
+            "object_detection_miss": False,
+            "explanation": "The motion decision did not proceed to object detection.",
+        }
+    if object_detected is None:
+        return {
+            "category": "object_detection_incomplete",
+            "label": "Object detection incomplete",
+            "object_detection_miss": False,
+            "explanation": "Object detection was attempted but did not complete successfully.",
+        }
+    if bool(object_detected):
+        return {
+            "category": "eligible_object_found",
+            "label": "Object found",
+            "object_detection_miss": False,
+            "explanation": "Object detection completed and found an incident-eligible object.",
+        }
+    return {
+        "category": "no_eligible_object_found",
+        "label": "No eligible object found",
+        "object_detection_miss": None,
+        "explanation": "Object detection completed without an incident-eligible object; visual review may identify a detector miss.",
+    }
 
 
 def motion_paradigm_context(

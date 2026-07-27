@@ -121,6 +121,7 @@ class CameraWorker:
         self._motion_retry_batches: deque[dict[str, Any]] = deque()
         self._motion_thread: threading.Thread | None = None
         self._active_motion_triggers: list[dict[str, Any]] | None = None
+        self._active_incident_event_id: int | None = None
         self._adaptive_trigger_pending = False
         self._adaptive_last_completed_at = 0.0
         self._priority_motion_times: deque[float] = deque(maxlen=16)
@@ -208,6 +209,7 @@ class CameraWorker:
         with self._lifecycle_lock:
             self._enabled = False
             self._stop.set()
+            self._active_incident_event_id = None
             with self._frame_lock:
                 stops = list(self._source_stops.values())
                 threads = list(self._source_threads.items())
@@ -1489,6 +1491,7 @@ class CameraWorker:
                         object_detected=None,
                         trigger_count=len(triggers),
                         features=self._audit_features(result),
+                        related_event_id=self._related_incident_event_id(result),
                     )
                 finally:
                     self._complete_adaptive_trigger(triggers)
@@ -1502,6 +1505,7 @@ class CameraWorker:
                     event_at,
                     qualification,
                 )
+                self._active_incident_event_id = int(outcome["event_id"])
                 # The incident is durable once the handler returns. Later audit or
                 # notification failures must not replay detection and duplicate it.
                 self._active_motion_triggers = None
@@ -1567,6 +1571,11 @@ class CameraWorker:
             event_at,
             qualification,
         ).as_dict()
+
+    def _related_incident_event_id(self, result: MotionQualificationResult) -> int | None:
+        if result.reason not in {"event_state_active", "event_state_cooldown"}:
+            return None
+        return self._active_incident_event_id
 
     def _start_source(self, source: str) -> bool:
         source = self.camera.normalized_source(source)

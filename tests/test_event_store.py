@@ -326,6 +326,37 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["decision_id"], "decision-gate-1800")
             self.assertEqual(rows[0]["snapshot_path"], "snapshot-now-available.jpg")
 
+    def test_active_observation_links_to_incident_and_legacy_row_is_backfilled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = store.add_event(
+                camera_id="foyer",
+                kind="motion",
+                created_at="2026-07-27T12:17:07+00:00",
+                objects_json=json.dumps([{"label": "person", "confidence": 0.9}]),
+            )
+            audit = store.add_motion_audit(
+                camera_id="foyer",
+                snapshot_path="audit.jpg",
+                created_at="2026-07-27T12:17:16+00:00",
+                mode="camera",
+                sensitivity="balanced",
+                score=0.728,
+                threshold=0.4817,
+                reason="event_state_active",
+                object_detected=None,
+                trigger_count=1,
+                features={},
+            )
+            self.assertIsNone(audit["related_event_id"])
+
+            reloaded = EventStore(Path(tmpdir))
+            linked = reloaded.get_motion_audit(int(audit["id"]))
+            observations = reloaded.motion_audits_for_related_events([int(event["id"])])
+
+            self.assertEqual(linked["related_event_id"], event["id"])
+            self.assertEqual([row["id"] for row in observations], [audit["id"]])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,7 @@ class MotionEventStore(Protocol):
         trigger_count: int,
         features: dict[str, Any],
         event_id: int | None = None,
+        related_event_id: int | None = None,
         decision_id: str = "",
     ) -> dict[str, Any]:
         ...
@@ -170,10 +171,12 @@ class MotionDecisionHandler:
         trigger_count: int,
         features: dict[str, Any],
         event_id: int | None = None,
+        related_event_id: int | None = None,
         decision_id: str = "",
     ) -> dict[str, Any]:
         audit = self.events.add_motion_audit(
             event_id=event_id,
+            related_event_id=related_event_id,
             decision_id=decision_id,
             camera_id=self.camera_id,
             snapshot_path=snapshot_path,

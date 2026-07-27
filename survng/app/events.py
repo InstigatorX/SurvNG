@@ -58,6 +58,7 @@ class EventStore:
                 create table if not exists motion_audits (
                     id integer primary key autoincrement,
                     event_id integer,
+                    related_event_id integer,
                     decision_id text,
                     camera_id text not null,
                     snapshot_path text not null default '',
@@ -79,6 +80,8 @@ class EventStore:
             }
             if "decision_id" not in columns:
                 conn.execute("alter table motion_audits add column decision_id text")
+            if "related_event_id" not in columns:
+                conn.execute("alter table motion_audits add column related_event_id integer")
             conn.execute(
                 "create index if not exists idx_motion_audits_created_at on motion_audits(created_at desc, id desc)"
             )
@@ -86,10 +89,38 @@ class EventStore:
                 "create index if not exists idx_motion_audits_camera_created_at on motion_audits(camera_id, created_at desc)"
             )
             conn.execute(
+                "create index if not exists idx_motion_audits_related_event on motion_audits(related_event_id, created_at) where related_event_id is not null"
+            )
+            conn.execute(
                 "create unique index if not exists idx_motion_audits_event on motion_audits(event_id) where event_id is not null"
             )
             conn.execute(
                 "create unique index if not exists idx_motion_audits_decision on motion_audits(decision_id) where decision_id is not null and decision_id != ''"
+            )
+            # Older active/cooldown observations predate durable linkage. The
+            # state reason guarantees they belong to an already-created event;
+            # attach them to the nearest preceding event for the same camera.
+            conn.execute(
+                """
+                update motion_audits as audit
+                set related_event_id = (
+                    select event.id from events as event
+                    where event.camera_id = audit.camera_id
+                      and julianday(event.created_at) <= julianday(audit.created_at)
+                      and (julianday(audit.created_at) - julianday(event.created_at)) * 86400.0 <= 300.0
+                    order by julianday(event.created_at) desc, event.id desc
+                    limit 1
+                )
+                where audit.related_event_id is null
+                  and audit.event_id is null
+                  and audit.reason in ('event_state_active', 'event_state_cooldown')
+                  and exists (
+                    select 1 from events as event
+                    where event.camera_id = audit.camera_id
+                      and julianday(event.created_at) <= julianday(audit.created_at)
+                      and (julianday(audit.created_at) - julianday(event.created_at)) * 86400.0 <= 300.0
+                )
+                """
             )
             storage_root = str(self.db_path.parent.resolve())
             if self._metadata_value(conn, "event_storage_root") != storage_root:
@@ -304,6 +335,7 @@ class EventStore:
         trigger_count: int,
         features: dict[str, Any],
         event_id: int | None = None,
+        related_event_id: int | None = None,
         decision_id: str = "",
     ) -> dict[str, Any]:
         normalized_object_detected = (
@@ -311,6 +343,11 @@ class EventStore:
         )
         normalized_trigger_count = max(1, int(trigger_count))
         normalized_decision_id = str(decision_id or "").strip()
+        normalized_related_event_id = (
+            int(related_event_id) if related_event_id is not None else None
+        )
+        if normalized_related_event_id is not None and normalized_related_event_id <= 0:
+            raise ValueError("related motion event id must be positive")
         if len(normalized_decision_id) > 128:
             raise ValueError("motion audit decision_id must be at most 128 characters")
         normalized_score = float(score)
@@ -334,7 +371,8 @@ class EventStore:
                     conn.execute(
                         """
                         update motion_audits
-                        set event_id = coalesce(?, event_id), camera_id = ?,
+                        set event_id = coalesce(?, event_id),
+                            related_event_id = coalesce(?, related_event_id), camera_id = ?,
                             snapshot_path = ?, created_at = ?, mode = ?,
                             sensitivity = ?, score = ?, threshold = ?, reason = ?,
                             object_detected = ?, trigger_count = ?, features_json = ?
@@ -342,6 +380,7 @@ class EventStore:
                         """,
                         (
                             event_id,
+                            normalized_related_event_id,
                             camera_id,
                             snapshot_path,
                             created_at,
@@ -364,6 +403,7 @@ class EventStore:
                       and mode = ? and sensitivity = ? and reason = ?
                       and snapshot_path = ? and score = ? and threshold = ?
                       and object_detected is ? and trigger_count = ?
+                      and related_event_id is ?
                       and features_json = ?
                     order by id asc limit 1
                     """,
@@ -378,6 +418,7 @@ class EventStore:
                         normalized_threshold,
                         normalized_object_detected,
                         normalized_trigger_count,
+                        normalized_related_event_id,
                         features_json,
                     ),
                 ).fetchone()
@@ -387,13 +428,14 @@ class EventStore:
                 cursor = conn.execute(
                     """
                     insert or ignore into motion_audits (
-                        event_id, decision_id, camera_id, snapshot_path, created_at, mode,
+                        event_id, related_event_id, decision_id, camera_id, snapshot_path, created_at, mode,
                         sensitivity, score, threshold, reason, object_detected,
                         trigger_count, features_json
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
+                        normalized_related_event_id,
                         normalized_decision_id or None,
                         camera_id,
                         snapshot_path,
@@ -473,6 +515,26 @@ class EventStore:
                 (int(audit_id),),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def motion_audits_for_related_events(self, event_ids: list[int]) -> list[dict[str, Any]]:
+        unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
+        if not unique_ids:
+            return []
+        audits: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            for offset in range(0, len(unique_ids), 500):
+                chunk = unique_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    select * from motion_audits
+                    where related_event_id in ({placeholders})
+                    order by created_at asc, id asc
+                    """,
+                    chunk,
+                ).fetchall()
+                audits.extend(dict(row) for row in rows)
+        return audits
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(int(limit), 10000))

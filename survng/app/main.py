@@ -41,6 +41,7 @@ from .audit_ai import (
     AuditAiAdvisor,
     AuditAiChange,
     AuditAiError,
+    motion_audit_interpretation,
     motion_paradigm_context,
     validate_tuning_value,
 )
@@ -1513,6 +1514,11 @@ def _motion_audit_row(row: dict, storage_dir: Path) -> dict:
         audit["has_snapshot"] = False
     raw_outcome = audit.get("object_detected")
     audit["object_detected"] = None if raw_outcome is None else bool(raw_outcome)
+    audit["interpretation"] = motion_audit_interpretation(
+        reason=audit.get("reason"),
+        event_id=audit.get("event_id"),
+        object_detected=audit["object_detected"],
+    )
     return audit
 
 
@@ -1603,6 +1609,55 @@ def _audit_ai_context(
         reason = str(row.get("reason") or "unknown")
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
         object_matches += int(row.get("object_detected") == 1)
+    interpretation = motion_audit_interpretation(
+        reason=audit.get("reason"),
+        event_id=audit.get("event_id"),
+        object_detected=audit.get("object_detected"),
+    )
+    related_prior_event: dict[str, Any] | None = None
+    if interpretation["category"] in {"duplicate_active_event", "duplicate_event_cooldown"}:
+        related_id = audit.get("related_event_id")
+        prior = active_manager.events.get(int(related_id)) if related_id else None
+        try:
+            audit_at = datetime.fromisoformat(str(audit.get("created_at")))
+        except (TypeError, ValueError):
+            audit_at = None
+        if prior is None and audit_at is not None:
+            nearby_events = active_manager.events.for_camera_range(
+                camera_id,
+                (audit_at - timedelta(seconds=60)).isoformat(),
+                audit_at.isoformat(),
+                limit=50,
+            )
+            prior = nearby_events[-1] if nearby_events else None
+        if prior is not None:
+            try:
+                prior_entries = json.loads(str(prior.get("objects_json") or "[]"))
+            except (json.JSONDecodeError, TypeError):
+                prior_entries = []
+            prior_objects = [
+                {
+                    "label": entry.get("label"),
+                    "confidence": entry.get("confidence"),
+                    "incident_eligible": entry.get("incident_eligible", True),
+                }
+                for entry in prior_entries if isinstance(entry, dict) and entry.get("label")
+            ] if isinstance(prior_entries, list) else []
+            try:
+                if audit_at is None:
+                    raise ValueError("audit timestamp unavailable")
+                seconds_before = max(
+                    0.0,
+                    (audit_at - datetime.fromisoformat(str(prior.get("created_at")))).total_seconds(),
+                )
+            except (TypeError, ValueError):
+                seconds_before = None
+            related_prior_event = {
+                "event_id": prior.get("id"),
+                "created_at": prior.get("created_at"),
+                "seconds_before": seconds_before,
+                "objects": prior_objects,
+            }
     return {
         "motion_paradigm": motion_paradigm_context(
             mode=effective_mode,
@@ -1625,6 +1680,7 @@ def _audit_ai_context(
             "pipeline_telemetry": pipeline_telemetry,
         },
         "decision_outcome": {
+            "interpretation": interpretation,
             "filtered_before_object_detection": not bool(audit.get("event_id")),
             "object_detection_ran": bool(audit.get("event_id")),
             "object_detection_completed": audit.get("object_detected") is not None,
@@ -1635,6 +1691,7 @@ def _audit_ai_context(
             ),
             "eligible_object_found": audit.get("object_detected") == 1,
         },
+        "related_prior_event": related_prior_event,
         "detected_objects": detected_objects,
         "effective_settings": effective,
         "recent_camera_audits": {
@@ -3298,6 +3355,14 @@ def _hydrate_incidents(summaries: list[dict]) -> list[dict]:
         int(event["id"]): _event_row(event)
         for event in manager.events.get_many(event_ids)
     }
+    observations_by_event: dict[int, list[dict]] = {}
+    for audit in manager.events.motion_audits_for_related_events(event_ids):
+        related_event_id = int(audit.get("related_event_id") or 0)
+        observations_by_event.setdefault(related_event_id, []).append(
+            _motion_audit_row(audit, manager.storage_dir)
+        )
+    for event_id, event in full_events.items():
+        event["motion_observations"] = observations_by_event.get(event_id, [])
     hydrated: list[dict] = []
     for summary in summaries:
         events = [
@@ -3386,7 +3451,17 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
     labels = sorted({label for event in ordered for label in event.get("labels", [])})
     zones = sorted({zone for event in ordered for zone in event.get("zones", [])})
     start_epoch = event_epoch(first)
-    last_epoch = event_epoch(last)
+    motion_observations = sorted(
+        [
+            observation
+            for event in ordered
+            for observation in event.get("motion_observations", [])
+            if isinstance(observation, dict)
+        ],
+        key=event_epoch,
+    )
+    final_item = max([last, *motion_observations], key=event_epoch)
+    last_epoch = event_epoch(final_item)
     object_count = sum(1 for event in ordered if event.get("has_objects"))
     incident = {
         **representative_payload,
@@ -3397,16 +3472,18 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         "kind": "motion",
         "created_at": representative.get("created_at"),
         "start_at": first.get("created_at"),
-        "end_at": last.get("created_at"),
+        "end_at": final_item.get("created_at"),
         "start_epoch": start_epoch,
         "last_epoch": last_epoch,
         "duration_seconds": max(0.0, last_epoch - start_epoch),
         "event_count": len(ordered),
+        "motion_observation_count": len(motion_observations),
         "object_event_count": object_count,
         "has_objects": bool(labels),
         "labels": labels,
         "zones": zones,
         "events": [_incident_event_payload(event) for event in reversed(ordered)],
+        "motion_observations": list(reversed(motion_observations)),
     }
     return incident
 

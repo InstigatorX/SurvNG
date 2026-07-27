@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,11 @@ from survng.app.recorder import Recorder
 
 
 class RecorderTest(unittest.TestCase):
+    @staticmethod
+    def _age_file(path: Path, seconds: float = 30.0) -> None:
+        old_epoch = time.time() - seconds
+        os.utime(path, (old_epoch, old_epoch))
+
     @staticmethod
     def _row(path: Path, start_epoch: float = 1_784_000_000.0) -> dict:
         return {
@@ -270,6 +277,28 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in rows], [clip.name for clip in clips])
 
+    def test_active_recorder_hides_segment_started_before_hour_rollover_until_finalized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now_epoch = time.time()
+            clip_start = now_epoch - 1
+            previous_hour = datetime.fromtimestamp(now_epoch - 3600)
+            hour_dir = (
+                Path(tmpdir) / "recordings" / "front-door" / "live"
+                / previous_hour.strftime("%Y-%m-%d") / previous_hour.strftime("%H")
+            )
+            hour_dir.mkdir(parents=True)
+            clip = hour_dir / datetime.fromtimestamp(clip_start).strftime("%Y%m%d-%H%M%S.mp4")
+            clip.write_bytes(b"still growing")
+            process = Mock()
+            process.poll.return_value = None
+            recorder.processes[("front-door", "live")] = (process, None, Mock(), Mock())
+
+            with patch("survng.app.recorder.time.time", return_value=now_epoch):
+                rows = recorder._recording_rows_for_files("front-door", "live", [clip])
+
+        self.assertEqual(rows, [])
+
     def test_recording_availability_merges_segments_but_preserves_gaps(self) -> None:
         rows = [
             {"start_epoch": 100.0, "end_epoch": 110.0},
@@ -458,6 +487,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "startup.mp4"
             clip.write_bytes(b"recording")
+            self._age_file(clip)
             row = self._row(clip)
             recorder._store_recording_rows("front-door", "main", [row])
             recorder.queue_recording_validation([row])
@@ -476,11 +506,59 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["playable"], 1)
         self.assertEqual(indexed["validated"], 1)
 
+    def test_validation_defers_a_segment_until_ffmpeg_can_finalize_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now_epoch = time.time()
+            clip = Path(tmpdir) / datetime.fromtimestamp(now_epoch - 1).strftime("%Y%m%d-%H%M%S.mp4")
+            clip.write_bytes(b"unfinished mp4")
+            row = self._row(clip, start_epoch=now_epoch - 1)
+            recorder._store_recording_rows("front-door", "main", [row])
+            recorder.queue_recording_validation([row])
+
+            with (
+                patch("survng.app.recorder.time.time", return_value=now_epoch),
+                patch.object(recorder, "_probe_recording") as probe,
+            ):
+                validated = recorder._validate_index_batch(limit=1)
+            with recorder._index_connection() as connection:
+                deferred = dict(connection.execute(
+                    "SELECT playable, validated, health_error FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+            deferred_queued = str(clip) in recorder._validation_pending_set
+
+            old_epoch = now_epoch - 30
+            os.utime(clip, (old_epoch, old_epoch))
+            with (
+                patch("survng.app.recorder.time.time", return_value=now_epoch + 15),
+                patch.object(recorder, "_probe_recording", return_value=(10.0, "")) as retry_probe,
+            ):
+                retried = recorder._validate_index_batch(limit=1)
+            with recorder._index_connection() as connection:
+                restored = dict(connection.execute(
+                    "SELECT playable, validated, health_error FROM recordings WHERE path = ?",
+                    (str(clip),),
+                ).fetchone())
+
+        self.assertEqual(validated, 0)
+        probe.assert_not_called()
+        self.assertEqual(deferred["playable"], 1)
+        self.assertEqual(deferred["validated"], 0)
+        self.assertEqual(deferred["health_error"], "")
+        self.assertTrue(deferred_queued)
+        self.assertEqual(retried, 1)
+        retry_probe.assert_called_once_with(clip)
+        self.assertEqual(restored["playable"], 1)
+        self.assertEqual(restored["validated"], 1)
+        self.assertEqual(restored["health_error"], "")
+
     def test_transient_playback_failure_is_revalidated_and_restored(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "recoverable.mp4"
             clip.write_bytes(b"recording")
+            self._age_file(clip)
             row = self._row(clip)
             row["validated"] = True
             recorder._store_recording_rows("front-door", "main", [row])
@@ -530,6 +608,7 @@ class RecorderTest(unittest.TestCase):
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "unqueued.mp4"
             clip.write_bytes(b"recording")
+            self._age_file(clip)
             row = self._row(clip)
             recorder._store_recording_rows("front-door", "main", [row])
 

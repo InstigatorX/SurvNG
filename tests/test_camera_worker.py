@@ -1148,6 +1148,20 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertFalse(second.accepted)
             self.assertEqual(second.reason, "event_state_active")
 
+    def test_active_and_cooldown_results_link_to_the_active_incident_event(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._active_incident_event_id = 42
+
+            active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
+            cooldown = MotionQualificationResult(False, 0.7, 0.5, "event_state_cooldown", 2, {})
+            unrelated = MotionQualificationResult(False, 0.2, 0.5, "low_score", 2, {})
+
+            self.assertEqual(worker._related_incident_event_id(active), 42)
+            self.assertEqual(worker._related_incident_event_id(cooldown), 42)
+            self.assertIsNone(worker._related_incident_event_id(unrelated))
+
     def test_powered_off_worker_does_not_start_snapshot_source(self) -> None:
         camera = CameraConfig(
             id="back-middle",

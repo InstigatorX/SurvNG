@@ -34,12 +34,26 @@ class EventApiSerializationTest(unittest.TestCase):
             def motion_audits(**_kwargs):
                 return [], 0
 
+            @staticmethod
+            def for_camera_range(_camera_id, _start_at, _end_at, limit=1000):
+                return [{
+                    "id": 99,
+                    "created_at": "2026-07-27T12:17:07+00:00",
+                    "objects_json": json.dumps([{
+                        "label": "person",
+                        "confidence": 0.9048,
+                        "incident_eligible": True,
+                    }]),
+                }]
+
         manager = type("Manager", (), {"events": Events()})()
         context = main._audit_ai_context(
             {
                 "id": 7,
                 "camera_id": "gate",
                 "features_json": "{}",
+                "created_at": "2026-07-27T12:17:16+00:00",
+                "reason": "event_state_active",
                 "event_id": None,
                 "object_detected": None,
             },
@@ -52,6 +66,13 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertTrue(context["decision_outcome"]["filtered_before_object_detection"])
         self.assertFalse(context["decision_outcome"]["object_detection_ran"])
         self.assertIsNone(context["decision_outcome"]["object_detected"])
+        self.assertEqual(
+            context["decision_outcome"]["interpretation"]["category"],
+            "duplicate_active_event",
+        )
+        self.assertEqual(context["related_prior_event"]["event_id"], 99)
+        self.assertEqual(context["related_prior_event"]["seconds_before"], 9.0)
+        self.assertEqual(context["related_prior_event"]["objects"][0]["label"], "person")
 
     def test_initial_event_stream_does_not_drop_change_racing_snapshot(self) -> None:
         class Request:
@@ -112,6 +133,28 @@ class EventApiSerializationTest(unittest.TestCase):
 
         selected = main._best_incident_event([row])
         self.assertEqual(selected["id"], 1)
+
+    def test_linked_motion_observation_extends_incident_without_duplicate_event(self) -> None:
+        incident = main._incident_row("foyer", [{
+            "id": 42,
+            "camera_id": "foyer",
+            "created_at": "2026-07-27T12:17:07+00:00",
+            "has_objects": True,
+            "labels": ["person"],
+            "zones": [],
+            "objects": [{"label": "person", "confidence": 0.9}],
+            "motion_observations": [{
+                "id": 3278,
+                "created_at": "2026-07-27T12:17:16+00:00",
+                "reason": "event_state_active",
+            }],
+        }])
+
+        self.assertEqual(incident["event_count"], 1)
+        self.assertEqual(incident["motion_observation_count"], 1)
+        self.assertEqual(incident["duration_seconds"], 9.0)
+        self.assertEqual(incident["end_at"], "2026-07-27T12:17:16+00:00")
+        self.assertEqual(incident["motion_observations"][0]["id"], 3278)
 
     def test_motion_audit_snapshot_status_is_confined_to_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as outside:

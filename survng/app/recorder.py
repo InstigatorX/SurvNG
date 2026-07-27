@@ -27,6 +27,8 @@ from .recording_media import mp4_stream_fingerprint
 ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event, threading.Thread]
 RecorderKey = tuple[str, str]
 LOGGER = logging.getLogger(__name__)
+
+RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 DTS_WARNING_WINDOW_SECONDS = 5.0
 DTS_WARNING_RESTART_COUNT = 12
 
@@ -694,11 +696,8 @@ class Recorder:
         with self._lock:
             item = self.processes.get((camera_id, source))
             recorder_active = item is not None and item[0].poll() is None
-        if recorder_active and files:
-            now = datetime.now()
-            current_hour = self._camera_dir(camera_id, source) / now.strftime("%Y-%m-%d") / now.strftime("%H")
-            if files[-1].parent == current_hour:
-                files = files[:-1]
+        if recorder_active and files and self._recording_file_may_be_active(files[-1]):
+            files = files[:-1]
         rows: list[dict] = []
         for index, file_path in enumerate(files):
             try:
@@ -730,6 +729,31 @@ class Recorder:
                 }
             )
         return rows
+
+    def _recording_file_may_be_active(self, path: Path, now_epoch: float | None = None) -> bool:
+        now_epoch = time.time() if now_epoch is None else now_epoch
+        start_epoch = self.recording_start_epoch(path)
+        if start_epoch is not None:
+            return now_epoch < start_epoch + self.segment_seconds + RECORDING_FINALIZE_GRACE_SECONDS
+        try:
+            return now_epoch - path.stat().st_mtime < self.segment_seconds + RECORDING_FINALIZE_GRACE_SECONDS
+        except OSError:
+            return False
+
+    def _recording_file_is_stable(self, path: Path, now_epoch: float | None = None) -> bool:
+        """Return whether FFmpeg has had enough time to finalize a segment."""
+        now_epoch = time.time() if now_epoch is None else now_epoch
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            return False
+        start_epoch = self.recording_start_epoch(path)
+        if (
+            start_epoch is not None
+            and now_epoch < start_epoch + self.segment_seconds + RECORDING_FINALIZE_GRACE_SECONDS
+        ):
+            return False
+        return now_epoch - modified_at >= RECORDING_FINALIZE_GRACE_SECONDS
 
     def _store_recording_rows(self, camera_id: str, source: str, rows: list[dict], validate_new: bool = False) -> None:
         if not rows:
@@ -1027,6 +1051,14 @@ class Recorder:
             path = Path(path_value)
             if not path.is_file():
                 self._delete_index_paths([str(path)])
+                continue
+            if not self._recording_file_is_stable(path):
+                # Keep the row unvalidated. The maintenance loop will retry it
+                # after FFmpeg has closed the file and written the MP4 trailer.
+                with self._validation_lock:
+                    if path_value not in self._validation_pending_set:
+                        self._validation_pending.append(path_value)
+                        self._validation_pending_set.add(path_value)
                 continue
             duration, error = self._probe_recording(path)
             with self._index_connection() as connection:
