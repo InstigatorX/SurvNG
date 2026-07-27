@@ -147,12 +147,14 @@ class BufferedMotionFusionStage:
         weighted_threshold: float | None = None,
         minimum_sources: int = 1,
         require_warmed: bool = True,
+        include_primary: bool = True,
+        fail_open: bool = True,
     ) -> None:
         self._stage_id = stage_id
         self.repository = repository
         self.sources = sources
         normalized_policy = policy.strip().lower()
-        if normalized_policy not in {"audit", "any", "all", "weighted"}:
+        if normalized_policy not in {"audit", "bypass", "any", "all", "weighted"}:
             raise ValueError(f"unsupported motion fusion policy: {policy}")
         self.policy = normalized_policy
         self.source_thresholds = {
@@ -170,6 +172,8 @@ class BufferedMotionFusionStage:
         )
         self.minimum_sources = max(0, int(minimum_sources))
         self.require_warmed = bool(require_warmed)
+        self.include_primary = bool(include_primary)
+        self.fail_open = bool(fail_open)
 
     @property
     def stage_id(self) -> str:
@@ -221,7 +225,28 @@ class BufferedMotionFusionStage:
         return aggregate
 
     def _apply_policy(self, context: MotionContext) -> None:
+        if (
+            bool(context.configuration.get("require_primary_trigger"))
+            and not context.scoring.accepted
+        ):
+            context.scoring.features.update({
+                "fusion_policy": self.policy,
+                "fusion_applied": False,
+                "fusion_primary_required": True,
+            })
+            context.scoring.reason = "primary_trigger_rejected"
+            return
         if self.policy == "audit":
+            return
+        if self.policy == "bypass":
+            context.scoring.accepted = True
+            context.scoring.score = 1.0
+            context.scoring.reason = "validation_disabled"
+            context.scoring.features.update({
+                "fusion_policy": self.policy,
+                "fusion_applied": True,
+                "fusion_primary_included": False,
+            })
             return
         source_scores: dict[str, float] = {}
         source_votes: dict[str, bool] = {}
@@ -243,20 +268,33 @@ class BufferedMotionFusionStage:
         features["fusion_policy"] = self.policy
         features["fusion_sources_considered"] = sorted(source_scores)
         features["fusion_primary_accepted"] = context.scoring.accepted
+        features["fusion_primary_included"] = self.include_primary
         if len(source_scores) < self.minimum_sources:
             features["fusion_applied"] = False
             features["fusion_reason"] = "insufficient_sources"
+            if self.fail_open:
+                context.scoring.accepted = True
+                context.scoring.score = 1.0
+                context.scoring.reason = "validation_unavailable_fail_open"
+            else:
+                context.scoring.accepted = False
+                context.scoring.reason = "validation_unavailable_fail_closed"
             return
 
         primary_score = context.scoring.score
+        considered_scores = list(source_scores.values())
+        considered_votes = list(source_votes.values())
+        if self.include_primary:
+            considered_scores.insert(0, primary_score)
+            considered_votes.insert(0, context.scoring.accepted)
         if self.policy == "any":
-            fused_score = max([primary_score, *source_scores.values()])
-            accepted = context.scoring.accepted or any(source_votes.values())
+            fused_score = max(considered_scores, default=primary_score)
+            accepted = any(considered_votes)
         elif self.policy == "all":
-            fused_score = min([primary_score, *source_scores.values()])
-            accepted = context.scoring.accepted and all(source_votes.values())
+            fused_score = min(considered_scores, default=primary_score)
+            accepted = bool(considered_votes) and all(considered_votes)
         else:
-            primary_weight = self.source_weights.get("primary", 1.0)
+            primary_weight = self.source_weights.get("primary", 1.0) if self.include_primary else 0.0
             weighted_total = primary_score * primary_weight
             total_weight = primary_weight
             for source, score in source_scores.items():
@@ -334,11 +372,16 @@ def _build_buffered_fusion(
 ) -> BufferedMotionFusionStage:
     raw_sources = options.get("sources", ("mog2",))
     if isinstance(raw_sources, str):
-        sources = (raw_sources,)
+        source_values = (raw_sources,)
     elif isinstance(raw_sources, (list, tuple)):
-        sources = tuple(str(source) for source in raw_sources)
+        source_values = raw_sources
     else:
         raise ValueError("motion fusion sources must be a list of source names")
+    sources = tuple(dict.fromkeys(
+        normalized
+        for source in source_values
+        if (normalized := str(source).strip().lower())
+    ))
     raw_thresholds = options.get("source_thresholds", {})
     raw_weights = options.get("source_weights", {})
     if not isinstance(raw_thresholds, Mapping):
@@ -364,6 +407,8 @@ def _build_buffered_fusion(
         ),
         minimum_sources=int(options.get("minimum_sources", 1)),
         require_warmed=bool(options.get("require_warmed", True)),
+        include_primary=bool(options.get("include_primary", True)),
+        fail_open=bool(options.get("fail_open", True)),
     )
 
 
@@ -417,12 +462,14 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             description="Combines the normal motion score with recent independent evidence.",
             options=(
                 MotionStageOption("sources", "Extra sources", "string_list", ["mog2", "onvif"]),
-                MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "any", "all", "weighted")),
+                MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "bypass", "any", "all", "weighted")),
                 MotionStageOption("source_thresholds", "Source confidence levels", "object", {}, advanced=True),
                 MotionStageOption("source_weights", "Source importance", "object", {}, advanced=True),
                 MotionStageOption("weighted_threshold", "Combined confidence", "number", 0.5, minimum=0, maximum=1, advanced=True),
                 MotionStageOption("minimum_sources", "Minimum available sources", "integer", 1, minimum=0, advanced=True),
                 MotionStageOption("require_warmed", "Require learned background", "boolean", True, advanced=True),
+                MotionStageOption("include_primary", "Include adaptive analysis", "boolean", True, advanced=True),
+                MotionStageOption("fail_open", "Run detection when validation is unavailable", "boolean", True, advanced=True),
             ),
         )
     )

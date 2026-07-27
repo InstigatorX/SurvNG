@@ -22,6 +22,6 @@ Implementation path:
 2. Add it to the observation graph as its own parallel branch.
 3. Add `optical_flow` thresholds and weights to evidence fusion.
 4. Add global and per-camera GUI controls with an explicit CPU-cost warning.
-5. Benchmark multiple simultaneous cameras before enabling enforcement.
+5. Benchmark multiple simultaneous cameras before enabling optical-flow validation.
 
 Reminder: revisit this item when adding the next motion algorithm or tuning cameras that remain unreliable with ONVIF plus modular frame analysis.

@@ -26,6 +26,7 @@ from .motion_pipeline import (
     MotionPipeline,
     MotionScoring,
     RecordedMotionObjectDetectorFactory,
+    resolved_trigger_mode,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -144,6 +145,8 @@ class CameraWorker:
             "event_retries": 0,
             "event_retry_drops": 0,
             "stale_fusion_samples": 0,
+            "validation_failures": 0,
+            "validation_fail_opens": 0,
             "audit_object_matches": 0,
             "last_result": None,
         }
@@ -466,6 +469,11 @@ class CameraWorker:
             event_at = event_at.astimezone(timezone.utc)
 
         self._observe_motion_event(topic, message, event_at, received_at)
+        configured_mode = self._motion_settings()[0]
+        if configured_mode == "adaptive" and not topic.startswith("manual"):
+            # ONVIF remains useful diagnostic evidence in visual-triggered mode,
+            # but it is never allowed to create an object-detection job.
+            return
         if self._priority_motion_topic(topic):
             self._remember_priority_motion(received_at)
 
@@ -551,6 +559,8 @@ class CameraWorker:
             pass
 
     def _remember_motion_frame(self, frame: np.ndarray, frame_clock: float) -> None:
+        if not self._frame_motion_analysis_required():
+            return
         interval = 1.0 / max(1.0, self.motion_config.sample_fps)
         with self._frame_lock:
             if frame_clock - self._motion_last_sample < interval * 0.85:
@@ -598,7 +608,7 @@ class CameraWorker:
                             runtime=self.motion_observation_pipeline.runtime,
                         )
                         self.motion_observation_pipeline.process(observation)
-                    if self.motion_pipeline.continuous_analysis:
+                    if self.motion_pipeline.continuous_analysis and self._adaptive_analysis_required():
                         self._analyze_continuous_motion(captured_at)
                     elif self.motion_debug.enabled() and time.monotonic() - self._motion_debug_last_run >= 1.0:
                         self._motion_debug_last_run = time.monotonic()
@@ -632,13 +642,14 @@ class CameraWorker:
         with self._motion_stats_lock:
             self._motion_stats["continuous_frames"] += 1
             self._motion_stats["continuous_candidates"] += int(result.accepted)
-        if mode != "enforce" or not self._detection_enabled:
+        if self._trigger_mode() != "adaptive" or not self._detection_enabled:
             return
         fused = self._with_source_evidence(
             result,
             samples[0][0],
             captured_at,
             include_telemetry=False,
+            require_primary_trigger=True,
         )
         self._motion_last_continuous_result = fused
         if not fused.accepted or not self._reserve_adaptive_trigger(captured_at):
@@ -770,6 +781,53 @@ class CameraWorker:
         frame_width = int(override.frame_width or self.motion_config.frame_width)
         return mode, sensitivity, frame_width
 
+    def _trigger_mode(self) -> str:
+        return resolved_trigger_mode(self._motion_settings()[0])
+
+    def _fusion_options(self) -> dict[str, Any]:
+        return next(
+            (
+                dict(stage.get("options") or {})
+                for stage in self.motion_fusion_pipeline.stage_configuration
+                if stage.get("implementation") == "buffered_evidence_fusion"
+            ),
+            {},
+        )
+
+    def _adaptive_analysis_required(self) -> bool:
+        if self._trigger_mode() == "adaptive":
+            return True
+        options = self._fusion_options()
+        return (
+            str(options.get("policy", "audit")).strip().lower() != "bypass"
+            and bool(options.get("include_primary", True))
+        )
+
+    def _external_confirmation_required(self) -> bool:
+        options = self._fusion_options()
+        raw_sources = options.get("sources", [])
+        source_values = (raw_sources,) if isinstance(raw_sources, str) else raw_sources
+        sources = tuple(
+            normalized
+            for source in source_values
+            if (normalized := str(source).strip().lower())
+        ) if isinstance(source_values, (list, tuple)) else ()
+        policy = str(options.get("policy", "audit")).strip().lower()
+        return bool(
+            sources
+            and (
+                policy in {"all", "weighted"}
+                or not bool(options.get("include_primary", True))
+            )
+        )
+
+    def _frame_motion_analysis_required(self) -> bool:
+        return bool(
+            self._adaptive_analysis_required()
+            or self.motion_observation_pipeline.handles_observation("frame")
+            or self.motion_debug.enabled()
+        )
+
     def _motion_rescue_settings(self) -> tuple[bool, float]:
         override = self.camera.motion_qualification
         enabled = (
@@ -784,6 +842,20 @@ class CameraWorker:
         )
         return bool(enabled), float(margin)
 
+    @staticmethod
+    def _is_borderline_candidate(
+        result: MotionQualificationResult,
+        enabled: bool,
+        margin: float,
+    ) -> bool:
+        return bool(
+            enabled
+            and not result.accepted
+            and not result.reason.startswith("event_state_")
+            and result.reason != "validation_unavailable_fail_closed"
+            and result.score >= max(0.0, result.threshold - margin)
+        )
+
     def _with_source_evidence(
         self,
         result: MotionQualificationResult,
@@ -791,6 +863,7 @@ class CameraWorker:
         end_epoch: float,
         *,
         include_telemetry: bool = True,
+        require_primary_trigger: bool = False,
     ) -> MotionQualificationResult:
         with self._motion_fusion_lock:
             stale_by = self._motion_fusion_last_at - end_epoch
@@ -817,6 +890,7 @@ class CameraWorker:
                 configuration={
                     "evidence_started_at": start_epoch,
                     "evidence_ended_at": end_epoch,
+                    "require_primary_trigger": require_primary_trigger,
                 },
                 runtime=self.motion_fusion_pipeline.runtime,
                 scoring=MotionScoring(
@@ -828,7 +902,17 @@ class CameraWorker:
                     features=dict(result.features),
                 ),
             )
-            processed = self.motion_fusion_pipeline.process(context)
+            try:
+                processed = self.motion_fusion_pipeline.process(context)
+            except Exception as error:
+                return self._validation_fail_open_result(
+                    "motion fusion pipeline",
+                    error,
+                    result,
+                    allow_detection=not (
+                        require_primary_trigger and not result.accepted
+                    ),
+                )
             self._motion_fusion_last_at = end_epoch
         scoring = processed.scoring
         decision = processed.decision
@@ -873,6 +957,41 @@ class CameraWorker:
             frame_count=scoring.frame_count,
             features=features,
             telemetry=telemetry,
+        )
+
+    def _validation_fail_open_result(
+        self,
+        component: str,
+        error: Exception,
+        original: MotionQualificationResult | None = None,
+        *,
+        allow_detection: bool = True,
+    ) -> MotionQualificationResult:
+        with self._motion_stats_lock:
+            self._motion_stats["validation_failures"] += 1
+            self._motion_stats["validation_fail_opens"] += int(allow_detection)
+        LOGGER.error(
+            "%s unavailable for %s; %s (%s)",
+            component,
+            self.camera.id,
+            "allowing object detection" if allow_detection else "preserving rejected primary trigger",
+            type(error).__name__,
+        )
+        features = dict(original.features) if original is not None else {}
+        features.update({
+            "validation_unavailable": True,
+            "validation_fail_open": allow_detection,
+            "validation_failure_component": component,
+            "validation_failure_type": type(error).__name__,
+        })
+        return MotionQualificationResult(
+            allow_detection,
+            1.0 if allow_detection else (original.score if original is not None else 0.0),
+            0.0 if allow_detection else (original.threshold if original is not None else 1.0),
+            "validation_unavailable_fail_open" if allow_detection else "primary_trigger_rejected",
+            original.frame_count if original is not None else 0,
+            features,
+            telemetry=dict(original.telemetry) if original is not None else {},
         )
 
     @staticmethod
@@ -921,6 +1040,25 @@ class CameraWorker:
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
         event_epoch = event_at.timestamp()
         anchor = min(event_epoch, received_at) if abs(event_epoch - received_at) <= 10.0 else received_at
+        if not self._adaptive_analysis_required():
+            if self._external_confirmation_required():
+                self._stop.wait(self.motion_config.post_trigger_seconds)
+            result = MotionQualificationResult(
+                False,
+                0.0,
+                1.0,
+                "adaptive_validation_disabled",
+                0,
+                {},
+            )
+            return self._with_source_evidence(
+                result,
+                anchor - self.motion_config.window_seconds,
+                time.time(),
+            ), {
+                "windows_evaluated": 0,
+                "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
+            }
         deadline = time.monotonic() + self.motion_config.post_trigger_seconds
         best_result: MotionQualificationResult | None = None
         evaluated_windows: set[tuple[float, ...]] = set()
@@ -946,15 +1084,24 @@ class CameraWorker:
                 if key in evaluated_windows:
                     continue
                 evaluated_windows.add(key)
-                result = self._run_motion_pipeline(
-                    [item[1] for item in window],
-                    sensitivity,
-                    window_end,
-                    [item[0] for item in window],
-                )
+                try:
+                    result = self._run_motion_pipeline(
+                        [item[1] for item in window],
+                        sensitivity,
+                        window_end,
+                        [item[0] for item in window],
+                    )
+                except Exception as error:
+                    return self._validation_fail_open_result(
+                        "adaptive validation pipeline",
+                        error,
+                    ), {
+                        "windows_evaluated": len(evaluated_windows),
+                        "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
+                    }
                 if best_result is None or result.score > best_result.score:
                     best_result = result
-                if result.accepted:
+                if result.accepted and not self._external_confirmation_required():
                     return self._with_source_evidence(
                         result,
                         anchor - self.motion_config.window_seconds,
@@ -1253,11 +1400,15 @@ class CameraWorker:
             else:
                 result, diagnostics = self._qualify_motion_burst(event_at, received_at, sensitivity)
 
-            borderline_candidate = bool(
-                rescue_enabled
-                and not result.accepted
-                and not result.reason.startswith("event_state_")
-                and result.score >= max(0.0, result.threshold - rescue_margin)
+            if self._stop.is_set():
+                self._complete_adaptive_trigger(triggers)
+                self._active_motion_triggers = None
+                return
+
+            borderline_candidate = self._is_borderline_candidate(
+                result,
+                rescue_enabled,
+                rescue_margin,
             )
             qualification = {
                 **result.as_dict(),
@@ -1273,9 +1424,17 @@ class CameraWorker:
                     (int(item.get("_event_retry_count") or 0) for item in triggers),
                     default=0,
                 ),
-                "would_suppress": bool(mode == "audit" and not result.accepted),
+                "would_suppress": bool(
+                    mode in {"audit", "camera", "adaptive", "enforce"}
+                    and not result.accepted
+                ),
             }
-            effective_accepted = mode != "enforce" or result.accepted or borderline_candidate
+            if mode == "off":
+                effective_accepted = True
+            elif mode == "audit":
+                effective_accepted = True
+            else:
+                effective_accepted = result.accepted or borderline_candidate
             qualification["effective_accepted"] = effective_accepted
             retry_attempt = qualification["retry_count"] > 0
             for item in triggers:
@@ -1292,7 +1451,7 @@ class CameraWorker:
                         self._motion_stats["inconclusive"] += 1
                     if result.accepted:
                         self._motion_stats["passed"] += 1
-                    elif mode == "enforce" and not borderline_candidate:
+                    elif mode in {"camera", "adaptive", "enforce"} and not borderline_candidate:
                         self._motion_stats["suppressed"] += 1
                     elif mode == "audit":
                         self._motion_stats["audit_rejected"] += 1
@@ -1351,13 +1510,13 @@ class CameraWorker:
                 if borderline_candidate and found_object:
                     with self._motion_stats_lock:
                         self._motion_stats["borderline_rescues"] = self._motion_stats.get("borderline_rescues", 0) + 1
-                elif mode == "enforce" and borderline_candidate:
+                elif mode in {"camera", "adaptive", "enforce"} and borderline_candidate:
                     with self._motion_stats_lock:
                         self._motion_stats["suppressed"] += 1
                 if mode == "audit" and not result.accepted and found_object:
                     with self._motion_stats_lock:
                         self._motion_stats["audit_object_matches"] += 1
-                if mode in {"audit", "enforce"} and not result.accepted:
+                if mode in {"audit", "camera", "adaptive", "enforce"} and not result.accepted:
                     self.motion_decision_handler.record_audit(
                         event_id=int(outcome["event_id"]),
                         snapshot_path=str(outcome.get("snapshot_path") or ""),

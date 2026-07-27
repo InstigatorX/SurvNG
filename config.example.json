@@ -7,7 +7,7 @@
   "event_clip_after_seconds": 5.0,
   "recording_segment_seconds": 10.0,
   "motion_qualification": {
-    "mode": "audit",
+    "mode": "camera",
     "sensitivity": "balanced",
     "frame_width": 320,
     "sample_fps": 5.0,
@@ -17,7 +17,7 @@
     "rejected_sample_rate": 1.0,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
-    "mog2_audit_enabled": true,
+    "mog2_audit_enabled": false,
     "mog2_history_seconds": 30.0,
     "pipeline": {
       "qualification": [],

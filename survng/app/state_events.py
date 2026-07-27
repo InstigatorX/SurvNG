@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import uuid
+from copy import deepcopy
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -30,6 +31,17 @@ class StateEventBroker:
         with self._lock:
             return f"{self.instance_id}:{self._next_id - 1}"
 
+    def sequence(self, event_id: str) -> int | None:
+        prefix = f"{self.instance_id}:"
+        value = str(event_id)
+        if not value.startswith(prefix):
+            return None
+        try:
+            sequence = int(value[len(prefix):])
+        except ValueError:
+            return None
+        return sequence if sequence >= 0 else None
+
     def subscribe(self) -> queue.Queue[StateEvent | None]:
         subscriber: queue.Queue[StateEvent | None] = queue.Queue(maxsize=self._subscriber_queue_size)
         with self._lock:
@@ -47,33 +59,37 @@ class StateEventBroker:
         with self._lock:
             if self._closed:
                 return None
-            event = StateEvent(f"{self.instance_id}:{self._next_id}", str(event_type), data)
+            event = StateEvent(
+                f"{self.instance_id}:{self._next_id}",
+                str(event_type),
+                deepcopy(data),
+            )
             self._next_id += 1
             self._history.append(event)
-            subscribers = tuple(self._subscribers)
-        for subscriber in subscribers:
-            try:
-                subscriber.put_nowait(event)
-            except queue.Full:
-                try:
-                    subscriber.get_nowait()
-                except queue.Empty:
-                    pass
+            # Deliver while holding the lifecycle lock so close() cannot enqueue
+            # its sentinel before an already accepted event.
+            for subscriber in tuple(self._subscribers):
                 try:
                     subscriber.put_nowait(event)
                 except queue.Full:
-                    pass
+                    try:
+                        subscriber.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        subscriber.put_nowait(event)
+                    except queue.Full:
+                        pass
         return event
 
     def events_after(self, event_id: str) -> list[StateEvent] | None:
-        prefix = f"{self.instance_id}:"
-        if not str(event_id).startswith(prefix):
-            return None
-        try:
-            sequence = int(str(event_id)[len(prefix):])
-        except ValueError:
+        sequence = self.sequence(event_id)
+        if sequence is None:
             return None
         with self._lock:
+            latest = self._next_id - 1
+            if sequence > latest:
+                return None
             history = list(self._history)
             if history:
                 oldest = int(history[0].id.rsplit(":", 1)[1])

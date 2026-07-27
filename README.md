@@ -10,7 +10,7 @@ document synchronized with changes to any video-processing stage.
 
 - Connects to RTSP, RTMP, HTTP, or file streams through OpenCV/FFmpeg.
 - Records streams to segmented MP4 files with FFmpeg.
-- Listens for ONVIF pull-point events when the camera supports them, and can use SurvNG adaptive visual motion as an independent trigger.
+- Listens for ONVIF pull-point events when the camera supports them, with explicit camera-triggered or adaptive visual-triggered operation.
 - Runs an OpenVINO detection pass on the latest frame when motion is reported.
 - Serves a React bento-style GUI for live streams, event history, recordings, and camera controls.
 
@@ -18,7 +18,7 @@ document synchronized with changes to any video-processing stage.
 
 ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.
 
-If ONVIF motion events are missing or unreliable, select **SurvNG smart motion** so adaptive visual analysis can trigger object detection independently.
+If ONVIF motion events are missing or unreliable, select **Visual-triggered** so adaptive visual analysis becomes the sole automatic trigger.
 
 ## Requirements
 
@@ -251,35 +251,34 @@ The detector is optional. If OpenVINO or the model is missing, the app records a
 
 ### Motion Qualification
 
-SurvNG learns each scene from a bounded, latest-frame analysis worker that is isolated from the live capture loop. It can qualify noisy ONVIF motion before starting the recorded-frame OpenVINO cycle and, in enforce mode, can independently trigger object detection for credible motion that the camera missed.
+SurvNG learns each scene from a bounded, latest-frame analysis worker that is isolated from the live capture loop. Trigger selection and visual validation are separate decisions.
 
-The GUI labels the three modes by their actual trigger behavior:
+The GUI exposes two trigger modes:
 
 | GUI option | Configuration | What starts object detection? | Filtering behavior |
 | --- | --- | --- | --- |
-| **SurvNG smart motion (Recommended)** | `enforce` | Accepted adaptive visual motion or camera/manual notices | Routine camera motion may be rejected; semantic person, vehicle, animal, face, and manual notices bypass filtering |
-| **Camera alerts + decision preview** | `audit` | Camera ONVIF or manual notices only | No camera notice is skipped; adaptive decisions are telemetry only and cannot create an event |
-| **Camera alerts without filtering** | `off` | Camera ONVIF or manual notices only | Every camera notice is sent to object detection |
+| **Camera-triggered (Recommended)** | `camera` | Camera ONVIF or manual notices only | Adaptive and MOG2 validation are optional; priority semantic notices bypass validation |
+| **Visual-triggered** | `adaptive` | Accepted adaptive visual motion or manual tests | MOG2 may corroborate adaptive motion; ordinary ONVIF notices are diagnostics only |
 
-This distinction matters: `audit` does not provide an adaptive fallback when a camera fails to send an ONVIF motion notice. Use `enforce` when SurvNG visual motion should replace or supplement ONVIF. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
+Camera-triggered mode never allows adaptive analysis or MOG2 to create an event. Visual-triggered mode never allows ordinary ONVIF notices or MOG2 to create an event. If a selected validator is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
 Adaptive analysis uses the camera's live feed: `live_stream_url` when a substream is configured, otherwise `stream_url`. Frames are downscaled to `frame_width` (320 px by default), converted to grayscale, and sampled at `sample_fps` (5 FPS by default). Object detection after a trigger uses high-resolution frames from the main recording.
 
 All cameras remain eligible for analysis, but a shared application semaphore permits at most two cameras to execute the CPU-heavy visual pipeline simultaneously. Each camera has a bounded latest-frame queue, so stale pending analysis is replaced instead of accumulating. This limit does not restrict capture, continuous recording, live view, or the number of cameras with motion detection enabled.
 
-The built-in fusion policy is observational and preserves existing decisions. Configured final graphs may select `any`, `all`, or weighted source consensus and add activation/release hysteresis or cooldown; incomplete graphs are rejected before config is saved.
+The built-in decision graph uses adaptive validation without MOG2. Guided settings can disable validation, use MOG2 alone, require adaptive and MOG2, or—in camera-triggered mode—allow either validator. Incomplete graphs are rejected before config is saved.
 
-Use the guided **Motion decision** panel under **Config > Detection** to choose a global policy without editing stage graphs. Each camera also has a Motion decision panel that either inherits the global policy or creates a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
+Use the guided **Motion decision** panel under **Config > Detection** to select the trigger source and validators without editing stage graphs. Each camera can inherit the global choice or create a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
 
-For the normal setup, select **SurvNG smart motion + camera notices** and click **Use this setup**. This enables low-resolution adaptive triggers, keeps ONVIF as a supporting signal, and disables the redundant MOG2 monitor. Detailed thresholds, supporting-signal policies, and camera-specific overrides remain available under the advanced sections. See [Adaptive motion triggers](docs/adaptive-motion.md) for the complete data flow and performance model.
+For the normal setup, select **Camera-triggered with adaptive validation** and click **Use this setup**. ONVIF remains the only automatic trigger, adaptive analysis validates ordinary notices, and MOG2 stays off for lower CPU use. See [Motion triggers and validation](docs/adaptive-motion.md) for the complete data flow and performance model.
 
 The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 
-Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. The built-in MOG2 and ONVIF observation sources use the `evidence_sources` parallel group.
+Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. The built-in MOG2 and ONVIF stages handle different observation kinds, so only the relevant stage runs for each frame or camera event.
 
 Camera Settings also includes an on-demand **Motion Diagnostics** viewer for the original and processed frame, difference image, threshold and cleaned masks, blob/track overlay, decision score, and stage timings. Diagnostics are limited to one selected camera and one capture per second, retain only the latest encoded snapshot in memory, stop when the viewer closes, and expire automatically if the browser disconnects.
 
-MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. The default audit fusion records both sources without changing trigger decisions.
+MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. ONVIF evidence is never presented as a visual validator in the guided configuration.
 
 ## Face Recognition
 

@@ -40,6 +40,7 @@ def apply_fusion_policy(
     primary_accepted: bool,
     primary_score: float,
     options: dict[str, object] | None = None,
+    require_primary_trigger: bool = False,
 ) -> MotionContext:
     pipeline = pipeline_factory(repository).create(
         "gate",
@@ -57,7 +58,11 @@ def apply_fusion_policy(
             camera_id="gate",
             captured_at=12.0,
             original_frame=None,
-            configuration={"evidence_started_at": 9.0, "evidence_ended_at": 12.0},
+            configuration={
+                "evidence_started_at": 9.0,
+                "evidence_ended_at": 12.0,
+                "require_primary_trigger": require_primary_trigger,
+            },
             runtime=pipeline.runtime,
             scoring=MotionScoring(
                 accepted=primary_accepted,
@@ -289,7 +294,14 @@ class MotionEvidenceTest(unittest.TestCase):
         factory = pipeline_factory(repository)
         pipeline = factory.create(
             "gate",
-            motion_fusion_stage_configs(),
+            [
+                MotionStageConfig(
+                    "evidence_fusion",
+                    "buffered_evidence_fusion",
+                    {"sources": ["mog2"], "policy": "audit"},
+                ),
+                *motion_fusion_stage_configs()[1:],
+            ],
             initial_artifacts={"scoring"},
         )
         context = MotionContext(
@@ -394,9 +406,80 @@ class MotionEvidenceTest(unittest.TestCase):
         )
 
         self.assertTrue(result.scoring.accepted)
-        self.assertEqual(result.scoring.score, 0.7)
+        self.assertEqual(result.scoring.score, 1.0)
+        self.assertEqual(result.scoring.reason, "validation_unavailable_fail_open")
         self.assertFalse(result.scoring.features["fusion_applied"])
         self.assertEqual(result.scoring.features["fusion_reason"], "insufficient_sources")
+
+    def test_policy_fails_open_even_when_primary_rejected(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+
+        result = apply_fusion_policy(
+            repository,
+            policy="all",
+            primary_accepted=False,
+            primary_score=0.1,
+        )
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "validation_unavailable_fail_open")
+
+    def test_policy_fails_closed_when_required_source_is_unavailable(self) -> None:
+        result = apply_fusion_policy(
+            MotionEvidenceRepository("gate"),
+            policy="all",
+            primary_accepted=True,
+            primary_score=0.8,
+            options={"fail_open": False},
+        )
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.score, 0.8)
+        self.assertEqual(result.scoring.reason, "validation_unavailable_fail_closed")
+        self.assertFalse(result.scoring.features["fusion_applied"])
+        self.assertEqual(result.scoring.features["fusion_reason"], "insufficient_sources")
+
+    def test_bypass_policy_accepts_without_visual_validators(self) -> None:
+        result = apply_fusion_policy(
+            MotionEvidenceRepository("gate"),
+            policy="bypass",
+            primary_accepted=False,
+            primary_score=0.1,
+        )
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "validation_disabled")
+
+    def test_mog2_only_policy_does_not_include_adaptive_score(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        repository.append("mog2", 11.0, {"warmed": 1.0, "score": 0.8})
+
+        result = apply_fusion_policy(
+            repository,
+            policy="all",
+            primary_accepted=False,
+            primary_score=0.1,
+            options={"include_primary": False},
+        )
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.scoring.score, 0.8)
+        self.assertFalse(result.scoring.features["fusion_primary_included"])
+
+    def test_required_primary_cannot_be_rescued_by_supporting_source(self) -> None:
+        repository = MotionEvidenceRepository("gate")
+        repository.append("mog2", 11.0, {"warmed": 1.0, "score": 0.9})
+
+        result = apply_fusion_policy(
+            repository,
+            policy="any",
+            primary_accepted=False,
+            primary_score=0.1,
+            require_primary_trigger=True,
+        )
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "primary_trigger_rejected")
 
     def test_generic_registered_source_can_participate_without_fusion_changes(self) -> None:
         repository = MotionEvidenceRepository("gate")

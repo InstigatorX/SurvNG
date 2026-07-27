@@ -49,13 +49,22 @@ def stage_selections(stages: Sequence[MotionStageConfig]) -> list[MotionStageSel
 def guided_fusion_settings(stages: Sequence[MotionStageConfig]) -> dict[str, Any]:
     for stage in stages:
         if stage.implementation == "buffered_evidence_fusion":
+            raw_sources = stage.options.get("sources", [])
+            source_values = (raw_sources,) if isinstance(raw_sources, str) else raw_sources
+            sources = list(dict.fromkeys(
+                normalized
+                for source in source_values
+                if (normalized := str(source).strip().lower())
+            )) if isinstance(source_values, (list, tuple)) else []
             return {
                 "guided": True,
-                "policy": str(stage.options.get("policy", "audit")),
-                "sources": list(stage.options.get("sources", [])),
+                "policy": str(stage.options.get("policy", "audit")).strip().lower(),
+                "sources": sources,
                 "source_thresholds": dict(stage.options.get("source_thresholds", {})),
                 "source_weights": dict(stage.options.get("source_weights", {})),
                 "weighted_threshold": float(stage.options.get("weighted_threshold", 0.5)),
+                "include_primary": bool(stage.options.get("include_primary", True)),
+                "fail_open": bool(stage.options.get("fail_open", True)),
             }
     return {"guided": False}
 

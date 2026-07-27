@@ -5,6 +5,7 @@
     "test:motion-analysis": "node tests/motion-analysis-config.mjs",
     "test:motion-decision": "node tests/motion-decision-config.mjs",
     "test:live-transport": "node tests/live-transport.mjs",
+    "test:storage": "node tests/storage.mjs",
     "test:recordings-soak": "node tests/recordings-soak.mjs"
   },
   "dependencies": {

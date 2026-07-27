@@ -133,7 +133,12 @@ def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:
         MotionStageConfig(
             stage_id="evidence_fusion",
             implementation="buffered_evidence_fusion",
-            options={"sources": ["mog2", "onvif"], "policy": "audit"},
+            options={
+                "sources": [],
+                "policy": "audit",
+                "include_primary": True,
+                "fail_open": True,
+            },
         ),
         MotionStageConfig(
             stage_id="event_state",

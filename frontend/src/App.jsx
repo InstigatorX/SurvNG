@@ -49,6 +49,7 @@ import {
   buildMotionDecisionFusion,
   defaultMotionDecisionSettings,
   MOTION_MODE_OPTIONS,
+  motionValidatorSettings,
   motionModeInfo,
   readMotionDecisionFusion,
 } from "./motionDecisionConfig.mjs";
@@ -63,6 +64,7 @@ import {
   rememberWebRtcFailure,
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
+import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -640,9 +642,9 @@ function eventSnapshotUrl(event) {
 }
 
 function useStoredState(key, initialValue) {
-  const [value, setValue] = useState(() => localStorage.getItem(key) || initialValue);
+  const [value, setValue] = useState(() => readStoredValue(browserStorage(window), key, initialValue));
   useEffect(() => {
-    localStorage.setItem(key, value);
+    writeStoredValue(browserStorage(window), key, value);
   }, [key, value]);
   return [value, setValue];
 }
@@ -1011,24 +1013,35 @@ function LiveHeaderStats() {
   const eventRefreshTimer = useRef(null);
 
   async function loadRecentEvents() {
-    const eventResponse = await fetch("/api/events?limit=50");
-    const events = await eventResponse.json();
-    setStats((current) => ({
-      ...current,
-      motion: events.filter((event) => event.kind === "motion").length,
-      objects: events.filter(hasDetectedObjects).length,
-    }));
+    try {
+      const eventResponse = await fetch("/api/events?limit=50");
+      if (!eventResponse.ok) return;
+      const events = await eventResponse.json();
+      if (!Array.isArray(events)) return;
+      setStats((current) => ({
+        ...current,
+        motion: events.filter((event) => event.kind === "motion").length,
+        objects: events.filter(hasDetectedObjects).length,
+      }));
+    } catch {
+      // Keep the last known summary; the next event or interval retries.
+    }
   }
 
   async function loadSystem() {
-    const systemResponse = await fetch("/api/system/status");
-    const system = systemResponse.ok ? await systemResponse.json() : {};
-    setStats((current) => ({
-      ...current,
-      storage: system.storage || null,
-      detector: system.detector || null,
-      cameras: system.cameras || null,
-    }));
+    try {
+      const systemResponse = await fetch("/api/system/status");
+      if (!systemResponse.ok) return;
+      const system = await systemResponse.json();
+      setStats((current) => ({
+        ...current,
+        storage: system.storage || null,
+        detector: system.detector || null,
+        cameras: system.cameras || null,
+      }));
+    } catch {
+      // Keep the last known status; the next event or interval retries.
+    }
   }
 
   useAppEvents(({ type, data }) => {
@@ -1046,8 +1059,8 @@ function LiveHeaderStats() {
   });
 
   useEffect(() => {
-    Promise.all([loadRecentEvents(), loadSystem()]);
-    const timer = window.setInterval(() => Promise.all([loadRecentEvents(), loadSystem()]), 60_000);
+    void Promise.all([loadRecentEvents(), loadSystem()]);
+    const timer = window.setInterval(() => void Promise.all([loadRecentEvents(), loadSystem()]), 60_000);
     return () => {
       window.clearInterval(timer);
       window.clearTimeout(eventRefreshTimer.current);
@@ -1116,23 +1129,43 @@ function usePollingData(includeIncidents = true) {
   const [appConfig, setAppConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const incidentRefreshTimer = useRef(null);
+  const loadSequence = useRef(0);
+  const incidentSequence = useRef(0);
 
   async function loadIncidents() {
     if (!includeIncidents) return;
-    const response = await fetch("/api/incidents?limit=120&gap_seconds=45");
-    if (response.ok) setIncidents(await response.json());
+    const sequence = ++incidentSequence.current;
+    try {
+      const response = await fetch("/api/incidents?limit=120&gap_seconds=45");
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (sequence === incidentSequence.current && Array.isArray(payload)) setIncidents(payload);
+    } catch {
+      // Preserve the last known incidents and retry on the next refresh.
+    }
   }
 
   async function load() {
-    const [cameraResponse, incidentResponse, configResponse] = await Promise.all([
-      fetch("/api/cameras"),
-      includeIncidents ? fetch("/api/incidents?limit=120&gap_seconds=45") : Promise.resolve(null),
-      fetch("/api/config"),
-    ]);
-    setCameras(await cameraResponse.json());
-    if (incidentResponse?.ok) setIncidents(await incidentResponse.json());
-    if (configResponse.ok) setAppConfig(await configResponse.json());
-    setLoading(false);
+    const sequence = ++loadSequence.current;
+    try {
+      const [cameraResponse, incidentResponse, configResponse] = await Promise.all([
+        fetch("/api/cameras"),
+        includeIncidents ? fetch("/api/incidents?limit=120&gap_seconds=45") : Promise.resolve(null),
+        fetch("/api/config"),
+      ]);
+      if (!cameraResponse.ok) throw new Error(`Camera status failed (${cameraResponse.status})`);
+      const cameraPayload = await cameraResponse.json();
+      const incidentPayload = incidentResponse?.ok ? await incidentResponse.json() : null;
+      const configPayload = configResponse.ok ? await configResponse.json() : null;
+      if (sequence !== loadSequence.current) return;
+      if (Array.isArray(cameraPayload)) setCameras(cameraPayload);
+      if (Array.isArray(incidentPayload)) setIncidents(incidentPayload);
+      if (configPayload) setAppConfig(configPayload);
+    } catch {
+      // SSE updates may still populate the page; periodic polling retries.
+    } finally {
+      if (sequence === loadSequence.current) setLoading(false);
+    }
   }
 
   useAppEvents(({ type, data }) => {
@@ -1157,6 +1190,8 @@ function usePollingData(includeIncidents = true) {
     load();
     const timer = window.setInterval(load, 60_000);
     return () => {
+      loadSequence.current += 1;
+      incidentSequence.current += 1;
       window.clearInterval(timer);
       window.clearTimeout(incidentRefreshTimer.current);
     };
@@ -1195,6 +1230,8 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   const [recordingError, setRecordingError] = useState("");
   const [detectionBusy, setDetectionBusy] = useState(false);
   const [detectionError, setDetectionError] = useState("");
+  const [cameraActionBusy, setCameraActionBusy] = useState(false);
+  const [cameraActionError, setCameraActionError] = useState("");
   const shouldUseWebRtc = camera.running && streamReady && activeTransport === "webrtc";
   const shouldUseMjpegStream = camera.running && streamReady && activeTransport === "mjpeg";
   const cameraConnected = camera.connected ?? camera.running;
@@ -1228,8 +1265,18 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   }, [camera.running, streamReady, activeTransport]);
 
   async function post(action) {
-    await fetch(`/api/cameras/${camera.id}/${action}`, { method: "POST" });
-    refresh();
+    if (cameraActionBusy) return;
+    setCameraActionBusy(true);
+    setCameraActionError("");
+    try {
+      const response = await fetch(`/api/cameras/${camera.id}/${action}`, { method: "POST" });
+      if (!response.ok) throw new Error(`Camera control failed (${response.status})`);
+      await refresh();
+    } catch (error) {
+      setCameraActionError(error instanceof Error ? error.message : "Camera control failed");
+    } finally {
+      setCameraActionBusy(false);
+    }
   }
 
   async function toggleRecording() {
@@ -1380,12 +1427,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
             </button>
             <button
               type="button"
-              className={`tile-control-button icon-only ${camera.running ? "danger" : ""}`}
+              className={`tile-control-button icon-only ${camera.running ? "danger" : ""} ${cameraActionError ? "bad" : ""}`}
               onClick={() => post(camera.running ? "camera/stop" : "camera/start")}
-              title={camera.running ? "Stop camera" : "Start camera"}
+              disabled={cameraActionBusy}
+              title={cameraActionError || (camera.running ? "Stop camera" : "Start camera")}
               aria-label={`${camera.running ? "Stop" : "Start"} ${camera.name}`}
             >
-              <Power size={16} />
+              {cameraActionBusy ? <RefreshCcw className="spin" size={16} /> : <Power size={16} />}
             </button>
           </div>
         </div>
@@ -1981,6 +2029,7 @@ function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats })
     }
     let disposed = false;
     let timer = null;
+    let controller = null;
 
     function updateTracks(detections) {
       const now = performance.now();
@@ -2058,18 +2107,21 @@ function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats })
       try {
         const blob = await new Promise((resolve) => capture.toBlob(resolve, "image/jpeg", 0.78));
         if (!blob || disposed) return;
+        controller = new AbortController();
         const response = await fetch(`/api/detector/frame?confidence=${Number(confidence).toFixed(2)}`, {
           method: "POST",
           headers: { "Content-Type": "image/jpeg" },
           body: blob,
+          signal: controller.signal,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json();
+        if (disposed) return;
         const tracks = updateTracks(payload.objects || []);
         draw(tracks, payload.width || width, payload.height || height);
         onStats?.({ inferenceMs: payload.elapsed_ms, objects: tracks.length, tracks: tracks.map((track) => track.id) });
       } catch (error) {
-        onStats?.({ error: error.message || "Detection failed" });
+        if (!disposed && error.name !== "AbortError") onStats?.({ error: error.message || "Detection failed" });
       }
       if (!disposed) timer = window.setTimeout(sample, 500);
     }
@@ -2077,6 +2129,7 @@ function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats })
     sample();
     return () => {
       disposed = true;
+      controller?.abort();
       window.clearTimeout(timer);
     };
   }, [active, confidence, videoRef, onStats]);
@@ -2563,6 +2616,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const [incidentLoading, setIncidentLoading] = useState(true);
   const [incidentLoadError, setIncidentLoadError] = useState("");
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
+  const incidentLoadedQueryRef = useRef("");
+  const incidentEventRefreshTimer = useRef(null);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [focusedFaceEventId, setFocusedFaceEventId] = useState(null);
   const [selectedFace, setSelectedFace] = useState(null);
@@ -2592,19 +2647,33 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   }
 
   useAppEvents(({ type }) => {
-    if (type === "incident") setIncidentRefreshToken((value) => value + 1);
+    if (type !== "incident" || incidentDay !== today || incidentPage !== 0 || document.hidden) return;
+    if (incidentEventRefreshTimer.current) return;
+    incidentEventRefreshTimer.current = window.setTimeout(
+      () => {
+        incidentEventRefreshTimer.current = null;
+        setIncidentRefreshToken((value) => value + 1);
+      },
+      1000,
+    );
   });
+
+  useEffect(() => () => window.clearTimeout(incidentEventRefreshTimer.current), []);
 
   async function openFaceReview(face) {
     const observationId = Number(face?.observation_id);
     if (!Number.isFinite(observationId)) return;
-    const [observationResponse, peopleResponse] = await Promise.all([
-      fetch(`/api/faces/observations/${observationId}`),
-      fetch("/api/faces/people"),
-    ]);
-    if (!observationResponse.ok || !peopleResponse.ok) return;
-    setFacePeople(await peopleResponse.json());
-    setSelectedFace(await observationResponse.json());
+    try {
+      const [observationResponse, peopleResponse] = await Promise.all([
+        fetch(`/api/faces/observations/${observationId}`),
+        fetch("/api/faces/people"),
+      ]);
+      if (!observationResponse.ok || !peopleResponse.ok) return;
+      setFacePeople(await peopleResponse.json());
+      setSelectedFace(await observationResponse.json());
+    } catch {
+      // Leave the current incident visible when face details are unavailable.
+    }
   }
 
   useEffect(() => {
@@ -2614,8 +2683,6 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   useEffect(() => {
     let cancelled = false;
     async function loadIncidentPage() {
-      setIncidentLoading(true);
-      setIncidentLoadError("");
       const query = new URLSearchParams({
         day: incidentDay || today,
         time_zone: timeZone,
@@ -2627,22 +2694,34 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
       if (incidentCameraFilter !== "all") query.set("camera_id", incidentCameraFilter);
       if (incidentObjectFilter !== "all") query.set("object_label", incidentObjectFilter);
       if (incidentZoneFilter !== "all") query.set("zone", incidentZoneFilter);
+      const queryKey = query.toString();
+      const foregroundLoad = incidentLoadedQueryRef.current !== queryKey;
+      if (foregroundLoad) {
+        setIncidentLoading(true);
+        setIncidentLoadError("");
+      }
       try {
         const response = await fetch(`/api/incidents/search?${query}`);
         if (!response.ok) throw new Error("Unable to load incidents");
         const payload = await response.json();
         if (cancelled) return;
-        setIncidents(payload.items || []);
+        incidentLoadedQueryRef.current = queryKey;
+        const items = payload.items || [];
+        setIncidents(items);
         setIncidentTotal(Number(payload.total || 0));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
+        setIncidentLoadError("");
+        if (!mobileView && items.length) {
+          setExpandedIncidentId((current) => current || items[0].id);
+        }
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && foregroundLoad) {
           setIncidents([]);
           setIncidentTotal(0);
           setIncidentLoadError(error.message || "Unable to load incidents");
         }
       } finally {
-        if (!cancelled) setIncidentLoading(false);
+        if (!cancelled && foregroundLoad) setIncidentLoading(false);
       }
     }
     loadIncidentPage();
@@ -3359,10 +3438,17 @@ function RecordingsPage({ timeZone }) {
   }
 
   useEffect(() => {
-    fetch("/api/cameras")
-      .then((response) => response.json())
+    const controller = new AbortController();
+    fetch("/api/cameras", { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Camera status failed (${response.status})`);
+        return response.json();
+      })
       .then(setCameras)
-      .catch(() => setPlaybackError("Unable to load cameras"));
+      .catch((error) => {
+        if (error.name !== "AbortError") setPlaybackError("Unable to load cameras");
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -3781,16 +3867,20 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
 
 const MOTION_DECISION_POLICIES = {
   audit: {
-    label: "Use SurvNG analysis only (Recommended)",
-    description: "Uses SurvNG's frame analysis result. Optional supporting signals are recorded but do not change it.",
+    label: "Adaptive validation",
+    description: "SurvNG's adaptive scene analysis must confirm the motion.",
+  },
+  bypass: {
+    label: "No visual validation",
+    description: "Every camera motion notice proceeds to object detection.",
   },
   any: {
-    label: "Accept motion from any signal",
-    description: "Accepts motion when SurvNG analysis or any available supporting signal sees it.",
+    label: "Either validator may confirm",
+    description: "Adaptive analysis or MOG2 may confirm motion. This is more sensitive.",
   },
   all: {
-    label: "Require every available signal",
-    description: "Accepts motion only when SurvNG analysis and every available supporting signal agree.",
+    label: "Require both validators",
+    description: "Adaptive analysis and MOG2 must agree. This is stricter and may miss subtle motion.",
   },
   weighted: {
     label: "Blend signals by importance",
@@ -3802,28 +3892,29 @@ function efficientMotionFusion() {
   return buildMotionDecisionFusion({
     ...defaultMotionDecisionSettings(),
     policy: "audit",
-    sources: ["onvif"],
+    sources: [],
+    includePrimary: true,
+    failOpen: true,
   });
 }
 
-function isEfficientMotionSetup({ mode, mog2Enabled, qualification, fusion, catalog }) {
+function isEfficientMotionSetup({ mode, qualification, fusion, catalog }) {
   const analysis = readMotionAnalysisPreset(qualification, catalog);
   const decision = readMotionDecisionFusion(fusion);
-  return mode === "enforce"
-    && mog2Enabled === false
+  return mode === "camera"
     && analysis.preset?.id === "adaptive"
     && !analysis.custom
     && decision.settings.policy === "audit"
-    && !decision.settings.sources.includes("mog2")
-    && decision.settings.sources.includes("onvif");
+    && decision.settings.includePrimary
+    && !decision.settings.sources.includes("mog2");
 }
 
 function EfficientMotionSetup({ active, inherited = false, disabled = false, onApply }) {
   return (
     <div className={`efficient-motion-setup ${active ? "active" : ""}`}>
       <div>
-        <strong>SurvNG smart motion + camera notices</strong>
-        <span>Recommended: SurvNG uses low-resolution visual motion to start object detection without depending on ONVIF. Camera notices remain available as supporting signals.</span>
+        <strong>Camera-triggered with adaptive validation</strong>
+        <span>Recommended: ONVIF is the only automatic trigger. SurvNG validates ordinary camera motion before object detection runs and fails open if validation is unavailable.</span>
       </div>
       {active ? <span className="efficient-motion-status">{inherited ? "Using global setup" : "Currently selected"}</span> : (
         <button type="button" className="primary" disabled={disabled} onClick={onApply}>Use this setup</button>
@@ -3890,11 +3981,12 @@ function MotionAnalysisPresetEditor({
 function MotionDecisionEditor({
   fusion,
   mode,
-  globalMode = "audit",
+  globalMode = "camera",
   inherited = false,
   inheritedFusion,
   onSetInherited,
   onModeChange,
+  onMog2Change,
   onChange,
   cameraName,
 }) {
@@ -3904,10 +3996,24 @@ function MotionDecisionEditor({
   const settings = effective.settings;
   const policy = MOTION_DECISION_POLICIES[settings.policy] || MOTION_DECISION_POLICIES.audit;
   const effectiveMode = mode === "inherit" ? globalMode : mode;
+  const legacyMode = ["audit", "off", "enforce"].includes(effectiveMode);
+  const adaptiveValidator = effectiveMode === "adaptive"
+    || (settings.policy !== "bypass" && settings.includePrimary);
+  const mog2Validator = settings.sources.includes("mog2");
   const modeInfo = motionModeInfo(effectiveMode);
   const modeControl = (
-    <label>What starts object detection?<select value={mode} onChange={(event) => onModeChange(event.target.value)}>
+    <label>What starts object detection?<select value={mode} onChange={(event) => {
+      const nextMode = event.target.value;
+      onModeChange(nextMode);
+      updateSettings(motionValidatorSettings(settings, {
+        mode: nextMode,
+        adaptiveEnabled: adaptiveValidator,
+        mog2Enabled: mog2Validator,
+        agreement: settings.policy,
+      }));
+    }}>
       {onSetInherited ? <option value="inherit">Use global setting</option> : null}
+      {legacyMode && mode !== "inherit" ? <option value={mode}>{motionModeInfo(mode).label}</option> : null}
       {MOTION_MODE_OPTIONS.map((option) => (
         <option key={option.value} value={option.value}>{option.label}</option>
       ))}
@@ -3935,12 +4041,14 @@ function MotionDecisionEditor({
     updateSettings({ [key]: { ...settings[key], [child]: value } });
   }
 
-  function toggleSource(source, enabled) {
-    let sources = enabled
-      ? [...new Set([...settings.sources, source])]
-      : settings.sources.filter((item) => item !== source);
-    if (settings.policy !== "audit" && sources.length === 0) sources = [source];
-    updateSettings({ sources });
+  function setValidators(adaptiveEnabled, mog2Enabled) {
+    updateSettings(motionValidatorSettings(settings, {
+      mode: effectiveMode,
+      adaptiveEnabled,
+      mog2Enabled,
+      agreement: settings.policy,
+    }));
+    onMog2Change?.(mog2Enabled);
   }
 
   if (inherited) {
@@ -3979,9 +4087,32 @@ function MotionDecisionEditor({
         {modeControl}
         <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
         {processingNote}
-        <button type="button" onClick={() => onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()))}>
+        <button type="button" onClick={() => {
+          onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
+          onMog2Change?.(false);
+        }}>
           Replace with recommended settings
         </button>
+      </div>
+    );
+  }
+
+  if (legacyMode) {
+    return (
+      <div className="motion-decision-editor motion-decision-custom">
+        <div className="motion-decision-heading">
+          <div>
+            <strong>Legacy motion configuration</strong>
+            <span>This older combined behavior remains operational, but it does not match the two current trigger models.</span>
+          </div>
+        </div>
+        {modeControl}
+        <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
+        <button type="button" onClick={() => {
+          onModeChange("camera");
+          onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
+          onMog2Change?.(false);
+        }}>Migrate to recommended camera-triggered mode</button>
       </div>
     );
   }
@@ -4003,35 +4134,33 @@ function MotionDecisionEditor({
       <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
       {processingNote}
 
-      <details className="motion-decision-options">
-        <summary>Advanced decision options</summary>
-        <div className="motion-decision-options-body">
-      <label>How should supporting signals be used?<select value={settings.policy} onChange={(event) => {
-        const nextPolicy = event.target.value;
-        updateSettings({
-          policy: nextPolicy,
-          sources: nextPolicy !== "audit" && settings.sources.length === 0
-            ? ["mog2", "onvif"]
-            : settings.sources,
-        });
-      }}>
-        {Object.entries(MOTION_DECISION_POLICIES).map(([value, option]) => (
-          <option key={value} value={value}>{option.label}</option>
-        ))}
-      </select></label>
+      <div className="motion-decision-options-body">
+      <fieldset className="motion-decision-sources">
+        <legend>{effectiveMode === "camera" ? "Validate camera motion before detection" : "Visual trigger confirmation"}</legend>
+        <label className="check-field"><input
+          type="checkbox"
+          checked={adaptiveValidator}
+          disabled={effectiveMode === "adaptive"}
+          onChange={(event) => setValidators(event.target.checked, mog2Validator)}
+        /> Adaptive scene analysis{effectiveMode === "adaptive" ? " (required trigger)" : ""}</label>
+        <label className="check-field"><input
+          type="checkbox"
+          checked={mog2Validator}
+          onChange={(event) => setValidators(adaptiveValidator, event.target.checked)}
+        /> Require MOG2 background confirmation <small>(higher CPU)</small></label>
+        <small>If a selected validator is unavailable or still learning, SurvNG fails open and runs object detection.</small>
+      </fieldset>
+      {effectiveMode === "camera" && adaptiveValidator && mog2Validator ? <label>When validators disagree<select value={settings.policy === "any" ? "any" : "all"} onChange={(event) => updateSettings({ policy: event.target.value })}>
+        <option value="all">Require both (fewer false triggers)</option>
+        <option value="any">Allow either (more sensitive)</option>
+      </select></label> : null}
       <div className={`motion-decision-explanation policy-${settings.policy}`}>
         <strong>{policy.label}</strong>
         <span>{policy.description}</span>
         {settings.policy === "all" ? <span>Use this cautiously: one low-confidence signal can prevent object detection.</span> : null}
       </div>
-
-      <fieldset className="motion-decision-sources">
-        <legend>Optional supporting signals</legend>
-        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("onvif")} onChange={(event) => toggleSource("onvif", event.target.checked)} /> Include camera ONVIF notices</label>
-        <label className="check-field"><input type="checkbox" checked={settings.sources.includes("mog2")} onChange={(event) => toggleSource("mog2", event.target.checked)} /> Include continuous background monitor</label>
-        <small>SurvNG frame analysis is always included. Unavailable supporting signals are ignored.</small>
-      </fieldset>
-
+      <details className="motion-decision-options">
+        <summary>Advanced timing options</summary>
       <div className="motion-decision-stability">
         <label>Start after<select value={settings.activationFrames} onChange={(event) => updateSettings({ activationFrames: Number(event.target.value) })}>
           {![1, 2, 3, 5].includes(settings.activationFrames) ? <option value={settings.activationFrames}>{settings.activationFrames} matching signals</option> : null}
@@ -4060,10 +4189,9 @@ function MotionDecisionEditor({
       <details className="motion-decision-fine-tuning">
         <summary>Fine tuning</summary>
         <p>These values are already set to safe defaults. Change them only when reviewing motion audit results.</p>
-        {(settings.policy === "any" || settings.policy === "all") ? (
+        {mog2Validator ? (
           <div className="field-row">
-            <label>Camera signal confidence<input type="number" min="0" max="1" step="0.05" value={settings.sourceThresholds.onvif} onChange={(event) => updateNested("sourceThresholds", "onvif", Number(event.target.value))} /></label>
-            <label>Visual change confidence<input type="number" min="0" max="1" step="0.05" value={settings.sourceThresholds.mog2} onChange={(event) => updateNested("sourceThresholds", "mog2", Number(event.target.value))} /></label>
+            <label>MOG2 confidence needed<input type="number" min="0" max="1" step="0.05" value={settings.sourceThresholds.mog2} onChange={(event) => updateNested("sourceThresholds", "mog2", Number(event.target.value))} /></label>
           </div>
         ) : null}
         {settings.policy === "weighted" ? (
@@ -4076,8 +4204,8 @@ function MotionDecisionEditor({
         ) : null}
         <label>Forget an unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
       </details>
-        </div>
       </details>
+      </div>
     </div>
   );
 }
@@ -4094,6 +4222,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
   const [selectedId, setSelectedId] = useState("");
   const [saveNotice, setSaveNotice] = useState(null);
+  const [configLoadError, setConfigLoadError] = useState("");
   const [generalSaving, setGeneralSaving] = useState(false);
   const [zonesSaving, setZonesSaving] = useState(false);
   const [cameraSaving, setCameraSaving] = useState(false);
@@ -4115,39 +4244,64 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
   const [selectedAuditId, setSelectedAuditId] = useState(null);
+  const configLoadSequence = useRef(0);
   const auditPageSize = 24;
 
   async function load() {
-    const [response, statusResponse, acceleratorResponse, modelsResponse, cacheResponse, systemResponse, motionCatalogResponse] = await Promise.all([
-      fetch("/api/config"),
-      fetch("/api/cameras"),
-      fetch("/api/accelerator"),
-      fetch("/api/detector/models"),
-      fetch("/api/recordings/cache/status"),
-      fetch("/api/system/status"),
-      fetch("/api/motion/pipeline/catalog"),
-    ]);
-    const nextConfig = await response.json();
-    setConfig(nextConfig);
-    if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
-    if (acceleratorResponse.ok) setAccelerator(await acceleratorResponse.json());
-    if (modelsResponse.ok) setDetectorModels((await modelsResponse.json()).models || []);
-    if (cacheResponse.ok) setRecordingCache(await cacheResponse.json());
-    if (systemResponse.ok) setMqttStatus((await systemResponse.json()).mqtt || null);
-    if (motionCatalogResponse.ok) setMotionCatalog(await motionCatalogResponse.json());
-    setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
+    const sequence = ++configLoadSequence.current;
+    setConfigLoadError("");
+    try {
+      const results = await Promise.allSettled([
+        fetch("/api/config"),
+        fetch("/api/cameras"),
+        fetch("/api/accelerator"),
+        fetch("/api/detector/models"),
+        fetch("/api/recordings/cache/status"),
+        fetch("/api/system/status"),
+        fetch("/api/motion/pipeline/catalog"),
+      ]);
+      const response = results[0].status === "fulfilled" ? results[0].value : null;
+      if (!response?.ok) throw new Error(`Configuration failed to load${response ? ` (${response.status})` : ""}`);
+      const nextConfig = await response.json();
+      const optionalPayload = async (index) => {
+        const result = results[index];
+        if (result.status !== "fulfilled" || !result.value.ok) return null;
+        try { return await result.value.json(); } catch { return null; }
+      };
+      const [status, acceleratorPayload, models, cache, system, catalog] = await Promise.all([
+        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6),
+      ]);
+      if (sequence !== configLoadSequence.current) return false;
+      setConfig(nextConfig);
+      if (Array.isArray(status)) setRuntimeStatus(status);
+      if (acceleratorPayload) setAccelerator(acceleratorPayload);
+      if (models) setDetectorModels(models.models || []);
+      if (cache) setRecordingCache(cache);
+      if (system) setMqttStatus(system.mqtt || null);
+      if (catalog) setMotionCatalog(catalog);
+      setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
+      return true;
+    } catch (error) {
+      if (sequence === configLoadSequence.current) setConfigLoadError(error.message || "Configuration failed to load");
+      return false;
+    }
   }
 
   useEffect(() => {
-    load();
+    void load();
+    return () => { configLoadSequence.current += 1; };
   }, []);
 
   useEffect(() => {
     if (settingsTab !== "cameras") return undefined;
     let active = true;
     async function refreshCameraRuntime() {
-      const response = await fetch("/api/cameras");
-      if (active && response.ok) setRuntimeStatus(await response.json());
+      try {
+        const response = await fetch("/api/cameras");
+        if (active && response.ok) setRuntimeStatus(await response.json());
+      } catch {
+        // Keep the last known runtime state and retry on the next interval.
+      }
     }
     refreshCameraRuntime();
     const timer = window.setInterval(refreshCameraRuntime, 5000);
@@ -4159,11 +4313,15 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
 
 
   async function loadLogs() {
-    const params = new URLSearchParams({ limit: "500", level: logLevel, q: logFilter });
-    const response = await fetch(`/api/logs?${params.toString()}`);
-    if (response.ok) {
-      const payload = await response.json();
-      setLogLines(payload.lines || []);
+    try {
+      const params = new URLSearchParams({ limit: "500", level: logLevel, q: logFilter });
+      const response = await fetch(`/api/logs?${params.toString()}`);
+      if (response.ok) {
+        const payload = await response.json();
+        setLogLines(payload.lines || []);
+      }
+    } catch {
+      // Preserve the current log view; polling retries automatically.
     }
   }
 
@@ -4217,7 +4375,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
 
 
   if (!config) {
-    return <main className="bento-grid config-grid"><section className="bento-card config-editor"><div className="empty-state">Loading config...</div></section></main>;
+    return <main className="bento-grid config-grid"><section className="bento-card config-editor"><div className="empty-state">{configLoadError || "Loading config..."}{configLoadError ? <button type="button" onClick={() => void load()}><RefreshCcw size={15} /> Retry</button> : null}</div></section></main>;
   }
 
   function updateConfig(path, value) {
@@ -4342,8 +4500,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         body: JSON.stringify(configToSave),
       });
       if (!response.ok) throw new Error(await response.text());
-      setSaveNotice({ state: "saved", text: "Saved. Camera workers reloaded." });
-      await load();
+      const reloaded = await load();
+      setSaveNotice(reloaded
+        ? { state: "saved", text: "Saved. Camera workers reloaded." }
+        : { state: "error", text: "Saved, but the refreshed configuration could not be loaded. Retry this page." });
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save general settings." });
     } finally {
@@ -4440,24 +4600,29 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     const host = probeCameraConfig.onvif?.host || probeCameraConfig.baichuan?.host || "";
     const username = probeCameraConfig.onvif?.username || probeCameraConfig.baichuan?.username || "";
     const password = probeCameraConfig.onvif?.password || probeCameraConfig.baichuan?.password || "";
-    const response = await fetch("/api/config/probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        camera_id: probeCameraConfig.id,
-        host,
-        username,
-        password,
-        onvif_port: probeCameraConfig.onvif?.port || 8000,
-        baichuan_port: probeCameraConfig.baichuan?.port || 9000,
-      }),
-    });
-    const result = await response.json();
-    setProbe(result);
-    if (result.onvif?.reachable) updateCamera(camera.id, ["onvif", "enabled"], true);
-    if (result.baichuan?.reachable) {
-      updateCamera(camera.id, ["baichuan", "enabled"], true);
-      updateCamera(camera.id, ["video_backend"], "baichuan_native");
+    try {
+      const response = await fetch("/api/config/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          camera_id: probeCameraConfig.id,
+          host,
+          username,
+          password,
+          onvif_port: probeCameraConfig.onvif?.port || 8000,
+          baichuan_port: probeCameraConfig.baichuan?.port || 9000,
+        }),
+      });
+      if (!response.ok) throw new Error(`Camera probe failed (${response.status})`);
+      const result = await response.json();
+      setProbe(result);
+      if (result.onvif?.reachable) updateCamera(camera.id, ["onvif", "enabled"], true);
+      if (result.baichuan?.reachable) {
+        updateCamera(camera.id, ["baichuan", "enabled"], true);
+        updateCamera(camera.id, ["video_backend"], "baichuan_native");
+      }
+    } catch (error) {
+      setProbe({ loading: false, error: error.message || "Camera probe failed" });
     }
   }
 
@@ -4690,7 +4855,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   <EfficientMotionSetup
                     active={isEfficientMotionSetup({
                       mode: selectedCamera.motion_qualification?.mode === "inherit" ? config.motion_qualification?.mode : selectedCamera.motion_qualification?.mode,
-                      mog2Enabled: selectedCamera.motion_qualification?.mog2_audit_enabled ?? config.motion_qualification?.mog2_audit_enabled,
                       qualification: selectedCamera.motion_qualification?.pipeline?.qualification ?? config.motion_qualification?.pipeline?.qualification,
                       fusion: selectedCamera.motion_qualification?.pipeline?.fusion ?? config.motion_qualification?.pipeline?.fusion,
                       catalog: motionCatalog,
@@ -4702,7 +4866,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                     disabled={!availableQualificationPresets(motionCatalog).length}
                     onApply={() => {
                       const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.recommended) || availableQualificationPresets(motionCatalog)[0];
-                      updateCamera(selectedCamera.id, ["motion_qualification", "mode"], "enforce");
+                      updateCamera(selectedCamera.id, ["motion_qualification", "mode"], "camera");
                       updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], false);
                       updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], {
                         ...(selectedCamera.motion_qualification?.pipeline || {}),
@@ -4750,11 +4914,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                     <option value="false">Disabled</option>
                   </select></label>
                   <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" placeholder="Global" value={selectedCamera.motion_qualification?.borderline_margin ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_margin"], event.target.value === "" ? null : Number(event.target.value))} /></label>
-                  <label>Continuous Background Monitor<select value={selectedCamera.motion_qualification?.mog2_audit_enabled == null ? "" : String(selectedCamera.motion_qualification.mog2_audit_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
-                    <option value="">Use global setting</option>
-                    <option value="false">Off (lower CPU)</option>
-                    <option value="true">On (MOG2, higher CPU)</option>
-                  </select></label>
                     </div>
                   </details>
                 </div>
@@ -4765,10 +4924,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   cameraName={selectedCamera.name}
                   fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
                   mode={selectedCamera.motion_qualification?.mode || "inherit"}
-                  globalMode={config.motion_qualification?.mode || "audit"}
+                  globalMode={config.motion_qualification?.mode || "camera"}
                   inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
                   inheritedFusion={config.motion_qualification?.pipeline?.fusion}
                   onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
+                  onMog2Change={(enabled) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], enabled)}
                   onSetInherited={(shouldInherit) => {
                     const pipeline = { ...(selectedCamera.motion_qualification?.pipeline || {}) };
                     pipeline.fusion = shouldInherit
@@ -5087,17 +5247,10 @@ function Mog2TrackOverlay({ tracks, bounds }) {
 
 const motionAiSettingLabels = {
   analysis_preset: "Motion analysis method",
-  fusion_policy: "Supporting evidence behavior",
-  fusion_sources: "Supporting motion sources",
 };
 
 function formatMotionAiValue(setting, value) {
   if (setting === "analysis_preset") return ({ adaptive: "Adaptive motion analysis", modular: "Fixed-threshold modular analysis", classic: "Classic compatibility" })[value] || String(value);
-  if (setting === "fusion_policy") return ({ audit: "Observe only", any: "Any source can confirm", all: "All sources must agree", weighted: "Weighted agreement" })[value] || String(value);
-  if (setting === "fusion_sources") {
-    const labels = { mog2: "Background model", onvif: "Camera motion events" };
-    return Array.isArray(value) && value.length ? value.map((source) => labels[source] || source).join(", ") : "No supporting sources";
-  }
   return String(value);
 }
 
@@ -5274,12 +5427,13 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
             <div className="motion-audit-ai">
               <div className="motion-audit-ai-head">
                 <strong><Sparkles size={15} /> AI Advisor</strong>
-                <button type="button" onClick={analyzeWithAi} disabled={aiLoading || aiApplying || !item.has_snapshot} title={item.has_snapshot ? "Analyze this rejected motion image" : "AI analysis requires a saved audit image"}><Sparkles size={15} /> {aiLoading ? "Analyzing..." : "Analyze"}</button>
+                <button type="button" onClick={analyzeWithAi} disabled={aiLoading || aiApplying || !item.has_snapshot} title={item.has_snapshot ? "Analyze this motion decision audit image" : "AI analysis requires a saved audit image"}><Sparkles size={15} /> {aiLoading ? "Analyzing..." : "Analyze"}</button>
               </div>
-              {!item.has_snapshot ? <span className="motion-audit-ai-none">AI analysis requires an audit image. This older rejection was not sampled or has passed the retention limit.</span> : null}
+              {!item.has_snapshot ? <span className="motion-audit-ai-none">AI analysis requires an audit image. This older audit was not sampled or has passed the retention limit.</span> : null}
               {aiError ? <div className="motion-audit-ai-error">{aiError}</div> : null}
               {aiAdvice?.advice ? (
                 <div className="motion-audit-ai-result">
+                  {aiAdvice.motion_paradigm ? <small>Analyzed as {String(aiAdvice.motion_paradigm.paradigm || "motion decision").replaceAll("_", " ")} · {String(aiAdvice.motion_paradigm.automatic_trigger?.source || "configured trigger").replaceAll("_", " ")}</small> : null}
                   <div className="motion-audit-ai-verdict"><span>{aiAdvice.advice.verdict.replaceAll("_", " ")}</span><strong>{Math.round(Number(aiAdvice.advice.confidence || 0) * 100)}%</strong></div>
                   <p>{aiAdvice.advice.summary}</p>
                   {aiAdvice.advice.visible_subjects?.length ? <div className="motion-audit-ai-subjects">{aiAdvice.advice.visible_subjects.map((subject) => <span key={subject}>{subject}</span>)}</div> : null}
@@ -5304,6 +5458,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
 
 function ProbeResult({ probe }) {
   if (probe.loading) return <div className="probe-result">Probing camera capabilities...</div>;
+  if (probe.error) return <div className="probe-result"><strong>Auto-detection failed</strong><span>{probe.error}</span></div>;
   return (
     <div className="probe-result">
       <strong>Auto-detection</strong>
@@ -5455,7 +5610,6 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <EfficientMotionSetup
           active={isEfficientMotionSetup({
             mode: config.motion_qualification?.mode,
-            mog2Enabled: config.motion_qualification?.mog2_audit_enabled,
             qualification: config.motion_qualification?.pipeline?.qualification,
             fusion: config.motion_qualification?.pipeline?.fusion,
             catalog: motionCatalog,
@@ -5463,7 +5617,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           disabled={!availableQualificationPresets(motionCatalog).length}
           onApply={() => {
             const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.recommended) || availableQualificationPresets(motionCatalog)[0];
-            updateConfig(["motion_qualification", "mode"], "enforce");
+            updateConfig(["motion_qualification", "mode"], "camera");
             updateConfig(["motion_qualification", "mog2_audit_enabled"], false);
             updateConfig(["motion_qualification", "pipeline"], {
               ...(config.motion_qualification?.pipeline || {}),
@@ -5492,14 +5646,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Save rejected motion images<select value={String(config.motion_qualification?.rejected_sample_rate ?? 1)} onChange={(event) => updateConfig(["motion_qualification", "rejected_sample_rate"], Number(event.target.value))}><option value="1">Every rejection (Recommended)</option><option value="0.5">About half</option><option value="0.1">About 1 in 10</option><option value="0.05">About 1 in 20</option><option value="0">Never</option></select><small>Used by Motion Audit and the AI Advisor. SurvNG keeps the latest 100 per camera.</small></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
           <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.mog2_audit_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "mog2_audit_enabled"], event.target.checked)} /> Continuous background monitor (MOG2, higher CPU)</label>
-          <label>Background Learning Time (seconds)<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} disabled={config.motion_qualification?.mog2_audit_enabled === false} /></label>
+          <label>Background Learning Time (seconds)<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} disabled={!readMotionDecisionFusion(config.motion_qualification?.pipeline?.fusion).settings.sources.includes("mog2")} /></label>
           </div>
         </details>
         <MotionDecisionEditor
           fusion={config.motion_qualification?.pipeline?.fusion}
-          mode={config.motion_qualification?.mode || "audit"}
+          mode={config.motion_qualification?.mode || "camera"}
           onModeChange={(mode) => updateConfig(["motion_qualification", "mode"], mode)}
+          onMog2Change={(enabled) => updateConfig(["motion_qualification", "mog2_audit_enabled"], enabled)}
           onChange={(fusion) => updateConfig(
             ["motion_qualification", "pipeline"],
             { ...(config.motion_qualification?.pipeline || {}), fusion },
@@ -5627,8 +5781,10 @@ function MotionDebugViewer({ cameraId, timeZone }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const ownedRef = useRef(false);
+  const debugRequestSequence = useRef(0);
 
   async function loadStatus(renew = false) {
+    const sequence = ++debugRequestSequence.current;
     const response = await fetch(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug`, renew ? {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -5636,6 +5792,7 @@ function MotionDebugViewer({ cameraId, timeZone }) {
     } : undefined);
     if (!response.ok) throw new Error("Could not load motion diagnostics");
     const payload = await response.json();
+    if (sequence !== debugRequestSequence.current) return null;
     setStatus(payload);
     const layers = payload.snapshot?.layers || [];
     if (layers.length && !layers.some((layer) => layer.id === selectedLayer)) {
@@ -5654,6 +5811,7 @@ function MotionDebugViewer({ cameraId, timeZone }) {
       .catch((loadError) => { if (active) setError(loadError.message); });
     return () => {
       active = false;
+      debugRequestSequence.current += 1;
       if (ownedRef.current) {
         fetch(`/api/cameras/${encodeURIComponent(cameraId)}/motion-debug`, {
           method: "PUT",
@@ -5668,10 +5826,19 @@ function MotionDebugViewer({ cameraId, timeZone }) {
 
   useEffect(() => {
     if (!status?.enabled) return undefined;
+    let inFlight = false;
+    let active = true;
     const timer = window.setInterval(() => {
-      loadStatus(ownedRef.current && Number(status.expires_in_seconds || 0) < 70).catch((loadError) => setError(loadError.message));
+      if (inFlight) return;
+      inFlight = true;
+      loadStatus(ownedRef.current && Number(status.expires_in_seconds || 0) < 70)
+        .catch((loadError) => { if (active) setError(loadError.message); })
+        .finally(() => { inFlight = false; });
     }, 2000);
-    return () => window.clearInterval(timer);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [cameraId, status?.enabled, status?.expires_in_seconds]);
 
   async function setEnabled(enabled) {
@@ -5741,10 +5908,12 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
   }
-  const cameraAlertsOnly = status.motion_qualification?.mode !== "enforce";
+  const cameraAlertsOnly = status.motion_qualification?.mode !== "adaptive"
+    && status.motion_qualification?.mode !== "enforce";
   const missingMotionNotices = cameraAlertsOnly
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
+  const missingCameraTrigger = cameraAlertsOnly && !status.onvif_enabled;
   return (
     <div className="probe-result runtime-result">
       <strong>Runtime</strong>
@@ -5758,8 +5927,10 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
           <div className="motion-runtime-summary">
             <strong>Motion processing</strong>
             <span>{motionModeInfo(status.motion_qualification.mode).status} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
-            <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} monitor-only rejects · {status.motion_qualification.suppressed || 0} filtered</span>
+            <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} legacy preview rejects · {status.motion_qualification.suppressed || 0} filtered</span>
             <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
+            <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
+            {missingCameraTrigger ? <span className="motion-runtime-warning">ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection.</span> : null}
             {missingMotionNotices ? <span className="motion-runtime-warning">No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident.</span> : null}
           </div>
           <div className="motion-pipeline-runtime-grid">
@@ -5873,10 +6044,12 @@ function FacesPage({ timeZone }) {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
   const [totalObservations, setTotalObservations] = useState(0);
+  const faceLoadSequence = useRef(0);
   const pageSize = isMobileViewport() ? 24 : 48;
   const pageCount = Math.max(1, Math.ceil(totalObservations / pageSize));
 
   async function load() {
+    const sequence = ++faceLoadSequence.current;
     setLoading(true);
     try {
       const query = new URLSearchParams({ status: personId ? "all" : filter, limit: String(pageSize), offset: String(page * pageSize) });
@@ -5893,31 +6066,47 @@ function FacesPage({ timeZone }) {
         fetch("/api/faces/status"),
       ]);
       if (!peopleResponse.ok || !observationResponse.ok) throw new Error("Unable to load the face database");
-      setPeople(await peopleResponse.json());
-      setObservations(await observationResponse.json());
-      if (countResponse.ok) setTotalObservations(Number((await countResponse.json()).total || 0));
-      if (cameraResponse.ok) setCameras(await cameraResponse.json());
-      if (statusResponse.ok) setStatus(await statusResponse.json());
+      const [peoplePayload, observationPayload, countPayload, cameraPayload, statusPayload] = await Promise.all([
+        peopleResponse.json(),
+        observationResponse.json(),
+        countResponse.ok ? countResponse.json() : null,
+        cameraResponse.ok ? cameraResponse.json() : null,
+        statusResponse.ok ? statusResponse.json() : null,
+      ]);
+      if (sequence !== faceLoadSequence.current) return;
+      setPeople(peoplePayload);
+      setObservations(observationPayload);
+      if (countPayload) setTotalObservations(Number(countPayload.total || 0));
+      if (cameraPayload) setCameras(cameraPayload);
+      if (statusPayload) setStatus(statusPayload);
+      setNotice("");
     } catch (error) {
-      setNotice(error.message || "Unable to load faces");
+      if (sequence === faceLoadSequence.current) setNotice(error.message || "Unable to load faces");
     } finally {
-      setLoading(false);
+      if (sequence === faceLoadSequence.current) setLoading(false);
     }
   }
 
-  useEffect(() => { load(); }, [filter, cameraId, personId, page]);
+  useEffect(() => {
+    void load();
+    return () => { faceLoadSequence.current += 1; };
+  }, [filter, cameraId, personId, page]);
   useEffect(() => { setPage(0); }, [filter, cameraId, personId]);
   useEffect(() => { if (page >= pageCount) setPage(Math.max(0, pageCount - 1)); }, [page, pageCount]);
 
   async function deletePerson(person) {
     if (!window.confirm(`Delete ${person.name}? Their observations will return to Unknown.`)) return;
-    const response = await fetch(`/api/faces/people/${person.id}`, { method: "DELETE" });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      return setNotice(payload.detail || "Could not delete this person");
+    try {
+      const response = await fetch(`/api/faces/people/${person.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        return setNotice(payload.detail || "Could not delete this person");
+      }
+      setPersonId("");
+      await load();
+    } catch (error) {
+      setNotice(error.message || "Could not delete this person");
     }
-    setPersonId("");
-    await load();
   }
 
   return (

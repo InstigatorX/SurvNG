@@ -37,7 +37,13 @@ import cv2
 import numpy as np
 
 from .config import AppConfig, CameraConfig, CameraMotionQualificationConfig, DetectionZone, camera_by_id, load_config, normalize_config, save_config, slugify_camera_id
-from .audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError, validate_tuning_value
+from .audit_ai import (
+    AuditAiAdvisor,
+    AuditAiChange,
+    AuditAiError,
+    motion_paradigm_context,
+    validate_tuning_value,
+)
 from .detector import detection_failure, merge_manual_detection_objects, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_pipeline import (
@@ -46,7 +52,6 @@ from .motion_pipeline import (
     identify_analysis_preset,
     motion_pipeline_catalog,
     resolve_motion_pipeline_graphs,
-    update_guided_fusion,
 )
 from .go2rtc import Go2RtcError
 from .incident_utils import (
@@ -647,10 +652,16 @@ async def application_event_stream(request: Request) -> StreamingResponse:
             last_event_id = request.headers.get("last-event-id", "")
             replay = active_manager.state_events.events_after(last_event_id)
             replayed_ids: set[str] = set()
+            snapshot_sequence: int | None = None
             if replay is None:
+                # Establish the snapshot boundary first. Events accepted after
+                # this cursor remain queued and are delivered after the
+                # snapshots, so a change racing snapshot generation cannot be
+                # lost. Events at or before it are represented by snapshots.
+                connection_cursor = active_manager.state_events.cursor
+                snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
                 yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
                 yield _sse_message("system_state", await asyncio.to_thread(system_status))
-                connection_cursor = active_manager.state_events.cursor
             else:
                 for event in replay:
                     replayed_ids.add(event.id)
@@ -675,6 +686,13 @@ async def application_event_stream(request: Request) -> StreamingResponse:
                 if event is None:
                     return
                 if event.id in replayed_ids:
+                    continue
+                event_sequence = active_manager.state_events.sequence(event.id)
+                if (
+                    snapshot_sequence is not None
+                    and event_sequence is not None
+                    and event_sequence <= snapshot_sequence
+                ):
                     continue
                 yield _sse_message(event.type, event.data, event.id)
         finally:
@@ -1542,8 +1560,19 @@ def _audit_ai_context(
                 qualification = candidate if isinstance(candidate, dict) else {}
     override = camera.motion_qualification
     graphs = resolve_motion_pipeline_graphs(active_config.motion_qualification, override)
+    effective_mode = (
+        active_config.motion_qualification.mode
+        if override.mode == "inherit"
+        else override.mode
+    )
+    fusion = guided_fusion_settings(graphs.fusion)
+    mog2_available = any(
+        stage.implementation == "opencv_mog2_evidence"
+        and bool(stage.options.get("enabled", True))
+        for stage in graphs.observation
+    )
     effective = {
-        "mode": active_config.motion_qualification.mode if override.mode == "inherit" else override.mode,
+        "mode": effective_mode,
         "sensitivity": active_config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
         "frame_width": override.frame_width or active_config.motion_qualification.frame_width,
         "borderline_rescue_enabled": (
@@ -1556,18 +1585,15 @@ def _audit_ai_context(
             if override.borderline_margin is None
             else override.borderline_margin
         ),
-        "mog2_audit_enabled": (
-            active_config.motion_qualification.mog2_audit_enabled
-            if override.mog2_audit_enabled is None
-            else override.mog2_audit_enabled
-        ),
+        "mog2_available": mog2_available,
+        "mog2_validation_enabled": mog2_available and "mog2" in fusion.get("sources", []),
         "mog2_history_seconds": active_config.motion_qualification.mog2_history_seconds,
         "sample_fps": active_config.motion_qualification.sample_fps,
         "window_seconds": active_config.motion_qualification.window_seconds,
         "post_trigger_seconds": active_config.motion_qualification.post_trigger_seconds,
         "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
         "analysis_preset": identify_analysis_preset(graphs.qualification),
-        "fusion": guided_fusion_settings(graphs.fusion),
+        "fusion": fusion,
         "pipeline_origins": graphs.origins,
     }
     recent, _ = active_manager.events.motion_audits(limit=50, camera_id=camera_id)
@@ -1578,6 +1604,13 @@ def _audit_ai_context(
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
         object_matches += int(row.get("object_detected") == 1)
     return {
+        "motion_paradigm": motion_paradigm_context(
+            mode=effective_mode,
+            onvif_enabled=camera.onvif.enabled,
+            has_live_substream=bool(camera.live_stream_url),
+            fusion=fusion,
+            mog2_available=mog2_available,
+        ),
         "audit": {
             "id": audit.get("id"),
             "camera_id": camera_id,
@@ -1590,6 +1623,17 @@ def _audit_ai_context(
             "object_detected": None if audit.get("object_detected") is None else bool(audit.get("object_detected")),
             "qualification": qualification,
             "pipeline_telemetry": pipeline_telemetry,
+        },
+        "decision_outcome": {
+            "filtered_before_object_detection": not bool(audit.get("event_id")),
+            "object_detection_ran": bool(audit.get("event_id")),
+            "object_detection_completed": audit.get("object_detected") is not None,
+            "object_detected": (
+                None
+                if audit.get("object_detected") is None
+                else bool(audit.get("object_detected"))
+            ),
+            "eligible_object_found": audit.get("object_detected") == 1,
         },
         "detected_objects": detected_objects,
         "effective_settings": effective,
@@ -1608,8 +1652,6 @@ def _audit_ai_context(
             "mog2_history_seconds": [5, 300],
             "sensitivity": ["high", "balanced", "low"],
             "analysis_preset": ["adaptive", "modular", "classic"],
-            "fusion_policy": ["audit", "any", "all", "weighted"],
-            "fusion_sources": ["mog2", "onvif"],
         },
     }
 
@@ -1628,22 +1670,7 @@ def _apply_pipeline_ai_change(
     if change.setting == "analysis_preset":
         target.pipeline.qualification = analysis_preset_selections(str(value))
         return
-    if change.setting not in {"fusion_policy", "fusion_sources"}:
-        setattr(target, change.setting, value)
-        return
-    override = (
-        CameraMotionQualificationConfig()
-        if change.scope == "global"
-        else camera.motion_qualification
-    )
-    graphs = resolve_motion_pipeline_graphs(next_config.motion_qualification, override)
-    target.pipeline.fusion = update_guided_fusion(
-        graphs.fusion,
-        change.setting,
-        value,
-    )
-    if change.setting == "fusion_sources" and "mog2" in value:
-        target.mog2_audit_enabled = True
+    setattr(target, change.setting, value)
 
 
 @app.get("/api/motion-audit")
@@ -1710,10 +1737,11 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
         )
     try:
         snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+        analysis_context = _audit_ai_context(audit, active_config, active_manager)
         advice = await asyncio.to_thread(
             AuditAiAdvisor(audit_config).analyze,
             snapshot_path,
-            _audit_ai_context(audit, active_config, active_manager),
+            analysis_context,
         )
     except AuditAiError as exc:
         raise HTTPException(status_code=502, detail=redact_secret_text(exc)) from exc
@@ -1728,6 +1756,7 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
         "camera_id": audit.get("camera_id"),
         "provider": audit_config.provider,
         "model": audit_config.model or "",
+        "motion_paradigm": analysis_context["motion_paradigm"],
         "advice": advice.model_dump(mode="json"),
     }
 

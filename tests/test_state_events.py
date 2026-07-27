@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import threading
+from unittest.mock import patch
 
 from survng.app.state_events import StateEventBroker
 
@@ -45,6 +47,51 @@ class StateEventBrokerTest(unittest.TestCase):
 
         self.assertEqual(broker.events_after(first.id), [second])
         self.assertIsNone(broker.events_after("another-boot:1"))
+
+    def test_rejects_impossible_future_and_negative_cursors(self) -> None:
+        broker = StateEventBroker()
+        broker.publish("camera_state", {"enabled": True})
+
+        self.assertIsNone(broker.events_after(f"{broker.instance_id}:999"))
+        self.assertIsNone(broker.events_after(f"{broker.instance_id}:-1"))
+        self.assertEqual(broker.sequence(f"{broker.instance_id}:1"), 1)
+        self.assertIsNone(broker.sequence("another-boot:1"))
+
+    def test_published_data_is_an_immutable_snapshot(self) -> None:
+        broker = StateEventBroker()
+        payload = {"camera": {"enabled": True}}
+
+        event = broker.publish("camera_state", payload)
+        payload["camera"]["enabled"] = False
+
+        self.assertTrue(event.data["camera"]["enabled"])
+
+    def test_close_sentinel_cannot_overtake_accepted_publish(self) -> None:
+        broker = StateEventBroker()
+        subscriber = broker.subscribe()
+        entered_delivery = threading.Event()
+        allow_delivery = threading.Event()
+        original_put = subscriber.put_nowait
+
+        def blocking_put(item):
+            if item is not None:
+                entered_delivery.set()
+                allow_delivery.wait(timeout=1)
+            original_put(item)
+
+        with patch.object(subscriber, "put_nowait", side_effect=blocking_put):
+            publisher = threading.Thread(target=broker.publish, args=("camera_state", {"id": "gate"}))
+            publisher.start()
+            self.assertTrue(entered_delivery.wait(timeout=1))
+            closer = threading.Thread(target=broker.close)
+            closer.start()
+            self.assertTrue(closer.is_alive())
+            allow_delivery.set()
+            publisher.join(timeout=1)
+            closer.join(timeout=1)
+
+        self.assertEqual(subscriber.get_nowait().type, "camera_state")
+        self.assertIsNone(subscriber.get_nowait())
 
 
 if __name__ == "__main__":

@@ -204,9 +204,9 @@ another camera connection. The ring is sized from the configured sample rate,
 analysis window, and post-trigger horizon with additional history for timestamp
 jitter.
 
-### MOG2 background audit and blob tracking
+### Optional MOG2 validation and blob tracking
 
-When `mog2_audit_enabled` is active and the effective camera mode is `audit`,
+When the resolved decision graph selects MOG2 validation,
 the same grayscale frame samples also feed a per-camera OpenCV MOG2 background
 model. No additional stream or camera connection is opened. The model warms for
 approximately two seconds, separates foreground from its learned background,
@@ -244,12 +244,11 @@ MOG2 processes only frame contexts and ONVIF evidence processes only event
 contexts. The shared repository is thread-safe and bounded. Evidence-stage
 failure is logged but never blocks the established trigger queue.
 
-MOG2 evidence is observational only. It does not alter the existing motion
-score, acceptance decision, suppression behavior, borderline rescue, or
-OpenVINO execution. This allows real daytime, nighttime, weather, and insect
-events to establish whether background modeling is reliable before it becomes
-part of enforcement. The model history is globally configurable; collection
-can be disabled globally or overridden per camera.
+MOG2 evidence is optional. When selected as a validator it can corroborate an
+adaptive decision; otherwise its processor is disabled to save CPU. The model
+history is globally configurable. A decision graph that selects MOG2 is
+authoritative and automatically enables its observation stage, preventing a
+configuration mismatch from silently degrading into permanent fail-open.
 
 ### Burst coalescing
 
@@ -294,13 +293,13 @@ Sensitivity selects the acceptance threshold:
 The names describe motion sensitivity: `high` accepts more candidate motion,
 while `low` requires stronger temporal evidence.
 
-### Modes
+### Trigger modes
 
-- `off`: coalesce bursts but skip scoring.
-- `audit`: score every burst and report whether it would be suppressed, but
-  continue through object detection. This is the default.
-- `enforce`: stop rejected bursts before high-resolution sampling and object
-  detection.
+- `camera`: only ONVIF and manual notices enter the event queue. Adaptive and
+  MOG2 validation are optional and never create an event.
+- `adaptive`: accepted adaptive motion is the only automatic trigger. MOG2 may
+  reject an adaptive candidate but cannot rescue rejected adaptive motion.
+  Ordinary ONVIF notices remain diagnostic evidence only.
 
 Semantic ONVIF topics containing person, people, human, vehicle, animal, or
 face bypass suppression. Manual test triggers also bypass it. If fewer than
@@ -316,7 +315,7 @@ margin is `0.03`; clearly weak motion does not incur inference. Global rescue
 settings can be inherited or overridden per camera.
 
 Each camera can inherit or override the global mode and sensitivity. A sampled
-percentage of enforced rejections is saved under:
+percentage of rejected validation decisions is saved under:
 
 ```text
 STORAGE_DIR/motion_samples/CAMERA_ID/
@@ -476,15 +475,15 @@ The pipeline publishes state through:
 - MQTT zone/object topics and Home Assistant Discovery entities.
 
 Motion qualification telemetry includes trigger count, coalesced bursts,
-passes, audit rejects, enforced suppressions, priority bypasses, insufficient
-frame decisions, dropped triggers, queue depth, ring depth, and the last
+passes, suppressions, priority bypasses, insufficient-frame decisions,
+validator fail-opens, dropped triggers, queue depth, ring depth, and the last
 decision details.
 
 Rejected decisions are also indexed in the `motion_audits` table inside
-`survng.sqlite3` and displayed under Config > Motion Audit. Audit-mode entries
-reuse the clean event snapshot and report whether OpenVINO subsequently found
-an eligible object. Enforced entries report that detection was skipped and use
-the configured rejected-frame sampling rate to attach an image. The viewer is
+`survng.sqlite3` and displayed under Config > Motion Audit. Rejected entries
+report that detection was skipped and use the configured rejected-frame
+sampling rate to attach an image. Borderline rescues also report whether
+OpenVINO subsequently found an eligible object. The viewer is
 paginated and filterable by camera and detector outcome. Its card grid uses the
 remaining browser height; selecting a thumbnail opens a full-viewport image
 overlay with decision details and keyboard previous/next navigation.
@@ -538,7 +537,7 @@ Global motion qualification:
 ```json
 {
   "motion_qualification": {
-    "mode": "audit",
+    "mode": "camera",
     "sensitivity": "balanced",
     "frame_width": 320,
     "sample_fps": 5.0,
@@ -548,7 +547,7 @@ Global motion qualification:
     "rejected_sample_rate": 0.05,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
-    "mog2_audit_enabled": true,
+    "mog2_audit_enabled": false,
     "mog2_history_seconds": 30.0,
     "pipeline": {
       "qualification": [],
@@ -609,10 +608,10 @@ stopped. Camera status reports the resolved implementation, options, and
 whether each graph came from built-in defaults, global config, or a camera
 override.
 
-The built-in final graph is parity-safe: fusion uses `audit`, activation and
-release both require one decision, cooldown is zero, and state expires after
-10 seconds of inactivity. A complete custom final graph can enable consensus
-and temporal hysteresis explicitly:
+The built-in final graph uses adaptive validation, starts after one accepted
+decision, releases after three rejected decisions, applies a five-second
+cooldown, and expires state after 10 seconds of inactivity. A complete custom
+final graph can require adaptive and MOG2 consensus explicitly:
 
 ```json
 {
@@ -623,13 +622,13 @@ and temporal hysteresis explicitly:
           "stage_id": "evidence_fusion",
           "implementation": "buffered_evidence_fusion",
           "options": {
-            "sources": ["mog2", "onvif"],
-            "policy": "weighted",
-            "source_thresholds": {"mog2": 0.55, "onvif": 0.5},
-            "source_weights": {"primary": 2.0, "mog2": 1.0, "onvif": 0.5},
-            "weighted_threshold": 0.5,
+            "sources": ["mog2"],
+            "policy": "all",
+            "source_thresholds": {"mog2": 0.55},
             "minimum_sources": 1,
-            "require_warmed": true
+            "require_warmed": true,
+            "include_primary": true,
+            "fail_open": true
           }
         },
         {
@@ -653,9 +652,11 @@ and temporal hysteresis explicitly:
 }
 ```
 
-Fusion policies are `audit` (collect only), `any`, `all`, and `weighted`.
-Unavailable or unwarmed sources leave the primary decision unchanged until
-`minimum_sources` is satisfied. Generic evidence producers only need to write
+Fusion policies are `bypass`, `audit` (adaptive only), `any`, `all`, and
+`weighted`. Guided visual-triggered configuration never uses `any`, because
+MOG2 is confirmation rather than an independent trigger. Unavailable or
+unwarmed selected validators fail open when `fail_open` is enabled. Generic
+evidence producers only need to write
 `score` and optional `warmed` values to the per-camera repository. The final
 graph must provide a trigger `decision`; preflight validation rejects partial
 graphs before configuration is persisted.
@@ -676,9 +677,9 @@ AI audit advisor:
 }
 ```
 
-Use `audit` until representative daytime, nighttime, weather, insect, and
-headlight events have been observed. Enable `enforce` globally only after
-checking false-reject behavior; use camera overrides for difficult scenes.
+Start with camera-triggered mode and adaptive validation. Review representative
+daytime, nighttime, weather, insect, and headlight events before adding MOG2 or
+switching a camera with unreliable ONVIF to visual-triggered mode.
 
 ## 13. Verification
 
@@ -687,12 +688,13 @@ Relevant automated coverage includes:
 - Motion scoring for coherent movement, erratic edge movement, global
   brightness changes, and insufficient-frame fail-open behavior.
 - MOG2 warmup, persistent slow-blob tracking, evidence aggregation, and
-  audit-only configuration inheritance.
+  fail-open validator behavior.
 - Concurrent ONVIF event normalization, semantic priority scoring, bounded
   storage, and event-window aggregation.
 - Event-state activation/release hysteresis, cooldown, timeout reset, and
   per-camera isolation.
-- Audit, any-source, all-source, and weighted evidence-fusion policies.
+- Bypass, adaptive-only, any-source, all-source, weighted, and source-only
+  evidence-fusion policies.
 - Non-blocking event enqueue and ONVIF burst coalescing.
 - Recorder ownership, failure isolation, indexing, media validation, recording
   range selection, and playback continuity helpers.
@@ -710,9 +712,9 @@ Chrome across repeated seeks and many segment boundaries.
 
 ## 14. Current Boundaries And Future Work
 
-The modular observation and fusion paths maintain MOG2 foreground tracks. The
-default `audit` policy does not let those tracks participate in suppression;
-`any`, `all`, or `weighted` must be selected explicitly after evidence review.
+The modular observation and fusion paths maintain optional MOG2 foreground
+tracks. MOG2 is disabled by default and participates only when selected as a
+validator.
 The repository and fusion stage accept multiple independently produced motion
 sources, but SurvNG does not yet calculate dense/sparse optical flow, maintain
 semantic object tracks, use a KNN background model, or consume vendor motion
@@ -722,10 +724,10 @@ separate scene motion from insects reliably enough.
 
 The next evidence-driven progression is:
 
-1. Run `audit / balanced` and collect representative decisions.
-2. Review rejected samples and any audit rejects that still produced objects.
+1. Run camera-triggered / balanced with adaptive validation.
+2. Review rejected samples and borderline rescues that produced objects.
 3. Tune per-camera sensitivity before changing global behavior.
-4. Enable enforcement for stable cameras.
+4. Use visual-triggered mode only for cameras with unreliable ONVIF.
 5. Compare `mog2_*` evidence with object-found and no-object audits before
    defining any consensus suppression rule.
 6. Add optical flow only where measured failures justify the additional CPU

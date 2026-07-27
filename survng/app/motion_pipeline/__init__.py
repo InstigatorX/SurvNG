@@ -27,7 +27,11 @@ from .contracts import (
     MotionStage,
     MotionStageLifecycle,
 )
-from .configuration import ResolvedMotionPipelineGraphs, resolve_motion_pipeline_graphs
+from .configuration import (
+    ResolvedMotionPipelineGraphs,
+    resolve_motion_pipeline_graphs,
+    resolved_trigger_mode,
+)
 from .catalog import (
     MotionPipelinePreset,
     builtin_motion_pipeline_presets,
@@ -193,5 +197,6 @@ __all__ = [
     "register_evidence_stages",
     "register_decision_stages",
     "resolve_motion_pipeline_graphs",
+    "resolved_trigger_mode",
     "update_guided_fusion",
 ]

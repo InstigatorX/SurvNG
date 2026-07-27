@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .config import CameraConfig, DetectionZone
@@ -72,22 +73,44 @@ def apply_detection_zones(
     zones = [zone for zone in camera.zones if zone.enabled and len(zone.points) >= 3]
     if not zones:
         for detected in objects:
+            if not isinstance(detected, dict):
+                continue
+            detected["zones"] = []
+            detected["zone_matches"] = []
+            detected.pop("zone_point", None)
+            detected["incident_eligible"] = False
             if detected.get("label"):
                 detected["incident_eligible"] = True
-                detected["zones"] = []
         return objects
 
     width = max(1, frame_width)
     height = max(1, frame_height)
     for detected in objects:
+        if not isinstance(detected, dict):
+            continue
+        # Always replace prior annotations so re-evaluating an object for a
+        # different camera or zone configuration cannot retain stale access.
+        detected["zones"] = []
+        detected["zone_matches"] = []
+        detected.pop("zone_point", None)
+        detected["incident_eligible"] = False
         label = str(detected.get("label") or "")
         box = detected.get("box") or {}
-        confidence = float(detected.get("confidence") or 0.0)
-        if not label or not all(key in box for key in ("x1", "y1", "x2", "y2")):
+        if not label or not isinstance(box, dict) or not all(
+            key in box for key in ("x1", "y1", "x2", "y2")
+        ):
+            continue
+        try:
+            confidence = float(detected.get("confidence") or 0.0)
+            coordinates = tuple(float(box[key]) for key in ("x1", "y1", "x2", "y2"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(confidence) or not all(math.isfinite(value) for value in coordinates):
             continue
 
-        x = ((float(box["x1"]) + float(box["x2"])) / 2.0) / width
-        y = float(box["y2"]) / height
+        x1, _y1, x2, y2 = coordinates
+        x = ((x1 + x2) / 2.0) / width
+        y = y2 / height
         relevant = [zone for zone in zones if _class_applies(zone, label)]
         incident_zones = [zone for zone in relevant if zone.behavior == "incident"]
         matches = []

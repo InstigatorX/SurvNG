@@ -1,6 +1,8 @@
 const DEFAULT_SETTINGS = Object.freeze({
   policy: "audit",
-  sources: ["mog2", "onvif"],
+  sources: [],
+  includePrimary: true,
+  failOpen: true,
   sourceThresholds: { mog2: 0.5, onvif: 0.5 },
   sourceWeights: { primary: 1, mog2: 1, onvif: 1 },
   weightedThreshold: 0.5,
@@ -12,28 +14,44 @@ const DEFAULT_SETTINGS = Object.freeze({
 
 export const MOTION_MODE_OPTIONS = Object.freeze([
   Object.freeze({
-    value: "enforce",
-    label: "SurvNG smart motion (Recommended)",
-    status: "SurvNG visual triggers + filtering",
-    description: "SurvNG can start object detection from credible visual motion, even when the camera sends no ONVIF motion notice. Routine camera motion notices are analyzed and may be filtered; semantic person, vehicle, animal, face, and manual notices bypass filtering.",
+    value: "camera",
+    label: "Camera-triggered (Recommended)",
+    status: "Camera ONVIF triggers",
+    description: "Only camera ONVIF notices and manual tests can start object detection. Optional visual validators can confirm ordinary camera motion before detection runs.",
   }),
   Object.freeze({
-    value: "audit",
-    label: "Camera alerts + decision preview",
-    status: "Camera alerts only · previewing decisions",
-    description: "Only camera ONVIF or manual notices start object detection. SurvNG still analyzes the video and previews its decisions, but visual analysis alone cannot create an event and camera notices are not skipped.",
-  }),
-  Object.freeze({
-    value: "off",
-    label: "Camera alerts without filtering",
-    status: "Camera alerts only · filtering off",
-    description: "Only camera ONVIF or manual notices start object detection, and every notice is passed through. Adaptive scene learning remains warm but does not create events or filter camera notices.",
+    value: "adaptive",
+    label: "Visual-triggered",
+    status: "SurvNG adaptive triggers",
+    description: "Adaptive visual motion starts object detection. Ordinary ONVIF notices are recorded as diagnostics but cannot trigger detection; MOG2 can optionally be required as confirmation.",
   }),
 ]);
 
+const LEGACY_MODE_INFO = Object.freeze({
+  audit: Object.freeze({
+    value: "audit",
+    label: "Legacy decision preview",
+    status: "Legacy camera triggers · preview only",
+    description: "Camera notices always run object detection; adaptive decisions are recorded but never enforced. Select a current mode to migrate this configuration.",
+  }),
+  off: Object.freeze({
+    value: "off",
+    label: "Legacy filtering off",
+    status: "Legacy camera triggers · no filtering",
+    description: "Camera notices always run object detection. Select Camera-triggered to migrate this configuration.",
+  }),
+  enforce: Object.freeze({
+    value: "enforce",
+    label: "Legacy hybrid mode",
+    status: "Legacy camera + visual triggers",
+    description: "Both ordinary ONVIF and adaptive visual motion may trigger detection. Select a current mode to remove this ambiguous hybrid behavior.",
+  }),
+});
+
 export function motionModeInfo(mode) {
+  if (LEGACY_MODE_INFO[mode]) return LEGACY_MODE_INFO[mode];
   return MOTION_MODE_OPTIONS.find((option) => option.value === mode)
-    || MOTION_MODE_OPTIONS.find((option) => option.value === "audit");
+    || MOTION_MODE_OPTIONS.find((option) => option.value === "camera");
 }
 
 const GUIDED_IMPLEMENTATIONS = [
@@ -51,6 +69,8 @@ const GUIDED_OPTION_KEYS = [
     "weighted_threshold",
     "minimum_sources",
     "require_warmed",
+    "include_primary",
+    "fail_open",
   ]),
   new Set([
     "activation_frames",
@@ -78,8 +98,38 @@ function clamp(value, minimum, maximum, fallback) {
   return Math.min(maximum, Math.max(minimum, finiteNumber(value, fallback)));
 }
 
+function knownMotionSources(value) {
+  const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  return [...new Set(values
+    .map((source) => String(source).trim().toLowerCase())
+    .filter((source) => source === "mog2" || source === "onvif"))];
+}
+
 export function defaultMotionDecisionSettings() {
   return structuredClone(DEFAULT_SETTINGS);
+}
+
+export function motionValidatorSettings(
+  current,
+  { mode, adaptiveEnabled = true, mog2Enabled = false, agreement = "all" },
+) {
+  const includePrimary = mode === "adaptive" ? true : Boolean(adaptiveEnabled);
+  const sources = mog2Enabled ? ["mog2"] : [];
+  let policy = "bypass";
+  if (includePrimary && !mog2Enabled) policy = "audit";
+  else if (mog2Enabled && !includePrimary) policy = "all";
+  else if (includePrimary && mog2Enabled) {
+    // In visual-triggered mode MOG2 may corroborate adaptive motion, but it
+    // must never become an independent trigger by rescuing a rejected primary.
+    policy = mode === "adaptive" ? "all" : agreement === "any" ? "any" : "all";
+  }
+  return {
+    ...current,
+    policy,
+    sources,
+    includePrimary,
+    failOpen: true,
+  };
 }
 
 export function readMotionDecisionFusion(fusion) {
@@ -103,12 +153,14 @@ export function readMotionDecisionFusion(fusion) {
     custom: false,
     usesDefaults: false,
     settings: {
-      policy: ["audit", "any", "all", "weighted"].includes(fusionOptions.policy)
-        ? fusionOptions.policy
+      policy: ["audit", "bypass", "any", "all", "weighted"].includes(
+        String(fusionOptions.policy || "").trim().toLowerCase(),
+      )
+        ? String(fusionOptions.policy).trim().toLowerCase()
         : defaults.policy,
-      sources: Array.isArray(fusionOptions.sources)
-        ? fusionOptions.sources.filter((source) => source === "mog2" || source === "onvif")
-        : defaults.sources,
+      sources: knownMotionSources(fusionOptions.sources),
+      includePrimary: fusionOptions.include_primary ?? defaults.includePrimary,
+      failOpen: fusionOptions.fail_open ?? defaults.failOpen,
       sourceThresholds: {
         mog2: clamp(fusionOptions.source_thresholds?.mog2, 0, 1, defaults.sourceThresholds.mog2),
         onvif: clamp(fusionOptions.source_thresholds?.onvif, 0, 1, defaults.sourceThresholds.onvif),
@@ -154,9 +206,7 @@ export function readMotionDecisionFusion(fusion) {
 
 export function buildMotionDecisionFusion(settings) {
   const normalized = { ...defaultMotionDecisionSettings(), ...settings };
-  const sources = [...new Set((normalized.sources || []).filter(
-    (source) => source === "mog2" || source === "onvif",
-  ))];
+  const sources = knownMotionSources(normalized.sources);
   return [
     {
       stage_id: "evidence_fusion",
@@ -176,6 +226,8 @@ export function buildMotionDecisionFusion(settings) {
         weighted_threshold: clamp(normalized.weightedThreshold, 0, 1, 0.5),
         minimum_sources: 1,
         require_warmed: true,
+        include_primary: normalized.includePrimary !== false,
+        fail_open: normalized.failOpen !== false,
       },
     },
     {

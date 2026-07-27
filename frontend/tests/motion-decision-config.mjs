@@ -3,19 +3,23 @@ import {
   buildMotionDecisionFusion,
   MOTION_MODE_OPTIONS,
   motionModeInfo,
+  motionValidatorSettings,
   readMotionDecisionFusion,
 } from "../src/motionDecisionConfig.mjs";
 
-assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["enforce", "audit", "off"]);
-assert.match(motionModeInfo("enforce").description, /start object detection/);
-assert.match(motionModeInfo("audit").description, /visual analysis alone cannot create an event/);
-assert.match(motionModeInfo("off").description, /Only camera ONVIF or manual notices/);
-assert.equal(motionModeInfo("unknown").value, "audit");
+assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["camera", "adaptive"]);
+assert.match(motionModeInfo("camera").description, /Only camera ONVIF notices/);
+assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
+assert.equal(motionModeInfo("unknown").value, "camera");
+assert.equal(motionModeInfo("audit").value, "audit");
+assert.match(motionModeInfo("enforce").description, /ambiguous hybrid/);
 
 const defaults = readMotionDecisionFusion(undefined);
 assert.equal(defaults.custom, false);
 assert.equal(defaults.usesDefaults, true);
 assert.equal(defaults.settings.policy, "audit");
+assert.equal(defaults.settings.includePrimary, true);
+assert.equal(defaults.settings.failOpen, true);
 
 const graph = buildMotionDecisionFusion({
   ...defaults.settings,
@@ -31,6 +35,45 @@ const roundTrip = readMotionDecisionFusion(graph);
 assert.equal(roundTrip.custom, false);
 assert.equal(roundTrip.settings.policy, "all");
 assert.equal(roundTrip.settings.activationFrames, 2);
+assert.equal(roundTrip.settings.includePrimary, true);
+assert.equal(roundTrip.settings.failOpen, true);
+
+const cameraEither = motionValidatorSettings(defaults.settings, {
+  mode: "camera",
+  adaptiveEnabled: true,
+  mog2Enabled: true,
+  agreement: "any",
+});
+assert.equal(cameraEither.policy, "any");
+assert.deepEqual(cameraEither.sources, ["mog2"]);
+
+const visualConfirmation = motionValidatorSettings(cameraEither, {
+  mode: "adaptive",
+  adaptiveEnabled: true,
+  mog2Enabled: true,
+  agreement: "any",
+});
+assert.equal(visualConfirmation.policy, "all");
+assert.equal(visualConfirmation.includePrimary, true);
+
+const cameraUnvalidated = motionValidatorSettings(defaults.settings, {
+  mode: "camera",
+  adaptiveEnabled: false,
+  mog2Enabled: false,
+});
+assert.equal(cameraUnvalidated.policy, "bypass");
+assert.equal(cameraUnvalidated.includePrimary, false);
+
+const scalarGraph = buildMotionDecisionFusion({
+  ...defaults.settings,
+  policy: "all",
+  sources: ["mog2"],
+});
+scalarGraph[0].options.sources = " MOG2 ";
+scalarGraph[0].options.policy = " ALL ";
+const scalarSource = readMotionDecisionFusion(scalarGraph);
+assert.deepEqual(scalarSource.settings.sources, ["mog2"]);
+assert.equal(scalarSource.settings.policy, "all");
 
 const custom = readMotionDecisionFusion([
   { stage_id: "custom", implementation: "site_specific_fusion" },

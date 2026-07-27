@@ -50,19 +50,71 @@ def _resolve_graph(
     return tuple(defaults), "default"
 
 
-def _fusion_uses_mog2_for_decisions(fusion: tuple[MotionStageConfig, ...]) -> bool:
+def _normalized_sources(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return ()
+    return tuple(dict.fromkeys(
+        normalized
+        for source in values
+        if (normalized := str(source).strip().lower())
+    ))
+
+
+def _fusion_uses_mog2(fusion: tuple[MotionStageConfig, ...]) -> bool:
     for stage in fusion:
         if stage.implementation != "buffered_evidence_fusion":
             continue
         policy = str(stage.options.get("policy", "audit")).strip().lower()
-        sources = stage.options.get("sources", [])
+        sources = _normalized_sources(stage.options.get("sources", []))
         if (
-            policy != "audit"
-            and isinstance(sources, (list, tuple))
+            policy != "bypass"
             and "mog2" in sources
         ):
             return True
     return False
+
+
+def _validate_trigger_source_separation(
+    mode: str,
+    fusion: tuple[MotionStageConfig, ...],
+) -> None:
+    if mode not in {"camera", "adaptive"}:
+        return
+    for stage in fusion:
+        if stage.implementation != "buffered_evidence_fusion":
+            continue
+        sources = _normalized_sources(stage.options.get("sources", []))
+        if "onvif" in sources:
+            raise ValueError(
+                "ONVIF cannot be a validation source in camera/adaptive mode; "
+                "it is the camera trigger in camera mode and diagnostic-only in adaptive mode"
+            )
+
+
+def _validate_required_observation_sources(
+    fusion: tuple[MotionStageConfig, ...],
+    observation: tuple[MotionStageConfig, ...],
+) -> None:
+    if not _fusion_uses_mog2(fusion):
+        return
+    if any(
+        stage.implementation == "opencv_mog2_evidence"
+        and bool(stage.options.get("enabled", True))
+        for stage in observation
+    ):
+        return
+    raise ValueError(
+        "motion fusion selects MOG2, but the observation graph has no enabled MOG2 source"
+    )
+
+
+def resolved_trigger_mode(mode: str) -> str:
+    """Resolve legacy modes to one of the two explicit trigger models."""
+    return "adaptive" if mode in {"adaptive", "enforce"} else "camera"
 
 
 def resolve_motion_pipeline_graphs(
@@ -87,10 +139,16 @@ def resolve_motion_pipeline_graphs(
         camera_config.pipeline.fusion,
         default_motion_fusion_stage_configs(),
     )
+    _validate_trigger_source_separation(mode, fusion)
+    # A decision graph that selects MOG2 is authoritative. The legacy flag is
+    # retained only for audit-mode compatibility and must never silently turn a
+    # configured validator into permanent fail-open behavior.
     mog2_enabled = bool(
-        mog2_requested
-        and mode != "off"
-        and (mode == "audit" or _fusion_uses_mog2_for_decisions(fusion))
+        mode != "off"
+        and (
+            _fusion_uses_mog2(fusion)
+            or (mode == "audit" and mog2_requested)
+        )
     )
     observation, observation_origin = _resolve_graph(
         "observation",
@@ -102,6 +160,7 @@ def resolve_motion_pipeline_graphs(
             mog2_history_seconds=global_config.mog2_history_seconds,
         ),
     )
+    _validate_required_observation_sources(fusion, observation)
     return ResolvedMotionPipelineGraphs(
         qualification=qualification,
         observation=observation,

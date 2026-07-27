@@ -3036,7 +3036,8 @@ button.status-pill.hud-toggle:disabled {
   padding: 6px 8px;
 }
 
-.motion-decision-mode.mode-enforce {
+.motion-decision-mode.mode-enforce,
+.motion-decision-mode.mode-adaptive {
   border-left: 3px solid var(--accent);
   color: var(--ink);
 }

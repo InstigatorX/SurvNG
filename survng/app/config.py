@@ -145,7 +145,9 @@ class CameraMotionPipelineConfig(BaseModel):
 
 
 class MotionQualificationConfig(BaseModel):
-    mode: Literal["off", "audit", "enforce"] = "audit"
+    # Legacy off/audit/enforce values remain loadable for backward
+    # compatibility; the GUI emits only camera/adaptive for new saves.
+    mode: Literal["camera", "adaptive", "off", "audit", "enforce"] = "camera"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
@@ -155,13 +157,13 @@ class MotionQualificationConfig(BaseModel):
     rejected_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     borderline_rescue_enabled: bool = True
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
-    mog2_audit_enabled: bool = True
+    mog2_audit_enabled: bool = False
     mog2_history_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     pipeline: MotionPipelineConfig = Field(default_factory=MotionPipelineConfig)
 
 
 class CameraMotionQualificationConfig(BaseModel):
-    mode: Literal["inherit", "off", "audit", "enforce"] = "inherit"
+    mode: Literal["inherit", "camera", "adaptive", "off", "audit", "enforce"] = "inherit"
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
     frame_width: int | None = Field(default=None, ge=240, le=960)
     borderline_rescue_enabled: bool | None = None
