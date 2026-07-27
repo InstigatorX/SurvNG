@@ -98,6 +98,29 @@ class EventStore:
             conn.execute(
                 "create unique index if not exists idx_motion_audits_decision on motion_audits(decision_id) where decision_id is not null and decision_id != ''"
             )
+            conn.execute(
+                """
+                create table if not exists motion_ai_reviews (
+                    id integer primary key autoincrement,
+                    camera_id text not null,
+                    status text not null,
+                    audits_considered integer not null default 0,
+                    images_available integer not null default 0,
+                    analyzed integer not null default 0,
+                    failed integer not null default 0,
+                    result_json text not null default '{}',
+                    error text not null default '',
+                    created_at text not null,
+                    updated_at text not null
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_motion_ai_reviews_camera_created on motion_ai_reviews(camera_id, created_at desc, id desc)"
+            )
+            conn.execute(
+                "update motion_ai_reviews set status = 'interrupted', error = 'SurvNG restarted before this review completed' where status in ('queued', 'running')"
+            )
             # Older active/cooldown observations predate durable linkage. The
             # state reason guarantees they belong to an already-created event;
             # attach them to the nearest preceding event for the same camera.
@@ -478,9 +501,12 @@ class EventStore:
         offset: int = 0,
         camera_id: str = "",
         outcome: str = "all",
+        include_incident_activity: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         clauses: list[str] = []
         values: list[Any] = []
+        if not include_incident_activity:
+            clauses.append("reason not in ('event_state_active', 'event_state_cooldown')")
         if camera_id:
             clauses.append("camera_id = ?")
             values.append(camera_id)
@@ -508,6 +534,113 @@ class EventStore:
                 [*values, bounded_limit, bounded_offset],
             ).fetchall()
         return [dict(row) for row in rows], total
+
+    def create_motion_ai_review(self, camera_id: str, audits_considered: int) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into motion_ai_reviews (
+                    camera_id, status, audits_considered, created_at, updated_at
+                ) values (?, 'queued', ?, ?, ?)
+                """,
+                (camera_id, max(0, int(audits_considered)), now, now),
+            )
+            review_id = int(cursor.lastrowid)
+        return self.get_motion_ai_review(review_id) or {}
+
+    def update_motion_ai_review(
+        self,
+        review_id: int,
+        *,
+        status: str,
+        images_available: int | None = None,
+        analyzed: int | None = None,
+        failed: int | None = None,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        allowed_statuses = {"queued", "running", "completed", "failed", "interrupted"}
+        if status not in allowed_statuses:
+            raise ValueError("invalid motion AI review status")
+        result_json = None if result is None else json.dumps(
+            result,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            current = conn.execute(
+                "select status from motion_ai_reviews where id = ?",
+                (int(review_id),),
+            ).fetchone()
+            if current is None:
+                raise KeyError("motion AI review not found")
+            if str(current["status"]) == "interrupted" and status != "interrupted":
+                return self._motion_ai_review_row(
+                    conn.execute(
+                        "select * from motion_ai_reviews where id = ?",
+                        (int(review_id),),
+                    ).fetchone()
+                ) or {}
+            cursor = conn.execute(
+                """
+                update motion_ai_reviews
+                set status = ?,
+                    images_available = coalesce(?, images_available),
+                    analyzed = coalesce(?, analyzed),
+                    failed = coalesce(?, failed),
+                    result_json = coalesce(?, result_json),
+                    error = coalesce(?, error),
+                    updated_at = ?
+                where id = ?
+                """,
+                (
+                    status,
+                    images_available,
+                    analyzed,
+                    failed,
+                    result_json,
+                    error,
+                    now,
+                    int(review_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("motion AI review not found")
+        return self.get_motion_ai_review(review_id) or {}
+
+    @staticmethod
+    def _motion_ai_review_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        payload = dict(row)
+        try:
+            result = json.loads(str(payload.pop("result_json") or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            result = {}
+        payload["result"] = result if isinstance(result, dict) else {}
+        return payload
+
+    def get_motion_ai_review(self, review_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from motion_ai_reviews where id = ?",
+                (int(review_id),),
+            ).fetchone()
+        return self._motion_ai_review_row(row)
+
+    def latest_motion_ai_review(self, camera_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select * from motion_ai_reviews
+                where camera_id = ?
+                order by created_at desc, id desc limit 1
+                """,
+                (camera_id,),
+            ).fetchone()
+        return self._motion_ai_review_row(row)
 
     def motion_effectiveness(self, *, days: float = 7.0) -> dict[str, Any]:
         """Summarize durable motion decisions without conflating visual filters and deduplication."""

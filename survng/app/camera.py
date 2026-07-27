@@ -44,6 +44,7 @@ MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
 FUSION_STALE_TOLERANCE_SECONDS = 5.0
+INCIDENT_ACTIVITY_REASONS = frozenset({"event_state_active", "event_state_cooldown"})
 
 
 class CameraWorker:
@@ -1540,7 +1541,11 @@ class CameraWorker:
                         None,
                     )
                     if snapshot_path is None:
-                        snapshot_path = self._sample_rejected_motion(event_at, result)
+                        snapshot_path = (
+                            ""
+                            if result.reason in INCIDENT_ACTIVITY_REASONS
+                            else self._sample_rejected_motion(event_at, result)
+                        )
                         for item in triggers:
                             item["_motion_audit_snapshot_path"] = snapshot_path
                     self.motion_decision_handler.record_audit(
@@ -1659,7 +1664,7 @@ class CameraWorker:
         ).as_dict()
 
     def _related_incident_event_id(self, result: MotionQualificationResult) -> int | None:
-        if result.reason not in {"event_state_active", "event_state_cooldown"}:
+        if result.reason not in INCIDENT_ACTIVITY_REASONS:
             return None
         return self._active_incident_event_id
 

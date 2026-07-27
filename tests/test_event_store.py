@@ -447,9 +447,18 @@ class EventStoreTest(unittest.TestCase):
             reloaded = EventStore(Path(tmpdir))
             linked = reloaded.get_motion_audit(int(audit["id"]))
             observations = reloaded.motion_audits_for_related_events([int(event["id"])])
+            visible_audits, visible_total = reloaded.motion_audits(camera_id="foyer")
+            all_audits, all_total = reloaded.motion_audits(
+                camera_id="foyer",
+                include_incident_activity=True,
+            )
 
             self.assertEqual(linked["related_event_id"], event["id"])
             self.assertEqual([row["id"] for row in observations], [audit["id"]])
+            self.assertEqual(visible_audits, [])
+            self.assertEqual(visible_total, 0)
+            self.assertEqual([row["id"] for row in all_audits], [audit["id"]])
+            self.assertEqual(all_total, 1)
 
 
 if __name__ == "__main__":

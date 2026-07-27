@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -78,6 +78,71 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(context["related_prior_event"]["event_id"], 99)
         self.assertEqual(context["related_prior_event"]["seconds_before"], 9.0)
         self.assertEqual(context["related_prior_event"]["objects"][0]["label"], "person")
+
+    def test_sampled_suppression_context_records_that_object_detection_ran(self) -> None:
+        config = AppConfig(cameras=[CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera.invalid/main",
+        )])
+        events = SimpleNamespace(
+            get=lambda _event_id: None,
+            motion_audits=lambda **_kwargs: ([], 0),
+            for_camera_range=lambda *_args, **_kwargs: [],
+        )
+
+        context = main._audit_ai_context(
+            {
+                "id": 8,
+                "camera_id": "gate",
+                "features_json": json.dumps({"suppression_verification": True}),
+                "created_at": "2026-07-27T12:17:16+00:00",
+                "reason": "stationary_foreground",
+                "event_id": None,
+                "object_detected": 0,
+            },
+            config,
+            SimpleNamespace(events=events),
+        )
+
+        self.assertTrue(context["decision_outcome"]["object_detection_ran"])
+        self.assertTrue(context["decision_outcome"]["object_detection_completed"])
+        self.assertFalse(context["decision_outcome"]["filtered_before_object_detection"])
+
+    def test_manual_camera_review_starts_a_background_job(self) -> None:
+        config = AppConfig.model_validate({
+            "audit_ai": {"enabled": True, "api_key": "secret"},
+            "cameras": [{
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsp://camera.invalid/main",
+            }],
+        })
+        events = SimpleNamespace(
+            motion_audits=lambda **_kwargs: ([{"id": 1, "camera_id": "gate"}], 1),
+            create_motion_ai_review=lambda camera_id, count: {
+                "id": 17,
+                "camera_id": camera_id,
+                "status": "queued",
+                "audits_considered": count,
+            },
+        )
+        limiter = SimpleNamespace(acquire=Mock(return_value=True), release=Mock())
+        thread = SimpleNamespace(start=Mock())
+        manager = SimpleNamespace(events=events)
+
+        with (
+            patch.object(main, "config", config),
+            patch.object(main, "manager", manager),
+            patch.object(main, "AUDIT_AI_LIMITER", limiter),
+            patch.object(main.threading, "Thread", return_value=thread) as thread_factory,
+        ):
+            review = main.start_motion_ai_review(main.MotionAiReviewRequest(camera_id="gate"))
+
+        self.assertEqual(review["id"], 17)
+        limiter.acquire.assert_called_once_with(blocking=False)
+        thread.start.assert_called_once_with()
+        self.assertEqual(thread_factory.call_args.kwargs["name"], "motion-ai-review-gate")
 
     def test_initial_event_stream_does_not_drop_change_racing_snapshot(self) -> None:
         class Request:

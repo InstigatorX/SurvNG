@@ -2187,7 +2187,8 @@ button.status-pill.hud-toggle:disabled {
   gap: 4px;
 }
 
-.incident-events button {
+.incident-events button,
+.incident-activity-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -2205,7 +2206,8 @@ button.status-pill.hud-toggle:disabled {
   color: var(--active-ink);
 }
 
-.incident-events button span {
+.incident-events button span,
+.incident-activity-row span {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
@@ -2214,7 +2216,8 @@ button.status-pill.hud-toggle:disabled {
   white-space: nowrap;
 }
 
-.incident-events button strong {
+.incident-events button strong,
+.incident-activity-row strong {
   min-width: 0;
   overflow: hidden;
   justify-self: stretch;
@@ -2222,6 +2225,11 @@ button.status-pill.hud-toggle:disabled {
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.incident-activity-row {
+  border: 1px dashed var(--line);
+  color: var(--muted);
 }
 
 .empty-thumb {
@@ -3812,6 +3820,118 @@ button.status-pill.hud-toggle:disabled {
   margin-top: 5px;
   border-top: 1px solid var(--line);
   padding-top: 6px;
+}
+
+.motion-ai-review-panel > .settings-help {
+  max-width: 920px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.motion-ai-review-controls {
+  align-items: end;
+}
+
+.motion-ai-review-controls button {
+  min-height: 42px;
+}
+
+.motion-ai-review-report {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.motion-ai-review-report > header,
+.motion-ai-review-report > header > div,
+.motion-ai-review-recommendations,
+.motion-ai-review-recommendations article {
+  display: grid;
+  gap: 6px;
+}
+
+.motion-ai-review-report > header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.motion-ai-review-report > header span,
+.motion-ai-review-report > header time,
+.motion-ai-review-recommendations span,
+.motion-ai-review-recommendations small {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.motion-ai-review-progress {
+  display: grid;
+  gap: 7px;
+}
+
+.motion-ai-review-progress > div {
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.motion-ai-review-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.motion-ai-review-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.motion-ai-review-stats span {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+}
+
+.motion-ai-review-stats strong {
+  color: var(--text);
+  font-size: 1.15rem;
+}
+
+.motion-ai-review-recommendations article {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+
+.motion-ai-review-recommendations article > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.motion-ai-review-recommendations p {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .motion-ai-review-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .motion-ai-review-report > header {
+    grid-template-columns: 1fr;
+  }
 }
 
 .motion-pipeline-runtime-grid {

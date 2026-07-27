@@ -54,6 +54,7 @@ from .motion_pipeline import (
     motion_pipeline_catalog,
     resolve_motion_pipeline_graphs,
 )
+from .motion_ai_review import aggregate_motion_ai_review
 from .go2rtc import Go2RtcError
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
@@ -1531,6 +1532,10 @@ class AuditAiApplyRequest(BaseModel):
     changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
 
 
+class MotionAiReviewRequest(BaseModel):
+    camera_id: str = Field(min_length=1, max_length=128)
+
+
 def _audit_ai_context(
     audit: dict,
     active_config: AppConfig,
@@ -1686,8 +1691,12 @@ def _audit_ai_context(
         },
         "decision_outcome": {
             "interpretation": interpretation,
-            "filtered_before_object_detection": not bool(audit.get("event_id")),
-            "object_detection_ran": bool(audit.get("event_id")),
+            "filtered_before_object_detection": bool(
+                not audit.get("event_id") and audit.get("object_detected") is None
+            ),
+            "object_detection_ran": bool(
+                audit.get("event_id") or audit.get("object_detected") is not None
+            ),
             "object_detection_completed": audit.get("object_detected") is not None,
             "object_detected": (
                 None
@@ -1862,6 +1871,190 @@ def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
         "applied": applied,
         "workers_restarted": True,
     }
+
+
+def _run_motion_ai_review(
+    review_id: int,
+    audits: list[dict[str, Any]],
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> None:
+    analyses: list[tuple[dict[str, Any], Any]] = []
+    images_available = 0
+    failures = 0
+    consecutive_failures = 0
+    first_error = ""
+    current_settings: dict[str, Any] = {}
+    try:
+        active_manager.events.update_motion_ai_review(review_id, status="running")
+        advisor = AuditAiAdvisor(active_config.audit_ai)
+        candidates: list[tuple[dict[str, Any], Path]] = []
+        for audit in audits:
+            try:
+                snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+            except (FileNotFoundError, PermissionError):
+                continue
+            candidates.append((audit, snapshot_path))
+        images_available = len(candidates)
+        active_manager.events.update_motion_ai_review(
+            review_id,
+            status="running",
+            images_available=images_available,
+            analyzed=0,
+            failed=0,
+        )
+        for audit, snapshot_path in candidates:
+            try:
+                context = _audit_ai_context(audit, active_config, active_manager)
+                if not current_settings:
+                    current_settings = dict(context.get("effective_settings") or {})
+                context["camera_review"] = {
+                    "purpose": "aggregate camera tuning review",
+                    "instruction": "Recommend only camera-scoped changes supported by this image.",
+                }
+                advice = advisor.analyze(snapshot_path, context)
+            except (AuditAiError, FileNotFoundError, PermissionError) as exc:
+                failures += 1
+                consecutive_failures += 1
+                if not first_error:
+                    first_error = redact_secret_text(exc)
+                active_manager.events.update_motion_ai_review(
+                    review_id,
+                    status="running",
+                    images_available=images_available,
+                    analyzed=len(analyses),
+                    failed=failures,
+                )
+                if consecutive_failures >= 3:
+                    break
+                continue
+            analyses.append((audit, advice))
+            consecutive_failures = 0
+            active_manager.events.update_motion_ai_review(
+                review_id,
+                status="running",
+                images_available=images_available,
+                analyzed=len(analyses),
+                failed=failures,
+            )
+
+        if not analyses:
+            if images_available == 0:
+                error = "No retained motion-audit images are available for this camera"
+            else:
+                error = first_error or "AI analysis did not complete for any retained image"
+            active_manager.events.update_motion_ai_review(
+                review_id,
+                status="failed",
+                images_available=images_available,
+                analyzed=0,
+                failed=failures,
+                error=error,
+            )
+            return
+        result = aggregate_motion_ai_review(
+            analyses,
+            audits_considered=len(audits),
+            images_available=images_available,
+            failed=failures,
+            current_settings=current_settings,
+        )
+        active_manager.events.update_motion_ai_review(
+            review_id,
+            status="completed",
+            images_available=images_available,
+            analyzed=len(analyses),
+            failed=failures,
+            result=result,
+            error=first_error if failures else "",
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).exception("motion AI review %s failed", review_id)
+        try:
+            active_manager.events.update_motion_ai_review(
+                review_id,
+                status="failed",
+                images_available=images_available,
+                analyzed=len(analyses),
+                failed=failures,
+                error=redact_secret_text(exc),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "failed to persist motion AI review %s failure",
+                review_id,
+            )
+    finally:
+        AUDIT_AI_LIMITER.release()
+
+
+@app.post("/api/motion-ai-reviews")
+def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        active_config = config.model_copy(deep=True)
+        camera = camera_by_id(active_config, request.camera_id)
+        if camera is None:
+            raise HTTPException(status_code=404, detail="camera not found")
+        if not active_config.audit_ai.enabled:
+            raise HTTPException(status_code=400, detail="AI audit advisor is disabled")
+        if not active_config.audit_ai.api_key.strip():
+            raise HTTPException(status_code=400, detail="AI audit API key is not configured")
+        audits, _total = active_manager.events.motion_audits(
+            limit=100,
+            camera_id=camera.id,
+        )
+        if not audits:
+            raise HTTPException(status_code=404, detail="this camera has no motion audits to review")
+        if not AUDIT_AI_LIMITER.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="an AI audit or camera review is already running",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            review = active_manager.events.create_motion_ai_review(camera.id, len(audits))
+        except BaseException:
+            AUDIT_AI_LIMITER.release()
+            raise
+    thread = threading.Thread(
+        target=_run_motion_ai_review,
+        args=(int(review["id"]), audits, active_config, active_manager),
+        name=f"motion-ai-review-{camera.id}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        AUDIT_AI_LIMITER.release()
+        active_manager.events.update_motion_ai_review(
+            int(review["id"]),
+            status="failed",
+            error="AI review worker could not start",
+        )
+        raise
+    return review
+
+
+@app.get("/api/motion-ai-reviews/latest")
+def latest_motion_ai_review(camera_id: str) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        active_config = config
+        active_events = manager.events
+        camera = camera_by_id(active_config, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    review = active_events.latest_motion_ai_review(camera.id)
+    return review or {"camera_id": camera.id, "status": "never"}
+
+
+@app.get("/api/motion-ai-reviews/{review_id}")
+def motion_ai_review(review_id: int) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        review = manager.events.get_motion_ai_review(review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="motion AI review not found")
+    return review
 
 
 @app.get("/api/events/{event_id}/snapshot.jpg")

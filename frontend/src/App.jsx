@@ -1817,15 +1817,20 @@ function IncidentClipLayer({ event, active, onEnded }) {
 
 function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, onToggle, onSelect, onPreviewChange }) {
   const rawEvents = incident.events || [];
-  const showSubEvents = rawEvents.length > 1;
+  const motionObservations = incident.motion_observations || [];
+  const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
   const [selectedPreview, setSelectedPreview] = useState(null);
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const preview = selectedPreview || incident;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
-  const observationCount = Number(incident.motion_observation_count || incident.motion_observations?.length || 0);
-  const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} linked observation${observationCount === 1 ? "" : "s"}` : ""}`;
+  const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
+  const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} additional motion update${observationCount === 1 ? "" : "s"}` : ""}`;
+  const incidentTimeline = [
+    ...rawEvents.map((event) => ({ kind: "event", item: event })),
+    ...motionObservations.map((observation) => ({ kind: "activity", item: observation })),
+  ].sort((left, right) => Date.parse(right.item.created_at || 0) - Date.parse(left.item.created_at || 0));
   const timeText = incident.start_at && incident.end_at && incident.start_at !== incident.end_at
     ? `${formatDateTime(incident.start_at, timeZone)} - ${formatDuration(incident.duration_seconds)}`
     : formatDateTime(incident.created_at, timeZone);
@@ -1930,7 +1935,17 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
             </button>
             {subEventsOpen ? (
               <div className="incident-events">
-                {rawEvents.map((event, index) => {
+                {incidentTimeline.map(({ kind, item }, index) => {
+                  if (kind === "activity") {
+                    const activityLabel = item.reason === "event_state_cooldown" ? "motion during cooldown" : "continued motion";
+                    return (
+                      <div className="incident-activity-row" key={`activity-${item.id || index}`}>
+                        <span>{formatTimeOnly(item.created_at || incident.created_at, timeZone)}</span>
+                        <strong>{activityLabel}</strong>
+                      </div>
+                    );
+                  }
+                  const event = item;
                   const eventLabels = incidentLabels(event);
                   const eventLabelText = eventLabels.length ? eventLabels.join(", ") : "motion";
                   const isActive = (preview.id || incident.id) === event.id && (preview.created_at || incident.created_at) === event.created_at;
@@ -1997,7 +2012,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
         <h3>Incident</h3>
         <dl>
           <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
-          <div><dt>Linked observations</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
+          <div><dt>Additional motion</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
           <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
           <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
           <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
@@ -4656,6 +4671,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             <button type="button" className={generalSection === "storage" ? "active" : ""} onClick={() => setGeneralSection("storage")}><HardDrive size={16} /><span>Storage</span></button>
             <button type="button" className={generalSection === "mqtt" ? "active" : ""} onClick={() => setGeneralSection("mqtt")}><Radio size={16} /><span>MQTT</span></button>
             <button type="button" className={generalSection === "detection" ? "active" : ""} onClick={() => setGeneralSection("detection")}><Cpu size={16} /><span>Object Detection</span></button>
+            <button type="button" className={generalSection === "motion-review" ? "active" : ""} onClick={() => setGeneralSection("motion-review")}><Sparkles size={16} /><span>AI Motion Review</span></button>
           </div>
         </section>
         <section className="bento-card config-editor settings-panel">
@@ -5484,6 +5500,133 @@ function ProbeResult({ probe }) {
   );
 }
 
+function MotionAiReviewPanel({ cameras, advisorEnabled }) {
+  const [cameraId, setCameraId] = useState(cameras[0]?.id || "");
+  const [review, setReview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!cameraId && cameras[0]?.id) setCameraId(cameras[0].id);
+    if (cameraId && !cameras.some((camera) => camera.id === cameraId)) {
+      setCameraId(cameras[0]?.id || "");
+    }
+  }, [cameraId, cameras]);
+
+  async function loadReview(selectedCameraId, quiet = false) {
+    if (!selectedCameraId) return;
+    if (!quiet) setLoading(true);
+    try {
+      const response = await fetch(`/api/motion-ai-reviews/latest?camera_id=${encodeURIComponent(selectedCameraId)}`);
+      if (!response.ok) throw new Error(await response.text());
+      setReview(await response.json());
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message || "Unable to load the latest AI motion review.");
+    } finally {
+      if (!quiet) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    setReview(null);
+    setError("");
+    void loadReview(cameraId);
+  }, [cameraId]);
+
+  useEffect(() => {
+    if (!cameraId || !["queued", "running"].includes(review?.status)) return undefined;
+    const timer = window.setInterval(() => void loadReview(cameraId, true), 2000);
+    return () => window.clearInterval(timer);
+  }, [cameraId, review?.status]);
+
+  async function startReview() {
+    if (!cameraId || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/motion-ai-reviews", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ camera_id: cameraId }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setReview(await response.json());
+    } catch (startError) {
+      setError(startError.message || "Unable to start the AI motion review.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const running = ["queued", "running"].includes(review?.status);
+  const report = review?.result || {};
+  const completedWork = Number(review?.analyzed || 0) + Number(review?.failed || 0);
+  const selectedCamera = cameras.find((camera) => camera.id === cameraId);
+
+  return (
+    <div className="sub-panel motion-ai-review-panel">
+      <h3>AI Motion Review</h3>
+      <p className="settings-help">Manually review up to the latest 100 Motion Audit entries for one camera. SurvNG analyzes each retained image with the configured AI Advisor, then combines repeated findings into camera-specific suggestions. Nothing is applied automatically.</p>
+      <div className="field-row motion-ai-review-controls">
+        <label>Camera<select value={cameraId} onChange={(event) => setCameraId(event.target.value)} disabled={running}>
+          {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
+        </select></label>
+        <button type="button" className="primary" onClick={startReview} disabled={!cameraId || !advisorEnabled || running || loading}>
+          {running ? <RefreshCcw className="spin" size={16} /> : <Sparkles size={16} />}
+          {running ? "Analyzing..." : "Analyze latest 100"}
+        </button>
+        <button type="button" onClick={() => loadReview(cameraId)} disabled={!cameraId || loading}><RefreshCcw className={loading ? "spin" : ""} size={16} /> Refresh</button>
+      </div>
+      {!advisorEnabled ? <div className="save-status motion-audit-error">Enable and save the AI Audit Advisor under Object Detection before running a review.</div> : null}
+      <div className="probe-result">
+        <strong>What this uses</strong>
+        <span>The latest 100 audit records for {selectedCamera?.name || cameraId || "the selected camera"}; records whose retained image has expired are skipped.</span>
+        <span>Each available image is a separate provider request. A camera with 100 retained images can therefore make up to 100 billable AI requests.</span>
+      </div>
+      {error ? <div className="save-status motion-audit-error">{error}</div> : null}
+      {review?.status && review.status !== "never" ? (
+        <section className="motion-ai-review-report">
+          <header>
+            <div><strong>{selectedCamera?.name || review.camera_id}</strong><span>Review #{review.id} · {String(review.status).replaceAll("_", " ")}</span></div>
+            <time>{review.updated_at ? formatDateTime(review.updated_at) : ""}</time>
+          </header>
+          {running ? (
+            <div className="motion-ai-review-progress">
+              <div><i style={{ width: `${Math.min(100, Number(review.audits_considered || 0) ? completedWork / Number(review.audits_considered) * 100 : 0)}%` }} /></div>
+              <span>{review.analyzed || 0} analyzed · {review.failed || 0} failed · {review.images_available || 0} retained images found among {review.audits_considered || 0} audits</span>
+            </div>
+          ) : null}
+          {review.error ? <div className="motion-runtime-warning">{review.error}</div> : null}
+          {review.status === "completed" ? (
+            <>
+              <p>{report.summary}</p>
+              <div className="motion-ai-review-stats">
+                <span><strong>{report.verdict_counts?.real_motion || 0}</strong> likely real motion</span>
+                <span><strong>{report.verdict_counts?.noise || 0}</strong> likely nuisance</span>
+                <span><strong>{report.verdict_counts?.uncertain || 0}</strong> uncertain</span>
+              </div>
+              <h4>Suggested camera changes</h4>
+              {report.recommendations?.length ? (
+                <div className="motion-ai-review-recommendations">
+                  {report.recommendations.map((recommendation) => (
+                    <article key={`${recommendation.setting}-${JSON.stringify(recommendation.value)}`}>
+                      <div><strong>{motionAiSettingLabels[recommendation.setting] || recommendation.setting.replaceAll("_", " ")}</strong><code>{recommendation.current_value == null ? "Current unavailable" : formatMotionAiValue(recommendation.setting, recommendation.current_value)} → {formatMotionAiValue(recommendation.setting, recommendation.value)}</code></div>
+                      <span>Supported by {recommendation.support_count} analyzed image{recommendation.support_count === 1 ? "" : "s"} · {Math.round(Number(recommendation.average_confidence || 0) * 100)}% average confidence</span>
+                      <p>{recommendation.reasons?.[0]}</p>
+                      {recommendation.evidence_audit_ids?.length ? <small>Evidence: audit {recommendation.evidence_audit_ids.join(", ")}</small> : null}
+                    </article>
+                  ))}
+                </div>
+              ) : <span>No setting change was recommended consistently enough across the analyzed images.</span>}
+            </>
+          ) : null}
+        </section>
+      ) : <div className="probe-result"><strong>No review yet</strong><span>Choose a camera and run its first manual review.</span></div>}
+    </div>
+  );
+}
+
 function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const openvinoDevices = accelerator?.openvino_devices || [];
@@ -5747,6 +5890,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           {accelerator?.openvino_error ? <span>{accelerator.openvino_error}</span> : null}
         </div>
       </div>
+      ) : null}
+
+      {section === "motion-review" ? (
+        <MotionAiReviewPanel
+          cameras={config.cameras || []}
+          advisorEnabled={config.audit_ai?.enabled ?? false}
+        />
       ) : null}
     </div>
   );
