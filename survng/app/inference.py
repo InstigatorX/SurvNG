@@ -20,6 +20,7 @@ LOGGER = logging.getLogger("uvicorn.error")
 MAX_INFERENCE_FRAME_BYTES = 64 * 1024 * 1024
 INFERENCE_START_TIMEOUT_SECONDS = 30.0
 INFERENCE_REQUEST_TIMEOUT_SECONDS = 15.0
+PERSON_REID_REQUEST_TIMEOUT_SECONDS = 3.0
 INFERENCE_STATUS_TIMEOUT_SECONDS = 5.0
 INFERENCE_RESTART_DELAY_SECONDS = 1.0
 INFERENCE_CRASH_WINDOW_SECONDS = 10 * 60.0
@@ -543,7 +544,11 @@ class _InferenceWorker:
                 "pending_requests": pending,
                 "fallback_active": now < self._fallback_until,
                 "fallback_seconds_remaining": round(max(0.0, self._fallback_until - now), 1),
-                "request_timeout_seconds": INFERENCE_REQUEST_TIMEOUT_SECONDS,
+                "request_timeout_seconds": (
+                    PERSON_REID_REQUEST_TIMEOUT_SECONDS
+                    if self.role == "reid"
+                    else INFERENCE_REQUEST_TIMEOUT_SECONDS
+                ),
                 "max_frame_bytes": MAX_INFERENCE_FRAME_BYTES,
             }
 
@@ -678,7 +683,11 @@ class InferenceSupervisor:
         return np.asarray(result, dtype=np.float32)
 
     def embed_person(self, person: np.ndarray) -> np.ndarray:
-        result = self._reid.request("embed_person", frame=person)
+        result = self._reid.request(
+            "embed_person",
+            frame=person,
+            timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
+        )
         return np.asarray(result, dtype=np.float32)
 
     def status(self) -> dict[str, Any]:

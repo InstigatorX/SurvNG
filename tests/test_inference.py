@@ -6,6 +6,7 @@ import signal
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ from survng.app.inference import (
     InferenceUnavailable,
     IsolatedFaceRecognizer,
     IsolatedPersonReidentifier,
+    PERSON_REID_REQUEST_TIMEOUT_SECONDS,
     _InferenceWorker,
 )
 
@@ -90,6 +92,22 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(proxy.enabled)
         self.assertEqual(proxy.status()["device"], "AUTO")
         self.assertFalse(proxy.status()["isolation"]["enabled"])
+        self.assertEqual(
+            proxy.status()["isolation"]["request_timeout_seconds"],
+            PERSON_REID_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    def test_person_reid_requests_use_short_timeout(self) -> None:
+        with patch.object(
+            self.supervisor._reid,
+            "request",
+            return_value=[1.0, 0.0],
+        ) as request:
+            result = self.supervisor.embed_person(np.zeros((32, 16, 3), dtype=np.uint8))
+
+        self.assertEqual(result.tolist(), [1.0, 0.0])
+        request.assert_called_once()
+        self.assertEqual(request.call_args.kwargs["timeout"], PERSON_REID_REQUEST_TIMEOUT_SECONDS)
 
     def test_face_worker_crash_does_not_restart_object_worker(self) -> None:
         supervisor = InferenceSupervisor(

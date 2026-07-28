@@ -76,6 +76,21 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual(tracked[0]["track_id"], 1)
         self.assertEqual(len(tracker.summaries(10.5)), 1)
 
+    def test_extreme_containment_does_not_merge_unrelated_person_box(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        tracker.update(
+            [detection("person", 0.9, (0, 0, 2000, 1200))],
+            10.0,
+            confirm_new=True,
+        )
+
+        tracked = tracker.update(
+            [detection("person", 0.9, (900, 500, 950, 600))],
+            10.5,
+        )
+
+        self.assertEqual(tracked[0]["track_id"], 2)
+
     def test_low_confidence_detection_recovers_track_but_does_not_start_one(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         initial = tracker.update(
@@ -117,6 +132,7 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         summary = tracker.summaries(30.0)[0]
         self.assertEqual(summary["duration_seconds"], 0.0)
         self.assertEqual(summary["last_seen"], datetime.fromtimestamp(30.0, timezone.utc).isoformat())
+        self.assertEqual(tracker._tracks[1].velocity, (0.0, 0.0, 0.0, 0.0))
 
     def test_initial_eligible_detection_below_global_threshold_is_seeded(self) -> None:
         config = self.config.model_copy(update={"low_confidence_threshold": 0.8})
@@ -202,6 +218,31 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
         self.assertEqual(tracked[0]["track_id"], 2)
 
+    def test_malformed_reid_embedding_is_ignored(self) -> None:
+        config = self.config.model_copy(update={"reid_enabled": True})
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+        initial = detection("person", 0.9, (10, 10, 40, 80))
+        initial["_tracking_embedding"] = {"invalid": "vector"}
+
+        tracked = tracker.update([initial], 10.0, confirm_new=True)
+
+        self.assertEqual(tracked[0]["track_id"], 1)
+        self.assertNotIn("_tracking_embedding", tracked[0])
+
+    def test_reid_is_never_applied_to_non_person_tracks(self) -> None:
+        config = self.config.model_copy(update={"reid_enabled": True})
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+        first = detection("car", 0.9, (10, 10, 80, 60))
+        first["_tracking_embedding"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        tracker.update([first], 10.0, confirm_new=True)
+        tracker.update([], 12.0)
+        second = detection("car", 0.9, (500, 300, 700, 500))
+        second["_tracking_embedding"] = np.asarray([1.0, 0.0], dtype=np.float32)
+
+        tracked = tracker.update([second], 15.0)
+
+        self.assertEqual(tracked[0]["track_id"], 2)
+
     def test_tracker_registry_rejects_unknown_or_duplicate_implementations(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("byte", ByteTrackObjectTracker)
@@ -213,6 +254,63 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
 
 class ObjectTrackingSessionTest(unittest.TestCase):
+    def test_reid_work_is_bounded_and_failures_are_redacted_in_status(self) -> None:
+        class Encoder:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def embed(self, _crop):
+                self.calls += 1
+                if self.calls == 2:
+                    raise RuntimeError("https://camera:secret@example.invalid/reid")
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+        encoder = Encoder()
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                reid_enabled=True,
+                reid_model_path="person-reid.xml",
+                reid_max_embeddings_per_frame=3,
+            ),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda _event_id, _tracking, _tracked: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            appearance_encoder=encoder,
+        )
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        objects = [
+            detection("person", 0.9 - index * 0.01, (index * 10, 10, index * 10 + 8, 80))
+            for index in range(6)
+        ]
+
+        session._annotate_appearances(frame, objects)
+
+        self.assertEqual(encoder.calls, 2)
+        self.assertEqual(session.status()["reid_failures"], 1)
+        self.assertNotIn("secret", session.status()["last_reid_error"])
+        self.assertEqual(
+            sum("_tracking_embedding" in detected for detected in objects),
+            1,
+        )
+
+    def test_malformed_confidence_and_seed_time_do_not_break_tracking(self) -> None:
+        tracker = ByteTrackObjectTracker(ObjectTrackingConfig(), 0.7)
+        invalid = detection("person", 0.9, (10, 10, 40, 80))
+        invalid["confidence"] = "invalid"
+        invalid["_tracking_first_seen_at"] = float("nan")
+
+        self.assertEqual(tracker.update([invalid], 100.0), [])
+
+        seeded = detection("person", 0.9, (10, 10, 40, 80))
+        seeded["_tracking_first_seen_at"] = float("inf")
+        tracked = tracker.update([seeded], 101.0, confirm_new=True)
+        self.assertEqual(len(tracked), 1)
+        self.assertEqual(tracked[0]["track_id"], 1)
     def test_rejects_new_sessions_after_admission_is_closed(self) -> None:
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),

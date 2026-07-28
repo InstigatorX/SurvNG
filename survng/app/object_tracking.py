@@ -115,6 +115,14 @@ def _box(value: object) -> Box | None:
     return (x1, y1, x2, y2)
 
 
+def _confidence(detection: dict[str, Any]) -> float:
+    try:
+        value = float(detection.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if np.isfinite(value) else 0.0
+
+
 def _iou(left: Box, right: Box) -> float:
     intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
     intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
@@ -127,7 +135,10 @@ def _iou(left: Box, right: Box) -> float:
 def _appearance(value: object) -> np.ndarray | None:
     if value is None:
         return None
-    vector = np.asarray(value, dtype=np.float32).reshape(-1)
+    try:
+        vector = np.asarray(value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return None
     norm = float(np.linalg.norm(vector))
     if vector.size == 0 or not np.all(np.isfinite(vector)) or norm <= 1e-9:
         return None
@@ -150,6 +161,7 @@ class ObjectTrack:
     zones: set[str] = field(default_factory=set)
     trajectory: list[tuple[float, float, float]] = field(default_factory=list)
     appearance: np.ndarray | None = field(default=None, repr=False)
+    reid_matches: int = 0
 
     def predicted_box(self, captured_at: float) -> Box:
         elapsed = max(0.0, min(captured_at - self.last_seen, 2.0))
@@ -162,19 +174,20 @@ class ObjectTrack:
         # Capture timestamps are wall-clock values and can briefly move backwards
         # after a clock correction. Keep track chronology monotonic even though
         # frame freshness is independently enforced with a monotonic token.
+        elapsed = captured_at - self.last_seen
         captured_at = max(captured_at, self.last_seen)
-        elapsed = max(1e-3, captured_at - self.last_seen)
-        instantaneous = tuple(
-            (coordinate - previous) / elapsed
-            for coordinate, previous in zip(box, self.box, strict=True)
-        )
-        self.velocity = tuple(
-            prior * 0.65 + current * 0.35
-            for prior, current in zip(self.velocity, instantaneous, strict=True)
-        )  # type: ignore[assignment]
+        if elapsed > 1e-3:
+            instantaneous = tuple(
+                (coordinate - previous) / elapsed
+                for coordinate, previous in zip(box, self.box, strict=True)
+            )
+            self.velocity = tuple(
+                prior * 0.65 + current * 0.35
+                for prior, current in zip(self.velocity, instantaneous, strict=True)
+            )  # type: ignore[assignment]
         self.box = box
         self.last_seen = captured_at
-        self.confidence = float(detection.get("confidence") or 0.0)
+        self.confidence = _confidence(detection)
         self.max_confidence = max(self.max_confidence, self.confidence)
         self.hits += 1
         self.missed = 0
@@ -208,6 +221,7 @@ class ObjectTrack:
             },
             "zones": sorted(self.zones),
             "trajectory": [list(point) for point in self.trajectory],
+            "reid_matches": self.reid_matches,
         }
 
 
@@ -240,14 +254,14 @@ class ByteTrackObjectTracker:
             item
             for item in usable
             if confirm_new
-            or float(item[1].get("confidence") or 0.0) >= self.high_confidence_threshold
+            or _confidence(item[1]) >= self.high_confidence_threshold
         ]
         low = [
             item
             for item in usable
             if not confirm_new
             and self.config.low_confidence_threshold
-            <= float(item[1].get("confidence") or 0.0)
+            <= _confidence(item[1])
             < self.high_confidence_threshold
         ]
         unmatched_tracks = set(self._tracks)
@@ -260,9 +274,14 @@ class ByteTrackObjectTracker:
                 continue
             if len(self._tracks) + len(self._completed) >= self.config.max_tracks_per_session:
                 break
-            confidence = float(detection.get("confidence") or 0.0)
+            confidence = _confidence(detection)
             try:
-                first_seen = min(captured_at, float(detection.get("_tracking_first_seen_at")))
+                candidate_first_seen = float(detection.get("_tracking_first_seen_at"))
+                first_seen = (
+                    min(captured_at, candidate_first_seen)
+                    if np.isfinite(candidate_first_seen) and candidate_first_seen >= 0.0
+                    else captured_at
+                )
             except (TypeError, ValueError):
                 first_seen = captured_at
             track = ObjectTrack(
@@ -361,9 +380,9 @@ class ByteTrackObjectTracker:
             * max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
         )
         containment = intersection / max(1.0, min(left_area, right_area))
-        if containment >= 0.55:
-            return 0.9 + containment
         area_ratio = min(left_area, right_area) / max(1.0, max(left_area, right_area))
+        if containment >= 0.55 and area_ratio >= 0.10:
+            return 0.9 + containment
         left_center = ((left[0] + left[2]) / 2.0, (left[1] + left[3]) / 2.0)
         right_center = ((right[0] + right[2]) / 2.0, (right[1] + right[3]) / 2.0)
         distance = float(np.hypot(
@@ -390,7 +409,7 @@ class ByteTrackObjectTracker:
             return
         candidates: list[tuple[float, int, bool, int, dict[str, Any], Box]] = []
         for index, detection, box in detections:
-            if index in assignments:
+            if index in assignments or str(detection.get("label") or "").lower() != "person":
                 continue
             embedding = _appearance(detection.get("_tracking_embedding"))
             if embedding is None:
@@ -452,6 +471,7 @@ class ByteTrackObjectTracker:
                 track = self._tracks[track_id]
                 unmatched_tracks.remove(track_id)
             track.observe(detection, captured_at, box)
+            track.reid_matches += 1
             track.confirmed = track.confirmed or track.hits >= self.config.min_confirmations
             assignments[index] = track_id
             used_detections.add(index)
@@ -532,6 +552,8 @@ class ObjectTrackingSession:
             "confirmed_tracks": 0,
             "frames_processed": 0,
             "last_error": "",
+            "reid_failures": 0,
+            "last_reid_error": "",
         }
 
     def start(
@@ -856,9 +878,16 @@ class ObjectTrackingSession:
         if encoder is None or not encoder.enabled or not self.config.reid_enabled:
             return
         height, width = frame.shape[:2]
-        for detected in objects:
-            if str(detected.get("label") or "").lower() != "person":
-                continue
+        candidates = sorted(
+            (
+                detected
+                for detected in objects
+                if str(detected.get("label") or "").lower() == "person"
+            ),
+            key=_confidence,
+            reverse=True,
+        )[:self.config.reid_max_embeddings_per_frame]
+        for detected in candidates:
             box = _box(detected.get("box"))
             if box is None:
                 continue
@@ -872,11 +901,21 @@ class ObjectTrackingSession:
             try:
                 detected["_tracking_embedding"] = encoder.embed(crop)
             except Exception as exc:
+                safe_error = redact_secret_text(exc)[:240]
+                with self._lock:
+                    self._status = {
+                        **self._status,
+                        "reid_failures": int(self._status.get("reid_failures") or 0) + 1,
+                        "last_reid_error": safe_error,
+                    }
                 LOGGER.debug(
                     "person ReID unavailable for %s: %s",
                     self.camera.id,
-                    redact_secret_text(exc),
+                    safe_error,
                 )
+                # A worker timeout terminates the failed worker. Do not restart it
+                # repeatedly for every remaining crop in the same frame.
+                break
 
 
 class ObjectTrackingSessionFactory:

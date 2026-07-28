@@ -412,6 +412,8 @@ reconnect a recently lost track using whole-body appearance embeddings. ReID
 runs in its own isolated inference worker and is disabled unless
 `reid_enabled` and a compatible OpenVINO person ReID model are configured.
 Face-recognition embedding models are not interchangeable with person ReID.
+ReID requests use a short timeout and `reid_max_embeddings_per_frame` bounds
+appearance work when detector output is unusually crowded or noisy.
 
 Tracking runs only after an eligible object is found. It samples the main
 camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous

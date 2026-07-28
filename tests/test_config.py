@@ -8,10 +8,26 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from survng.app.config import AppConfig, CameraConfig, MqttConfig, load_config, save_config
+from survng.app.config import (
+    AppConfig,
+    CameraConfig,
+    MqttConfig,
+    ObjectTrackingConfig,
+    load_config,
+    save_config,
+)
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_person_reid_requires_a_model_when_enabled(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "reid_model_path"):
+            ObjectTrackingConfig(reid_enabled=True)
+
+        tracking = ObjectTrackingConfig(
+            reid_enabled=True,
+            reid_model_path="person-reid.xml",
+        )
+        self.assertEqual(tracking.reid_max_embeddings_per_frame, 8)
     def test_base_path_defaults_to_survng(self) -> None:
         self.assertEqual(AppConfig().base_path, "/survng")
         self.assertEqual(AppConfig().database_dir, "")

@@ -227,6 +227,40 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertTrue(qualification["effective_accepted"])
         self.assertFalse(qualification["would_suppress"])
 
+    def test_reid_seeds_tracking_from_the_event_snapshot(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        events = Mock()
+        events.add_event.return_value = {"id": 42}
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+        seed = np.ones((180, 320, 3), dtype=np.uint8)
+        objects = [{"label": "person", "confidence": 0.9, "incident_eligible": True}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), events=events)
+            worker.object_tracking.config = ObjectTrackingConfig(
+                enabled=True,
+                reid_enabled=True,
+                reid_model_path="person-reid.xml",
+            )
+            with (
+                patch.object(
+                    worker,
+                    "_recorded_motion_frame",
+                    return_value=(frame, objects, "recording.mp4"),
+                ),
+                patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
+                patch("survng.app.camera.cv2.imread", return_value=seed) as imread,
+                patch.object(worker.object_tracking, "start", return_value=True) as start,
+            ):
+                worker._process_motion_event(
+                    "motion",
+                    "message",
+                    datetime.now(timezone.utc),
+                    {"effective_accepted": True},
+                )
+
+        imread.assert_called_once_with("snapshot.jpg")
+        self.assertIs(start.call_args.args[3], seed)
+
     def test_borderline_candidate_without_object_remains_suppressed(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         events = Mock()

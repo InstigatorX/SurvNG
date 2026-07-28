@@ -240,11 +240,18 @@ class ObjectTrackingConfig(BaseModel):
     reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
     reid_match_threshold: float = Field(default=0.82, ge=0.0, le=1.0)
     reid_max_age_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    reid_max_embeddings_per_frame: int = Field(default=8, ge=1, le=64)
 
     @field_validator("implementation", mode="before")
     @classmethod
     def normalize_tracking_implementation(cls, value: object) -> str:
         return str(value or "").strip().lower()
+
+    @model_validator(mode="after")
+    def validate_reid_model(self) -> "ObjectTrackingConfig":
+        if self.reid_enabled and not self.reid_model_path.strip():
+            raise ValueError("reid_model_path is required when person ReID is enabled")
+        return self
 
 
 class DetectorConfig(BaseModel):

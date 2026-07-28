@@ -4250,6 +4250,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [detectorModels, setDetectorModels] = useState([]);
   const [recordingCache, setRecordingCache] = useState(null);
   const [mqttStatus, setMqttStatus] = useState(null);
+  const [detectorStatus, setDetectorStatus] = useState(null);
   const [motionCatalog, setMotionCatalog] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
@@ -4310,7 +4311,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       if (acceleratorPayload) setAccelerator(acceleratorPayload);
       if (models) setDetectorModels(models.models || []);
       if (cache) setRecordingCache(cache);
-      if (system) setMqttStatus(system.mqtt || null);
+      if (system) {
+        setMqttStatus(system.mqtt || null);
+        setDetectorStatus(system.detector || null);
+      }
       if (catalog) setMotionCatalog(catalog);
       setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
       return true;
@@ -4704,6 +4708,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             detectorModels={detectorModels}
             recordingCache={recordingCache}
             mqttStatus={mqttStatus}
+            detectorStatus={detectorStatus}
             motionCatalog={motionCatalog}
             section={generalSection}
           />
@@ -5636,8 +5641,9 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, motionCatalog, section }) {
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, detectorStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
+  const reidStatus = detectorStatus?.reid || null;
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
   const detectorBackend = config.detector?.backend || "openvino";
@@ -5799,7 +5805,17 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>ReID device<input value={config.detector?.tracking?.reid_device ?? "AUTO"} onChange={(event) => updateConfig(["detector", "tracking", "reid_device"], event.target.value)} /><small>Runs in a separate isolated inference worker.</small></label>
             <label>Appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.reid_match_threshold ?? 0.82} onChange={(event) => updateConfig(["detector", "tracking", "reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce the chance of joining two similarly dressed people.</small></label>
             <label>Remember lost appearance<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.reid_max_age_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_age_seconds"], Number(event.target.value))} /><small>Seconds a lost person can recover the same track ID.</small></label>
+            <label>Maximum appearance checks<input type="number" min="1" max="64" step="1" value={config.detector?.tracking?.reid_max_embeddings_per_frame ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_embeddings_per_frame"], Number(event.target.value))} /><small>Bounds ReID work if a frame contains many person boxes.</small></label>
           </div>
+          {config.detector?.tracking?.reid_enabled ? (
+            reidStatus?.enabled ? (
+              <div className={`probe-result ${reidStatus.ready ? "ok" : "bad"}`}>
+                <strong>{reidStatus.ready ? "Person appearance matching is ready" : "Person appearance matching is unavailable"}</strong>
+                <span>{reidStatus.ready ? `${reidStatus.device || "AUTO"} · ${reidStatus.embedding_size || 0}-value appearance signature` : reidStatus.error || "The isolated ReID worker did not start."}</span>
+                {reidStatus.ready && reidStatus.model_load_ms != null ? <span>Model loaded in {Math.round(reidStatus.model_load_ms)} ms</span> : null}
+              </div>
+            ) : <div className="probe-result"><strong>Person appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start its isolated model worker.</span></div>
+          ) : null}
         </details>
         <h3>Motion Triggers &amp; Filtering</h3>
         <EfficientMotionSetup

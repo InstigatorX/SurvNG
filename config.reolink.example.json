@@ -56,7 +56,8 @@
       "reid_model_path": "",
       "reid_device": "AUTO",
       "reid_match_threshold": 0.82,
-      "reid_max_age_seconds": 30.0
+      "reid_max_age_seconds": 30.0,
+      "reid_max_embeddings_per_frame": 8
     }
   },
   "cameras": [
