@@ -6372,10 +6372,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         ) : null}
 
       {section === "detection" ? (
-      <div className="sub-panel">
-        <h3>Object Detection</h3>
-        <div className="field-row">
-          <label className="check-field"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /> Enable detector</label>
+      <div className="detection-settings">
+        <section className="detection-settings-card primary">
+          <header className="detection-settings-card-head">
+            <div className="detection-settings-card-icon"><ScanFace size={18} /></div>
+            <div><h3>Detection</h3><p>Choose the model, accelerator, and rules that turn motion into object incidents.</p></div>
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.enabled || false} onChange={(event) => updateConfig(["detector", "enabled"], event.target.checked)} /><span>Detector enabled</span></label>
+          </header>
+          <div className="detection-field-grid">
           <label>Backend<select value={detectorBackend} onChange={(event) => updateConfig(["detector", "backend"], event.target.value)}>
             <option value="openvino">OpenVINO / ONNX</option>
             <option value="coreml">Core ML (Mac)</option>
@@ -6388,34 +6392,41 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <option value="true">Zones</option>
             <option value="false">Zones + Full Frame</option>
           </select><small>Default for cameras using the global rule.</small></label>
-        </div>
-        <div className="field-row">
-          <label>Detected Model<select value={detectorModels.some((model) => model.path === activeModelPath) ? activeModelPath : ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
+          <label className="wide-field">Model<select value={detectorModels.some((model) => model.path === activeModelPath) ? activeModelPath : ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
             <option value="">Custom path</option>
             {detectorModels.map((model) => {
               const directory = String(model.path || "").split("/").slice(0, -1).pop();
               return <option key={model.path} value={model.path} disabled={!model.valid}>{directory ? `${directory} / ` : ""}{model.name} ({model.task || "detect"}, {model.valid ? "ready" : "incomplete"})</option>;
             })}
           </select></label>
-          <label>OpenVINO / ONNX Model<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
-          <label>Labels Path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Optional; metadata.yaml is automatic" /></label>
-          <label>Compiled Model Cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /> Cache compiled model</label>
-          <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
-          <label>Saved Face Limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest faces are removed first; one confirmed reference is kept for each person.</small></label>
-        </div>
-        <h3>Continuous Object Tracking</h3>
-        <p className="muted">After a person, vehicle, or other configured object is found, SurvNG follows each object with a separate numbered track. Tracking stops when every object leaves or the time limit is reached.</p>
-        <div className="field-row">
-          <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /> Follow detected objects</label>
+          </div>
+          <details className="detection-compact-details">
+            <summary>Model paths and startup options</summary>
+            <div className="detection-field-grid">
+              <label className="wide-field">OpenVINO / ONNX path<input value={activeModelPath} onChange={(event) => selectOpenvinoModel(event.target.value)} placeholder="openvino_model/best.xml or best.onnx" /></label>
+              <label>Labels path<input value={config.detector?.labels_path || ""} onChange={(event) => updateConfig(["detector", "labels_path"], event.target.value)} placeholder="Automatic from metadata" /></label>
+              <label>Compiled model cache<input value={config.detector?.cache_dir || ".cache/openvino"} onChange={(event) => updateConfig(["detector", "cache_dir"], event.target.value)} disabled={config.detector?.cache_enabled === false} /></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.cache_enabled ?? true} onChange={(event) => updateConfig(["detector", "cache_enabled"], event.target.checked)} /><span>Cache compiled model</span></label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /><span>Warm up at startup</span></label>
+            </div>
+          </details>
+        </section>
+
+        <section className="detection-settings-card">
+          <header className="detection-settings-card-head">
+            <div className="detection-settings-card-icon"><Activity size={18} /></div>
+            <div><h3>Continuous tracking</h3><p>Keep one numbered identity while an object moves through an active incident.</p></div>
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /><span>Tracking enabled</span></label>
+          </header>
+          <div className="detection-field-grid">
           <label>Tracking detail<select value={String(config.detector?.tracking?.sample_fps ?? 2)} onChange={(event) => updateConfig(["detector", "tracking", "sample_fps"], Number(event.target.value))}><option value="1">Lower CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Smoother (3 frames/sec)</option><option value="5">Maximum detail (5 frames/sec)</option></select><small>OpenVINO runs once for every analyzed tracking frame.</small></label>
-          <label>Maximum tracking time<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after the initial object detection.</small></label>
-          <label>Wait after object disappears<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Keeps the same ID through a short obstruction or missed detection.</small></label>
-          <label>Simultaneous cameras<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Limits tracking load when several cameras trigger together.</small></label>
-        </div>
-        <details className="motion-tuning-details">
-          <summary>Advanced object tracking</summary>
-          <div className="field-row">
+          <label>Maximum duration<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after initial detection.</small></label>
+          <label>Lost-object grace<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Seconds to retain an obstructed object.</small></label>
+          <label>Camera limit<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Maximum simultaneous tracking sessions.</small></label>
+          </div>
+        <details className="detection-compact-details">
+          <summary>Association tuning</summary>
+          <div className="detection-field-grid advanced-tracking-grid">
             <label>Tracking engine<select value={config.detector?.tracking?.implementation ?? "survng_hybrid"} onChange={(event) => updateConfig(["detector", "tracking", "implementation"], event.target.value)}>{(trackingCatalog?.implementations || [{ id: "survng_hybrid", name: "SurvNG Hybrid", available: true }]).map((item) => <option key={item.id} value={item.id} disabled={!item.available}>{item.name}{item.available ? "" : " (not installed)"}</option>)}</select><small>{trackingCatalog?.implementations?.find((item) => item.id === (config.detector?.tracking?.implementation ?? "survng_hybrid"))?.description || "Choose how detections retain the same numbered track."}</small>{trackingCatalog?.implementations?.find((item) => item.id === "ultralytics_botsort" && !item.available)?.reason ? <small>{trackingCatalog.implementations.find((item) => item.id === "ultralytics_botsort").reason} Install the optional tracking requirements to enable it.</small> : null}</label>
             <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Objects that started the incident are trusted immediately.</small></label>
             <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
@@ -6424,12 +6435,19 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
               <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
             </> : null}
             <label>Maximum tracks per incident<input type="number" min="1" max="1000" step="10" value={config.detector?.tracking?.max_tracks_per_session ?? 100} onChange={(event) => updateConfig(["detector", "tracking", "max_tracks_per_session"], Number(event.target.value))} /><small>Safety limit for unusually noisy detector output.</small></label>
-            <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "reid_enabled"], event.target.checked)} /> Reconnect people by appearance</label>
+          </div>
+        </details>
+        <details className="detection-compact-details">
+          <summary>Appearance matching (ReID)</summary>
+          <div className="detection-field-grid advanced-tracking-grid">
+            <div className="detection-settings-subhead"><strong>Person appearance matching</strong><small>Reconnect a person after geometry briefly loses them.</small></div>
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "reid_enabled"], event.target.checked)} /><span>Person ReID enabled</span></label>
             <label>Person ReID model<input value={config.detector?.tracking?.reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "reid_model_path"], event.target.value)} placeholder="person-reidentification.xml" /><small>Optional OpenVINO whole-person embedding model. Face-recognition models are not compatible.</small></label>
             <label>ReID device<input value={config.detector?.tracking?.reid_device ?? "AUTO"} onChange={(event) => updateConfig(["detector", "tracking", "reid_device"], event.target.value)} /><small>Runs in a separate isolated inference worker.</small></label>
             <label>Appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.reid_match_threshold ?? 0.82} onChange={(event) => updateConfig(["detector", "tracking", "reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce the chance of joining two similarly dressed people.</small></label>
             <label>Remember lost appearance<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.reid_max_age_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_age_seconds"], Number(event.target.value))} /><small>Seconds a lost person can recover the same track ID.</small></label>
-            <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.vehicle_reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_enabled"], event.target.checked)} /> Reconnect vehicles by appearance</label>
+            <div className="detection-settings-subhead"><strong>Vehicle appearance matching</strong><small>Use vehicle appearance to recover car, truck, bus, and motorcycle identities.</small></div>
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.vehicle_reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_enabled"], event.target.checked)} /><span>Vehicle ReID enabled</span></label>
             <label>Vehicle ReID model<input value={config.detector?.tracking?.vehicle_reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_model_path"], event.target.value)} placeholder="vehicle-reid-0001.xml" /><small>OpenVINO whole-vehicle embedding model. This is separate from the person model.</small></label>
             <label>Vehicle labels<input value={(config.detector?.tracking?.vehicle_reid_labels || ["car", "truck", "bus", "motorcycle"]).join(", ")} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_labels"], event.target.value.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))} /><small>Comma-separated detector labels that use vehicle appearance matching.</small></label>
             <label>Vehicle ReID device<input value={config.detector?.tracking?.vehicle_reid_device ?? "AUTO"} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_device"], event.target.value)} /><small>Shares the isolated appearance worker but uses its own OpenVINO model.</small></label>
@@ -6439,7 +6457,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <>
               <label>BoT-SORT match tolerance<input type="number" min="0.1" max="1" step="0.05" value={config.detector?.tracking?.botsort_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "botsort_match_threshold"], Number(event.target.value))} /><small>Higher values allow more motion difference while retaining an ID.</small></label>
               <label>Appearance proximity<input type="number" min="0" max="1" step="0.05" value={config.detector?.tracking?.botsort_proximity_threshold ?? 0.1} onChange={(event) => updateConfig(["detector", "tracking", "botsort_proximity_threshold"], Number(event.target.value))} /><small>Minimum box overlap before appearance can reconnect a person. Zero allows appearance recovery anywhere in the frame.</small></label>
-              <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.botsort_fuse_score ?? true} onChange={(event) => updateConfig(["detector", "tracking", "botsort_fuse_score"], event.target.checked)} /> Blend detector confidence into BoT-SORT matching</label>
+              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.botsort_fuse_score ?? true} onChange={(event) => updateConfig(["detector", "tracking", "botsort_fuse_score"], event.target.checked)} /><span>Blend detector confidence</span></label>
             </> : null}
           </div>
           {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <div className="probe-result"><strong>Optional high-accuracy engine</strong><span>Runs official Ultralytics BoT-SORT with separate state for each camera event. Camera-motion compensation is disabled for fixed cameras. The optional runtime adds substantial disk and memory overhead.</span></div> : null}
@@ -6462,7 +6480,11 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             ) : <div className="probe-result"><strong>Vehicle appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start the model.</span></div>
           ) : null}
         </details>
-        <h3>Motion Triggers &amp; Filtering</h3>
+        </section>
+
+        <details className="detection-settings-card detection-feature-card wide-card">
+          <summary><span className="detection-settings-card-icon"><Gauge size={18} /></span><span><strong>Motion validation</strong><small>How camera and visual motion decide when object detection runs.</small></span></summary>
+          <div className="detection-feature-body">
         <EfficientMotionSetup
           active={isEfficientMotionSetup({
             mode: config.motion_qualification?.mode,
@@ -6517,9 +6539,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             { ...(config.motion_qualification?.pipeline || {}), fusion },
           )}
         />
-        <h3>AI Audit Advisor</h3>
-        <div className="field-row">
-          <label className="check-field"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /> Enable AI advisor</label>
+          </div>
+        </details>
+
+        <details className="detection-settings-card detection-feature-card">
+          <summary><span className="detection-settings-card-icon"><Sparkles size={18} /></span><span><strong>AI audit advisor</strong><small>Optional analysis of recent motion-audit outcomes and tuning suggestions.</small></span></summary>
+          <div className="detection-feature-body detection-field-grid">
+          <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /><span>AI advisor enabled</span></label>
           <label>Provider<select value={config.audit_ai?.provider || "openai"} onChange={(event) => updateConfig(["audit_ai", "provider"], event.target.value)}>
             <option value="openai">OpenAI</option>
             <option value="gemini">Google Gemini</option>
@@ -6529,11 +6555,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
           <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
           <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /> Allow confirmed recommendation apply</label>
-        </div>
-        <h3>Face Recognition</h3>
-        <div className="field-row">
-          <label className="check-field"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /> Enable recognition</label>
+          <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.allow_apply_recommendations ?? false} onChange={(event) => updateConfig(["audit_ai", "allow_apply_recommendations"], event.target.checked)} /><span>Allow confirmed changes</span></label>
+          </div>
+        </details>
+
+        <details className="detection-settings-card detection-feature-card">
+          <summary><span className="detection-settings-card-icon"><ScanFace size={18} /></span><span><strong>Face recognition</strong><small>Identify detected faces using a separate embedding model.</small></span></summary>
+          <div className="detection-feature-body detection-field-grid">
+          <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Recognition enabled</span></label>
           <label>Embedding Model<input value={config.detector?.face_embedding_model_path || ""} onChange={(event) => updateConfig(["detector", "face_embedding_model_path"], event.target.value)} placeholder="face_model/model.xml" /></label>
           <label>Landmark Model<input value={config.detector?.face_landmark_model_path || ""} onChange={(event) => updateConfig(["detector", "face_landmark_model_path"], event.target.value)} placeholder="face_model/landmarks.xml" /></label>
           <label>Recognition Device<select value={config.detector?.face_recognition_device || "AUTO"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
@@ -6542,7 +6571,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_match_threshold ?? 0.4} onChange={(event) => updateConfig(["detector", "face_match_threshold"], Number(event.target.value))} /></label>
           <label>Minimum Face Size<input type="number" min="16" max="1024" step="8" value={config.detector?.face_min_size ?? 48} onChange={(event) => updateConfig(["detector", "face_min_size"], Number(event.target.value))} /></label>
           <label>References Per Person<input type="number" min="1" max="200" step="1" value={config.detector?.face_max_references ?? 20} onChange={(event) => updateConfig(["detector", "face_max_references"], Number(event.target.value))} /></label>
-        </div>
+          <label>Saved face limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest observations are removed first.</small></label>
+          </div>
+        </details>
+
+        <details className="detection-settings-card detection-feature-card diagnostics-card">
+          <summary><span className="detection-settings-card-icon"><Cpu size={18} /></span><span><strong>Model &amp; accelerator diagnostics</strong><small>Loaded model metadata and available processing hardware.</small></span></summary>
+          <div className="detection-feature-body diagnostics-grid">
         {activeModel ? (
           <div className={`probe-result ${activeModel.valid ? "ok" : "bad"}`}>
             <strong>{activeModel.valid ? "OpenVINO IR ready" : "OpenVINO IR incomplete"}</strong>
@@ -6556,7 +6591,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           </div>
         ) : null}
         {detectorBackend === "coreml" ? (
-          <div className="field-row">
+          <div className="detection-field-grid">
             <label>Core ML Model Path<input value={config.detector?.coreml_model_path || ""} onChange={(event) => updateConfig(["detector", "coreml_model_path"], event.target.value)} placeholder="model.mlpackage or model.mlmodel" /></label>
           </div>
         ) : null}
@@ -6583,6 +6618,8 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           {accelerator?.coreml_error ? <span>{accelerator.coreml_error}</span> : null}
           {accelerator?.openvino_error ? <span>{accelerator.openvino_error}</span> : null}
         </div>
+          </div>
+        </details>
       </div>
       ) : null}
 

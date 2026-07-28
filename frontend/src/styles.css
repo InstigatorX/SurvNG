@@ -1049,6 +1049,8 @@ p {
   align-items: center;
   justify-content: flex-start;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .settings-tab-list {
@@ -3102,6 +3104,312 @@ button.status-pill.hud-toggle:disabled {
 .config-form select {
   width: 100%;
   min-width: 0;
+}
+
+.detection-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+  padding: 12px;
+}
+
+.detection-settings-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+
+section.detection-settings-card {
+  display: grid;
+  gap: 11px;
+  padding: 12px;
+}
+
+.detection-settings-card.primary {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+  background: color-mix(in srgb, var(--accent) 4%, var(--subtle));
+}
+
+.detection-settings-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.detection-settings-card-head h3,
+.detection-settings-card-head p {
+  margin: 0;
+}
+
+.detection-settings-card-head h3 {
+  font-size: 14px;
+  line-height: 1.15;
+}
+
+.detection-settings-card-head p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.detection-settings-card-icon {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--active);
+  color: var(--active-ink);
+}
+
+.detection-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 8px;
+}
+
+.detection-settings label,
+.detection-settings .sub-panel label {
+  display: grid;
+  grid-template-rows: auto 34px auto;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 740;
+  line-height: 1.2;
+}
+
+.detection-settings input:not([type="checkbox"]),
+.detection-settings select {
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  min-height: 34px;
+  border-radius: 7px;
+  font-size: 12px;
+  padding-right: 9px;
+  padding-left: 9px;
+}
+
+.detection-settings label > small {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 560;
+  line-height: 1.3;
+}
+
+.detection-settings .wide-field,
+.detection-settings-subhead {
+  grid-column: 1 / -1;
+}
+
+.compact-toggle,
+.detection-settings label.compact-toggle {
+  display: flex;
+  grid-template-rows: none;
+  align-items: center;
+  align-self: end;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--control-muted);
+  color: var(--ink);
+  padding: 0 9px;
+}
+
+.compact-toggle input,
+.detection-settings .compact-toggle input {
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.compact-toggle span {
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.detection-settings .check-field {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: none;
+  align-items: center;
+  align-self: end;
+  gap: 7px;
+  min-height: 34px;
+}
+
+.detection-settings .check-field input {
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  margin: 0;
+}
+
+.detection-settings-card-head > .compact-toggle {
+  white-space: nowrap;
+}
+
+.detection-compact-details {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.detection-compact-details > summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.detection-compact-details[open] {
+  display: grid;
+  gap: 10px;
+}
+
+.detection-settings-subhead {
+  display: grid;
+  gap: 2px;
+  margin-top: 3px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.detection-settings-subhead strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.detection-settings-subhead small {
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
+.detection-feature-card.wide-card,
+.diagnostics-card {
+  grid-column: 1 / -1;
+}
+
+.detection-feature-card > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 54px;
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 12px;
+}
+
+.detection-feature-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.detection-feature-card > summary::after {
+  content: "+";
+  position: absolute;
+  right: 13px;
+  color: var(--muted);
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.detection-feature-card[open] > summary::after {
+  content: "−";
+}
+
+.detection-feature-card > summary {
+  position: relative;
+  padding-right: 38px;
+}
+
+.detection-feature-card > summary > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.detection-feature-card > summary strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.detection-feature-card > summary small {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 560;
+}
+
+.detection-feature-body {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding: 11px 12px 12px;
+}
+
+.diagnostics-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.detection-settings .probe-result {
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  padding: 9px;
+}
+
+@media (max-width: 900px) {
+  .detection-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .detection-feature-card.wide-card,
+  .diagnostics-card {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .detection-settings {
+    gap: 9px;
+    padding: 9px;
+  }
+
+  .diagnostics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .detection-settings-card-head {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .detection-settings-card-head > .compact-toggle {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+}
+
+@media (max-width: 360px) {
+  .detection-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .detection-settings .wide-field,
+  .detection-settings-subhead {
+    grid-column: auto;
+  }
 }
 
 .inline-field {
@@ -6175,7 +6483,9 @@ button.status-pill.hud-toggle:disabled {
 
   .settings-tab-list {
     width: 100%;
+    max-width: 100%;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
   }
 
   .settings-tab-list button {
