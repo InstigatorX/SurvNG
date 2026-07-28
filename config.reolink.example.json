@@ -49,7 +49,8 @@
       "min_confirmations": 2,
       "low_confidence_threshold": 0.25,
       "match_iou_threshold": 0.2,
-      "max_active_cameras": 2
+      "max_active_cameras": 2,
+      "max_tracks_per_session": 100
     }
   },
   "cameras": [

@@ -41,7 +41,8 @@ def merge_manual_detection_objects(
     preserved = [
         item
         for item in existing
-        if isinstance(item, dict) and item.get("status") == "motion_qualification"
+        if isinstance(item, dict)
+        and item.get("status") in {"motion_qualification", "object_tracking"}
     ] if isinstance(existing, list) else []
     return [*detected_objects, *preserved]
 

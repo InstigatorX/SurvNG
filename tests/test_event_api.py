@@ -300,6 +300,12 @@ class EventApiSerializationTest(unittest.TestCase):
                             "label": "person",
                             "state": "confirmed",
                             "observations": 4,
+                        }, {
+                            "track_id": 2,
+                            "label": "car",
+                            "state": "confirmed",
+                            "observations": 2,
+                            "zones": ["driveway"],
                         }],
                     },
                 },
@@ -313,6 +319,32 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(incident["end_at"], "2026-07-27T12:17:15+00:00")
         self.assertEqual(incident["object_tracking"]["tracks"][0]["track_id"], 1)
         self.assertEqual(incident["events"][0]["objects"][0]["track_id"], 1)
+        self.assertEqual(incident["labels"], ["car", "person"])
+        self.assertEqual(incident["zones"], ["driveway"])
+
+    def test_capacity_skip_does_not_extend_incident_duration(self) -> None:
+        event = main._event_row({
+            "id": 43,
+            "camera_id": "gate",
+            "created_at": "2026-07-27T12:17:07+00:00",
+            "objects_json": json.dumps([{
+                "label": "person",
+                "confidence": 0.9,
+                "incident_eligible": True,
+            }, {
+                "status": "object_tracking",
+                "object_tracking": {
+                    "state": "skipped_capacity",
+                    "updated_at": "2026-07-27T12:17:17+00:00",
+                    "tracks": [],
+                },
+            }]),
+        })
+
+        incident = main._incident_row("gate", [event])
+
+        self.assertEqual(incident["duration_seconds"], 0.0)
+        self.assertEqual(incident["end_at"], "2026-07-27T12:17:07+00:00")
 
     def test_incident_payload_keeps_annotation_fields_without_detector_diagnostics(self) -> None:
         payload = main._incident_event_payload({

@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import cv2
 
-from survng.app.camera import CameraWorker
+from survng.app.camera import CameraWorker, FRAME_STALE_SECONDS
 from survng.app.config import CameraConfig, MotionQualificationConfig, ObjectTrackingConfig
 from survng.app.detector import objects_to_json
 from survng.app.motion import MotionQualificationResult
@@ -123,6 +123,33 @@ def make_worker(
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_tracking_frame_includes_capture_time_and_rejects_stale_cache(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            frame = np.zeros((20, 30, 3), dtype=np.uint8)
+            captured_at = time.time() - 0.1
+            frame_clock = time.monotonic() - 0.1
+            with worker._frame_lock:
+                worker._source_frames["main"] = frame
+                worker._source_frame_epoch["main"] = captured_at
+                worker._source_frame_monotonic["main"] = frame_clock
+            with patch.object(worker, "_start_source", return_value=True):
+                sample = worker._get_latest_tracking_frame("main")
+                with worker._frame_lock:
+                    worker._source_frame_monotonic["main"] = (
+                        time.monotonic() - FRAME_STALE_SECONDS - 1.0
+                    )
+                stale = worker._get_latest_tracking_frame("main")
+
+        self.assertIsNotNone(sample)
+        sampled_frame, sampled_at, sampled_clock = sample
+        self.assertIsNot(sampled_frame, frame)
+        self.assertEqual(sampled_at, captured_at)
+        self.assertEqual(sampled_clock, frame_clock)
+        self.assertIsNone(stale)
+
     def test_snapshot_filename_uses_event_time_not_processing_time(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         event_at = datetime(2026, 7, 27, 15, 56, 55, 123456, tzinfo=timezone.utc)

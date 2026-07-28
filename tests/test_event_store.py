@@ -313,6 +313,32 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(objects[0]["label"], "car")
             self.assertEqual(objects[0]["detection_source"], "manual_openvino")
 
+    def test_replace_detected_objects_preserves_concurrent_tracking_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                objects_json=json.dumps([
+                    {"label": "old", "confidence": 0.8},
+                    {"status": "motion_qualification", "motion_qualification": {"score": 0.7}},
+                    {"status": "object_tracking", "object_tracking": {"state": "active"}},
+                ]),
+            )
+
+            updated = store.replace_detected_objects(
+                int(event["id"]),
+                json.dumps([{"label": "person", "confidence": 0.9}]),
+            )
+
+        self.assertIsNotNone(updated)
+        objects = json.loads(str(updated["objects_json"]))
+        self.assertEqual(objects[0]["label"], "person")
+        self.assertEqual(
+            [item["status"] for item in objects[1:]],
+            ["motion_qualification", "object_tracking"],
+        )
+
     def test_motion_audits_filter_and_backfill_rejected_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

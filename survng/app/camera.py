@@ -85,7 +85,7 @@ class CameraWorker:
         )
         self.object_tracking = object_tracking_session_factory.create(
             camera=camera,
-            frame_provider=lambda: self._get_latest_frame("main"),
+            frame_provider=lambda: self._get_latest_tracking_frame("main"),
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
@@ -108,6 +108,7 @@ class CameraWorker:
         self._source_stops: dict[str, threading.Event] = {}
         self._source_frames: dict[str, Any] = {}
         self._source_frame_at: dict[str, str] = {}
+        self._source_frame_epoch: dict[str, float] = {}
         self._source_frame_monotonic: dict[str, float] = {}
         self._source_last_access: dict[str, float] = {}
         self._source_errors: dict[str, str] = {}
@@ -177,6 +178,7 @@ class CameraWorker:
         with self._lifecycle_lock:
             self._enabled = True
             self._stop.clear()
+            self.object_tracking.set_accepting(self._detection_enabled)
             try:
                 if self._motion_analysis_thread is None or not self._motion_analysis_thread.is_alive():
                     self._clear_motion_analysis_queue()
@@ -271,6 +273,7 @@ class CameraWorker:
                 }
                 self._source_frames.clear()
                 self._source_frame_at.clear()
+                self._source_frame_epoch.clear()
                 self._source_frame_monotonic.clear()
                 self._source_last_access.clear()
                 self._source_errors.clear()
@@ -307,6 +310,8 @@ class CameraWorker:
                 shutdown_failures.append("motion workers")
             if self.onvif.running:
                 shutdown_failures.append("ONVIF worker")
+            if self.object_tracking.running():
+                shutdown_failures.append("object tracking worker")
             if shutdown_failures:
                 raise RuntimeError(
                     f"camera {self.camera.id} did not stop cleanly ({'; '.join(shutdown_failures)})"
@@ -430,8 +435,9 @@ class CameraWorker:
 
     def set_detection_enabled(self, enabled: bool) -> None:
         self._detection_enabled = bool(enabled)
-        if not self._detection_enabled:
-            self.object_tracking.stop()
+        self.object_tracking.set_accepting(
+            self._detection_enabled and not self._stop.is_set()
+        )
 
     def snapshot(self, source: str = "live") -> bytes | None:
         frame = self._get_latest_frame(source)
@@ -1741,6 +1747,7 @@ class CameraWorker:
             if source != "live":
                 self._source_frames.pop(source, None)
                 self._source_frame_at.pop(source, None)
+                self._source_frame_epoch.pop(source, None)
                 self._source_frame_monotonic.pop(source, None)
                 self._source_errors.pop(source, None)
             else:
@@ -1784,11 +1791,13 @@ class CameraWorker:
                             if self._stop.is_set() or stop_event.is_set():
                                 break
                             retry_delay = CAPTURE_RETRY_INITIAL_SECONDS
-                            stamp = datetime.now(timezone.utc).isoformat()
+                            frame_epoch = time.time()
+                            stamp = datetime.fromtimestamp(frame_epoch, timezone.utc).isoformat()
                             frame_clock = time.monotonic()
                             with self._frame_lock:
                                 self._source_frames[source] = frame.copy()
                                 self._source_frame_at[source] = stamp
+                                self._source_frame_epoch[source] = frame_epoch
                                 self._source_frame_monotonic[source] = frame_clock
                                 if source == "live":
                                     self.last_frame_at = stamp
@@ -1855,6 +1864,30 @@ class CameraWorker:
             ):
                 return None
             return frame.copy()
+
+    def _get_latest_tracking_frame(
+        self,
+        source: str = "main",
+    ) -> tuple[np.ndarray, float, float] | None:
+        source = self.camera.normalized_source(source)
+        if self._stop.is_set():
+            return None
+        with self._frame_lock:
+            self._source_last_access[source] = time.monotonic()
+        if not self._start_source(source):
+            return None
+        with self._frame_lock:
+            frame = self._source_frames.get(source)
+            captured_at = self._source_frame_epoch.get(source)
+            frame_clock = self._source_frame_monotonic.get(source)
+            if (
+                frame is None
+                or captured_at is None
+                or frame_clock is None
+                or time.monotonic() - frame_clock > FRAME_STALE_SECONDS
+            ):
+                return None
+            return frame.copy(), captured_at, frame_clock
 
     def _recorded_motion_frame(
         self,

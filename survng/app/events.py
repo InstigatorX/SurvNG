@@ -881,6 +881,47 @@ class EventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def replace_detected_objects(
+        self,
+        event_id: int,
+        detected_objects_json: str,
+    ) -> dict[str, Any] | None:
+        """Replace detections while preserving metadata added by concurrent workers."""
+        try:
+            detected_objects = json.loads(detected_objects_json or "[]")
+        except (TypeError, ValueError):
+            detected_objects = []
+        if not isinstance(detected_objects, list):
+            detected_objects = []
+        detected_objects = [item for item in detected_objects if isinstance(item, dict)]
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select objects_json from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                existing = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                existing = []
+            preserved = [
+                item
+                for item in existing
+                if isinstance(item, dict)
+                and item.get("status") in {"motion_qualification", "object_tracking"}
+            ] if isinstance(existing, list) else []
+            objects_json = json.dumps([*detected_objects, *preserved], separators=(",", ":"))
+            conn.execute(
+                "update events set objects_json = ? where id = ?",
+                (objects_json, event_id),
+            )
+            updated = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated) if updated is not None else None
+
     def update_object_tracking(
         self,
         event_id: int,
@@ -901,12 +942,16 @@ class EventStore:
                 objects = []
             if not isinstance(objects, list):
                 objects = []
+            had_tracking = any(
+                isinstance(item, dict) and item.get("status") == "object_tracking"
+                for item in objects
+            )
             objects = [
                 item
                 for item in objects
                 if not (isinstance(item, dict) and item.get("status") == "object_tracking")
             ]
-            if tracked_objects:
+            if tracked_objects and not had_tracking:
                 assignments = {
                     (
                         str(item.get("label") or ""),

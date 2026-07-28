@@ -397,7 +397,8 @@ frame-level boxes, classes, and confidence. A separate ByteTrack-style
 tracking-by-detection stage associates those boxes over time and assigns
 camera-local track IDs.
 
-The initial high-confidence incident detections are confirmed immediately.
+The initial incident-eligible detections are confirmed immediately, including
+per-camera detections admitted by a threshold lower than the global default.
 During the session, lower-confidence boxes may preserve an existing track but
 cannot create a new track until a normal detector-confidence observation is
 seen. A short lost timeout preserves IDs through missed detections and brief
@@ -410,6 +411,8 @@ camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous
 sessions so a burst of camera activity cannot create unbounded inference and
 decode load. Track summaries, trajectories, zones, observation counts, and
 first/last-seen timestamps are stored with the originating incident.
+`max_tracks_per_session` additionally bounds association work and persisted
+metadata if a detector produces an abnormal number of boxes.
 
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,

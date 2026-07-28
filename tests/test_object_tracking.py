@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,11 @@ import numpy as np
 
 from survng.app.config import CameraConfig, ObjectTrackingConfig
 from survng.app.events import EventStore
-from survng.app.object_tracking import ByteTrackObjectTracker, ObjectTrackingSession
+from survng.app.object_tracking import (
+    ByteTrackObjectTracker,
+    ObjectTrackerRegistry,
+    ObjectTrackingSession,
+)
 
 
 def detection(
@@ -83,8 +88,23 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertFalse(tracker.has_live_tracks(31.1))
         self.assertEqual(tracker.summaries(31.1)[0]["state"], "lost")
 
-    def test_initial_eligible_detection_below_global_threshold_is_seeded(self) -> None:
+    def test_wall_clock_correction_cannot_move_track_backwards(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        tracker.update(
+            [detection("person", 0.9, (10, 10, 40, 80))],
+            30.0,
+            confirm_new=True,
+        )
+
+        tracker.update([detection("person", 0.9, (12, 10, 42, 80))], 29.5)
+
+        summary = tracker.summaries(30.0)[0]
+        self.assertEqual(summary["duration_seconds"], 0.0)
+        self.assertEqual(summary["last_seen"], datetime.fromtimestamp(30.0, timezone.utc).isoformat())
+
+    def test_initial_eligible_detection_below_global_threshold_is_seeded(self) -> None:
+        config = self.config.model_copy(update={"low_confidence_threshold": 0.8})
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
 
         tracked = tracker.update(
             [detection("person", 0.4, (10, 10, 40, 80))],
@@ -105,8 +125,191 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual(tracked, [])
         self.assertEqual(tracker.summaries(50.0), [])
 
+    def test_bounds_total_tracks_for_noisy_detector_output(self) -> None:
+        config = self.config.model_copy(update={"max_tracks_per_session": 2})
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+
+        tracked = tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80)),
+            detection("person", 0.9, (50, 10, 80, 80)),
+            detection("person", 0.9, (90, 10, 120, 80)),
+        ], 60.0, confirm_new=True)
+
+        self.assertEqual([item["track_id"] for item in tracked], [1, 2])
+        self.assertEqual(len(tracker.summaries(60.0)), 2)
+
+    def test_tracker_registry_rejects_unknown_or_duplicate_implementations(self) -> None:
+        registry = ObjectTrackerRegistry()
+        registry.register("byte", ByteTrackObjectTracker)
+
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            registry.register("BYTE", ByteTrackObjectTracker)
+        with self.assertRaisesRegex(ValueError, "available: byte"):
+            registry.require("kalman")
+
 
 class ObjectTrackingSessionTest(unittest.TestCase):
+    def test_rejects_new_sessions_after_admission_is_closed(self) -> None:
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda _event_id, _tracking, _tracked: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+
+        self.assertFalse(session.start(
+            42,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        session.set_accepting(True)
+        session.stop()
+        self.assertFalse(session.start(
+            43,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+
+    def test_capacity_skip_is_terminal_and_releases_worker_ownership(self) -> None:
+        terminal = threading.Event()
+        updates: list[dict] = []
+        limiter = threading.BoundedSemaphore(1)
+        self.assertTrue(limiter.acquire(blocking=False))
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            terminal.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=update_event,
+            publisher=None,
+            limiter=limiter,
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            42,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        self.assertTrue(terminal.wait(1.0))
+        deadline = time.monotonic() + 1.0
+        while session.running() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        limiter.release()
+
+        self.assertEqual(updates[-1]["state"], "skipped_capacity")
+        self.assertFalse(session.running())
+
+    def test_does_not_reprocess_same_captured_frame(self) -> None:
+        duplicate_seen = threading.Event()
+        provider_calls = 0
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.calls += 1
+                return [detection("person", 0.8, (12, 10, 42, 80))]
+
+        detector = Detector()
+        captured_at = time.time()
+        frame_token = time.monotonic()
+
+        def frame_provider():
+            nonlocal provider_calls
+            provider_calls += 1
+            if provider_calls >= 2:
+                duplicate_seen.set()
+            return np.zeros((100, 100, 3), dtype=np.uint8), captured_at, frame_token
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=5.0, max_session_seconds=3.0),
+            detector=detector,
+            frame_provider=frame_provider,
+            update_event=lambda _event_id, _tracking, _tracked: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            42,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        self.assertTrue(duplicate_seen.wait(2.0))
+        session.stop()
+
+        self.assertEqual(detector.calls, 1)
+
+    def test_does_not_restart_when_admission_closes_during_session_transition(self) -> None:
+        detector_entered = threading.Event()
+        release_detector = threading.Event()
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def detect(self, _frame, confidence_threshold=None):
+                detector_entered.set()
+                release_detector.wait(2.0)
+                return [detection("person", 0.8, (12, 10, 42, 80))]
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=5.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
+            update_event=lambda _event_id, _tracking, _tracked: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+        self.assertTrue(session.start(
+            42,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        self.assertTrue(detector_entered.wait(1.0))
+
+        start_result: list[bool] = []
+        replacement = threading.Thread(target=lambda: start_result.append(session.start(
+            43,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        )))
+        replacement.start()
+        deadline = time.monotonic() + 1.0
+        while not session._stop.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        closer = threading.Thread(target=lambda: session.set_accepting(False))
+        closer.start()
+        deadline = time.monotonic() + 1.0
+        while session.status()["accepting"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        release_detector.set()
+        replacement.join(2.0)
+        closer.join(2.0)
+
+        self.assertEqual(start_result, [False])
+        self.assertFalse(session.running())
+
     def test_processes_live_frames_and_finishes_cleanly(self) -> None:
         update_ready = threading.Event()
         updates: list[dict] = []
@@ -124,16 +327,22 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             updates.append(tracking)
             if int(tracking.get("frames_processed") or 0) >= 1:
                 update_ready.set()
+            return {}
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
             config=ObjectTrackingConfig(sample_fps=5.0, max_session_seconds=3.0),
             detector=detector,
-            frame_provider=lambda: np.zeros((100, 100, 3), dtype=np.uint8),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
             update_event=update_event,
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
         )
+        session.set_accepting(True)
 
         started = session.start(
             42,
@@ -148,6 +357,93 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[-1]["state"], "complete")
         self.assertGreaterEqual(updates[-1]["frames_processed"], 1)
         self.assertFalse(session.status()["active"])
+
+    def test_detector_failures_persist_terminal_failure_state(self) -> None:
+        terminal = threading.Event()
+        updates: list[dict] = []
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [{"status": "inference_error", "error": "GPU unavailable"}]
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if tracking.get("state") == "failed":
+                terminal.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=5.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            tracker_registry=(registry := ObjectTrackerRegistry()),
+        )
+        registry.register("bytetrack", ByteTrackObjectTracker)
+        session.set_accepting(True)
+
+        with self.assertLogs("survng.app.object_tracking", level="ERROR"):
+            self.assertTrue(session.start(
+                42,
+                datetime.now(timezone.utc),
+                [detection("person", 0.9, (10, 10, 40, 80))],
+            ))
+            self.assertTrue(terminal.wait(2.0))
+            session.stop()
+
+        self.assertEqual(updates[-1]["state"], "failed")
+        self.assertIn("GPU unavailable", updates[-1]["error"])
+        self.assertFalse(session.status()["active"])
+
+    def test_failure_status_redacts_credentials(self) -> None:
+        terminal = threading.Event()
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            def detect(self, _frame, confidence_threshold=None):
+                raise RuntimeError("rtsp://camera:secret@example.invalid/live")
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            if tracking.get("state") == "failed":
+                terminal.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=5.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        with self.assertLogs("survng.app.object_tracking", level="ERROR"):
+            self.assertTrue(session.start(
+                43,
+                datetime.now(timezone.utc),
+                [detection("person", 0.9, (10, 10, 40, 80))],
+            ))
+            self.assertTrue(terminal.wait(2.0))
+            session.stop()
+
+        self.assertNotIn("secret", session.status()["last_error"])
+        self.assertIn("camera:***@", session.status()["last_error"])
 
 
 class ObjectTrackingPersistenceTest(unittest.TestCase):
@@ -177,6 +473,10 @@ class ObjectTrackingPersistenceTest(unittest.TestCase):
             updated = store.update_object_tracking(
                 int(event["id"]),
                 {"state": "complete", "tracks": [{"track_id": 7}]},
+                [{
+                    **detection("person", 0.9, (10, 10, 40, 80)),
+                    "track_id": 99,
+                }],
             )
 
         self.assertIsNotNone(updated)

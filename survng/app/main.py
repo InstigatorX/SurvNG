@@ -45,7 +45,7 @@ from .audit_ai import (
     motion_paradigm_context,
     validate_tuning_value,
 )
-from .detector import detection_failure, merge_manual_detection_objects, objects_to_json
+from .detector import detection_failure, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_pipeline import (
     analysis_preset_selections,
@@ -2427,11 +2427,9 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
         detected_object["detection_source"] = "manual_openvino"
         detected_object["manual_confidence_threshold"] = safe_confidence
-    persisted_event = manager.events.update_objects(
+    persisted_event = manager.events.replace_detected_objects(
         event_id,
-        objects_to_json(
-            merge_manual_detection_objects(str(event.get("objects_json") or "[]"), objects)
-        ),
+        objects_to_json(objects),
     )
     if persisted_event is None:
         raise HTTPException(status_code=404, detail="event not found")
@@ -3578,12 +3576,21 @@ def _event_row(row: dict) -> dict:
         and positive_confidence(item)
         and item.get("incident_eligible") is not False
     ]
+    tracked_objects = (
+        [item for item in tracking_entry.get("tracks", []) if isinstance(item, dict)]
+        if isinstance(tracking_entry, dict)
+        else []
+    )
     event["objects"] = objects
     event["has_objects"] = bool(detected_objects)
-    event["labels"] = sorted({str(item["label"]) for item in detected_objects})
+    event["labels"] = sorted({
+        str(item["label"])
+        for item in [*detected_objects, *tracked_objects]
+        if item.get("label")
+    })
     event["zones"] = sorted({
         str(zone_name)
-        for item in detected_objects
+        for item in [*detected_objects, *tracked_objects]
         for zone_name in (
             item.get("zones", [])
             if isinstance(item.get("zones", []), list)
@@ -3781,6 +3788,7 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         for event in ordered
         if isinstance((tracking := event.get("object_tracking")), dict)
         and tracking.get("updated_at")
+        and tracking.get("tracks")
     ]
     final_item = max([last, *motion_observations, *tracking_updates], key=event_epoch)
     last_epoch = event_epoch(final_item)

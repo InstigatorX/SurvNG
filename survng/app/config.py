@@ -225,7 +225,7 @@ class CameraConfig(BaseModel):
 
 class ObjectTrackingConfig(BaseModel):
     enabled: bool = True
-    implementation: Literal["bytetrack"] = "bytetrack"
+    implementation: str = Field(default="bytetrack", min_length=1, max_length=64)
     sample_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     max_session_seconds: float = Field(default=15.0, ge=3.0, le=120.0)
     lost_timeout_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
@@ -233,6 +233,12 @@ class ObjectTrackingConfig(BaseModel):
     low_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
     match_iou_threshold: float = Field(default=0.20, ge=0.05, le=0.90)
     max_active_cameras: int = Field(default=2, ge=1, le=16)
+    max_tracks_per_session: int = Field(default=100, ge=1, le=1000)
+
+    @field_validator("implementation", mode="before")
+    @classmethod
+    def normalize_tracking_implementation(cls, value: object) -> str:
+        return str(value or "").strip().lower()
 
 
 class DetectorConfig(BaseModel):
