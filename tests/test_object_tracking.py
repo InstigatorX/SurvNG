@@ -550,7 +550,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             limiter=threading.BoundedSemaphore(1),
             tracker_registry=(registry := ObjectTrackerRegistry()),
         )
-        registry.register("bytetrack", ByteTrackObjectTracker)
+        registry.register("survng_hybrid", ByteTrackObjectTracker)
         session.set_accepting(True)
 
         with self.assertLogs("survng.app.object_tracking", level="ERROR"):

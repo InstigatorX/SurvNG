@@ -28,6 +28,13 @@ class AppConfigTest(unittest.TestCase):
             reid_model_path="person-reid.xml",
         )
         self.assertEqual(tracking.reid_max_embeddings_per_frame, 8)
+
+    def test_legacy_bytetrack_name_migrates_to_survng_hybrid(self) -> None:
+        self.assertEqual(ObjectTrackingConfig().implementation, "survng_hybrid")
+        self.assertEqual(
+            ObjectTrackingConfig(implementation="ByteTrack").implementation,
+            "survng_hybrid",
+        )
     def test_base_path_defaults_to_survng(self) -> None:
         self.assertEqual(AppConfig().base_path, "/survng")
         self.assertEqual(AppConfig().database_dir, "")

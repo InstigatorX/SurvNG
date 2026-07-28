@@ -71,6 +71,7 @@ from .recording_media import (
     playback_segment_duration,
     resolve_stream_fingerprints,
 )
+from .object_tracking import ultralytics_botsort_dependency_status
 from .zones import apply_detection_zones, detection_threshold
 from .security import redact_secret_text
 
@@ -1202,6 +1203,31 @@ def accelerator() -> dict:
 @app.get("/api/detector/status")
 def detector_status() -> dict:
     return manager.detector_status()
+
+
+@app.get("/api/object-tracking/catalog")
+def object_tracking_catalog() -> dict:
+    ultralytics_status = ultralytics_botsort_dependency_status()
+    return {
+        "active": config.detector.tracking.implementation,
+        "implementations": [
+            {
+                "id": "survng_hybrid",
+                "name": "SurvNG Hybrid",
+                "available": True,
+                "description": "Lightweight geometry tracking with SurvNG appearance recovery.",
+            },
+            {
+                "id": "ultralytics_botsort",
+                "name": "Ultralytics BoT-SORT",
+                "available": ultralytics_status["available"],
+                "description": "Official Kalman/BoT-SORT association using SurvNG person embeddings.",
+                "installed_version": ultralytics_status["installed_version"],
+                "required_version": ultralytics_status["required_version"],
+                "reason": ultralytics_status["reason"] or "",
+            },
+        ],
+    }
 
 
 @app.get("/api/detector/models")

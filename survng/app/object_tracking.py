@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 import logging
 import threading
 import time
@@ -62,6 +64,50 @@ class ObjectTrackerBackend(Protocol):
 
 
 ObjectTrackerBuilder = Callable[[ObjectTrackingConfig, float], ObjectTrackerBackend]
+SUPPORTED_ULTRALYTICS_TRACKING_VERSION = "8.4.108"
+
+
+def ultralytics_botsort_dependency_status() -> dict[str, Any]:
+    try:
+        installed_version = version("ultralytics")
+    except PackageNotFoundError:
+        installed_version = ""
+    lap_present = importlib.util.find_spec("lap") is not None
+    available = (
+        importlib.util.find_spec("ultralytics") is not None
+        and installed_version == SUPPORTED_ULTRALYTICS_TRACKING_VERSION
+        and lap_present
+    )
+    if not installed_version:
+        reason = "Ultralytics is not installed."
+    elif installed_version != SUPPORTED_ULTRALYTICS_TRACKING_VERSION:
+        reason = (
+            f"Ultralytics {installed_version} is installed; "
+            f"SurvNG requires {SUPPORTED_ULTRALYTICS_TRACKING_VERSION}."
+        )
+    elif not lap_present:
+        reason = "The LAP assignment dependency is not installed."
+    else:
+        reason = ""
+    return {
+        "available": available,
+        "installed_version": installed_version,
+        "required_version": SUPPORTED_ULTRALYTICS_TRACKING_VERSION,
+        "reason": reason,
+    }
+
+
+def ultralytics_botsort_available() -> bool:
+    return bool(ultralytics_botsort_dependency_status()["available"])
+
+
+def _build_ultralytics_botsort(
+    config: ObjectTrackingConfig,
+    high_confidence_threshold: float,
+) -> ObjectTrackerBackend:
+    from .ultralytics_tracking import UltralyticsBotSortObjectTracker
+
+    return UltralyticsBotSortObjectTracker(config, high_confidence_threshold)
 
 
 class ObjectTrackerRegistry:
@@ -506,7 +552,11 @@ class ByteTrackObjectTracker:
 
 def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     registry = ObjectTrackerRegistry()
+    registry.register("survng_hybrid", ByteTrackObjectTracker)
+    # Compatibility alias for configurations created before the tracker gained
+    # SurvNG-specific geometry and appearance association.
     registry.register("bytetrack", ByteTrackObjectTracker)
+    registry.register("ultralytics_botsort", _build_ultralytics_botsort)
     return registry
 
 
@@ -938,6 +988,13 @@ class ObjectTrackingSessionFactory:
         self.appearance_encoder = appearance_encoder
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
+        if (
+            config.implementation == "ultralytics_botsort"
+            and not ultralytics_botsort_available()
+        ):
+            raise ValueError(
+                "ultralytics_botsort requires the optional Ultralytics tracking dependencies"
+            )
 
     def create(self, camera: CameraConfig, frame_provider: FrameProvider) -> ObjectTrackingSession:
         return ObjectTrackingSession(

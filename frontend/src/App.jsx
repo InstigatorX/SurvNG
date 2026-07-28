@@ -1601,8 +1601,37 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, incidentEligibleOnly = false, thumbnail = false, onImageSize, children }) {
+function storedObjectTracks(event) {
+  const tracks = event?.object_tracking?.tracks;
+  if (!Array.isArray(tracks)) return [];
+  return tracks.flatMap((track) => {
+    const box = track?.box || {};
+    const coordinates = [box.x1, box.y1, box.x2, box.y2].map(Number);
+    if (!track?.label || !Number.isFinite(Number(track.track_id)) || coordinates.some((value) => !Number.isFinite(value))) return [];
+    const trajectory = Array.isArray(track.trajectory)
+      ? track.trajectory.flatMap((point) => {
+        if (!Array.isArray(point) || point.length < 3) return [];
+        const timestamp = Number(point[0]);
+        const x = Number(point[1]);
+        const y = Number(point[2]);
+        return Number.isFinite(timestamp) && Number.isFinite(x) && Number.isFinite(y) ? [[timestamp, x, y]] : [];
+      })
+      : [];
+    return [{
+      ...track,
+      trackId: Number(track.track_id),
+      x1: coordinates[0],
+      y1: coordinates[1],
+      x2: coordinates[2],
+      y2: coordinates[3],
+      trajectory,
+    }];
+  }).filter((track) => track.x2 > track.x1 && track.y2 > track.y1);
+}
+
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
+  const tracks = storedObjectTracks(event);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
   const [frameSize, setFrameSize] = useState(null);
@@ -1661,6 +1690,18 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     })).filter((box) => box.width > 0 && box.height > 0);
   }, [boxes, frameSize, renderedImage]);
 
+  const renderedTracks = useMemo(() => {
+    if (!renderedImage || !frameSize) return [];
+    return tracks.map((track) => ({
+      ...track,
+      left: renderedImage.x + track.x1 * renderedImage.scale,
+      top: renderedImage.y + track.y1 * renderedImage.scale,
+      width: (track.x2 - track.x1) * renderedImage.scale,
+      height: (track.y2 - track.y1) * renderedImage.scale,
+      pathPoints: track.trajectory.map(([, x, y]) => `${renderedImage.x + x * renderedImage.scale},${renderedImage.y + y * renderedImage.scale}`).join(" "),
+    })).filter((track) => track.width > 0 && track.height > 0);
+  }, [frameSize, renderedImage, tracks]);
+
   const focusStyle = useMemo(() => {
     if (!canFocus || !frameSize || !renderedBoxes.length) return null;
     const minX = Math.max(0, Math.min(...renderedBoxes.map((box) => box.left)));
@@ -1693,7 +1734,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
         {event?.snapshot_path && eventSnapshotUrl(event) ? <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
-        {showAnnotations && renderedBoxes.length ? (
+        {showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
               {renderedBoxes.filter((box) => box.maskPoints).map((box, index) => (
@@ -1707,6 +1748,27 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
                 style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }}
               >
                 <strong>{box.label}{box.confidence ? ` ${(box.confidence * 100).toFixed(0)}%` : ""}</strong>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {showTracking && renderedTracks.length ? (
+          <div className="object-track-layer" aria-label={`${renderedTracks.length} stored object track${renderedTracks.length === 1 ? "" : "s"}`}>
+            <svg viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+              {renderedTracks.map((track) => (
+                <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`trail-${track.trackId}`}>
+                  {track.pathPoints ? <polyline className="object-track-trail" points={track.pathPoints} vectorEffect="non-scaling-stroke" /> : null}
+                  <circle className="object-track-end" cx={track.left + track.width / 2} cy={track.top + track.height / 2} r="4" vectorEffect="non-scaling-stroke" />
+                </g>
+              ))}
+            </svg>
+            {renderedTracks.map((track) => (
+              <span
+                className={`object-track-box object-track-color-${Math.abs(track.trackId) % 6}`}
+                key={`track-${track.trackId}`}
+                style={{ left: `${track.left}px`, top: `${track.top}px`, width: `${track.width}px`, height: `${track.height}px` }}
+              >
+                <strong>#{track.trackId} {track.label}</strong>
               </span>
             ))}
           </div>
@@ -1905,6 +1967,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
           event={preview}
           alt="incident snapshot"
           showAnnotations={expanded || thumbnailAnnotations}
+          showTracking={expanded && !inlineVideoActive}
           incidentEligibleOnly={!expanded}
           thumbnail
         >
@@ -1998,10 +2061,11 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
         }) : <p>No eligible object detections.</p>}
       </section>
       {objectTracks.length ? <section>
-        <h3>Object track segments</h3>
-        {objectTracks.map((track) => <div className="inspector-detection" key={track.track_id}>
+        <h3>Tracked objects</h3>
+        <p>{String(inspectedEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(inspectedEvent.object_tracking?.sample_fps || 0) || "?"} FPS. Open the viewer to see paths.</p>
+        {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
-          <small>{track.observations} observations · {formatDuration(track.duration_seconds || 0)}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
+          <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
         </div>)}
       </section> : null}
       <section>
@@ -2181,6 +2245,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [videoActive, setVideoActive] = useState(false);
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
+  const [trackingVisible, setTrackingVisible] = useState(true);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [mediaSize, setMediaSize] = useState(null);
   const zoomRef = useRef(zoom);
@@ -2189,6 +2254,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState("");
   const displayedEvent = manualDetection ? { ...event, objects: manualDetection.objects || [] } : event;
+  const storedTracks = storedObjectTracks(event);
   const objects = eventObjects(displayedEvent);
   const detectedObjects = objects.filter((object) => object.label);
   const manualConfidenceNumber = Number(manualConfidence);
@@ -2413,6 +2479,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     setMediaSize(null);
     setDetectionDebug(false);
     setDetectionDebugStats(null);
+    setTrackingVisible(true);
     setManualDetection(null);
     setManualError("");
     setManualLoading(false);
@@ -2481,6 +2548,21 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             <time>{formatDateTime(event.created_at, timeZone)}</time>
           </div>
           <div className="overlay-actions">
+            {storedTracks.length ? (
+              <button
+                type="button"
+                className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
+                onClick={() => {
+                  setVideoActive(false);
+                  setTrackingVisible((visible) => !visible);
+                }}
+                title={`${trackingVisible ? "Hide" : "Show"} stored object paths on the event snapshot`}
+                aria-label={`${trackingVisible ? "Hide" : "Show"} stored object tracks`}
+                aria-pressed={trackingVisible}
+              >
+                <ListTree size={16} /> Tracks
+              </button>
+            ) : null}
             <button
               type="button"
               className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
@@ -2541,6 +2623,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             layerStyle={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }}
             allowObjectFocus={zoom.scale === 1 && !videoActive}
             showAnnotations
+            showTracking={trackingVisible && !manualDetection}
             onImageSize={setMediaSize}
           />
           {videoActive && clipInfo && playback && !clipError ? (
@@ -2585,6 +2668,13 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
           ) : null}
         </div>
         <div className="event-detail-body">
+          {storedTracks.length ? (
+            <div className="event-track-summary">
+              <span className="muted">Stored tracking</span>
+              <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(event.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(event.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
+              <small>Paths show sampled object centers over time. The box marks each track's last stored position.</small>
+            </div>
+          ) : null}
           <div>
             <span className="muted">Detection</span>
             <div className="pill-row">
@@ -4251,6 +4341,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [recordingCache, setRecordingCache] = useState(null);
   const [mqttStatus, setMqttStatus] = useState(null);
   const [detectorStatus, setDetectorStatus] = useState(null);
+  const [trackingCatalog, setTrackingCatalog] = useState(null);
   const [motionCatalog, setMotionCatalog] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
@@ -4293,6 +4384,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         fetch("/api/recordings/cache/status"),
         fetch("/api/system/status"),
         fetch("/api/motion/pipeline/catalog"),
+        fetch("/api/object-tracking/catalog"),
       ]);
       const response = results[0].status === "fulfilled" ? results[0].value : null;
       if (!response?.ok) throw new Error(`Configuration failed to load${response ? ` (${response.status})` : ""}`);
@@ -4302,8 +4394,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         if (result.status !== "fulfilled" || !result.value.ok) return null;
         try { return await result.value.json(); } catch { return null; }
       };
-      const [status, acceleratorPayload, models, cache, system, catalog] = await Promise.all([
-        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6),
+      const [status, acceleratorPayload, models, cache, system, catalog, trackerCatalog] = await Promise.all([
+        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6), optionalPayload(7),
       ]);
       if (sequence !== configLoadSequence.current) return false;
       setConfig(nextConfig);
@@ -4316,6 +4408,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         setDetectorStatus(system.detector || null);
       }
       if (catalog) setMotionCatalog(catalog);
+      if (trackerCatalog) setTrackingCatalog(trackerCatalog);
       setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
       return true;
     } catch (error) {
@@ -4709,6 +4802,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             recordingCache={recordingCache}
             mqttStatus={mqttStatus}
             detectorStatus={detectorStatus}
+            trackingCatalog={trackingCatalog}
             motionCatalog={motionCatalog}
             section={generalSection}
           />
@@ -5641,7 +5735,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, detectorStatus, motionCatalog, section }) {
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, detectorStatus, trackingCatalog, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const reidStatus = detectorStatus?.reid || null;
   const openvinoDevices = accelerator?.openvino_devices || [];
@@ -5795,10 +5889,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <details className="motion-tuning-details">
           <summary>Advanced object tracking</summary>
           <div className="field-row">
+            <label>Tracking engine<select value={config.detector?.tracking?.implementation ?? "survng_hybrid"} onChange={(event) => updateConfig(["detector", "tracking", "implementation"], event.target.value)}>{(trackingCatalog?.implementations || [{ id: "survng_hybrid", name: "SurvNG Hybrid", available: true }]).map((item) => <option key={item.id} value={item.id} disabled={!item.available}>{item.name}{item.available ? "" : " (not installed)"}</option>)}</select><small>{trackingCatalog?.implementations?.find((item) => item.id === (config.detector?.tracking?.implementation ?? "survng_hybrid"))?.description || "Choose how detections retain the same numbered track."}</small>{trackingCatalog?.implementations?.find((item) => item.id === "ultralytics_botsort" && !item.available)?.reason ? <small>{trackingCatalog.implementations.find((item) => item.id === "ultralytics_botsort").reason} Install the optional tracking requirements to enable it.</small> : null}</label>
             <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Objects that started the incident are trusted immediately.</small></label>
             <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
-            <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
-            <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
+            {config.detector?.tracking?.implementation !== "ultralytics_botsort" ? <>
+              <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
+              <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
+            </> : null}
             <label>Maximum tracks per incident<input type="number" min="1" max="1000" step="10" value={config.detector?.tracking?.max_tracks_per_session ?? 100} onChange={(event) => updateConfig(["detector", "tracking", "max_tracks_per_session"], Number(event.target.value))} /><small>Safety limit for unusually noisy detector output.</small></label>
             <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "reid_enabled"], event.target.checked)} /> Reconnect people by appearance</label>
             <label>Person ReID model<input value={config.detector?.tracking?.reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "reid_model_path"], event.target.value)} placeholder="person-reidentification.xml" /><small>Optional OpenVINO whole-person embedding model. Face-recognition models are not compatible.</small></label>
@@ -5806,7 +5903,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>Appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.reid_match_threshold ?? 0.82} onChange={(event) => updateConfig(["detector", "tracking", "reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce the chance of joining two similarly dressed people.</small></label>
             <label>Remember lost appearance<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.reid_max_age_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_age_seconds"], Number(event.target.value))} /><small>Seconds a lost person can recover the same track ID.</small></label>
             <label>Maximum appearance checks<input type="number" min="1" max="64" step="1" value={config.detector?.tracking?.reid_max_embeddings_per_frame ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_embeddings_per_frame"], Number(event.target.value))} /><small>Bounds ReID work if a frame contains many person boxes.</small></label>
+            {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <>
+              <label>BoT-SORT match tolerance<input type="number" min="0.1" max="1" step="0.05" value={config.detector?.tracking?.botsort_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "botsort_match_threshold"], Number(event.target.value))} /><small>Higher values allow more motion difference while retaining an ID.</small></label>
+              <label>Appearance proximity<input type="number" min="0" max="1" step="0.05" value={config.detector?.tracking?.botsort_proximity_threshold ?? 0.1} onChange={(event) => updateConfig(["detector", "tracking", "botsort_proximity_threshold"], Number(event.target.value))} /><small>Minimum box overlap before appearance can reconnect a person. Zero allows appearance recovery anywhere in the frame.</small></label>
+              <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.botsort_fuse_score ?? true} onChange={(event) => updateConfig(["detector", "tracking", "botsort_fuse_score"], event.target.checked)} /> Blend detector confidence into BoT-SORT matching</label>
+            </> : null}
           </div>
+          {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <div className="probe-result"><strong>Optional high-accuracy engine</strong><span>Runs official Ultralytics BoT-SORT with separate state for each camera event. Camera-motion compensation is disabled for fixed cameras. The optional runtime adds substantial disk and memory overhead.</span></div> : null}
           {config.detector?.tracking?.reid_enabled ? (
             reidStatus?.enabled ? (
               <div className={`probe-result ${reidStatus.ready ? "ok" : "bad"}`}>

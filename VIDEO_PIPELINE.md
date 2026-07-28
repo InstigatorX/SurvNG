@@ -415,6 +415,21 @@ Face-recognition embedding models are not interchangeable with person ReID.
 ReID requests use a short timeout and `reid_max_embeddings_per_frame` bounds
 appearance work when detector output is unusually crowded or noisy.
 
+The object-tracking implementation is pluggable. `survng_hybrid` is the
+lightweight default and is the corrected name for the historical `bytetrack`
+setting. `ultralytics_botsort` is an optional adapter around the official
+Ultralytics BoT-SORT implementation. It retains one tracker instance per camera
+event, prevents association across object classes, disables global camera-motion
+compensation for fixed cameras, and consumes the same isolated OpenVINO person
+embeddings used by the default engine. Install
+`requirements-ultralytics-tracking.txt` before selecting it. This optional
+runtime adds a large PyTorch dependency and should be enabled only after its
+accuracy and resource use are compared with the default on representative
+recordings. The adapter is pinned to the reviewed Ultralytics version because
+it uses tracker-level APIs rather than the higher-level `model.track()` entry
+point. Ultralytics is distributed under AGPL-3.0; deployments that redistribute
+SurvNG with this optional dependency should review the applicable license terms.
+
 Tracking runs only after an eligible object is found. It samples the main
 camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous
 sessions so a burst of camera activity cannot create unbounded inference and
@@ -422,6 +437,15 @@ decode load. Track summaries, trajectories, zones, observation counts, and
 first/last-seen timestamps are stored with the originating incident.
 `max_tracks_per_session` additionally bounds association work and persisted
 metadata if a detector produces an abnormal number of boxes.
+
+The Incidents workspace visualizes that persisted metadata without rerunning
+inference. Expanding a tracked incident or opening its viewer draws each track
+in a stable color, labels its last stored box with `#<track_id>`, and connects
+the sampled centers as a path. The viewer's **Tracks** control toggles this
+layer, while the inspector reports the implementation, sampling rate,
+observation count, duration, zones, and ReID recoveries. These are sampled
+paths on the representative snapshot, not frame-accurate video annotations;
+the last box can therefore be later than the snapshot itself.
 
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,

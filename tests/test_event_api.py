@@ -19,6 +19,15 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:
+        catalog = main.object_tracking_catalog()
+        implementations = {
+            item["id"]: item for item in catalog["implementations"]
+        }
+
+        self.assertTrue(implementations["survng_hybrid"]["available"])
+        self.assertIn("ultralytics_botsort", implementations)
+
     def test_motion_audit_ai_context_explains_current_decision_outcome(self) -> None:
         config = AppConfig(
             cameras=[CameraConfig(

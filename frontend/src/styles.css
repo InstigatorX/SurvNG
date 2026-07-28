@@ -752,6 +752,33 @@ p {
   font-size: 9px;
 }
 
+.inspector-track {
+  border-left: 4px solid var(--object-track-color);
+}
+
+.tracking-trail-toggle.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.event-track-summary {
+  display: grid;
+  gap: 3px;
+  min-width: min(100%, 270px);
+}
+
+.event-track-summary strong {
+  font-size: 12px;
+}
+
+.event-track-summary small {
+  max-width: 420px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .inspector-face {
   display: flex;
   width: 100%;
@@ -1755,6 +1782,69 @@ button.status-pill.hud-toggle:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.object-track-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.object-track-layer svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.object-track-trail {
+  fill: none;
+  stroke: var(--object-track-color);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .92;
+}
+
+.object-track-end {
+  fill: var(--object-track-color);
+  stroke: rgba(3, 12, 14, .88);
+  stroke-width: 2;
+}
+
+.object-track-box {
+  position: absolute;
+  min-width: 8px;
+  min-height: 8px;
+  border: 2px solid var(--object-track-color);
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .48), 0 0 12px color-mix(in srgb, var(--object-track-color) 28%, transparent);
+}
+
+.object-track-box strong {
+  position: absolute;
+  left: -2px;
+  bottom: calc(100% + 2px);
+  max-width: 160px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--object-track-color);
+  color: #071011;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  padding: 4px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.object-track-color-0 { --object-track-color: #22d3a6; }
+.object-track-color-1 { --object-track-color: #38bdf8; }
+.object-track-color-2 { --object-track-color: #facc15; }
+.object-track-color-3 { --object-track-color: #fb7185; }
+.object-track-color-4 { --object-track-color: #c084fc; }
+.object-track-color-5 { --object-track-color: #fb923c; }
 
 .snapshot-focus-button {
   position: absolute;
