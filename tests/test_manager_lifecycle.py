@@ -121,6 +121,30 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.state_events.close.assert_called_once_with()
         self.assertTrue(manager._closed)
 
+    def test_shutdown_releases_onvif_before_other_camera_components(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+        order: list[str] = []
+        manager.workers["gate"].stop_onvif_events.side_effect = (
+            lambda: order.append("onvif")
+        )
+        manager.workers["gate"].stop.side_effect = lambda: order.append("camera")
+        manager.mqtt.stop.side_effect = lambda: order.append("mqtt")
+
+        manager.stop_all()
+
+        self.assertLess(order.index("onvif"), order.index("mqtt"))
+        self.assertLess(order.index("onvif"), order.index("camera"))
+
+    def test_early_onvif_release_keeps_video_worker_running(self) -> None:
+        manager = manager_with_mocks()
+
+        manager.release_onvif_subscriptions()
+
+        manager.workers["gate"].stop_onvif_events.assert_called_once_with()
+        manager.workers["gate"].stop.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+
     def test_start_is_idempotent_and_stop_is_terminal(self) -> None:
         manager = manager_with_mocks()
 

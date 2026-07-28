@@ -583,16 +583,59 @@ def reload_manager(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    loop = asyncio.get_running_loop()
+    early_onvif_thread: threading.Thread | None = None
+    early_onvif_lock = threading.Lock()
+
+    def release_onvif_before_server_drain() -> None:
+        nonlocal early_onvif_thread
+        with early_onvif_lock:
+            if early_onvif_thread is not None and early_onvif_thread.is_alive():
+                return
+            active_manager = manager
+
+            def release() -> None:
+                logging.getLogger("uvicorn.error").info(
+                    "SurvNG early shutdown: releasing ONVIF subscriptions before connection drain"
+                )
+                try:
+                    active_manager.release_onvif_subscriptions()
+                except Exception:
+                    logging.getLogger("uvicorn.error").exception(
+                        "early ONVIF subscription release was incomplete"
+                    )
+
+            early_onvif_thread = threading.Thread(
+                target=release,
+                name="early-onvif-shutdown",
+                daemon=False,
+            )
+            early_onvif_thread.start()
+
+    early_signal_installed = False
+    try:
+        loop.add_signal_handler(signal.SIGUSR1, release_onvif_before_server_drain)
+        early_signal_installed = True
+    except (NotImplementedError, RuntimeError):
+        logging.getLogger(__name__).warning(
+            "early ONVIF shutdown signal is unavailable on this platform"
+        )
     manager.start_all()
     try:
         _start_face_observation_sync()
         _start_recording_prewarmer()
         yield
     finally:
+        if early_signal_installed:
+            loop.remove_signal_handler(signal.SIGUSR1)
         try:
             _stop_recording_prewarmer()
         finally:
-            manager.stop_all()
+            try:
+                manager.stop_all()
+            finally:
+                if early_onvif_thread is not None and early_onvif_thread.is_alive():
+                    early_onvif_thread.join()
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)

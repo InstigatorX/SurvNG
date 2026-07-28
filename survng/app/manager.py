@@ -433,6 +433,44 @@ class AppManager:
                 self._closed = True
             return preferences
 
+    def release_onvif_subscriptions(self) -> None:
+        """Stop ONVIF listeners early while leaving video and recorders running."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            failures: list[tuple[str, Exception]] = []
+            failures_lock = threading.Lock()
+
+            def release(camera_id: str, worker: CameraWorker) -> None:
+                try:
+                    worker.stop_onvif_events()
+                except Exception as exc:
+                    with failures_lock:
+                        failures.append((camera_id, exc))
+                    LOGGER.exception(
+                        "early ONVIF subscription release failed for %s",
+                        camera_id,
+                    )
+
+            releases = [
+                threading.Thread(
+                    target=release,
+                    args=(camera_id, worker),
+                    name=f"release-onvif-{camera_id}",
+                    daemon=False,
+                )
+                for camera_id, worker in self.workers.items()
+            ]
+            for thread in releases:
+                thread.start()
+            for thread in releases:
+                thread.join()
+            if failures:
+                cameras = ", ".join(camera_id for camera_id, _exc in failures)
+                raise RuntimeError(
+                    f"failed to release ONVIF subscriptions for: {cameras}"
+                ) from failures[0][1]
+
     def _shutdown_components(self) -> None:
         errors: list[tuple[str, Exception]] = []
 
@@ -443,8 +481,10 @@ class AppManager:
                 errors.append((label, exc))
                 LOGGER.exception("SurvNG shutdown step failed: %s", label)
 
-        attempt("state monitor", self._stop_state_monitor)
         started = time.monotonic()
+        LOGGER.info("SurvNG shutdown: releasing ONVIF subscriptions")
+        attempt("ONVIF subscriptions", self.release_onvif_subscriptions)
+        attempt("state monitor", self._stop_state_monitor)
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
         attempt("MQTT", self.mqtt.stop)
         LOGGER.info("SurvNG shutdown: stopping camera and ONVIF workers")

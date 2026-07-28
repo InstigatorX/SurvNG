@@ -144,6 +144,27 @@ class CaptureProtocolTest(unittest.TestCase):
         transport.session.close.assert_called_once_with()
         self.assertFalse(listener.connected)
 
+    def test_onvif_clean_stop_unsubscribes_before_closing_transport(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        manager = Mock()
+        transport = SimpleNamespace(session=Mock())
+        listener._subscription_manager = manager
+        listener._transport = transport
+        order: list[str] = []
+        manager.Unsubscribe.side_effect = lambda: order.append("unsubscribe")
+        transport.session.close.side_effect = lambda: order.append("close")
+
+        with patch.object(
+            listener,
+            "_run_until_stopped",
+            side_effect=lambda: listener._stop.wait(2),
+        ):
+            listener.start()
+            listener.stop()
+
+        self.assertEqual(order, ["unsubscribe", "close"])
+        self.assertFalse(listener.running)
+
     def test_onvif_numeric_off_state_is_not_reported_as_motion(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
 

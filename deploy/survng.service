@@ -9,10 +9,15 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=/root/SurvNG
 ExecStart=/root/SurvNG/.venv/bin/uvicorn survng.app.main:app --host 0.0.0.0 --port 8088 --loop asyncio --timeout-graceful-shutdown 30
+# Ask SurvNG to release scarce camera PullPoint slots before Uvicorn starts
+# waiting for long-lived browser connections to drain.
+ExecStop=-/bin/kill -USR1 $MAINPID
+ExecStop=/bin/sleep 1
+ExecStop=/bin/kill -TERM $MAINPID
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONFAULTHANDLER=1
 
-# FastAPI's lifespan shutdown stops camera, ONVIF, HLS, and recorder workers.
+# SIGUSR1 releases ONVIF first; FastAPI lifespan then stops the remaining workers.
 # SurvNG gracefully stops FFmpeg children; systemd kills the cgroup only if that stalls.
 KillSignal=SIGTERM
 KillMode=mixed

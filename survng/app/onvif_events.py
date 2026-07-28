@@ -105,8 +105,10 @@ class OnvifEventListener:
         self._stop.set()
         with self._lifecycle_lock:
             thread = self._thread
-        self._close_transport()
         if thread is not None:
+            # PullMessages has a short bounded timeout. Let the owning worker
+            # return from it and send Unsubscribe while its transport is still
+            # usable before resorting to forcibly closing the session.
             thread.join(timeout=PULL_TIMEOUT_SECONDS + 5)
             if thread.is_alive():
                 self._close_transport()
@@ -124,7 +126,7 @@ class OnvifEventListener:
         try:
             self._run_until_stopped()
         finally:
-            self._unsubscribe(notify_camera=not self._stop.is_set())
+            self._unsubscribe()
             self._close_transport()
             self.connected = False
             current = threading.current_thread()
@@ -170,7 +172,7 @@ class OnvifEventListener:
                 self.connected = False
                 self.retry_attempts += 1
                 self.last_error = f"subscription failed: {self._error_text(exc)[:200]}"
-                self._unsubscribe(notify_camera=not self._stop.is_set())
+                self._unsubscribe()
                 self._close_transport()
                 LOGGER.warning(
                     "failed to subscribe to ONVIF events for %s, retrying in %.0fs: %s",
@@ -273,7 +275,7 @@ class OnvifEventListener:
                     if self._stop.wait(POLL_RETRY_SECONDS):
                         return
 
-            self._unsubscribe(notify_camera=not self._stop.is_set())
+            self._unsubscribe()
             self._close_transport()
             self.connected = False
             if not self._stop.is_set():
@@ -403,13 +405,14 @@ class OnvifEventListener:
             )
             return False
 
-    def _unsubscribe(self, *, notify_camera: bool = True) -> None:
+    def _unsubscribe(self) -> None:
         manager = self._subscription_manager
         self._subscription_manager = None
-        if manager is None or not notify_camera:
+        if manager is None:
             return
         try:
             manager.Unsubscribe()
+            LOGGER.info("released ONVIF subscription for %s", self.camera.id)
         except Exception:
             LOGGER.debug(
                 "failed to release ONVIF subscription for %s",

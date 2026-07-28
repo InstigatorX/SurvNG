@@ -317,6 +317,11 @@ class CameraWorker:
                     f"camera {self.camera.id} did not stop cleanly ({'; '.join(shutdown_failures)})"
                 )
 
+    def stop_onvif_events(self) -> None:
+        """Release the camera's ONVIF subscription without stopping video."""
+        with self._lifecycle_lock:
+            self.onvif.stop()
+
     def close(self) -> None:
         self.motion_pipeline.close()
         self.motion_observation_pipeline.close()
