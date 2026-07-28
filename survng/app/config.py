@@ -244,7 +244,7 @@ class ObjectTrackingConfig(BaseModel):
     vehicle_reid_enabled: bool = False
     vehicle_reid_model_path: str = Field(default="", max_length=4096)
     vehicle_reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
-    vehicle_reid_match_threshold: float = Field(default=0.72, ge=0.0, le=1.0)
+    vehicle_reid_match_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     vehicle_reid_labels: list[str] = Field(
         default_factory=lambda: ["car", "truck", "bus", "motorcycle"],
         max_length=32,

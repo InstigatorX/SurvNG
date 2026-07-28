@@ -29,6 +29,7 @@ class OpenVinoPersonReidentifier:
         device: str | None = None,
         match_threshold: float | None = None,
         default_input_shape: tuple[int, int] = (128, 256),
+        input_color_order: str = "BGR",
     ) -> None:
         self.config = config
         tracking = config.tracking
@@ -43,6 +44,7 @@ class OpenVinoPersonReidentifier:
             if match_threshold is None
             else match_threshold
         )
+        self.input_color_order = input_color_order.upper()
         self.ready = False
         self.error = ""
         self.loaded_device = ""
@@ -79,6 +81,9 @@ class OpenVinoPersonReidentifier:
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 core.set_property({"CACHE_DIR": str(cache_dir)})
             model = core.read_model(model=model_path)
+            if model.input(0).partial_shape.is_dynamic:
+                width, height = self.input_shape
+                model.reshape({model.input(0).any_name: [1, 3, height, width]})
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
             device = self.configured_device or "AUTO"
             compile_config = {"PERFORMANCE_HINT": "LATENCY"}
@@ -135,6 +140,8 @@ class OpenVinoPersonReidentifier:
     def _image_tensor(self, image: np.ndarray) -> np.ndarray:
         resized = cv2.resize(image, self.input_shape, interpolation=cv2.INTER_AREA)
         tensor = resized.astype(np.float32)
+        if self.input_color_order == "RGB":
+            tensor = tensor[:, :, ::-1]
         if self.input_layout == "NCHW":
             tensor = np.transpose(tensor, (2, 0, 1))
         return np.expand_dims(tensor, axis=0)
@@ -176,6 +183,7 @@ class OpenVinoPersonReidentifier:
             "model_path": self.configured_model_path,
             "model_fingerprint": self.model_fingerprint,
             "input_shape": list(self.input_shape),
+            "input_color_order": self.input_color_order,
             "embedding_size": self.embedding_size,
             "model_load_ms": self.model_load_ms,
             "match_threshold": self.match_threshold,
@@ -197,6 +205,7 @@ class OpenVinoAppearanceReidentifier:
             device=tracking.vehicle_reid_device,
             match_threshold=tracking.vehicle_reid_match_threshold,
             default_input_shape=(208, 208),
+            input_color_order="RGB",
         )
         self.enabled = tracking.appearance_reid_enabled
 
