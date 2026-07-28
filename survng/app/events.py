@@ -507,6 +507,103 @@ class EventStore:
             "created_at": created_at,
         }
 
+    def telemetry_activity(
+        self,
+        *,
+        hours: int = 24,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate bounded event/object history into UTC hourly buckets."""
+        bounded_hours = max(1, min(int(hours), 168))
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        current_hour = current.replace(minute=0, second=0, microsecond=0)
+        first_hour = current_hour - timedelta(hours=bounded_hours - 1)
+        one_hour_ago = current - timedelta(hours=1)
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                select camera_id, created_at, objects_json
+                from events
+                where created_at >= ?
+                order by created_at, id
+                """,
+                (first_hour.isoformat(),),
+            ).fetchall()
+
+        def empty_counts() -> dict[str, Any]:
+            return {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}}
+
+        def add_counts(target: dict[str, Any], detected: list[dict[str, Any]]) -> None:
+            target["events"] += 1
+            if detected:
+                target["object_incidents"] += 1
+            target["objects"] += len(detected)
+            labels = target["labels"]
+            for item in detected:
+                label = str(item.get("label") or "unknown")
+                labels[label] = int(labels.get(label, 0)) + 1
+
+        hourly = [
+            {"started_at": (first_hour + timedelta(hours=index)).isoformat(), **empty_counts()}
+            for index in range(bounded_hours)
+        ]
+
+        def empty_hourly() -> list[dict[str, Any]]:
+            return [
+                {"started_at": item["started_at"], **empty_counts()}
+                for item in hourly
+            ]
+
+        overall_24h = empty_counts()
+        overall_1h = empty_counts()
+        cameras: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at = created_at.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            bucket_index = int((created_at.replace(minute=0, second=0, microsecond=0) - first_hour).total_seconds() // 3600)
+            if bucket_index < 0 or bucket_index >= bounded_hours:
+                continue
+            try:
+                objects = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                objects = []
+            detected = [
+                item for item in objects
+                if isinstance(item, dict)
+                and item.get("label")
+                and item.get("incident_eligible") is not False
+                and not item.get("status")
+            ] if isinstance(objects, list) else []
+            camera_id = str(row["camera_id"])
+            camera = cameras.setdefault(
+                camera_id,
+                {"last_24h": empty_counts(), "last_hour": empty_counts(), "hourly": empty_hourly()},
+            )
+            add_counts(hourly[bucket_index], detected)
+            add_counts(camera["hourly"][bucket_index], detected)
+            add_counts(overall_24h, detected)
+            add_counts(camera["last_24h"], detected)
+            if created_at >= one_hour_ago:
+                add_counts(overall_1h, detected)
+                add_counts(camera["last_hour"], detected)
+
+        return {
+            "hours": bounded_hours,
+            "started_at": first_hour.isoformat(),
+            "last_hour": overall_1h,
+            "last_24h": overall_24h,
+            "hourly": hourly,
+            "by_camera": cameras,
+        }
+
     def add_motion_audit(
         self,
         *,

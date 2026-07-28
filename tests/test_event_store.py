@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,57 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_telemetry_activity_groups_events_objects_and_cameras(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            now = datetime.fromisoformat("2026-07-28T12:30:00+00:00")
+            store.add_event(
+                "gate",
+                "motion",
+                created_at="2026-07-28T12:10:00+00:00",
+                objects_json=json.dumps([
+                    {"label": "person", "incident_eligible": True},
+                    {"label": "car", "incident_eligible": False},
+                    {"status": "motion_qualification"},
+                ]),
+            )
+            store.add_event(
+                "foyer",
+                "motion",
+                created_at="2026-07-28T10:10:00+00:00",
+                objects_json=json.dumps([
+                    {"label": "person"},
+                    {"label": "dog", "incident_eligible": True},
+                ]),
+            )
+            store.add_event(
+                "gate",
+                "motion",
+                created_at="2026-07-27T01:00:00+00:00",
+                objects_json=json.dumps([{"label": "person", "incident_eligible": True}]),
+            )
+
+            summary = store.telemetry_activity(hours=24, now=now)
+
+            self.assertEqual(len(summary["hourly"]), 24)
+            self.assertEqual(summary["last_hour"]["events"], 1)
+            self.assertEqual(summary["last_hour"]["object_incidents"], 1)
+            self.assertEqual(summary["last_24h"]["events"], 2)
+            self.assertEqual(summary["last_24h"]["objects"], 3)
+            self.assertEqual(summary["last_24h"]["labels"], {"person": 2, "dog": 1})
+            self.assertEqual(summary["by_camera"]["gate"]["last_24h"]["objects"], 1)
+            self.assertEqual(summary["by_camera"]["foyer"]["last_hour"]["events"], 0)
+            self.assertEqual(sum(item["events"] for item in summary["by_camera"]["foyer"]["hourly"]), 1)
+            self.assertEqual(sum(item["objects"] for item in summary["by_camera"]["foyer"]["hourly"]), 2)
+
+    def test_telemetry_activity_bounds_requested_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            now = datetime.fromisoformat("2026-07-28T12:30:00+00:00")
+
+            self.assertEqual(store.telemetry_activity(hours=0, now=now)["hours"], 1)
+            self.assertEqual(store.telemetry_activity(hours=999, now=now)["hours"], 168)
+
     def test_motion_effectiveness_separates_visual_filters_from_state_deduplication(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

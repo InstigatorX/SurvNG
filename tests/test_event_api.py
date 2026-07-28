@@ -19,6 +19,89 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_telemetry_history_throttles_samples_and_replaces_latest(self) -> None:
+        history = main.deque(maxlen=360)
+        state = {"last_sample_at": 0.0}
+        with patch.object(main, "TELEMETRY_HISTORY", history), patch.object(main, "TELEMETRY_HISTORY_STATE", state):
+            first = main._record_telemetry_history({"sampled_at": "first"}, 10.0)
+            replaced = main._record_telemetry_history({"sampled_at": "replacement"}, 12.0)
+            appended = main._record_telemetry_history({"sampled_at": "second"}, 16.0)
+
+        self.assertEqual(first, [{"sampled_at": "first"}])
+        self.assertEqual(replaced, [{"sampled_at": "replacement"}])
+        self.assertEqual(appended, [{"sampled_at": "replacement"}, {"sampled_at": "second"}])
+
+    def test_gpu_status_calculates_drm_engine_utilization_between_samples(self) -> None:
+        detector = {
+            "workers": {
+                "object": {"worker_pid": 42, "worker_alive": True},
+                "face": {"worker_pid": 0, "worker_alive": False},
+            },
+        }
+        counters = {
+            "engines": {"render": 2_000_000_000},
+            "allocated_bytes": 128 * 1024 * 1024,
+            "resident_bytes": 96 * 1024 * 1024,
+            "driver": "i915",
+        }
+
+        with (
+            patch.dict(main.GPU_SAMPLE, {"at": 8.0, "pids": (42,), "engines": {"render": 1_000_000_000}}, clear=True),
+            patch.object(main, "_drm_worker_counters", return_value=counters),
+            patch.object(main, "_read_integer", return_value=None),
+            patch.object(main.time, "monotonic", return_value=10.0),
+        ):
+            status = main._gpu_status(detector)
+
+        self.assertEqual(status["utilization_percent"], 50.0)
+        self.assertEqual(status["engine_utilization"], {"render": 50.0})
+        self.assertEqual(status["resident_bytes"], 96 * 1024 * 1024)
+        self.assertEqual(status["driver"], "i915")
+        self.assertTrue(status["sample_ready"])
+
+    def test_telemetry_combines_history_with_runtime_camera_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            activity = {
+                "hours": 24,
+                "last_hour": {"events": 1},
+                "last_24h": {"events": 2},
+                "hourly": [],
+                "by_camera": {
+                    "gate": {
+                        "last_hour": {"events": 1},
+                        "last_24h": {"events": 2},
+                    },
+                },
+            }
+            fake_manager = SimpleNamespace(
+                storage_dir=root,
+                database_dir=root,
+                events=SimpleNamespace(telemetry_activity=Mock(return_value=activity)),
+                detector_status=Mock(return_value={"runtime": {"total_inferences": 8}}),
+                statuses=Mock(return_value=[{
+                    "id": "gate",
+                    "name": "Gate",
+                    "connected": True,
+                    "recording": True,
+                    "detection_enabled": True,
+                    "onvif_enabled": True,
+                    "onvif_connected": True,
+                    "onvif_notifications_received": 12,
+                    "onvif_motion_events_received": 4,
+                    "motion_qualification": {"passed": 3, "audit_rejected": 2},
+                }]),
+            )
+
+            with patch.object(main, "manager", fake_manager), patch.object(main.os, "getloadavg", return_value=(1.0, 0.5, 0.25)):
+                payload = main.telemetry(hours=24)
+
+            self.assertEqual(payload["activity"], activity)
+            self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
+            self.assertEqual(payload["cameras"][0]["onvif"]["notifications"], 12)
+            self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)
+            fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
+
     def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:
         catalog = main.object_tracking_catalog()
         implementations = {

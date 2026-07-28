@@ -119,6 +119,12 @@ CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
+PROCESS_STARTED_MONOTONIC = time.monotonic()
+GPU_SAMPLE_LOCK = threading.Lock()
+GPU_SAMPLE: dict[str, object] = {"at": 0.0, "pids": (), "engines": {}}
+TELEMETRY_HISTORY_LOCK = threading.Lock()
+TELEMETRY_HISTORY: deque[dict[str, object]] = deque(maxlen=360)
+TELEMETRY_HISTORY_STATE: dict[str, float] = {"last_sample_at": 0.0}
 
 
 class RecordingPrewarmCancelled(Exception):
@@ -1388,6 +1394,280 @@ def system_status() -> dict:
         },
         "mqtt": manager.mqtt_status(),
         "go2rtc": manager.go2rtc_status(),
+    }
+
+
+def _linux_memory_status() -> dict[str, int | float]:
+    values: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, raw = line.split(":", 1)
+            values[key] = int(raw.strip().split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        return {"total_bytes": 0, "available_bytes": 0, "used_bytes": 0, "used_percent": 0.0}
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", values.get("MemFree", 0))
+    used = max(0, total - available)
+    return {
+        "total_bytes": total,
+        "available_bytes": available,
+        "used_bytes": used,
+        "used_percent": round((used / total) * 100, 1) if total else 0.0,
+    }
+
+
+def _process_rss_bytes() -> int:
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _database_bytes() -> int:
+    total = 0
+    for path in manager.database_dir.glob("*.sqlite3*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _read_integer(path: Path, *, scale: int = 1) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip(), 0) * scale
+    except (OSError, ValueError):
+        return None
+
+
+def _drm_worker_counters(pid: int) -> dict[str, object]:
+    engines: dict[str, int] = {}
+    allocated_bytes = 0
+    resident_bytes = 0
+    clients: set[str] = set()
+    driver = ""
+    try:
+        fdinfo_paths = list(Path(f"/proc/{pid}/fdinfo").iterdir())
+    except OSError:
+        return {"engines": engines, "allocated_bytes": 0, "resident_bytes": 0, "driver": ""}
+    for path in fdinfo_paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        values: dict[str, str] = {}
+        for line in lines:
+            if not line.startswith("drm-") or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            values[key] = value.strip()
+        if not values:
+            continue
+        driver = values.get("drm-driver", driver)
+        client_id = values.get("drm-client-id", str(path))
+        for key, value in values.items():
+            if not key.startswith("drm-engine-"):
+                continue
+            try:
+                nanoseconds = int(value.split()[0])
+            except (ValueError, IndexError):
+                continue
+            name = key.removeprefix("drm-engine-")
+            engines[name] = engines.get(name, 0) + nanoseconds
+        if client_id in clients:
+            continue
+        clients.add(client_id)
+        for key, target in (("drm-total-system0", "allocated"), ("drm-resident-system0", "resident")):
+            try:
+                byte_count = int(values.get(key, "0").split()[0]) * 1024
+            except (ValueError, IndexError):
+                byte_count = 0
+            if target == "allocated":
+                allocated_bytes += byte_count
+            else:
+                resident_bytes += byte_count
+    return {
+        "engines": engines,
+        "allocated_bytes": allocated_bytes,
+        "resident_bytes": resident_bytes,
+        "driver": driver,
+    }
+
+
+def _gpu_status(detector: dict) -> dict[str, object]:
+    workers = detector.get("workers") or {}
+    pids = tuple(sorted({
+        int(worker.get("worker_pid") or 0)
+        for worker in workers.values()
+        if isinstance(worker, dict) and worker.get("worker_alive") and int(worker.get("worker_pid") or 0) > 0
+    })) if isinstance(workers, dict) else ()
+    engines: dict[str, int] = {}
+    allocated_bytes = 0
+    resident_bytes = 0
+    driver = ""
+    for pid in pids:
+        counters = _drm_worker_counters(pid)
+        driver = str(counters.get("driver") or driver)
+        allocated_bytes += int(counters.get("allocated_bytes") or 0)
+        resident_bytes += int(counters.get("resident_bytes") or 0)
+        for name, value in dict(counters.get("engines") or {}).items():
+            engines[str(name)] = engines.get(str(name), 0) + int(value)
+
+    sampled_at = time.monotonic()
+    engine_usage: dict[str, float] = {}
+    with GPU_SAMPLE_LOCK:
+        previous_at = float(GPU_SAMPLE.get("at") or 0.0)
+        previous_pids = tuple(GPU_SAMPLE.get("pids") or ())
+        previous_engines = dict(GPU_SAMPLE.get("engines") or {})
+        elapsed_ns = (sampled_at - previous_at) * 1_000_000_000
+        if pids and pids == previous_pids and elapsed_ns > 0:
+            for name, value in engines.items():
+                delta = value - int(previous_engines.get(name, value))
+                if delta >= 0:
+                    engine_usage[name] = round(min(100.0, (delta / elapsed_ns) * 100.0), 1)
+        GPU_SAMPLE.update({"at": sampled_at, "pids": pids, "engines": engines})
+
+    card = Path("/sys/class/drm/card0")
+    vendor_id = _read_integer(card / "device/vendor")
+    device_id = _read_integer(card / "device/device")
+    current_frequency = _read_integer(card / "gt_act_freq_mhz")
+    maximum_frequency = _read_integer(card / "gt_max_freq_mhz")
+    temperature_millidegrees = next(
+        (value for value in (_read_integer(path) for path in (card / "device/hwmon").glob("hwmon*/temp1_input")) if value is not None),
+        None,
+    )
+    vendor_names = {0x8086: "Intel", 0x1002: "AMD", 0x10DE: "NVIDIA"}
+    vendor = vendor_names.get(vendor_id, f"0x{vendor_id:04x}" if vendor_id is not None else "Unknown")
+    utilization = round(min(100.0, sum(engine_usage.values())), 1) if engine_usage else None
+    return {
+        "available": bool(card.exists() or engines),
+        "scope": "SurvNG inference workers",
+        "vendor": vendor,
+        "device_id": f"0x{device_id:04x}" if device_id is not None else "",
+        "driver": driver,
+        "worker_pids": list(pids),
+        "utilization_percent": utilization,
+        "engine_utilization": engine_usage,
+        "allocated_bytes": allocated_bytes,
+        "resident_bytes": resident_bytes,
+        "current_frequency_mhz": current_frequency,
+        "maximum_frequency_mhz": maximum_frequency,
+        "temperature_celsius": round(temperature_millidegrees / 1000.0, 1) if temperature_millidegrees is not None else None,
+        "sample_ready": utilization is not None,
+    }
+
+
+def _record_telemetry_history(sample: dict[str, object], sampled_at: float) -> list[dict[str, object]]:
+    """Keep one rolling system sample per five seconds for up to one hour."""
+    with TELEMETRY_HISTORY_LOCK:
+        last_sample_at = TELEMETRY_HISTORY_STATE["last_sample_at"]
+        if not TELEMETRY_HISTORY or sampled_at - last_sample_at >= 5.0:
+            TELEMETRY_HISTORY.append(sample)
+            TELEMETRY_HISTORY_STATE["last_sample_at"] = sampled_at
+        else:
+            TELEMETRY_HISTORY[-1] = sample
+        return [dict(item) for item in TELEMETRY_HISTORY]
+
+
+@app.get("/api/telemetry")
+def telemetry(hours: int = 24) -> dict:
+    """Operational history and runtime counters for the Config telemetry view."""
+    storage_path = manager.storage_dir
+    storage_path.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(storage_path)
+    camera_statuses = manager.statuses()
+    detector = manager.detector_status()
+    gpu = _gpu_status(detector)
+    activity = manager.events.telemetry_activity(hours=hours)
+    per_camera_activity = activity.get("by_camera", {})
+    load_1m, load_5m, load_15m = os.getloadavg()
+    memory = _linux_memory_status()
+    process_rss_bytes = _process_rss_bytes()
+    cpu_count = os.cpu_count() or 1
+    generated_at = datetime.now(timezone.utc).isoformat()
+    cameras = []
+    for status in camera_statuses:
+        camera_id = str(status.get("id") or "")
+        motion = status.get("motion_qualification") or {}
+        cameras.append({
+            "id": camera_id,
+            "name": status.get("name") or camera_id,
+            "connected": bool(status.get("connected")),
+            "frame_fresh": bool(status.get("frame_fresh")),
+            "last_frame_age_seconds": status.get("last_frame_age_seconds"),
+            "recording": bool(status.get("recording") or status.get("sub_recording")),
+            "detection_enabled": bool(status.get("detection_enabled")),
+            "onvif": {
+                "enabled": bool(status.get("onvif_enabled")),
+                "connected": bool(status.get("onvif_connected")),
+                "notifications": int(status.get("onvif_notifications_received") or 0),
+                "motion_events": int(status.get("onvif_motion_events_received") or 0),
+                "poll_errors": int(status.get("onvif_poll_errors") or 0),
+                "poll_timeouts": int(status.get("onvif_poll_timeouts") or 0),
+                "renewals": int(status.get("onvif_renewals") or 0),
+                "renewal_errors": int(status.get("onvif_renewal_errors") or 0),
+                "last_motion_at": status.get("onvif_last_motion_event_at"),
+                "last_error": status.get("onvif_last_error") or "",
+            },
+            "motion": {
+                "mode": motion.get("mode") or "",
+                "triggers": int(motion.get("triggers") or 0),
+                "bursts": int(motion.get("bursts") or 0),
+                "passed": int(motion.get("passed") or 0),
+                "rejected": int(motion.get("audit_rejected") or 0),
+                "suppressed": int(motion.get("suppressed") or 0),
+                "dropped": int(motion.get("dropped_triggers") or 0),
+                "queue_depth": int(motion.get("queue_depth") or 0),
+            },
+            "activity": per_camera_activity.get(
+                camera_id,
+                {
+                    "last_hour": {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}},
+                    "last_24h": {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}},
+                    "hourly": [],
+                },
+            ),
+        })
+    detector_runtime = detector.get("runtime") or {}
+    history = _record_telemetry_history(
+        {
+            "sampled_at": generated_at,
+            "cpu_load_percent": round(min(100.0, (load_1m / cpu_count) * 100.0), 2),
+            "memory_used_percent": float(memory.get("used_percent") or 0.0),
+            "storage_used_percent": round((usage.used / usage.total) * 100.0, 3) if usage.total else 0.0,
+            "process_rss_bytes": process_rss_bytes,
+            "gpu_utilization_percent": gpu.get("utilization_percent"),
+            "inference_ms": detector_runtime.get("average_inference_ms"),
+            "detection_fps": detector_runtime.get("detection_fps"),
+        },
+        time.monotonic(),
+    )
+    return {
+        "generated_at": generated_at,
+        "system": {
+            "uptime_seconds": round(max(0.0, time.monotonic() - PROCESS_STARTED_MONOTONIC), 1),
+            "cpu_count": cpu_count,
+            "load_average": {"one": round(load_1m, 2), "five": round(load_5m, 2), "fifteen": round(load_15m, 2)},
+            "memory": memory,
+            "process_rss_bytes": process_rss_bytes,
+            "storage": {
+                "path": str(storage_path),
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "free_bytes": usage.free,
+                "used_percent": round((usage.used / usage.total) * 100, 1) if usage.total else 0.0,
+            },
+            "database": {"path": str(manager.database_dir), "bytes": _database_bytes()},
+        },
+        "detector": detector,
+        "gpu": gpu,
+        "history": history,
+        "activity": activity,
+        "cameras": cameras,
     }
 
 

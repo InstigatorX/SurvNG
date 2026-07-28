@@ -4583,6 +4583,148 @@ function MotionDecisionEditor({
   );
 }
 
+function TelemetryTrend({ title, description, history, series, timeZone, maximum = null, valueFormatter = (value) => `${value}` }) {
+  const numericValue = (raw) => {
+    if (raw == null || raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  };
+  const values = series.flatMap((item) => history.map((point) => numericValue(point[item.key])).filter((value) => value != null));
+  const top = maximum || Math.max(1, ...values) * 1.12;
+  const width = 100;
+  const height = 42;
+  const pointsFor = (key) => history.map((point, index) => {
+    const value = numericValue(point[key]);
+    if (value == null) return null;
+    const x = history.length <= 1 ? width : (index / (history.length - 1)) * width;
+    const y = height - Math.min(height, (Math.max(0, value) / top) * height);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).filter(Boolean).join(" ");
+  const latestValue = (key) => {
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const value = numericValue(history[index]?.[key]);
+      if (value != null) return value;
+    }
+    return null;
+  };
+  return (
+    <article className="telemetry-trend">
+      <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values">{series.map((item) => <span className={item.className || ""} key={item.key}><i />{item.label} {latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</span>)}</div></header>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${title} trend`}>
+        <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
+        {series.map((item) => <polyline className={item.className || ""} key={item.key} points={pointsFor(item.key)} />)}
+      </svg>
+      <footer><time>{history[0] ? formatTimeOnly(history[0].sampled_at, timeZone) : "Now"}</time><span>{history.length} sample{history.length === 1 ? "" : "s"}</span><time>{history.at(-1) ? formatTimeOnly(history.at(-1).sampled_at, timeZone) : "Now"}</time></footer>
+    </article>
+  );
+}
+
+function TelemetryViewer({ data, cameraId, timeZone }) {
+  if (!data) return <div className="empty-state">Waiting for telemetry...</div>;
+  const selected = cameraId ? data.cameras?.find((camera) => camera.id === cameraId) : null;
+  const activity = selected?.activity || data.activity;
+  const lastHour = activity?.last_hour || {};
+  const lastDay = activity?.last_24h || {};
+  const runtime = data.detector?.runtime || {};
+  const gpu = data.gpu || {};
+  const storage = data.system?.storage || {};
+  const memory = data.system?.memory || {};
+  const hourly = activity?.hourly || [];
+  const history = data.history || [];
+  const maxHourly = Math.max(1, ...hourly.map((item) => Number(item.events) || 0));
+  const topLabels = Object.entries(lastDay.labels || {}).sort((left, right) => right[1] - left[1]).slice(0, 5);
+  const shownCameras = selected ? [selected] : (data.cameras || []);
+  return (
+    <div className="telemetry-viewer">
+      <div className="telemetry-summary-grid">
+        <article><span>Events · last hour</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
+        <article><span>Object incidents · 24h</span><strong>{Number(lastDay.object_incidents || 0).toLocaleString()}</strong><small>{Number(lastDay.objects || 0).toLocaleString()} eligible object detections</small></article>
+        <article><span>Object detector</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{formatRate(runtime.detection_fps)} · queue {runtime.queue_depth || 0} · {Number(runtime.failed_inferences || 0).toLocaleString()} failures since restart</small></article>
+        <article><span>GPU · SurvNG inference</span><strong>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : gpu.available ? "Sampling…" : "Unavailable"}</strong><small>{formatBytes(gpu.resident_bytes)} resident · {gpu.current_frequency_mhz || 0}/{gpu.maximum_frequency_mhz || 0} MHz</small></article>
+        <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
+      </div>
+
+      <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>Events by hour{selected ? ` · ${selected.name}` : ""}</h3><p>Persisted events {selected ? "for this camera" : "across all cameras"}; times use your configured zone.</p></div></div>
+        <div className="telemetry-hourly" aria-label="Events per hour">
+          {hourly.map((item, index) => (
+            <div className="telemetry-hour" key={item.started_at} title={`${formatDateTime(item.started_at, timeZone)}: ${item.events} events, ${item.object_incidents} object incidents`}>
+              <div className="telemetry-hour-bars">
+                <i style={{ height: `${Math.max(3, (Number(item.events) / maxHourly) * 100)}%` }} />
+                <b style={{ height: `${Math.max(0, (Number(item.object_incidents) / maxHourly) * 100)}%` }} />
+              </div>
+              {(index % 4 === 0 || index === hourly.length - 1) ? <time>{formatTimeOnly(item.started_at, timeZone).replace(/:00(?=\s)/, "")}</time> : <time />}
+            </div>
+          ))}
+        </div>
+        <div className="telemetry-legend"><span><i /> Events</span><span><i className="objects" /> Object incidents</span></div>
+      </section>
+
+      <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>System trends</h3><p>Rolling one-hour history sampled while Telemetry is active.</p></div></div>
+        <div className="telemetry-trend-grid">
+          <TelemetryTrend title="Host pressure" description="Normalized 1-minute CPU load and memory use" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
+          <TelemetryTrend title="GPU utilization" description="SurvNG inference workers" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "gpu_utilization_percent", label: "GPU", className: "gpu" }]} />
+          <TelemetryTrend title="Inference latency" description="Rolling detector average" history={history} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Latency", className: "inference" }]} />
+          <TelemetryTrend title="SurvNG memory" description="Resident process memory" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "process_rss_bytes", label: "RSS", className: "process-memory" }]} />
+          <TelemetryTrend title="Storage use" description="Recording filesystem" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "storage_used_percent", label: "Used", className: "storage" }]} />
+          <TelemetryTrend title="Detection rate" description="Completed inference requests" history={history} timeZone={timeZone} valueFormatter={(value) => formatRate(value)} series={[{ key: "detection_fps", label: "Rate", className: "rate" }]} />
+        </div>
+      </section>
+
+      <div className="telemetry-system-grid">
+        <section className="telemetry-section">
+          <div className="telemetry-section-head"><div><h3>System</h3><p>Current host and SurvNG process health.</p></div></div>
+          <dl className="telemetry-details">
+            <div><dt>SurvNG uptime</dt><dd>{formatDuration(data.system?.uptime_seconds || 0)}</dd></div>
+            <div><dt>CPU load (1 / 5 / 15 min)</dt><dd>{data.system?.load_average?.one ?? "--"} / {data.system?.load_average?.five ?? "--"} / {data.system?.load_average?.fifteen ?? "--"} <small>({data.system?.cpu_count || 1} cores)</small></dd></div>
+            <div><dt>System memory</dt><dd>{memory.used_percent || 0}% · {formatBytes(memory.used_bytes)} used</dd></div>
+            <div><dt>SurvNG memory</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
+            <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
+            <div><dt>Detector</dt><dd>{data.detector?.loaded_backend || "Not loaded"} · {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
+            <div><dt>GPU</dt><dd>{gpu.available ? `${gpu.vendor} ${gpu.device_id} · ${gpu.driver || "DRM"}` : "Unavailable"}</dd></div>
+            <div><dt>GPU use</dt><dd>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : "Collecting second sample"}{gpu.temperature_celsius != null ? ` · ${gpu.temperature_celsius}°C` : ""}</dd></div>
+            <div><dt>GPU memory</dt><dd>{formatBytes(gpu.resident_bytes)} resident · {formatBytes(gpu.allocated_bytes)} allocated</dd></div>
+            <div><dt>GPU engines</dt><dd>{Object.keys(gpu.engine_utilization || {}).length ? Object.entries(gpu.engine_utilization).map(([name, value]) => `${name} ${value}%`).join(" · ") : "Collecting second sample"}</dd></div>
+            <div><dt>Inference since restart</dt><dd>{Number(runtime.total_inferences || 0).toLocaleString()} total · {Number(runtime.object_hit_inferences || 0).toLocaleString()} with objects</dd></div>
+          </dl>
+        </section>
+        <section className="telemetry-section">
+          <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} activity` : "Object activity"}</h3><p>Counts from persisted event history.</p></div></div>
+          <dl className="telemetry-details">
+            <div><dt>Events (1h / 24h)</dt><dd>{lastHour.events || 0} / {lastDay.events || 0}</dd></div>
+            <div><dt>Object incidents (1h / 24h)</dt><dd>{lastHour.object_incidents || 0} / {lastDay.object_incidents || 0}</dd></div>
+            <div><dt>Eligible objects (1h / 24h)</dt><dd>{lastHour.objects || 0} / {lastDay.objects || 0}</dd></div>
+            <div><dt>Top labels · 24h</dt><dd>{topLabels.length ? topLabels.map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
+          </dl>
+        </section>
+      </div>
+
+      <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>{selected ? selected.name : "Per-camera telemetry"}</h3><p>Health and runtime counters. ONVIF and motion counters reset when SurvNG restarts.</p></div></div>
+        <div className="telemetry-camera-grid">
+          {shownCameras.map((camera) => (
+            <article className="telemetry-camera-card" key={camera.id}>
+              <header><div><strong>{camera.name}</strong><small>{camera.id}</small></div><span className={camera.connected ? "healthy" : "offline"}>{camera.connected ? "Online" : "Offline"}</span></header>
+              <dl>
+                <div><dt>Last frame</dt><dd>{formatAge(camera.last_frame_age_seconds)}</dd></div>
+                <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
+                <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
+                <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>
+                <div><dt>ONVIF notices / motion</dt><dd>{camera.onvif.notifications} / {camera.onvif.motion_events}</dd></div>
+                <div><dt>ONVIF errors / renewals</dt><dd>{camera.onvif.poll_errors + camera.onvif.poll_timeouts + camera.onvif.renewal_errors} / {camera.onvif.renewals}</dd></div>
+                <div><dt>Motion passed / rejected</dt><dd>{camera.motion.passed} / {camera.motion.rejected}</dd></div>
+                <div><dt>Motion suppressed / dropped</dt><dd>{camera.motion.suppressed} / {camera.motion.dropped}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      </section>
+      <p className="telemetry-footnote">“Events” are stored camera events. “Object incidents” contain at least one incident-eligible detection; “objects” counts those detections individually. History survives restarts.</p>
+    </div>
+  );
+}
+
 function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
@@ -4619,6 +4761,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
   const [selectedAuditId, setSelectedAuditId] = useState(null);
+  const [telemetry, setTelemetry] = useState(null);
+  const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [telemetryError, setTelemetryError] = useState("");
+  const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", "");
   const configLoadSequence = useRef(0);
   const auditPageSize = 24;
 
@@ -4741,6 +4887,27 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     const timer = window.setInterval(() => loadMotionAudit(0), 10000);
     return () => window.clearInterval(timer);
   }, [settingsTab, auditPage, auditCamera, auditOutcome]);
+
+  async function loadTelemetry() {
+    setTelemetryLoading(true);
+    setTelemetryError("");
+    try {
+      const response = await fetch("/api/telemetry?hours=24");
+      if (!response.ok) throw new Error(`Telemetry failed to load (${response.status})`);
+      setTelemetry(await response.json());
+    } catch (error) {
+      setTelemetryError(error.message || "Unable to load telemetry.");
+    } finally {
+      setTelemetryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (settingsTab !== "telemetry") return undefined;
+    void loadTelemetry();
+    const timer = window.setInterval(() => void loadTelemetry(), 10000);
+    return () => window.clearInterval(timer);
+  }, [settingsTab]);
 
   const cameras = config?.cameras || [];
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
@@ -5013,6 +5180,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")} role="tab" aria-selected={settingsTab === "general"}><Cog size={16} /> General</button>
           <button className={settingsTab === "cameras" ? "active" : ""} onClick={() => setSettingsTab("cameras")} role="tab" aria-selected={settingsTab === "cameras"}><Camera size={16} /> Camera Settings</button>
           <button className={settingsTab === "audit" ? "active" : ""} onClick={() => setSettingsTab("audit")} role="tab" aria-selected={settingsTab === "audit"}><Activity size={16} /> Motion Audit</button>
+          <button className={settingsTab === "telemetry" ? "active" : ""} onClick={() => setSettingsTab("telemetry")} role="tab" aria-selected={settingsTab === "telemetry"}><Gauge size={16} /> Telemetry</button>
           <button className={settingsTab === "logs" ? "active" : ""} onClick={() => setSettingsTab("logs")} role="tab" aria-selected={settingsTab === "logs"}><ListTree size={16} /> Logs</button>
         </div>
         {saveNotice ? <span className={`camera-save-indicator settings-header-status ${saveNotice.state}`} role="status">{saveNotice.state === "saving" ? <RefreshCcw size={14} /> : saveNotice.state === "error" ? <CircleAlert size={14} /> : <CircleDot size={14} />}{saveNotice.text}</span> : null}
@@ -5095,6 +5263,24 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             timeZone={timeZone}
             onOpen={(item) => setSelectedAuditId(item.id)}
           />
+        </section>
+        </>
+      ) : settingsTab === "telemetry" ? (
+        <>
+        <section className="bento-card camera-tree config-tree settings-section-tree telemetry-camera-filter">
+          <div className="section-head compact"><div><h2>Telemetry</h2><p>Updates every 10 seconds</p></div></div>
+          <div className="tree-list">
+            <button type="button" className={!telemetryCamera ? "active" : ""} onClick={() => setTelemetryCamera("")}><Gauge size={16} /><span>All cameras</span></button>
+            {cameras.map((camera) => <button type="button" className={telemetryCamera === camera.id ? "active" : ""} key={camera.id} onClick={() => setTelemetryCamera(camera.id)}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
+          </div>
+        </section>
+        <section className="bento-card config-editor settings-panel telemetry-panel">
+          <div className="section-head">
+            <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
+            <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
+          </div>
+          {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
+          <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
         </section>
         </>
       ) : settingsTab === "logs" ? (
