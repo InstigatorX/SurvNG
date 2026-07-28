@@ -450,6 +450,19 @@ recoveries. Historical incidents without box history retain snapshot trails
 but cannot show synchronized video boxes. Snapshot boxes represent the last
 stored position and can therefore be later than the representative snapshot.
 
+The incident viewer’s **Compare** action is an explicit, offline diagnostic.
+It decodes a bounded recording window, runs OpenVINO detection and optional
+person appearance extraction once per sampled frame, then gives that identical
+detection sequence to SurvNG Hybrid and Ultralytics BoT-SORT. The result shows
+side-by-side paths, track and observation counts, extra-track-ID and processing
+time signals, and lets either result replay over the same recording. Detection
+and appearance costs are reported separately because they are shared inputs,
+not tracker costs. Extra track IDs are only a fragmentation proxy: without
+labeled ground truth, the comparison cannot claim a true ID-switch count or
+choose a winner automatically. Comparisons do not alter saved configuration or
+incident metadata, and a single-job limiter prevents concurrent reviews from
+competing with live inference.
+
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,
 zones, and incident eligibility.

@@ -28,6 +28,60 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertTrue(implementations["survng_hybrid"]["available"])
         self.assertIn("ultralytics_botsort", implementations)
 
+    def test_tracking_comparison_uses_bounded_shared_incident_frames(self) -> None:
+        event = {
+            "id": 43,
+            "camera_id": "gate",
+            "created_at": "2026-07-27T12:17:07+00:00",
+            "objects_json": "[]",
+        }
+        active_config = AppConfig(
+            cameras=[CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://camera.invalid/main",
+            )],
+        )
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(get=lambda _event_id: event),
+            detector=object(),
+            person_reidentifier=object(),
+        )
+        limiter = SimpleNamespace(acquire=Mock(return_value=True), release=Mock())
+        comparison = {
+            "frames_processed": 4,
+            "engines": {"survng_hybrid": {}, "ultralytics_botsort": {}},
+        }
+        runner = SimpleNamespace(run=Mock(return_value=comparison))
+
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            patch.object(main, "TRACKING_COMPARISON_LIMITER", limiter),
+            patch.object(main, "ultralytics_botsort_dependency_status", return_value={"available": True, "reason": ""}),
+            patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")) as ensure_clip,
+            patch.object(main, "sampled_video_frames", return_value=[(1.0, np.zeros((2, 2, 3), dtype=np.uint8))]),
+            patch.object(main, "TrackingComparisonRunner", return_value=runner),
+        ):
+            result = main.compare_event_tracking(43, duration_seconds=200.0)
+
+        self.assertEqual(result["frames_processed"], 4)
+        self.assertEqual(result["requested_duration_seconds"], 30.0)
+        ensure_clip.assert_called_once()
+        runner.run.assert_called_once()
+        limiter.release.assert_called_once_with()
+
+    def test_tracking_comparison_rejects_missing_optional_backend_without_work(self) -> None:
+        with patch.object(
+            main,
+            "ultralytics_botsort_dependency_status",
+            return_value={"available": False, "reason": "not installed"},
+        ):
+            with self.assertRaises(HTTPException) as unavailable:
+                main.compare_event_tracking(43)
+
+        self.assertEqual(unavailable.exception.status_code, 503)
+
     def test_motion_audit_ai_context_explains_current_decision_outcome(self) -> None:
         config = AppConfig(
             cameras=[CameraConfig(

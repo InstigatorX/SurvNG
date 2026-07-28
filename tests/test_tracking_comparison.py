@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
+
+from survng.app.config import CameraConfig, ObjectTrackingConfig
+from survng.app.object_tracking import ByteTrackObjectTracker, ObjectTrackerRegistry
+from survng.app.tracking_comparison import TrackingComparisonRunner, sampled_video_frames
+
+
+class Detector:
+    config = SimpleNamespace(confidence_threshold=0.45)
+
+    def detect(self, frame, confidence_threshold=None):
+        offset = int(frame[0, 0, 0])
+        return [{
+            "label": "person",
+            "confidence": 0.9,
+            "box": {"x1": 10 + offset, "y1": 10, "x2": 40 + offset, "y2": 80},
+        }]
+
+
+class TrackingComparisonRunnerTest(unittest.TestCase):
+    def test_runs_both_engines_on_the_same_detections_and_reports_metrics(self) -> None:
+        registry = ObjectTrackerRegistry()
+        registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
+        config = ObjectTrackingConfig(min_confirmations=1, sample_fps=2.0)
+        runner = TrackingComparisonRunner(
+            config=config,
+            detector=Detector(),
+            tracker_registry=registry,
+        )
+        frames = [
+            (100.0 + index * 0.5, np.full((100, 120, 3), index * 2, dtype=np.uint8))
+            for index in range(3)
+        ]
+
+        result = runner.run(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            frames,
+        )
+
+        self.assertEqual(result["frames_processed"], 3)
+        self.assertEqual(result["frame_width"], 120)
+        self.assertEqual(result["duration_seconds"], 1.0)
+        for engine in result["engines"].values():
+            self.assertEqual(engine["track_count"], 1)
+            self.assertEqual(engine["observations"], 3)
+            self.assertEqual(engine["fragmentation_proxy"], 0)
+            self.assertEqual(len(engine["tracks"][0]["box_history"]), 3)
+
+    def test_rejects_an_empty_or_unreadable_frame_sequence(self) -> None:
+        registry = ObjectTrackerRegistry()
+        registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
+        runner = TrackingComparisonRunner(
+            config=ObjectTrackingConfig(),
+            detector=Detector(),
+            tracker_registry=registry,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "no readable frames"):
+            runner.run(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+                [],
+            )
+
+    def test_appearance_failure_is_reported_without_losing_geometry_results(self) -> None:
+        class Encoder:
+            enabled = True
+
+            def embed(self, _crop):
+                raise RuntimeError("worker unavailable")
+
+        registry = ObjectTrackerRegistry()
+        registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
+        runner = TrackingComparisonRunner(
+            config=ObjectTrackingConfig(
+                reid_enabled=True,
+                reid_model_path="person-reid.xml",
+                min_confirmations=1,
+            ),
+            detector=Detector(),
+            tracker_registry=registry,
+            appearance_encoder=Encoder(),
+        )
+
+        result = runner.run(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            [(100.0, np.zeros((100, 120, 3), dtype=np.uint8))],
+        )
+
+        self.assertEqual(result["appearance_failures"], 1)
+        self.assertEqual(result["engines"]["survng_hybrid"]["track_count"], 1)
+
+    def test_video_sampler_uses_source_timing_and_releases_capture(self) -> None:
+        class Capture:
+            def __init__(self) -> None:
+                self.frames = [np.zeros((2, 2, 3), dtype=np.uint8) for _ in range(7)]
+                self.released = False
+
+            def isOpened(self):
+                return True
+
+            def get(self, _property):
+                return 4.0
+
+            def read(self):
+                return (True, self.frames.pop(0)) if self.frames else (False, None)
+
+            def release(self):
+                self.released = True
+
+        capture = Capture()
+        with patch("survng.app.tracking_comparison.cv2.VideoCapture", return_value=capture):
+            frames = list(sampled_video_frames(
+                Path("comparison.mp4"),
+                start_epoch=50.0,
+                sample_fps=2.0,
+                duration_seconds=1.25,
+            ))
+
+        self.assertEqual([epoch for epoch, _frame in frames], [50.0, 50.5, 51.0])
+        self.assertTrue(capture.released)
+
+
+if __name__ == "__main__":
+    unittest.main()

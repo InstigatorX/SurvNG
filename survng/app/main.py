@@ -72,6 +72,7 @@ from .recording_media import (
     resolve_stream_fingerprints,
 )
 from .object_tracking import ultralytics_botsort_dependency_status
+from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .zones import apply_detection_zones, detection_threshold
 from .security import redact_secret_text
 
@@ -117,6 +118,7 @@ MANAGER_RELOAD_LOCK = threading.RLock()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
+TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 
 
 class RecordingPrewarmCancelled(Exception):
@@ -2498,6 +2500,79 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     }
 
 
+@app.post("/api/events/{event_id}/tracking-comparison")
+def compare_event_tracking(event_id: int, duration_seconds: float | None = None) -> dict:
+    dependency = ultralytics_botsort_dependency_status()
+    if not dependency["available"]:
+        raise HTTPException(status_code=503, detail=dependency["reason"])
+    if duration_seconds is not None and not math.isfinite(duration_seconds):
+        raise HTTPException(status_code=422, detail="duration_seconds must be finite")
+    duration = max(
+        3.0,
+        min(
+            30.0,
+            float(duration_seconds)
+            if duration_seconds is not None
+            else min(15.0, config.detector.tracking.max_session_seconds),
+        ),
+    )
+    event = manager.events.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    camera = camera_by_id(config, str(event.get("camera_id") or ""))
+    if camera is None:
+        raise HTTPException(status_code=404, detail="event camera is not configured")
+    if not TRACKING_COMPARISON_LIMITER.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="another tracking comparison is already running",
+            headers={"Retry-After": "3"},
+        )
+    try:
+        request_started = time.perf_counter()
+        enriched = _event_row(event)
+        clip_started = time.perf_counter()
+        clip_path = _ensure_event_clip(enriched, before=0.0, after=duration, source="main")
+        clip_ms = (time.perf_counter() - clip_started) * 1000.0
+        start_epoch = event_epoch(enriched)
+        runner = TrackingComparisonRunner(
+            config=config.detector.tracking,
+            detector=manager.detector,
+            appearance_encoder=manager.person_reidentifier,
+        )
+        result = runner.run(
+            camera,
+            sampled_video_frames(
+                clip_path,
+                start_epoch=start_epoch,
+                sample_fps=config.detector.tracking.sample_fps,
+                duration_seconds=duration,
+            ),
+        )
+        return {
+            "event_id": event_id,
+            "camera_id": camera.id,
+            "created_at": str(enriched.get("created_at") or ""),
+            "requested_duration_seconds": duration,
+            "clip_preparation_ms": round(clip_ms, 1),
+            "elapsed_ms": round((time.perf_counter() - request_started) * 1000.0, 1),
+            **result,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).exception(
+            "tracking comparison failed for event %d",
+            event_id,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="tracking comparison failed",
+        ) from None
+    finally:
+        TRACKING_COMPARISON_LIMITER.release()
+
+
 @app.post("/api/detector/frame")
 async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict:
     maximum_bytes = 2 * 1024 * 1024
@@ -3441,29 +3516,12 @@ def event_clip(event_id: int, before: float | None = None, after: float | None =
     enriched = _event_row(event)
     before_seconds, after_seconds = _event_clip_window(before, after)
     clip_source = recording_source(source)
-    clip_path = _event_clip_path(enriched, before=before_seconds, after=after_seconds, source=clip_source)
-    if not clip_path.exists() or clip_path.stat().st_size == 0:
-        cache_key = str(clip_path)
-        with EVENT_CLIP_LOCKS_GUARD:
-            lock = EVENT_CLIP_LOCKS.setdefault(cache_key, threading.Lock())
-        with lock:
-            if not clip_path.exists() or clip_path.stat().st_size == 0:
-                if not EVENT_CLIP_BUILD_LIMITER.acquire(blocking=False):
-                    raise HTTPException(
-                        status_code=429,
-                        detail="too many event clips are already being generated",
-                        headers={"Retry-After": "3"},
-                    )
-                try:
-                    _build_event_clip(
-                        enriched,
-                        before=before_seconds,
-                        after=after_seconds,
-                        output_path=clip_path,
-                        source=clip_source,
-                    )
-                finally:
-                    EVENT_CLIP_BUILD_LIMITER.release()
+    clip_path = _ensure_event_clip(
+        enriched,
+        before=before_seconds,
+        after=after_seconds,
+        source=clip_source,
+    )
     return FileResponse(
         clip_path,
         media_type="video/mp4",
@@ -3877,6 +3935,42 @@ def _event_clip_path(event: dict, before: float, after: float, source: str = "ma
     clip_dir.mkdir(parents=True, exist_ok=True)
     accel_mode = _hardware_acceleration_mode()
     return clip_dir / f"{event_id}-{safe_before}-{safe_after}-a3-{accel_mode}.mp4"
+
+
+def _ensure_event_clip(
+    event: dict,
+    *,
+    before: float,
+    after: float,
+    source: str = "main",
+) -> Path:
+    clip_source = recording_source(source)
+    clip_path = _event_clip_path(event, before=before, after=after, source=clip_source)
+    if clip_path.exists() and clip_path.stat().st_size > 0:
+        return clip_path
+    cache_key = str(clip_path)
+    with EVENT_CLIP_LOCKS_GUARD:
+        lock = EVENT_CLIP_LOCKS.setdefault(cache_key, threading.Lock())
+    with lock:
+        if clip_path.exists() and clip_path.stat().st_size > 0:
+            return clip_path
+        if not EVENT_CLIP_BUILD_LIMITER.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="too many event clips are already being generated",
+                headers={"Retry-After": "3"},
+            )
+        try:
+            _build_event_clip(
+                event,
+                before=before,
+                after=after,
+                output_path=clip_path,
+                source=clip_source,
+            )
+        finally:
+            EVENT_CLIP_BUILD_LIMITER.release()
+    return clip_path
 
 
 def _build_event_clip(event: dict, before: float, after: float, output_path: Path, source: str = "main") -> None:

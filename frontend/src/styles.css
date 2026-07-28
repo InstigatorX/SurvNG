@@ -779,6 +779,128 @@ p {
   line-height: 1.35;
 }
 
+.tracking-comparison-error {
+  border-color: rgba(244, 63, 94, .45) !important;
+  background: rgba(244, 63, 94, .09) !important;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.tracking-comparison-panel {
+  gap: 10px !important;
+}
+
+.tracking-comparison-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tracking-comparison-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.tracking-comparison-head small {
+  max-width: 340px;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+}
+
+.tracking-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tracking-comparison-shared {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tracking-comparison-shared > span {
+  border-radius: 999px;
+  background: var(--pill);
+  color: var(--muted);
+  font-size: 9px;
+  padding: 4px 7px;
+}
+
+.tracking-comparison-shared strong {
+  color: var(--text);
+}
+
+.tracking-comparison-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-subtle);
+  padding: 8px;
+}
+
+.tracking-comparison-card.active {
+  border-color: rgba(34, 211, 166, .65);
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 166, .2);
+}
+
+.tracking-comparison-card > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.tracking-comparison-card > header span {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tracking-comparison-card .snapshot-frame {
+  border-radius: 5px;
+}
+
+.tracking-comparison-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 12px;
+  margin: 0;
+}
+
+.tracking-comparison-card dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 5px;
+  font-size: 10px;
+}
+
+.tracking-comparison-card dt {
+  color: var(--muted);
+}
+
+.tracking-comparison-card dd {
+  margin: 0;
+  font-weight: 800;
+}
+
+@media (max-width: 700px) {
+  .tracking-comparison-head {
+    display: grid;
+  }
+
+  .tracking-comparison-head small {
+    text-align: left;
+  }
+
+  .tracking-comparison-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .inspector-face {
   display: flex;
   width: 100%;
@@ -2443,6 +2565,8 @@ button.status-pill.hud-toggle:disabled {
   position: relative;
   z-index: 1;
   display: grid;
+  grid-template-rows: max-content max-content max-content;
+  align-content: start;
   gap: 12px;
   width: min(1120px, calc(100vw - 36px), var(--event-panel-fit-width, 1120px));
   max-height: calc(100vh - 36px);
