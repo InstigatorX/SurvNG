@@ -90,6 +90,15 @@ class EventApiSerializationTest(unittest.TestCase):
                     "onvif_notifications_received": 12,
                     "onvif_motion_events_received": 4,
                     "motion_qualification": {"passed": 3, "audit_rejected": 2},
+                    "object_tracking": {
+                        "reid_attempts": 7,
+                        "reid_successes": 6,
+                        "reid_failures": 1,
+                        "reid_average_ms": 4.25,
+                        "reid_attempts_by_label": {"car": 7},
+                        "reid_recoveries": 2,
+                        "reid_recoveries_by_label": {"car": 2},
+                    },
                 }]),
             )
 
@@ -100,6 +109,8 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
             self.assertEqual(payload["cameras"][0]["onvif"]["notifications"], 12)
             self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)
+            self.assertEqual(payload["cameras"][0]["tracking"]["reid_attempts"], 7)
+            self.assertEqual(payload["cameras"][0]["tracking"]["reid_recoveries"], 2)
             fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
 
     def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:

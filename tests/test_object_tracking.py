@@ -286,6 +286,59 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual(tracked[0]["track_id"], 1)
         self.assertEqual(tracker.summaries(15.0)[0]["reid_matches"], 1)
 
+    def test_lazy_reid_skips_geometry_matches_and_refreshes_periodically(self) -> None:
+        config = self.config.model_copy(update={
+            "vehicle_reid_enabled": True,
+            "vehicle_reid_model_path": "vehicle-reid.xml",
+            "reid_refresh_interval_frames": 3,
+        })
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+        calls: list[int] = []
+
+        def detected(x: int) -> dict:
+            item = detection("car", 0.9, (x, 10, x + 70, 60))
+            item["_tracking_embedding_provider"] = lambda: (
+                calls.append(x) or np.asarray([1.0, 0.0], dtype=np.float32)
+            )
+            return item
+
+        tracker.update([detected(10)], 10.0, confirm_new=True)
+        tracker.update([detected(12)], 10.5)
+        tracker.update([detected(14)], 11.0)
+        tracker.update([detected(16)], 11.5)
+
+        self.assertEqual(calls, [10, 16])
+        self.assertEqual(tracker.summaries(11.5)[0]["observations"], 4)
+
+    def test_lazy_reid_is_resolved_for_geometry_failure_recovery(self) -> None:
+        config = self.config.model_copy(update={
+            "vehicle_reid_enabled": True,
+            "vehicle_reid_model_path": "vehicle-reid.xml",
+            "vehicle_reid_match_threshold": 0.7,
+        })
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+        initial = detection("car", 0.9, (10, 10, 80, 60))
+        initial["_tracking_embedding_provider"] = lambda: np.asarray(
+            [1.0, 0.0], dtype=np.float32
+        )
+        tracker.update([initial], 10.0, confirm_new=True)
+        tracker.update([], 14.0)
+        calls = 0
+
+        def recover() -> np.ndarray:
+            nonlocal calls
+            calls += 1
+            return np.asarray([0.99, 0.01], dtype=np.float32)
+
+        reappeared = detection("car", 0.9, (500, 300, 700, 500))
+        reappeared["_tracking_embedding_provider"] = recover
+
+        tracked = tracker.update([reappeared], 15.0)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(tracked[0]["track_id"], 1)
+        self.assertEqual(tracker.summaries(15.0)[0]["reid_matches"], 1)
+
     def test_confirmed_seed_tolerates_an_initial_sampling_gap(self) -> None:
         tracker = ByteTrackObjectTracker(
             self.config.model_copy(update={"lost_timeout_seconds": 3.0}),
@@ -313,6 +366,78 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
 
 class ObjectTrackingSessionTest(unittest.TestCase):
+    def test_reid_recovery_telemetry_accumulates_across_sessions(self) -> None:
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda _event_id, _tracking, _tracked: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session._reid_recovery_base = 2
+        session._reid_recovery_base_by_label = {"car": 2}
+        tracker = SimpleNamespace(summaries=lambda _captured_at: [
+            {"label": "car", "reid_matches": 1},
+            {"label": "person", "reid_matches": 2},
+        ])
+
+        session._persist(7, tracker, 10.0, None, 3, "active")
+
+        self.assertEqual(session.status()["reid_recoveries"], 5)
+        self.assertEqual(
+            session.status()["reid_recoveries_by_label"],
+            {"car": 3, "person": 2},
+        )
+
+    def test_lazy_annotation_defers_inference_and_records_label_telemetry(self) -> None:
+        class Encoder:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            @staticmethod
+            def supports_label(label):
+                return label == "car"
+
+            def embed_for_label(self, _label, _crop):
+                self.calls += 1
+                return np.asarray([1.0, 0.0], dtype=np.float32)
+
+        encoder = Encoder()
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                vehicle_reid_enabled=True,
+                vehicle_reid_model_path="vehicle.xml",
+            ),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda _event_id, _tracking, _tracked: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            appearance_encoder=encoder,
+        )
+        objects = [detection("car", 0.9, (5, 5, 95, 80))]
+
+        session._annotate_appearances(
+            np.zeros((100, 100, 3), dtype=np.uint8),
+            objects,
+            lazy=True,
+        )
+        self.assertEqual(encoder.calls, 0)
+
+        tracker = ByteTrackObjectTracker(session.config, high_confidence_threshold=0.7)
+        tracker.update(objects, 10.0, confirm_new=True)
+
+        status = session.status()
+        self.assertEqual(encoder.calls, 1)
+        self.assertEqual(status["reid_attempts"], 1)
+        self.assertEqual(status["reid_successes"], 1)
+        self.assertEqual(status["reid_attempts_by_label"], {"car": 1})
+
     def test_label_aware_encoder_annotates_people_and_vehicles(self) -> None:
         class Encoder:
             enabled = True

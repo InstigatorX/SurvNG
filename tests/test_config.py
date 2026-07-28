@@ -28,6 +28,7 @@ class AppConfigTest(unittest.TestCase):
             reid_model_path="person-reid.xml",
         )
         self.assertEqual(tracking.reid_max_embeddings_per_frame, 8)
+        self.assertEqual(tracking.reid_refresh_interval_frames, 8)
 
     def test_vehicle_reid_requires_model_and_normalizes_labels(self) -> None:
         with self.assertRaisesRegex(ValidationError, "vehicle_reid_model_path"):

@@ -1593,6 +1593,7 @@ def telemetry(hours: int = 24) -> dict:
     for status in camera_statuses:
         camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
+        tracking = status.get("object_tracking") or {}
         cameras.append({
             "id": camera_id,
             "name": status.get("name") or camera_id,
@@ -1622,6 +1623,18 @@ def telemetry(hours: int = 24) -> dict:
                 "suppressed": int(motion.get("suppressed") or 0),
                 "dropped": int(motion.get("dropped_triggers") or 0),
                 "queue_depth": int(motion.get("queue_depth") or 0),
+            },
+            "tracking": {
+                "active": bool(tracking.get("active")),
+                "frames_processed": int(tracking.get("frames_processed") or 0),
+                "track_count": int(tracking.get("track_count") or 0),
+                "reid_attempts": int(tracking.get("reid_attempts") or 0),
+                "reid_successes": int(tracking.get("reid_successes") or 0),
+                "reid_failures": int(tracking.get("reid_failures") or 0),
+                "reid_average_ms": float(tracking.get("reid_average_ms") or 0.0),
+                "reid_attempts_by_label": dict(tracking.get("reid_attempts_by_label") or {}),
+                "reid_recoveries": int(tracking.get("reid_recoveries") or 0),
+                "reid_recoveries_by_label": dict(tracking.get("reid_recoveries_by_label") or {}),
             },
             "activity": per_camera_activity.get(
                 camera_id,

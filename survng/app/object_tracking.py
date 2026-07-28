@@ -219,6 +219,27 @@ def _appearance(value: object) -> np.ndarray | None:
     return vector / norm
 
 
+def _ensure_detection_appearance(detection: dict[str, Any]) -> np.ndarray | None:
+    """Resolve a detection's appearance at most once, only when association needs it."""
+    embedding = _appearance(detection.get("_tracking_embedding"))
+    if embedding is not None:
+        return embedding
+    provider = detection.pop("_tracking_embedding_provider", None)
+    if not callable(provider):
+        return None
+    try:
+        embedding = _appearance(provider())
+    except Exception:
+        # Providers normally report sanitized details through session telemetry.
+        # Keep this defensive boundary free of exception text in case a future
+        # provider includes a credential-bearing model or camera path.
+        LOGGER.warning("lazy appearance provider failed")
+        return None
+    if embedding is not None:
+        detection["_tracking_embedding"] = embedding
+    return embedding
+
+
 @dataclass(slots=True)
 class ObjectTrack:
     track_id: int
@@ -391,7 +412,7 @@ class ByteTrackObjectTracker:
                     round(box[2], 1),
                     round(box[3], 1),
                 )],
-                appearance=_appearance(detection.get("_tracking_embedding")),
+                appearance=_ensure_detection_appearance(detection),
             )
             self._tracks[track.track_id] = track
             assignments[index] = track.track_id
@@ -462,6 +483,15 @@ class ByteTrackObjectTracker:
             if track_id not in unmatched_tracks or index in used_detections:
                 continue
             track = self._tracks[track_id]
+            if (
+                self.config.appearance_reid_enabled
+                and self.config.reid_enabled_for_label(track.label)
+                and (
+                    track.appearance is None
+                    or track.hits % self.config.reid_refresh_interval_frames == 0
+                )
+            ):
+                _ensure_detection_appearance(detection)
             track.observe(detection, captured_at, box)
             track.confirmed = track.confirmed or track.hits >= self.config.min_confirmations
             unmatched_tracks.remove(track_id)
@@ -527,7 +557,7 @@ class ByteTrackObjectTracker:
             label = str(detection.get("label") or "").lower()
             if index in assignments or not self.config.reid_enabled_for_label(label):
                 continue
-            embedding = _appearance(detection.get("_tracking_embedding"))
+            embedding = _ensure_detection_appearance(detection)
             if embedding is None:
                 continue
             for track_id in unmatched_tracks:
@@ -663,6 +693,8 @@ class ObjectTrackingSession:
         self._accepting = False
         self._status: dict[str, Any] = self._idle_status()
         self._status["enabled"] = config.enabled
+        self._reid_recovery_base = 0
+        self._reid_recovery_base_by_label: dict[str, int] = {}
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -675,6 +707,13 @@ class ObjectTrackingSession:
             "frames_processed": 0,
             "last_error": "",
             "reid_failures": 0,
+            "reid_attempts": 0,
+            "reid_successes": 0,
+            "reid_inference_ms": 0.0,
+            "reid_average_ms": 0.0,
+            "reid_attempts_by_label": {},
+            "reid_recoveries": 0,
+            "reid_recoveries_by_label": {},
             "last_reid_error": "",
         }
 
@@ -725,6 +764,10 @@ class ObjectTrackingSession:
             self._stop = threading.Event()
             self._event_id = event_id
             self._deadline = time.monotonic() + self.config.max_session_seconds
+            self._reid_recovery_base = int(self._status.get("reid_recoveries") or 0)
+            self._reid_recovery_base_by_label = dict(
+                self._status.get("reid_recoveries_by_label") or {}
+            )
             thread = threading.Thread(
                 target=self._run,
                 args=(
@@ -824,7 +867,11 @@ class ObjectTrackingSession:
                 float(self.detector.config.confidence_threshold),
             )
             if initial_frame is not None:
-                self._annotate_appearances(initial_frame, initial_objects)
+                self._annotate_appearances(
+                    initial_frame,
+                    initial_objects,
+                    lazy=self.config.implementation == "survng_hybrid",
+                )
             captured_at = time.time()
             for detected in initial_objects:
                 detected["_tracking_first_seen_at"] = event_at.timestamp()
@@ -880,7 +927,11 @@ class ObjectTrackingSession:
                     int(frame.shape[0]),
                     float(self.detector.config.confidence_threshold),
                 )
-                self._annotate_appearances(frame, objects)
+                self._annotate_appearances(
+                    frame,
+                    objects,
+                    lazy=self.config.implementation == "survng_hybrid",
+                )
                 tracked = tracker.update(objects, sample_epoch)
                 frames_processed += 1
                 self._persist(event_id, tracker, sample_epoch, tracked, frames_processed, "active")
@@ -923,6 +974,12 @@ class ObjectTrackingSession:
         state: str,
     ) -> None:
         tracks = tracker.summaries(captured_at)
+        recoveries_by_label: dict[str, int] = {}
+        for track in tracks:
+            recoveries = int(track.get("reid_matches") or 0)
+            if recoveries:
+                label = str(track.get("label") or "unknown")
+                recoveries_by_label[label] = recoveries_by_label.get(label, 0) + recoveries
         payload = {
             "implementation": self.config.implementation,
             "state": state,
@@ -940,6 +997,17 @@ class ObjectTrackingSession:
             track_count=len(tracks),
             confirmed_tracks=len(tracks),
             frames_processed=frames_processed,
+            reid_recoveries=(
+                self._reid_recovery_base + sum(recoveries_by_label.values())
+            ),
+            reid_recoveries_by_label={
+                label: int(self._reid_recovery_base_by_label.get(label) or 0)
+                + int(recoveries_by_label.get(label) or 0)
+                for label in (
+                    self._reid_recovery_base_by_label.keys()
+                    | recoveries_by_label.keys()
+                )
+            },
         )
         if state == "complete":
             self._publish_safely(event_id, payload)
@@ -995,6 +1063,8 @@ class ObjectTrackingSession:
         self,
         frame: np.ndarray,
         objects: list[dict[str, Any]],
+        *,
+        lazy: bool = False,
     ) -> None:
         encoder = self.appearance_encoder
         if encoder is None or not encoder.enabled or not self.config.appearance_reid_enabled:
@@ -1013,6 +1083,7 @@ class ObjectTrackingSession:
             key=_confidence,
             reverse=True,
         )[:self.config.reid_max_embeddings_per_frame]
+        frame_state = {"failed": False}
         for detected in candidates:
             box = _box(detected.get("box"))
             if box is None:
@@ -1024,29 +1095,72 @@ class ObjectTrackingSession:
             crop = frame[y1:y2, x1:x2]
             if crop.shape[0] < 16 or crop.shape[1] < 8:
                 continue
-            try:
-                label = str(detected.get("label") or "").lower()
-                detected["_tracking_embedding"] = _encode_appearance(
-                    encoder,
-                    label,
-                    crop,
+            label = str(detected.get("label") or "").lower()
+            if lazy:
+                # The provider is consumed synchronously by tracker.update(), so
+                # retaining a view avoids copying large vehicle crops.
+                owned_crop = crop
+                detected["_tracking_embedding_provider"] = (
+                    lambda label=label, crop=owned_crop: self._encode_with_telemetry(
+                        encoder,
+                        label,
+                        crop,
+                        frame_state,
+                    )
                 )
-            except Exception as exc:
-                safe_error = redact_secret_text(exc)[:240]
-                with self._lock:
-                    self._status = {
-                        **self._status,
-                        "reid_failures": int(self._status.get("reid_failures") or 0) + 1,
-                        "last_reid_error": safe_error,
-                    }
-                LOGGER.debug(
-                    "appearance ReID unavailable for %s: %s",
-                    self.camera.id,
-                    safe_error,
-                )
-                # A worker timeout terminates the failed worker. Do not restart it
-                # repeatedly for every remaining crop in the same frame.
+                continue
+            embedding = self._encode_with_telemetry(encoder, label, crop, frame_state)
+            if embedding is not None:
+                detected["_tracking_embedding"] = embedding
+            if frame_state["failed"]:
                 break
+
+    def _encode_with_telemetry(
+        self,
+        encoder: AppearanceEncoder,
+        label: str,
+        crop: np.ndarray,
+        frame_state: dict[str, bool],
+    ) -> np.ndarray | None:
+        if frame_state["failed"]:
+            return None
+        started_at = time.perf_counter()
+        embedding: np.ndarray | None = None
+        error = ""
+        try:
+            embedding = _encode_appearance(encoder, label, crop)
+        except Exception as exc:
+            error = redact_secret_text(exc)[:240]
+            frame_state["failed"] = True
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        with self._lock:
+            attempts = int(self._status.get("reid_attempts") or 0) + 1
+            successes = int(self._status.get("reid_successes") or 0)
+            failures = int(self._status.get("reid_failures") or 0)
+            total_ms = float(self._status.get("reid_inference_ms") or 0.0) + elapsed_ms
+            by_label = dict(self._status.get("reid_attempts_by_label") or {})
+            by_label[label] = int(by_label.get(label) or 0) + 1
+            if embedding is not None:
+                successes += 1
+            if error:
+                failures += 1
+            self._status = {
+                **self._status,
+                "reid_attempts": attempts,
+                "reid_successes": successes,
+                "reid_failures": failures,
+                "reid_inference_ms": round(total_ms, 3),
+                "reid_average_ms": round(total_ms / attempts, 3),
+                "reid_attempts_by_label": by_label,
+                "last_reid_error": error or self._status.get("last_reid_error", ""),
+            }
+        if error:
+            LOGGER.debug(
+                "appearance ReID unavailable for %s: %s",
+                self.camera.id,
+                error,
+            )
+        return embedding
 
 
 class ObjectTrackingSessionFactory:

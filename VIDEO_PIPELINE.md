@@ -407,13 +407,21 @@ reached. IDs are local to the event and camera; they are not identities and do
 not carry across a service restart or between cameras.
 
 Association first uses predicted overlap, then a conservative center-distance
-and containment fallback for rapidly changing boxes. Optional person ReID can
-reconnect a recently lost track using whole-body appearance embeddings. ReID
-runs in its own isolated inference worker and is disabled unless
-`reid_enabled` and a compatible OpenVINO person ReID model are configured.
+and containment fallback for rapidly changing boxes. Optional person and
+vehicle ReID can reconnect a recently lost track using whole-object appearance
+embeddings. ReID runs in its own isolated inference worker and is disabled
+unless the corresponding feature and compatible OpenVINO model are configured.
 Face-recognition embedding models are not interchangeable with person ReID.
-ReID requests use a short timeout and `reid_max_embeddings_per_frame` bounds
-appearance work when detector output is unusually crowded or noisy.
+
+The default SurvNG Hybrid tracker computes embeddings on demand: once when a
+track is created, when geometry cannot associate a detection, and periodically
+to refresh a matched track's appearance. Ordinary geometry matches between
+refreshes do not invoke the ReID worker. `reid_refresh_interval_frames` controls
+the refresh cadence; `reid_max_embeddings_per_frame` bounds candidate work when
+detector output is unusually crowded or noisy. Per-camera attempts, latency,
+failures, object-label counts, and successful recoveries appear in Telemetry.
+Offline comparisons remain eager so both engines receive identical appearance
+inputs and comparison runs are reproducible.
 
 The object-tracking implementation is pluggable. `survng_hybrid` is the
 lightweight default and is the corrected name for the historical `bytetrack`
