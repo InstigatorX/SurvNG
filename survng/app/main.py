@@ -636,6 +636,12 @@ async def lifespan(app: FastAPI):
             finally:
                 if early_onvif_thread is not None and early_onvif_thread.is_alive():
                     early_onvif_thread.join()
+                try:
+                    manager.detector.stop_resource_tracker()
+                except Exception:
+                    logging.getLogger("uvicorn.error").exception(
+                        "final multiprocessing resource tracker cleanup failed"
+                    )
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)

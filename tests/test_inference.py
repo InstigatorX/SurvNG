@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from multiprocessing import resource_tracker
 from pathlib import Path
 import signal
 import threading
@@ -158,6 +159,29 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(face_process.is_alive())
         self.assertIsNone(supervisor.worker_status()["object"]["worker_pid"])
         self.assertIsNone(supervisor.worker_status()["face"]["worker_pid"])
+
+    def test_final_shutdown_reaps_multiprocessing_resource_tracker(self) -> None:
+        self.assertTrue(self.supervisor.start())
+        tracker_pid = resource_tracker._resource_tracker._pid
+        self.assertIsNotNone(tracker_pid)
+
+        self.supervisor.stop()
+        stopped = self.supervisor.stop_resource_tracker()
+
+        self.assertTrue(stopped)
+        self.assertIsNone(resource_tracker._resource_tracker._pid)
+        self.assertFalse(Path(f"/proc/{tracker_pid}").exists())
+
+    def test_resource_tracker_is_preserved_while_worker_is_alive(self) -> None:
+        self.assertTrue(self.supervisor.start())
+
+        with patch(
+            "survng.app.inference.stop_multiprocessing_resource_tracker"
+        ) as stop_tracker:
+            stopped = self.supervisor.stop_resource_tracker()
+
+        self.assertFalse(stopped)
+        stop_tracker.assert_not_called()
 
     def test_request_timeout_includes_time_waiting_for_worker_lock(self) -> None:
         worker = _InferenceWorker(

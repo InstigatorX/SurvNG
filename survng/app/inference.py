@@ -26,10 +26,58 @@ INFERENCE_RESTART_DELAY_SECONDS = 1.0
 INFERENCE_CRASH_WINDOW_SECONDS = 10 * 60.0
 INFERENCE_GPU_FALLBACK_CRASHES = 3
 INFERENCE_GPU_FALLBACK_SECONDS = 30 * 60.0
+RESOURCE_TRACKER_STOP_TIMEOUT_SECONDS = 2.0
 
 
 class InferenceUnavailable(RuntimeError):
     pass
+
+
+def stop_multiprocessing_resource_tracker(
+    timeout: float = RESOURCE_TRACKER_STOP_TIMEOUT_SECONDS,
+) -> bool:
+    """Reap Python's tracker after all SurvNG multiprocessing users stop."""
+    try:
+        from multiprocessing import resource_tracker
+
+        tracker = resource_tracker._resource_tracker
+        pid = getattr(tracker, "_pid", None)
+        if pid is None:
+            return True
+        failure: list[BaseException] = []
+
+        def stop_tracker() -> None:
+            try:
+                tracker._stop()
+            except BaseException as exc:
+                failure.append(exc)
+
+        thread = threading.Thread(
+            target=stop_tracker,
+            name="stop-multiprocessing-resource-tracker",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(timeout=max(0.0, float(timeout)))
+        if thread.is_alive():
+            LOGGER.warning(
+                "multiprocessing resource tracker pid=%s did not stop within %.1fs; systemd will clean it up",
+                pid,
+                timeout,
+            )
+            return False
+        if failure:
+            LOGGER.warning(
+                "multiprocessing resource tracker pid=%s cleanup failed: %s",
+                pid,
+                failure[0],
+            )
+            return False
+        LOGGER.info("multiprocessing resource tracker stopped pid=%s", pid)
+        return True
+    except (AttributeError, ImportError, RuntimeError) as exc:
+        LOGGER.warning("multiprocessing resource tracker cleanup unavailable: %s", exc)
+        return False
 
 
 def load_detector_labels(config: DetectorConfig) -> list[str]:
@@ -659,6 +707,20 @@ class InferenceSupervisor:
         self._reid.stop()
         self._face.stop()
         self._object.stop()
+
+    def stop_resource_tracker(self) -> bool:
+        alive = [
+            role
+            for role, status in self.worker_status().items()
+            if status.get("worker_alive")
+        ]
+        if alive:
+            LOGGER.error(
+                "not stopping multiprocessing resource tracker while inference workers remain alive: %s",
+                ", ".join(alive),
+            )
+            return False
+        return stop_multiprocessing_resource_tracker()
 
     def detect(
         self,
