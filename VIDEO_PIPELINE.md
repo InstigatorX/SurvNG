@@ -441,11 +441,14 @@ metadata if a detector produces an abnormal number of boxes.
 The Incidents workspace visualizes that persisted metadata without rerunning
 inference. Expanding a tracked incident or opening its viewer draws each track
 in a stable color, labels its last stored box with `#<track_id>`, and connects
-the sampled centers as a path. The viewer's **Tracks** control toggles this
-layer, while the inspector reports the implementation, sampling rate,
-observation count, duration, zones, and ReID recoveries. These are sampled
-paths on the representative snapshot, not frame-accurate video annotations;
-the last box can therefore be later than the snapshot itself.
+the sampled centers as a path. New tracking sessions also store a bounded box
+history. During incident-video playback, the viewer interpolates those sampled
+boxes against the recording clock and progressively draws each path. The
+viewer’s **Tracks** control toggles both layers, while the inspector reports the
+implementation, sampling rate, observation count, duration, zones, and ReID
+recoveries. Historical incidents without box history retain snapshot trails
+but cannot show synchronized video boxes. Snapshot boxes represent the last
+stored position and can therefore be later than the representative snapshot.
 
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,

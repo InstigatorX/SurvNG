@@ -206,6 +206,7 @@ class ObjectTrack:
     velocity: Box = (0.0, 0.0, 0.0, 0.0)
     zones: set[str] = field(default_factory=set)
     trajectory: list[tuple[float, float, float]] = field(default_factory=list)
+    box_history: list[tuple[float, float, float, float, float]] = field(default_factory=list)
     appearance: np.ndarray | None = field(default=None, repr=False)
     reid_matches: int = 0
 
@@ -246,8 +247,17 @@ class ObjectTrack:
         center_x = (box[0] + box[2]) / 2.0
         center_y = (box[1] + box[3]) / 2.0
         self.trajectory.append((round(captured_at, 3), round(center_x, 1), round(center_y, 1)))
+        self.box_history.append((
+            round(captured_at, 3),
+            round(box[0], 1),
+            round(box[1], 1),
+            round(box[2], 1),
+            round(box[3], 1),
+        ))
         if len(self.trajectory) > 60:
             del self.trajectory[:-60]
+        if len(self.box_history) > 60:
+            del self.box_history[:-60]
 
     def summary(self, *, active: bool) -> dict[str, Any]:
         return {
@@ -267,6 +277,7 @@ class ObjectTrack:
             },
             "zones": sorted(self.zones),
             "trajectory": [list(point) for point in self.trajectory],
+            "box_history": [list(sample) for sample in self.box_history],
             "reid_matches": self.reid_matches,
         }
 
@@ -341,9 +352,16 @@ class ByteTrackObjectTracker:
                 confirmed=confirm_new or self.config.min_confirmations <= 1,
                 zones={str(zone) for zone in detection.get("zones", []) if zone},
                 trajectory=[(
-                    round(first_seen, 3),
+                    round(captured_at, 3),
                     round((box[0] + box[2]) / 2.0, 1),
                     round((box[1] + box[3]) / 2.0, 1),
+                )],
+                box_history=[(
+                    round(captured_at, 3),
+                    round(box[0], 1),
+                    round(box[1], 1),
+                    round(box[2], 1),
+                    round(box[3], 1),
                 )],
                 appearance=_appearance(detection.get("_tracking_embedding")),
             )

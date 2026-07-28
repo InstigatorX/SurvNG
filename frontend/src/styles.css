@@ -1846,6 +1846,41 @@ button.status-pill.hud-toggle:disabled {
 .object-track-color-4 { --object-track-color: #c084fc; }
 .object-track-color-5 { --object-track-color: #fb923c; }
 
+.object-track-video-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.object-track-video-layer svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.object-track-video-box {
+  fill: var(--object-track-color);
+  fill-opacity: .07;
+  stroke: var(--object-track-color);
+  stroke-width: 2.5;
+}
+
+.object-track-video-label {
+  position: absolute;
+  transform: translateY(-100%);
+  border-radius: 4px 4px 4px 0;
+  background: var(--object-track-color);
+  color: #071011;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 19px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
 .snapshot-focus-button {
   position: absolute;
   top: 7px;

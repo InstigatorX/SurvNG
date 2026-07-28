@@ -62,6 +62,19 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertNotEqual(third_ids["person"], first_ids["car"])
         self.assertNotEqual(third_ids["car"], first_ids["person"])
 
+    def test_persists_sampled_boxes_for_video_review(self) -> None:
+        tracker = UltralyticsBotSortObjectTracker(self.config(), 0.7)
+        tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80)),
+        ], 10.0, confirm_new=True)
+        tracker.update([
+            detection("person", 0.9, (12, 10, 42, 80)),
+        ], 10.5)
+
+        summary = tracker.summaries(10.5)[0]
+        self.assertEqual(summary["box_history"][0], [10.0, 10, 10, 40, 80])
+        self.assertEqual(summary["box_history"][-1], [10.5, 12, 10, 42, 80])
+
     def test_reid_can_recover_a_far_person_when_proximity_is_disabled(self) -> None:
         tracker = UltralyticsBotSortObjectTracker(self.config(
             reid_enabled=True,

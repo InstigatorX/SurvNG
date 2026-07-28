@@ -236,9 +236,16 @@ class UltralyticsBotSortObjectTracker:
                     confirmed=confirm_new or self.config.min_confirmations <= 1,
                     zones={str(zone) for zone in detection.get("zones", []) if zone},
                     trajectory=[(
-                        round(first_seen, 3),
+                        round(captured_at, 3),
                         round((box[0] + box[2]) / 2.0, 1),
                         round((box[1] + box[3]) / 2.0, 1),
+                    )],
+                    box_history=[(
+                        round(captured_at, 3),
+                        round(box[0], 1),
+                        round(box[1], 1),
+                        round(box[2], 1),
+                        round(box[3], 1),
                     )],
                     appearance=_appearance(detection.get("_tracking_embedding")),
                 )

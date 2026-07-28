@@ -159,7 +159,31 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertNotIn("_tracking_first_seen_at", tracked[0])
         self.assertEqual(summary["first_seen"], datetime.fromtimestamp(40.0, timezone.utc).isoformat())
         self.assertEqual(summary["last_seen"], datetime.fromtimestamp(48.0, timezone.utc).isoformat())
+        self.assertEqual(summary["trajectory"], [[48.0, 25.0, 45.0]])
+        self.assertEqual(summary["box_history"], [[48.0, 10, 10, 40, 80]])
         self.assertTrue(tracker.has_live_tracks(48.0))
+
+    def test_box_history_is_bounded_and_uses_monotonic_observation_times(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        tracker.update(
+            [detection("person", 0.9, (10, 10, 40, 80))],
+            100.0,
+            confirm_new=True,
+        )
+        for offset in range(1, 66):
+            tracker.update(
+                [detection("person", 0.9, (10 + offset, 10, 40 + offset, 80))],
+                100.0 + offset * 0.1,
+            )
+
+        summary = tracker.summaries(107.0)[0]
+        self.assertEqual(len(summary["trajectory"]), 60)
+        self.assertEqual(len(summary["box_history"]), 60)
+        self.assertEqual(summary["box_history"][-1], [106.5, 75, 10, 105, 80])
+        self.assertEqual(
+            [sample[0] for sample in summary["box_history"]],
+            sorted(sample[0] for sample in summary["box_history"]),
+        )
 
     def test_ignored_zone_detection_cannot_start_new_track(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)

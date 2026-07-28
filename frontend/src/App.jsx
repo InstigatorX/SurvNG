@@ -65,6 +65,7 @@ import {
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
 import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
+import { storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -1601,34 +1602,6 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function storedObjectTracks(event) {
-  const tracks = event?.object_tracking?.tracks;
-  if (!Array.isArray(tracks)) return [];
-  return tracks.flatMap((track) => {
-    const box = track?.box || {};
-    const coordinates = [box.x1, box.y1, box.x2, box.y2].map(Number);
-    if (!track?.label || !Number.isFinite(Number(track.track_id)) || coordinates.some((value) => !Number.isFinite(value))) return [];
-    const trajectory = Array.isArray(track.trajectory)
-      ? track.trajectory.flatMap((point) => {
-        if (!Array.isArray(point) || point.length < 3) return [];
-        const timestamp = Number(point[0]);
-        const x = Number(point[1]);
-        const y = Number(point[2]);
-        return Number.isFinite(timestamp) && Number.isFinite(x) && Number.isFinite(y) ? [[timestamp, x, y]] : [];
-      })
-      : [];
-    return [{
-      ...track,
-      trackId: Number(track.track_id),
-      x1: coordinates[0],
-      y1: coordinates[1],
-      x2: coordinates[2],
-      y2: coordinates[3],
-      trajectory,
-    }];
-  }).filter((track) => track.x2 > track.x1 && track.y2 > track.y1);
-}
-
 function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
@@ -1753,7 +1726,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
           </div>
         ) : null}
         {showTracking && renderedTracks.length ? (
-          <div className="object-track-layer" aria-label={`${renderedTracks.length} stored object track${renderedTracks.length === 1 ? "" : "s"}`}>
+          <div className="object-track-layer" aria-hidden="true">
             <svg viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none" aria-hidden="true">
               {renderedTracks.map((track) => (
                 <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`trail-${track.trackId}`}>
@@ -1789,6 +1762,93 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
         </button>
       ) : null}
       {children}
+    </div>
+  );
+}
+
+function StoredTrackVideoOverlay({ videoRef, tracks, imageSize, windowStartEpoch, sampleFps }) {
+  const [playbackEpoch, setPlaybackEpoch] = useState(null);
+  const baselineRef = useRef(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(windowStartEpoch)) return undefined;
+    let timer = null;
+    let stopped = false;
+
+    function establishBaseline() {
+      if (!baselineRef.current && Number.isFinite(video.currentTime)) {
+        baselineRef.current = { mediaTime: video.currentTime, epoch: windowStartEpoch };
+      }
+    }
+
+    function update() {
+      establishBaseline();
+      const baseline = baselineRef.current;
+      if (baseline && Number.isFinite(video.currentTime)) {
+        setPlaybackEpoch(baseline.epoch + video.currentTime - baseline.mediaTime);
+      }
+    }
+
+    function schedule() {
+      if (stopped) return;
+      update();
+      if (!video.paused && !video.ended) timer = window.setTimeout(schedule, 100);
+    }
+
+    function onPlaying() {
+      establishBaseline();
+      if (timer !== null) window.clearTimeout(timer);
+      schedule();
+    }
+
+    function onSeeked() {
+      update();
+    }
+
+    video.addEventListener("playing", onPlaying);
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("timeupdate", update);
+    if (!video.paused) onPlaying();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("timeupdate", update);
+      baselineRef.current = null;
+    };
+  }, [videoRef, windowStartEpoch]);
+
+  const visibleTracks = useMemo(() => {
+    if (!Number.isFinite(playbackEpoch)) return [];
+    const holdSeconds = Math.max(0.75, 2 / Math.max(0.1, Number(sampleFps) || 2));
+    return tracks.flatMap((track) => {
+      const frame = trackFrameAt(track, playbackEpoch, holdSeconds);
+      return frame ? [{ ...track, ...frame }] : [];
+    });
+  }, [playbackEpoch, sampleFps, tracks]);
+
+  if (!imageSize?.width || !imageSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
+  return (
+    <div className="object-track-video-layer" aria-hidden="true">
+      <svg viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+        {visibleTracks.map((track) => (
+          <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`video-path-${track.trackId}`}>
+            {track.path.length > 1 ? <polyline className="object-track-trail" points={track.path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
+            <rect className="object-track-video-box" x={track.box[0]} y={track.box[1]} width={track.box[2] - track.box[0]} height={track.box[3] - track.box[1]} vectorEffect="non-scaling-stroke" />
+          </g>
+        ))}
+      </svg>
+      {visibleTracks.map((track) => (
+        <span
+          className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6}`}
+          key={`video-label-${track.trackId}`}
+          style={{ left: `${track.box[0] / imageSize.width * 100}%`, top: `${track.box[1] / imageSize.height * 100}%` }}
+        >
+          #{track.trackId} {track.label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -2255,6 +2315,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [manualError, setManualError] = useState("");
   const displayedEvent = manualDetection ? { ...event, objects: manualDetection.objects || [] } : event;
   const storedTracks = storedObjectTracks(event);
+  const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
   const objects = eventObjects(displayedEvent);
   const detectedObjects = objects.filter((object) => object.label);
   const manualConfidenceNumber = Number(manualConfidence);
@@ -2293,12 +2354,14 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       const safeBefore = Number.isFinite(before) ? before : 5;
       const safeAfter = Number.isFinite(after) ? after : 5;
       const window = incidentClipWindow(event, safeBefore, safeAfter);
+      const anchorEpoch = eventEpoch(event);
       const info = {
         streamUrl: eventStreamUrl(eventId, window.before, window.after),
         downloadUrl: eventClipUrl(eventId, window.before, window.after),
         before: window.before,
         after: window.after,
         duration: window.before + window.after,
+        windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null,
       };
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
@@ -2552,11 +2615,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               <button
                 type="button"
                 className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
-                onClick={() => {
-                  setVideoActive(false);
-                  setTrackingVisible((visible) => !visible);
-                }}
-                title={`${trackingVisible ? "Hide" : "Show"} stored object paths on the event snapshot`}
+                onClick={() => setTrackingVisible((visible) => !visible)}
+                title={`${trackingVisible ? "Hide" : "Show"} stored object tracking${replayTrackCount ? " on the snapshot and video" : " on the event snapshot"}`}
                 aria-label={`${trackingVisible ? "Hide" : "Show"} stored object tracks`}
                 aria-pressed={trackingVisible}
               >
@@ -2566,9 +2626,12 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             <button
               type="button"
               className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
-              onClick={() => {
-                if (!videoActive) playEventClip();
-                setDetectionDebug((enabled) => !enabled);
+                onClick={() => {
+                  if (!videoActive) playEventClip();
+                  setDetectionDebug((enabled) => {
+                    if (!enabled) setTrackingVisible(false);
+                    return !enabled;
+                  });
               }}
               disabled={!clipInfo || Boolean(clipError)}
               title="Toggle real-time OpenVINO detection and tracking"
@@ -2656,6 +2719,15 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 confidence={safeManualConfidence}
                 onStats={setDetectionDebugStats}
               />
+              {trackingVisible ? (
+                <StoredTrackVideoOverlay
+                  videoRef={clipVideoRef}
+                  tracks={storedTracks}
+                  imageSize={mediaSize}
+                  windowStartEpoch={clipInfo.windowStartEpoch}
+                  sampleFps={event.object_tracking?.sample_fps}
+                />
+              ) : null}
               {clipLoading ? <div className="event-video-preparing">Preparing incident video...</div> : null}
             </>
           ) : null}
@@ -2672,7 +2744,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             <div className="event-track-summary">
               <span className="muted">Stored tracking</span>
               <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(event.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(event.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
-              <small>Paths show sampled object centers over time. The box marks each track's last stored position.</small>
+              <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
             </div>
           ) : null}
           <div>

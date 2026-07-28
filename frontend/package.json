@@ -6,7 +6,8 @@
     "test:motion-decision": "node tests/motion-decision-config.mjs",
     "test:live-transport": "node tests/live-transport.mjs",
     "test:storage": "node tests/storage.mjs",
-    "test:recordings-soak": "node tests/recordings-soak.mjs"
+    "test:recordings-soak": "node tests/recordings-soak.mjs",
+    "test:object-tracks": "node tests/object-track-replay.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
