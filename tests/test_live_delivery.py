@@ -48,7 +48,9 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
         ):
             await relay_go2rtc_websocket(websocket, "gate", "MSE stream")
 
-        to_thread.assert_awaited_once_with(websocket_url, camera, "main", "h264")
+        # Legacy compat parameters are deliberately ignored; relay ownership
+        # stops at selecting the configured native go2rtc source.
+        to_thread.assert_awaited_once_with(websocket_url, camera, "main")
         websocket.accept.assert_awaited_once_with()
         self.assertEqual(connect.call_args.kwargs["max_size"], 8 * 1024 * 1024)
         self.assertEqual(connect.call_args.kwargs["max_queue"], 4)

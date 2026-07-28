@@ -3134,6 +3134,8 @@ def live_info(camera_id: str, response: Response, source: str = "live") -> dict:
             "video_codec": "",
             "video_codecs": [],
             "compatibility": "native",
+            "delivery": "native",
+            "transcoding": False,
             "error": str(exc)[:160],
         }
 
@@ -3183,7 +3185,6 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
             manager.go2rtc.websocket_url,
             camera,
             websocket.query_params.get("source", "live"),
-            websocket.query_params.get("compat", "native"),
         )
     except (Go2RtcError, OSError, RuntimeError):
         await websocket.close(code=1008)

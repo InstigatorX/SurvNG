@@ -1,5 +1,9 @@
 export const WEBRTC_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
+export function nextNativeFallbackSource(requestedSource, currentSource) {
+  return requestedSource === "main" && currentSource === "main" ? "live" : null;
+}
+
 export function webRtcFailureKey(cameraId, source) {
   return `survng.webrtcFailure.v1.${cameraId}.${source}`;
 }

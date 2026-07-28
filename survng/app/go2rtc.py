@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from .config import CameraConfig
 
@@ -30,7 +28,6 @@ class Go2RtcAdapter:
         self.cache_seconds = max(1.0, float(cache_seconds))
         self._streams_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._stream_locks: dict[str, threading.Lock] = {}
-        self._compatibility_locks: dict[tuple[str, str], threading.Lock] = {}
         self._lock = threading.RLock()
 
     def stream(self, camera: CameraConfig, source: str = "live") -> Go2RtcStream:
@@ -66,22 +63,18 @@ class Go2RtcAdapter:
             "stream": stream.name,
             "video_codec": codec,
             "video_codecs": codecs,
-            "compatibility": (
-                "h264"
-                if not any(item in {"H264", "AVC"} for item in codecs)
-                and any(item in {"H265", "HEVC"} for item in codecs)
-                else "native"
-            ),
+            # Kept for older clients. SurvNG now always relays the configured
+            # go2rtc stream without creating codec-conversion aliases.
+            "compatibility": "native",
+            "delivery": "native",
+            "transcoding": False,
         }
 
-    def websocket_url(self, camera: CameraConfig, source: str = "live", compatibility: str = "native") -> str:
+    def websocket_url(self, camera: CameraConfig, source: str = "live") -> str:
         stream = self.stream(camera, source)
-        stream_name = stream.name
-        if compatibility == "h264":
-            stream_name = self._ensure_h264(stream)
         return (
             f"ws://{self._host_authority(stream.host)}:{self.api_port}"
-            f"/api/ws?src={quote(stream_name, safe='')}"
+            f"/api/ws?src={quote(stream.name, safe='')}"
         )
 
     def status(self, cameras: list[CameraConfig]) -> dict[str, Any]:
@@ -104,35 +97,6 @@ class Go2RtcAdapter:
     def invalidate(self, host: str) -> None:
         with self._lock:
             self._streams_cache.pop(host, None)
-
-    def _ensure_h264(self, stream: Go2RtcStream) -> str:
-        digest = hashlib.sha1(f"{stream.host}/{stream.name}".encode("utf-8")).hexdigest()[:8]
-        stem = re.sub(r"[^a-zA-Z0-9_-]+", "_", stream.name).strip("_") or "stream"
-        compat_name = f"survng_{stem}_{digest}_h264"
-        lock_key = (stream.host, stream.name)
-        with self._lock:
-            compatibility_lock = self._compatibility_locks.setdefault(
-                lock_key,
-                threading.Lock(),
-            )
-        with compatibility_lock:
-            streams = self._streams(stream.host)
-            if compat_name in streams:
-                return compat_name
-            params = urlencode({
-                "name": compat_name,
-                "src": f"ffmpeg:{stream.name}#video=h264#width=1920",
-            })
-            request = Request(f"{self._base_url(stream.host)}/api/streams?{params}", method="PUT")
-            try:
-                with urlopen(request, timeout=self.timeout) as response:
-                    if response.status >= 300:
-                        raise Go2RtcError(f"go2rtc returned HTTP {response.status}")
-            except OSError as exc:
-                self.invalidate(stream.host)
-                raise Go2RtcError(f"go2rtc compatibility stream failed: {exc}") from exc
-            self.invalidate(stream.host)
-        return compat_name
 
     def _streams(self, host: str, force: bool = False) -> dict[str, Any]:
         with self._lock:

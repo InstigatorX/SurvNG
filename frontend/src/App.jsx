@@ -61,6 +61,7 @@ import {
 import {
   clearWebRtcFailure,
   initialLiveTransport,
+  nextNativeFallbackSource,
   rememberWebRtcFailure,
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
@@ -283,34 +284,21 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 }, forwardedRef) {
   const videoRef = useRef(null);
   const [stage, setStage] = useState(() => initialLiveTransport(cameraId, source));
-  const [compatibility, setCompatibility] = useState("detect");
+  const [deliverySource, setDeliverySource] = useState(source);
   const [snapshotToken, setSnapshotToken] = useState(() => Date.now());
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
     setStage(initialLiveTransport(cameraId, source));
-    setCompatibility("detect");
+    setDeliverySource(source);
   }, [cameraId, source]);
 
   useEffect(() => {
-    onStageChange?.(stage);
-  }, [stage, onStageChange]);
+    onStageChange?.(stage, deliverySource);
+  }, [deliverySource, stage, onStageChange]);
 
   useEffect(() => {
-    if (!["webrtc", "mse"].includes(stage) || compatibility !== "detect") return undefined;
-    const controller = new AbortController();
-    fetch(`/api/cameras/${encodeURIComponent(cameraId)}/live-info?source=${encodeURIComponent(source)}`, {
-      signal: controller.signal,
-    }).then((response) => response.ok ? response.json() : null).then((info) => {
-      if (!controller.signal.aborted) setCompatibility(info?.compatibility === "h264" ? "h264" : "native");
-    }).catch(() => {
-      if (!controller.signal.aborted) setCompatibility("native");
-    });
-    return () => controller.abort();
-  }, [cameraId, source, stage, compatibility]);
-
-  useEffect(() => {
-    if (stage !== "webrtc" || compatibility === "detect") return undefined;
+    if (stage !== "webrtc") return undefined;
     let disposed = false;
     let mediaReady = false;
     let socket = null;
@@ -322,7 +310,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const fallback = () => {
       if (!disposed) {
-        rememberWebRtcFailure(cameraId, source);
+        rememberWebRtcFailure(cameraId, deliverySource);
         setStage("mse");
       }
     };
@@ -331,7 +319,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const markMediaReady = () => {
       mediaReady = true;
       window.clearTimeout(failTimer);
-      clearWebRtcFailure(cameraId, source);
+      clearWebRtcFailure(cameraId, deliverySource);
     };
     video?.addEventListener("loadeddata", markMediaReady);
 
@@ -365,7 +353,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           disconnectTimer = window.setTimeout(fallback, 1000);
         }
       });
-      socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(source)}&compat=${compatibility}`)}`);
+      socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/webrtc?source=${encodeURIComponent(deliverySource)}`)}`);
       socket.addEventListener("open", async () => {
         try {
           const offer = await peer.createOffer();
@@ -418,13 +406,19 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       video?.removeEventListener("loadeddata", markMediaReady);
       if (videoRef.current) videoRef.current.srcObject = null;
     };
-  }, [cameraId, source, stage, compatibility]);
+  }, [cameraId, deliverySource, stage]);
 
   useEffect(() => {
-    if (stage !== "mse" || compatibility === "detect") return undefined;
+    if (stage !== "mse") return undefined;
     const MediaSourceApi = window.ManagedMediaSource || window.MediaSource;
     if (!MediaSourceApi) {
-      setStage("mjpeg");
+      const fallbackSource = nextNativeFallbackSource(source, deliverySource);
+      if (fallbackSource) {
+        setDeliverySource(fallbackSource);
+        setStage(initialLiveTransport(cameraId, fallbackSource));
+      } else {
+        setStage("mjpeg");
+      }
       return undefined;
     }
 
@@ -442,7 +436,15 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const video = videoRef.current;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const fallback = () => {
-      if (!disposed) setStage("mjpeg");
+      if (disposed) return;
+      const fallbackSource = nextNativeFallbackSource(source, deliverySource);
+      if (fallbackSource) {
+        setDeliverySource(fallbackSource);
+        setStage(initialLiveTransport(cameraId, fallbackSource));
+        setSnapshotToken(Date.now());
+      } else {
+        setStage("mjpeg");
+      }
     };
     const markReady = () => {
       ready = true;
@@ -516,7 +518,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       video.play().catch(() => {});
       video.addEventListener("loadeddata", markReady, { once: true });
 
-      socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/mse?source=${encodeURIComponent(source)}&compat=${compatibility}`)}`);
+      socket = new WebSocket(`${protocol}//${location.host}${appUrl(`/api/cameras/${encodeURIComponent(cameraId)}/mse?source=${encodeURIComponent(deliverySource)}`)}`);
       socket.binaryType = "arraybuffer";
       socket.addEventListener("open", () => {
         socketOpen = true;
@@ -578,18 +580,18 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       }
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [cameraId, source, stage, compatibility]);
+  }, [cameraId, deliverySource, source, stage]);
 
   useEffect(() => {
     if (stage === "webrtc") return undefined;
-    const delay = Math.max(1000, webRtcRetryDelay(cameraId, source));
+    const delay = Math.max(1000, webRtcRetryDelay(cameraId, deliverySource));
     const timer = window.setTimeout(() => {
-      setCompatibility("detect");
-      setStage("webrtc");
+      setDeliverySource(source);
+      setStage(initialLiveTransport(cameraId, source));
       setSnapshotToken(Date.now());
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [cameraId, source, stage]);
+  }, [cameraId, deliverySource, source, stage]);
 
   useEffect(() => {
     if (stage !== "snapshot") return undefined;
@@ -602,8 +604,8 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       <img
         className="live-poster"
         src={appUrl(stage === "mjpeg"
-          ? `/api/cameras/${cameraId}/stream.mjpg?source=${source}&fps=1&t=${snapshotToken}`
-          : `/api/cameras/${cameraId}/snapshot.jpg?source=${source === "main" ? "live" : source}&t=${snapshotToken}`)}
+          ? `/api/cameras/${cameraId}/stream.mjpg?source=${deliverySource}&fps=1&t=${snapshotToken}`
+          : `/api/cameras/${cameraId}/snapshot.jpg?source=${deliverySource === "main" ? "live" : deliverySource}&t=${snapshotToken}`)}
         alt=""
         onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, stage)}
       />
@@ -625,7 +627,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
       {stage === "recording" ? (
         <RecordingFallback
           cameraId={cameraId}
-          source={source}
+          source={deliverySource}
           timeZone={timeZone}
           muted={muted}
           controls={controls}
@@ -1457,11 +1459,13 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
   const [mediaReady, setMediaReady] = useState(false);
   const [transport, setTransport] = useState("webrtc");
   const activeSource = source === "main" ? "main" : "live";
+  const [deliveredSource, setDeliveredSource] = useState(activeSource);
 
   useEffect(() => {
     setShowControls(false);
     setMediaReady(false);
     setTransport("webrtc");
+    setDeliveredSource(activeSource);
   }, [camera.id, activeSource]);
 
   useEffect(() => {
@@ -1485,6 +1489,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             <h2>{camera.name}</h2>
             <div className="live-overlay-subtitle">
               <span>{sourceLabel(activeSource)} stream</span>
+              {deliveredSource !== activeSource ? <span>using {sourceLabel(deliveredSource)} fallback</span> : null}
               <span className="live-transport-badge" aria-label={`Stream transport ${liveTransportLabel(transport)}`}>
                 {liveTransportLabel(transport)}
               </span>
@@ -1516,7 +1521,11 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             timeZone={timeZone}
             muted
             controls={showControls}
-            onStageChange={setTransport}
+            onStageChange={(nextTransport, nextSource) => {
+              setTransport(nextTransport);
+              setDeliveredSource(nextSource);
+              if (nextSource !== deliveredSource) setMediaReady(false);
+            }}
             onReady={(media, readyTransport) => {
               setAspect(mediaAspect(media));
               setMediaReady(true);

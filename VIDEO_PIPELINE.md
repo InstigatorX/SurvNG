@@ -144,9 +144,13 @@ Browser live-view modes currently include:
   WebSocket connection before falling back to MJPEG. This keeps go2rtc's API
   private and works through HTTP proxies that support WebSocket upgrades.
 
-The live-view fallback order is WebRTC, MSE, then MJPEG. H265 browser
-compatibility may require a go2rtc compatibility stream; SurvNG does not make
-OpenCV frames into WebRTC media.
+SurvNG relays the selected go2rtc stream in its native codec and never creates
+or writes transcoding aliases into go2rtc. The live-view fallback order is
+native WebRTC, native MSE, then MJPEG. If a selected H265 main stream cannot be
+decoded through either native browser transport, SurvNG tries the camera's
+native live/substream through WebRTC and MSE before using MJPEG. The viewer
+labels that source fallback explicitly. Any intentionally transcoded stream
+must be configured and owned in go2rtc rather than synthesized by SurvNG.
 
 ## 3. Continuous Recording
 

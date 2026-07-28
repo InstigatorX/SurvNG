@@ -3,6 +3,7 @@ import {
   WEBRTC_FAILURE_COOLDOWN_MS,
   clearWebRtcFailure,
   initialLiveTransport,
+  nextNativeFallbackSource,
   rememberWebRtcFailure,
   webRtcFailureKey,
   webRtcRetryDelay,
@@ -29,6 +30,9 @@ class MemoryStorage {
 const storage = new MemoryStorage();
 const now = 1_800_000_000_000;
 assert.equal(initialLiveTransport("gate", "live", storage, now), "webrtc");
+assert.equal(nextNativeFallbackSource("main", "main"), "live");
+assert.equal(nextNativeFallbackSource("main", "live"), null);
+assert.equal(nextNativeFallbackSource("live", "live"), null);
 
 rememberWebRtcFailure("gate", "live", storage, now);
 assert.equal(initialLiveTransport("gate", "live", storage, now + 1_000), "mse");
