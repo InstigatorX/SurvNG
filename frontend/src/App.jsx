@@ -2310,6 +2310,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [trackingComparisonEngine, setTrackingComparisonEngine] = useState(null);
   const [trackingComparisonLoading, setTrackingComparisonLoading] = useState(false);
   const [trackingComparisonError, setTrackingComparisonError] = useState("");
+  const [trackingComparisonHistory, setTrackingComparisonHistory] = useState({ items: [], summary: null });
+  const [trackingVerdictLoading, setTrackingVerdictLoading] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [mediaSize, setMediaSize] = useState(null);
   const zoomRef = useRef(zoom);
@@ -2377,6 +2379,21 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     loadClipSettings();
     return () => { cancelled = true; };
   }, [event.id, event.representative_event_id, event.start_epoch, event.last_epoch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cameraId = String(event.camera_id || "");
+    setTrackingComparisonHistory({ items: [], summary: null });
+    if (!cameraId) return undefined;
+    fetch(`/api/tracking-comparisons?camera_id=${encodeURIComponent(cameraId)}&limit=10`)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "Comparison history unavailable");
+        if (!cancelled) setTrackingComparisonHistory(payload);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [event.camera_id]);
 
   function playEventClip() {
     if (!clipInfo || clipError) return;
@@ -2603,10 +2620,44 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Tracking comparison failed");
       setTrackingComparison(payload);
+      setTrackingComparisonHistory((current) => ({
+        items: payload.comparison
+          ? [payload.comparison, ...current.items.filter((item) => Number(item.id) !== Number(payload.comparison.id))].slice(0, 10)
+          : current.items,
+        summary: payload.evidence_summary || current.summary,
+      }));
     } catch (error) {
       setTrackingComparisonError(error.message || "Tracking comparison failed");
     } finally {
       setTrackingComparisonLoading(false);
+    }
+  }
+
+  async function saveTrackingVerdict(verdict) {
+    const comparisonId = Number(trackingComparison?.comparison_id);
+    if (!Number.isFinite(comparisonId) || trackingVerdictLoading) return;
+    setTrackingVerdictLoading(true);
+    setTrackingComparisonError("");
+    try {
+      const response = await fetch(`/api/tracking-comparisons/${comparisonId}/verdict`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verdict }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not save comparison verdict");
+      setTrackingComparison((current) => ({ ...current, verdict }));
+      setTrackingComparisonHistory((current) => {
+        const comparison = payload.comparison;
+        const items = comparison
+          ? [comparison, ...current.items.filter((item) => Number(item.id) !== Number(comparison.id))].slice(0, 10)
+          : current.items;
+        return { items, summary: payload.summary || current.summary };
+      });
+    } catch (error) {
+      setTrackingComparisonError(error.message || "Could not save comparison verdict");
+    } finally {
+      setTrackingVerdictLoading(false);
     }
   }
 
@@ -2836,6 +2887,42 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                   );
                 })}
               </div>
+              <div className="tracking-comparison-verdict">
+                <div><span className="muted">Your visual review</span><strong>Which replay kept identities most accurately?</strong></div>
+                <div className="tracking-comparison-verdict-actions">
+                  {[
+                    ["survng_hybrid", "Hybrid looked better"],
+                    ["ultralytics_botsort", "BoT-SORT looked better"],
+                    ["inconclusive", "No clear winner"],
+                  ].map(([verdict, label]) => (
+                    <button type="button" className={`tile-control-button ${trackingComparison.verdict === verdict ? "active" : ""}`} disabled={trackingVerdictLoading} onClick={() => saveTrackingVerdict(verdict)} key={verdict}>{label}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {trackingComparisonHistory.summary?.total ? (
+            <div className="tracking-comparison-history">
+              <div className="tracking-comparison-head">
+                <div><span className="muted">{event.camera_id} comparison evidence</span><strong>{trackingComparisonHistory.summary.reviewed} reviewed · {trackingComparisonHistory.summary.verdicts?.unreviewed || 0} awaiting review</strong></div>
+                <small>SurvNG records your judgment but never changes the configured tracker automatically.</small>
+              </div>
+              <div className="tracking-comparison-shared">
+                <span>Hybrid better <strong>{trackingComparisonHistory.summary.verdicts?.survng_hybrid || 0}</strong></span>
+                <span>BoT-SORT better <strong>{trackingComparisonHistory.summary.verdicts?.ultralytics_botsort || 0}</strong></span>
+                <span>No clear winner <strong>{trackingComparisonHistory.summary.verdicts?.inconclusive || 0}</strong></span>
+              </div>
+              {trackingComparisonHistory.items.some((item) => item.verdict) ? (
+                <div className="tracking-comparison-history-list">
+                  {trackingComparisonHistory.items.filter((item) => item.verdict).slice(0, 5).map((item) => (
+                    <div key={item.id}>
+                      <time>{formatDateTime(item.event_created_at || item.created_at, timeZone)}</time>
+                      <strong>{item.verdict === "survng_hybrid" ? "Hybrid" : item.verdict === "ultralytics_botsort" ? "BoT-SORT" : "No clear winner"}</strong>
+                      <span>{item.result?.frames_processed || 0} frames</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
           <div>

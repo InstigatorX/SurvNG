@@ -459,9 +459,13 @@ time signals, and lets either result replay over the same recording. Detection
 and appearance costs are reported separately because they are shared inputs,
 not tracker costs. Extra track IDs are only a fragmentation proxy: without
 labeled ground truth, the comparison cannot claim a true ID-switch count or
-choose a winner automatically. Comparisons do not alter saved configuration or
-incident metadata, and a single-job limiter prevents concurrent reviews from
-competing with live inference.
+choose a winner automatically. After watching the replays, an operator can
+mark Hybrid, BoT-SORT, or no clear winner. SurvNG retains only compact evidence
+for the latest 100 compared incidents per camera (not the replay trajectories),
+shows the reviewed totals in the incident viewer, and resets an incident's
+verdict when that incident is compared again. This evidence never changes the
+configured tracker automatically. A single-job limiter prevents concurrent
+reviews from competing with live inference.
 
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,

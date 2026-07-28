@@ -486,6 +486,59 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual([row["id"] for row in all_audits], [audit["id"]])
             self.assertEqual(all_total, 1)
 
+    def test_tracking_comparison_history_persists_verdict_and_compact_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            comparison = store.save_tracking_comparison(
+                event_id=17,
+                camera_id="foyer",
+                event_created_at="2026-07-27T19:19:50+00:00",
+                result={"frames_processed": 12, "engines": {"survng_hybrid": {"track_count": 2}}},
+            )
+
+            reviewed = store.set_tracking_comparison_verdict(
+                comparison["id"],
+                "survng_hybrid",
+            )
+            history = EventStore(Path(tmpdir)).tracking_comparison_history(camera_id="foyer")
+            summary = store.tracking_comparison_summary(camera_id="foyer")
+
+            self.assertEqual(reviewed["verdict"], "survng_hybrid")
+            self.assertIsNotNone(reviewed["reviewed_at"])
+            self.assertEqual(history[0]["result"]["frames_processed"], 12)
+            self.assertEqual(summary["total"], 1)
+            self.assertEqual(summary["reviewed"], 1)
+            self.assertEqual(summary["verdicts"]["survng_hybrid"], 1)
+
+    def test_tracking_comparison_rerun_resets_verdict_and_prunes_per_camera(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.TRACKING_COMPARISON_HISTORY_PER_CAMERA = 2
+            first = store.save_tracking_comparison(
+                event_id=1,
+                camera_id="gate",
+                event_created_at="one",
+                result={"frames_processed": 1},
+            )
+            store.set_tracking_comparison_verdict(first["id"], "inconclusive")
+            rerun = store.save_tracking_comparison(
+                event_id=1,
+                camera_id="gate",
+                event_created_at="one",
+                result={"frames_processed": 2},
+            )
+            store.save_tracking_comparison(event_id=2, camera_id="gate", event_created_at="two", result={})
+            store.save_tracking_comparison(event_id=3, camera_id="gate", event_created_at="three", result={})
+
+            history = store.tracking_comparison_history(camera_id="gate")
+
+            self.assertEqual(rerun["verdict"], "")
+            self.assertIsNone(rerun["reviewed_at"])
+            self.assertEqual([row["event_id"] for row in history], [3, 2])
+
+            with self.assertRaisesRegex(ValueError, "invalid tracking comparison verdict"):
+                store.set_tracking_comparison_verdict(history[0]["id"], "automatic")
+
 
 if __name__ == "__main__":
     unittest.main()

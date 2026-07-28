@@ -1564,6 +1564,12 @@ class MotionAiReviewRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=128)
 
 
+class TrackingComparisonVerdictRequest(BaseModel):
+    verdict: str = Field(
+        pattern=r"^(survng_hybrid|ultralytics_botsort|inconclusive)$"
+    )
+
+
 def _audit_ai_context(
     audit: dict,
     active_config: AppConfig,
@@ -2500,6 +2506,74 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     }
 
 
+def _tracking_comparison_evidence(result: dict) -> dict:
+    engines: dict[str, dict] = {}
+    for implementation in ("survng_hybrid", "ultralytics_botsort"):
+        engine = result.get("engines", {}).get(implementation, {})
+        engines[implementation] = {
+            key: engine.get(key)
+            for key in (
+                "track_count",
+                "observations",
+                "reid_recoveries",
+                "fragmentation_proxy",
+                "initialization_ms",
+                "processing_ms",
+                "average_ms_per_frame",
+                "labels",
+            )
+        }
+    return {
+        key: result.get(key)
+        for key in (
+            "sample_fps",
+            "frames_processed",
+            "duration_seconds",
+            "frame_width",
+            "frame_height",
+            "average_frame_decode_ms",
+            "average_detection_ms_per_frame",
+            "average_appearance_ms_per_frame",
+            "appearance_failures",
+            "clip_preparation_ms",
+            "elapsed_ms",
+        )
+    } | {"engines": engines}
+
+
+@app.get("/api/tracking-comparisons")
+def tracking_comparison_history(camera_id: str = "", limit: int = 25) -> dict:
+    normalized_camera_id = str(camera_id or "").strip()
+    return {
+        "items": manager.events.tracking_comparison_history(
+            camera_id=normalized_camera_id,
+            limit=limit,
+        ),
+        "summary": manager.events.tracking_comparison_summary(
+            camera_id=normalized_camera_id,
+        ),
+    }
+
+
+@app.put("/api/tracking-comparisons/{comparison_id}/verdict")
+def update_tracking_comparison_verdict(
+    comparison_id: int,
+    payload: TrackingComparisonVerdictRequest,
+) -> dict:
+    comparison = manager.events.set_tracking_comparison_verdict(
+        comparison_id,
+        payload.verdict,
+    )
+    if comparison is None:
+        raise HTTPException(status_code=404, detail="tracking comparison not found")
+    return {
+        "comparison": comparison,
+        "summary": manager.events.tracking_comparison_summary(
+            camera_id=str(comparison.get("camera_id") or ""),
+        ),
+    }
+
+
 @app.post("/api/events/{event_id}/tracking-comparison")
 def compare_event_tracking(event_id: int, duration_seconds: float | None = None) -> dict:
     dependency = ultralytics_botsort_dependency_status()
@@ -2549,7 +2623,7 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
                 duration_seconds=duration,
             ),
         )
-        return {
+        response = {
             "event_id": event_id,
             "camera_id": camera.id,
             "created_at": str(enriched.get("created_at") or ""),
@@ -2558,6 +2632,19 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
             "elapsed_ms": round((time.perf_counter() - request_started) * 1000.0, 1),
             **result,
         }
+        comparison = manager.events.save_tracking_comparison(
+            event_id=event_id,
+            camera_id=camera.id,
+            event_created_at=str(enriched.get("created_at") or ""),
+            result=_tracking_comparison_evidence(response),
+        )
+        response["comparison_id"] = comparison["id"]
+        response["verdict"] = comparison["verdict"]
+        response["comparison"] = comparison
+        response["evidence_summary"] = manager.events.tracking_comparison_summary(
+            camera_id=camera.id,
+        )
+        return response
     except HTTPException:
         raise
     except Exception as exc:

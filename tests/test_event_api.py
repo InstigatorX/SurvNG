@@ -42,8 +42,13 @@ class EventApiSerializationTest(unittest.TestCase):
                 stream_url="rtsp://camera.invalid/main",
             )],
         )
+        event_store = SimpleNamespace(
+            get=lambda _event_id: event,
+            save_tracking_comparison=Mock(return_value={"id": 8, "verdict": ""}),
+            tracking_comparison_summary=Mock(return_value={"total": 1, "reviewed": 0}),
+        )
         active_manager = SimpleNamespace(
-            events=SimpleNamespace(get=lambda _event_id: event),
+            events=event_store,
             detector=object(),
             person_reidentifier=object(),
         )
@@ -66,7 +71,10 @@ class EventApiSerializationTest(unittest.TestCase):
             result = main.compare_event_tracking(43, duration_seconds=200.0)
 
         self.assertEqual(result["frames_processed"], 4)
+        self.assertEqual(result["comparison_id"], 8)
         self.assertEqual(result["requested_duration_seconds"], 30.0)
+        saved_result = event_store.save_tracking_comparison.call_args.kwargs["result"]
+        self.assertNotIn("tracks", saved_result["engines"]["survng_hybrid"])
         ensure_clip.assert_called_once()
         runner.run.assert_called_once()
         limiter.release.assert_called_once_with()
@@ -81,6 +89,24 @@ class EventApiSerializationTest(unittest.TestCase):
                 main.compare_event_tracking(43)
 
         self.assertEqual(unavailable.exception.status_code, 503)
+
+    def test_tracking_comparison_history_and_verdict_api_use_event_store(self) -> None:
+        events = SimpleNamespace(
+            tracking_comparison_history=Mock(return_value=[{"id": 4}]),
+            tracking_comparison_summary=Mock(return_value={"total": 1, "reviewed": 1}),
+            set_tracking_comparison_verdict=Mock(return_value={"id": 4, "camera_id": "gate"}),
+        )
+        with patch.object(main, "manager", SimpleNamespace(events=events)):
+            history = main.tracking_comparison_history(camera_id="gate", limit=7)
+            verdict = main.update_tracking_comparison_verdict(
+                4,
+                main.TrackingComparisonVerdictRequest(verdict="inconclusive"),
+            )
+
+        self.assertEqual(history["items"], [{"id": 4}])
+        events.tracking_comparison_history.assert_called_once_with(camera_id="gate", limit=7)
+        events.set_tracking_comparison_verdict.assert_called_once_with(4, "inconclusive")
+        self.assertEqual(verdict["comparison"]["camera_id"], "gate")
 
     def test_motion_audit_ai_context_explains_current_decision_outcome(self) -> None:
         config = AppConfig(
