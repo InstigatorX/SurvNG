@@ -13,7 +13,15 @@ from unittest.mock import Mock, patch
 import numpy as np
 import cv2
 
-from survng.app.camera import CameraWorker, FRAME_STALE_SECONDS
+from survng.app.camera import (
+    CAPTURE_OPEN_TIMEOUT_MS,
+    CAPTURE_OPEN_CONCURRENCY,
+    CAPTURE_OPEN_SLOTS,
+    CAPTURE_READ_TIMEOUT_MS,
+    CAPTURE_STOP_TIMEOUT_SECONDS,
+    CameraWorker,
+    FRAME_STALE_SECONDS,
+)
 from survng.app.config import CameraConfig, MotionQualificationConfig, ObjectTrackingConfig
 from survng.app.detector import objects_to_json
 from survng.app.motion import MotionQualificationResult
@@ -201,7 +209,53 @@ class CameraWorkerTest(unittest.TestCase):
         _, backend, options = capture.open.call_args.args
         self.assertEqual(backend, cv2.CAP_FFMPEG)
         self.assertEqual(options[options.index(cv2.CAP_PROP_N_THREADS) + 1], 1)
+        self.assertEqual(
+            options[options.index(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC) + 1],
+            CAPTURE_OPEN_TIMEOUT_MS,
+        )
+        self.assertEqual(
+            options[options.index(cv2.CAP_PROP_READ_TIMEOUT_MSEC) + 1],
+            CAPTURE_READ_TIMEOUT_MS,
+        )
         capture.release.assert_called_once()
+
+    def test_capture_io_deadlines_fit_inside_shutdown_budget(self) -> None:
+        shutdown_budget_ms = CAPTURE_STOP_TIMEOUT_SECONDS * 1000
+
+        self.assertLess(CAPTURE_OPEN_TIMEOUT_MS, shutdown_budget_ms)
+        self.assertLess(CAPTURE_READ_TIMEOUT_MS, shutdown_budget_ms)
+        self.assertLess(
+            CAPTURE_OPEN_TIMEOUT_MS * CAPTURE_OPEN_CONCURRENCY,
+            shutdown_budget_ms,
+        )
+
+    def test_capture_waiting_for_global_open_slot_cancels_on_stop(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        stop_event = threading.Event()
+        capture = Mock()
+        result: list[bool] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            for _ in range(CAPTURE_OPEN_CONCURRENCY):
+                CAPTURE_OPEN_SLOTS.acquire()
+            try:
+                thread = threading.Thread(
+                    target=lambda: result.append(
+                        worker._open_capture(capture, "live", stop_event)
+                    )
+                )
+                thread.start()
+                time.sleep(0.02)
+                stop_event.set()
+                thread.join(timeout=1)
+            finally:
+                for _ in range(CAPTURE_OPEN_CONCURRENCY):
+                    CAPTURE_OPEN_SLOTS.release()
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [False])
+        capture.open.assert_not_called()
 
     def test_borderline_candidate_is_rescued_by_eligible_object(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
