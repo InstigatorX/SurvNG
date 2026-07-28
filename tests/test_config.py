@@ -29,6 +29,21 @@ class AppConfigTest(unittest.TestCase):
         )
         self.assertEqual(tracking.reid_max_embeddings_per_frame, 8)
 
+    def test_vehicle_reid_requires_model_and_normalizes_labels(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "vehicle_reid_model_path"):
+            ObjectTrackingConfig(vehicle_reid_enabled=True)
+
+        tracking = ObjectTrackingConfig(
+            vehicle_reid_enabled=True,
+            vehicle_reid_model_path="vehicle-reid.xml",
+            vehicle_reid_labels=["Car", " truck ", "car", ""],
+        )
+
+        self.assertTrue(tracking.appearance_reid_enabled)
+        self.assertEqual(tracking.vehicle_reid_labels, ["car", "truck"])
+        self.assertTrue(tracking.reid_enabled_for_label("CAR"))
+        self.assertFalse(tracking.reid_enabled_for_label("person"))
+
     def test_legacy_bytetrack_name_migrates_to_survng_hybrid(self) -> None:
         self.assertEqual(ObjectTrackingConfig().implementation, "survng_hybrid")
         self.assertEqual(

@@ -241,6 +241,14 @@ class ObjectTrackingConfig(BaseModel):
     reid_match_threshold: float = Field(default=0.82, ge=0.0, le=1.0)
     reid_max_age_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     reid_max_embeddings_per_frame: int = Field(default=8, ge=1, le=64)
+    vehicle_reid_enabled: bool = False
+    vehicle_reid_model_path: str = Field(default="", max_length=4096)
+    vehicle_reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
+    vehicle_reid_match_threshold: float = Field(default=0.72, ge=0.0, le=1.0)
+    vehicle_reid_labels: list[str] = Field(
+        default_factory=lambda: ["car", "truck", "bus", "motorcycle"],
+        max_length=32,
+    )
     botsort_match_threshold: float = Field(default=0.8, ge=0.1, le=1.0)
     botsort_proximity_threshold: float = Field(default=0.1, ge=0.0, le=1.0)
     botsort_fuse_score: bool = True
@@ -255,7 +263,35 @@ class ObjectTrackingConfig(BaseModel):
     def validate_reid_model(self) -> "ObjectTrackingConfig":
         if self.reid_enabled and not self.reid_model_path.strip():
             raise ValueError("reid_model_path is required when person ReID is enabled")
+        if self.vehicle_reid_enabled and not self.vehicle_reid_model_path.strip():
+            raise ValueError(
+                "vehicle_reid_model_path is required when vehicle ReID is enabled"
+            )
+        self.vehicle_reid_labels = list(dict.fromkeys(
+            label
+            for value in self.vehicle_reid_labels
+            if (label := str(value).strip().lower())
+        ))
+        if self.vehicle_reid_enabled and not self.vehicle_reid_labels:
+            raise ValueError("vehicle_reid_labels must contain at least one label")
         return self
+
+    @property
+    def appearance_reid_enabled(self) -> bool:
+        return self.reid_enabled or self.vehicle_reid_enabled
+
+    def reid_enabled_for_label(self, label: str) -> bool:
+        normalized = str(label or "").strip().lower()
+        if normalized == "person":
+            return self.reid_enabled
+        return self.vehicle_reid_enabled and normalized in self.vehicle_reid_labels
+
+    def reid_threshold_for_label(self, label: str) -> float:
+        return (
+            self.reid_match_threshold
+            if str(label or "").strip().lower() == "person"
+            else self.vehicle_reid_match_threshold
+        )
 
 
 class DetectorConfig(BaseModel):

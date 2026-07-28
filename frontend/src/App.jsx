@@ -1665,15 +1665,20 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
 
   const renderedTracks = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
+    const sourceWidth = Number(event?.object_tracking?.frame_width) || imageSize?.width;
+    const sourceHeight = Number(event?.object_tracking?.frame_height) || imageSize?.height;
+    if (!sourceWidth || !sourceHeight) return [];
+    const scaleX = renderedImage.width / sourceWidth;
+    const scaleY = renderedImage.height / sourceHeight;
     return tracks.map((track) => ({
       ...track,
-      left: renderedImage.x + track.x1 * renderedImage.scale,
-      top: renderedImage.y + track.y1 * renderedImage.scale,
-      width: (track.x2 - track.x1) * renderedImage.scale,
-      height: (track.y2 - track.y1) * renderedImage.scale,
-      pathPoints: track.trajectory.map(([, x, y]) => `${renderedImage.x + x * renderedImage.scale},${renderedImage.y + y * renderedImage.scale}`).join(" "),
+      left: renderedImage.x + track.x1 * scaleX,
+      top: renderedImage.y + track.y1 * scaleY,
+      width: (track.x2 - track.x1) * scaleX,
+      height: (track.y2 - track.y1) * scaleY,
+      pathPoints: track.trajectory.map(([, x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
     })).filter((track) => track.width > 0 && track.height > 0);
-  }, [frameSize, renderedImage, tracks]);
+  }, [event?.object_tracking?.frame_height, event?.object_tracking?.frame_width, frameSize, imageSize, renderedImage, tracks]);
 
   const focusStyle = useMemo(() => {
     if (!canFocus || !frameSize || !renderedBoxes.length) return null;
@@ -1766,7 +1771,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   );
 }
 
-function StoredTrackVideoOverlay({ videoRef, tracks, imageSize, windowStartEpoch, sampleFps }) {
+function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, sampleFps }) {
   const [playbackEpoch, setPlaybackEpoch] = useState(null);
   const baselineRef = useRef(null);
 
@@ -1829,10 +1834,10 @@ function StoredTrackVideoOverlay({ videoRef, tracks, imageSize, windowStartEpoch
     });
   }, [playbackEpoch, sampleFps, tracks]);
 
-  if (!imageSize?.width || !imageSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
+  if (!coordinateSize?.width || !coordinateSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
   return (
     <div className="object-track-video-layer" aria-hidden="true">
-      <svg viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+      <svg viewBox={`0 0 ${coordinateSize.width} ${coordinateSize.height}`} preserveAspectRatio="none" aria-hidden="true">
         {visibleTracks.map((track) => (
           <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`video-path-${track.trackId}`}>
             {track.path.length > 1 ? <polyline className="object-track-trail" points={track.path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
@@ -1844,7 +1849,7 @@ function StoredTrackVideoOverlay({ videoRef, tracks, imageSize, windowStartEpoch
         <span
           className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6}`}
           key={`video-label-${track.trackId}`}
-          style={{ left: `${track.box[0] / imageSize.width * 100}%`, top: `${track.box[1] / imageSize.height * 100}%` }}
+          style={{ left: `${track.box[0] / coordinateSize.width * 100}%`, top: `${track.box[1] / coordinateSize.height * 100}%` }}
         >
           #{track.trackId} {track.label}
         </span>
@@ -2120,14 +2125,14 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
           );
         }) : <p>No eligible object detections.</p>}
       </section>
-      {objectTracks.length ? <section>
+      <section>
         <h3>Tracked objects</h3>
-        <p>{String(inspectedEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(inspectedEvent.object_tracking?.sample_fps || 0) || "?"} FPS. Open the viewer to see paths.</p>
+        {objectTracks.length ? <p>{String(inspectedEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(inspectedEvent.object_tracking?.sample_fps || 0) || "?"} FPS. Open the viewer to see paths.</p> : <p>No stored tracks for this event. Open the viewer to compare trackers offline.</p>}
         {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
           <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
         </div>)}
-      </section> : null}
+      </section>
       <section>
         <h3>Faces</h3>
         {faces.length ? faces.map((face, index) => (
@@ -2297,6 +2302,7 @@ function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats })
 function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
   const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
+  const comparisonPanelRef = useRef(null);
   const gestureRef = useRef({ mode: null, pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false, pinchDistance: 0, scale: 1 });
   const [clipInfo, setClipInfo] = useState(null);
   const [clipLoading, setClipLoading] = useState(false);
@@ -2319,10 +2325,27 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [manualDetection, setManualDetection] = useState(null);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState("");
-  const displayedEvent = manualDetection ? { ...event, objects: manualDetection.objects || [] } : event;
+  const incidentTrackingEvent = event.representative_event_id && !event.object_tracking?.tracks?.length
+    ? (event.events || []).find((candidate) => candidate.object_tracking?.tracks?.length)
+    : null;
+  const viewerEvent = incidentTrackingEvent ? {
+    ...incidentTrackingEvent,
+    start_epoch: event.start_epoch,
+    last_epoch: event.last_epoch,
+    start_at: event.start_at,
+    end_at: event.end_at,
+    event_count: event.event_count,
+    events: event.events || [],
+  } : event;
+  const displayedEvent = manualDetection ? { ...viewerEvent, objects: manualDetection.objects || [] } : viewerEvent;
   const comparisonTracking = trackingComparisonEngine ? trackingComparison?.engines?.[trackingComparisonEngine] : null;
   const trackingEvent = comparisonTracking
-    ? { ...displayedEvent, object_tracking: { ...comparisonTracking, sample_fps: trackingComparison.sample_fps } }
+    ? { ...displayedEvent, object_tracking: {
+      ...comparisonTracking,
+      sample_fps: trackingComparison.sample_fps,
+      frame_width: trackingComparison.frame_width,
+      frame_height: trackingComparison.frame_height,
+    } }
     : displayedEvent;
   const storedTracks = storedObjectTracks(trackingEvent);
   const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
@@ -2330,13 +2353,13 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const detectedObjects = objects.filter((object) => object.label);
   const manualConfidenceNumber = Number(manualConfidence);
   const safeManualConfidence = Number.isFinite(manualConfidenceNumber) ? Math.max(0.01, Math.min(0.99, manualConfidenceNumber)) : 0.35;
-  const manualEventId = Number(event.representative_event_id || event.id);
-  const downloadName = `survng-${String(event.camera_id || "camera")}-${String(event.created_at || event.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
+  const manualEventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
+  const downloadName = `survng-${String(viewerEvent.camera_id || "camera")}-${String(viewerEvent.created_at || viewerEvent.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
 
   useEffect(() => {
     let cancelled = false;
     async function loadClipSettings() {
-      const eventId = Number(event.representative_event_id || event.id);
+      const eventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
       if (!Number.isFinite(eventId)) {
         setClipInfo(null);
         setClipLoading(false);
@@ -2363,8 +2386,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       if (cancelled) return;
       const safeBefore = Number.isFinite(before) ? before : 5;
       const safeAfter = Number.isFinite(after) ? after : 5;
-      const window = incidentClipWindow(event, safeBefore, safeAfter);
-      const anchorEpoch = eventEpoch(event);
+      const window = incidentClipWindow(viewerEvent, safeBefore, safeAfter);
+      const anchorEpoch = eventEpoch(viewerEvent);
       const info = {
         streamUrl: eventStreamUrl(eventId, window.before, window.after),
         downloadUrl: eventClipUrl(eventId, window.before, window.after),
@@ -2378,7 +2401,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     }
     loadClipSettings();
     return () => { cancelled = true; };
-  }, [event.id, event.representative_event_id, event.start_epoch, event.last_epoch]);
+  }, [viewerEvent.id, viewerEvent.representative_event_id, viewerEvent.start_epoch, viewerEvent.last_epoch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2577,6 +2600,14 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     setManualLoading(false);
   }, [event.id]);
 
+  useEffect(() => {
+    if (!trackingComparison || !comparisonPanelRef.current) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      comparisonPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [trackingComparison]);
+
   const mediaStyle = useMemo(() => {
     if (!mediaSize?.width || !mediaSize?.height) return undefined;
     const ratio = mediaSize.width / mediaSize.height;
@@ -2664,15 +2695,16 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   function replayTrackingComparison(implementation) {
     const engine = trackingComparison?.engines?.[implementation];
     if (!engine || !clipInfo) return;
-    const after = Math.max(Number(clipInfo.after || 0), Number(trackingComparison.requested_duration_seconds || 0));
-    const anchorEpoch = eventEpoch(event);
+    const after = Math.max(0.1, Number(trackingComparison.requested_duration_seconds || trackingComparison.duration_seconds || 0));
+    const anchorEpoch = eventEpoch(viewerEvent);
     const nextClip = {
       ...clipInfo,
+      before: 0,
       after,
-      duration: Number(clipInfo.before || 0) + after,
-      streamUrl: eventStreamUrl(manualEventId, clipInfo.before, after),
-      downloadUrl: eventClipUrl(manualEventId, clipInfo.before, after),
-      windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch - Number(clipInfo.before || 0) : null,
+      duration: after,
+      streamUrl: eventStreamUrl(manualEventId, 0, after),
+      downloadUrl: eventClipUrl(manualEventId, 0, after),
+      windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch : null,
     };
     setTrackingComparisonEngine(implementation);
     setTrackingVisible(true);
@@ -2680,7 +2712,11 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     setClipError("");
     setClipLoading(true);
     setClipInfo(nextClip);
-    setPlayback({ url: nextClip.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
+    setPlayback({
+      url: nextClip.streamUrl,
+      mimeType: "application/vnd.apple.mpegurl",
+      key: `comparison-${implementation}-${Date.now()}`,
+    });
     setVideoActive(true);
   }
 
@@ -2710,8 +2746,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       <section className="event-overlay-panel" style={mediaStyle}>
         <div className="event-detail-head">
           <div>
-            <h2>{event.camera_id}</h2>
-            <time>{formatDateTime(event.created_at, timeZone)}</time>
+            <h2>{viewerEvent.camera_id}</h2>
+            <time>{formatDateTime(viewerEvent.created_at, timeZone)}</time>
           </div>
           <div className="overlay-actions">
             <button
@@ -2723,18 +2759,17 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             >
               <Gauge size={16} /> {trackingComparisonLoading ? "Comparing" : "Compare"}
             </button>
-            {storedTracks.length ? (
-              <button
+            <button
                 type="button"
                 className={`tile-control-button tracking-trail-toggle ${trackingVisible ? "active" : ""}`}
                 onClick={() => setTrackingVisible((visible) => !visible)}
-                title={`${trackingVisible ? "Hide" : "Show"} stored object tracking${replayTrackCount ? " on the snapshot and video" : " on the event snapshot"}`}
-                aria-label={`${trackingVisible ? "Hide" : "Show"} stored object tracks`}
+                disabled={!storedTracks.length}
+                title={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracking${replayTrackCount ? " on the snapshot and video" : " on the event snapshot"}` : "No stored tracks for this event; run Compare to generate an offline replay"}
+                aria-label={storedTracks.length ? `${trackingVisible ? "Hide" : "Show"} stored object tracks` : "Stored object tracks unavailable"}
                 aria-pressed={trackingVisible}
               >
                 <ListTree size={16} /> Tracks
-              </button>
-            ) : null}
+            </button>
             <button
               type="button"
               className={`tile-control-button debug-detection-toggle ${detectionDebug ? "active" : ""}`}
@@ -2804,6 +2839,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
           {videoActive && clipInfo && playback && !clipError ? (
             <>
               <ShakaVideo
+                key={playback.key || playback.url}
                 className="event-video-layer"
                 ref={clipVideoRef}
                 src={playback.url}
@@ -2835,9 +2871,12 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 <StoredTrackVideoOverlay
                   videoRef={clipVideoRef}
                   tracks={storedTracks}
-                  imageSize={mediaSize}
+                  coordinateSize={{
+                    width: Number(trackingEvent.object_tracking?.frame_width) || mediaSize?.width,
+                    height: Number(trackingEvent.object_tracking?.frame_height) || mediaSize?.height,
+                  }}
                   windowStartEpoch={clipInfo.windowStartEpoch}
-                  sampleFps={event.object_tracking?.sample_fps}
+                  sampleFps={trackingEvent.object_tracking?.sample_fps}
                 />
               ) : null}
               {clipLoading ? <div className="event-video-preparing">Preparing incident video...</div> : null}
@@ -2861,7 +2900,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
           ) : null}
           {trackingComparisonError ? <div className="tracking-comparison-error">{trackingComparisonError}</div> : null}
           {trackingComparison ? (
-            <div className="tracking-comparison-panel">
+            <div className="tracking-comparison-panel" ref={comparisonPanelRef}>
               <div className="tracking-comparison-head">
                 <div><span className="muted">Same-frame comparison</span><strong>{trackingComparison.frames_processed} frames · {Number(trackingComparison.duration_seconds || 0).toFixed(1)}s · {trackingComparison.sample_fps} FPS · {(Number(trackingComparison.elapsed_ms || 0) / 1000).toFixed(1)}s analysis</strong></div>
                 <small>Detection and appearance extraction are shared by both engines. Extra track IDs are a comparison signal, not ground-truth identity accuracy.</small>
@@ -2871,7 +2910,12 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 {["survng_hybrid", "ultralytics_botsort"].map((implementation) => {
                   const engine = trackingComparison.engines?.[implementation];
                   if (!engine) return null;
-                  const comparisonEvent = { ...event, object_tracking: { ...engine, sample_fps: trackingComparison.sample_fps } };
+                  const comparisonEvent = { ...viewerEvent, object_tracking: {
+                    ...engine,
+                    sample_fps: trackingComparison.sample_fps,
+                    frame_width: trackingComparison.frame_width,
+                    frame_height: trackingComparison.frame_height,
+                  } };
                   return (
                     <article className={`tracking-comparison-card ${trackingComparisonEngine === implementation ? "active" : ""}`} key={implementation}>
                       <header><strong>{implementation === "survng_hybrid" ? "SurvNG Hybrid" : "Ultralytics BoT-SORT"}</strong><span>{engine.average_ms_per_frame} ms/frame · {engine.initialization_ms} ms init</span></header>
@@ -2971,6 +3015,26 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       </section>
     </div>
   );
+}
+
+function refreshedIncidentSelection(selected, incidents) {
+  if (!selected) return null;
+  for (const incident of incidents) {
+    if (incident.id === selected.id) return incident;
+    const child = (incident.events || []).find((candidate) => candidate.id === selected.id);
+    if (child) {
+      return {
+        ...child,
+        start_epoch: incident.start_epoch,
+        last_epoch: incident.last_epoch,
+        start_at: incident.start_at,
+        end_at: incident.end_at,
+        event_count: incident.event_count,
+        events: incident.events || [],
+      };
+    }
+  }
+  return null;
 }
 
 function IncidentsPage({ timeZone, onRecordingContextChange }) {
@@ -3121,16 +3185,11 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   }, [selectedEvent?.id, focusedEvent?.id, focusedEvent?.created_at, focusedEvent?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
-    if (selectedEvent && !visibleIncidents.some((incident) => {
-      if (incident.id === selectedEvent.id) return true;
-      return (incident.events || []).some((event) => event.id === selectedEvent.id);
-    })) {
-      setSelectedEvent(null);
-    }
+    setSelectedEvent((current) => refreshedIncidentSelection(current, visibleIncidents));
     if (expandedIncidentId && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
       setExpandedIncidentId(null);
     }
-  }, [selectedEvent, expandedIncidentId, visibleIncidents]);
+  }, [expandedIncidentId, visibleIncidents]);
 
   useEffect(() => {
     function onKey(keyEvent) {
@@ -3398,16 +3457,11 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   }, [selectedEvent?.id, focusedIncident?.id, focusedIncident?.created_at, focusedIncident?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
-    if (selectedEvent && !visibleIncidents.some((incident) => {
-      if (incident.id === selectedEvent.id) return true;
-      return (incident.events || []).some((event) => event.id === selectedEvent.id);
-    })) {
-      setSelectedEvent(null);
-    }
+    setSelectedEvent((current) => refreshedIncidentSelection(current, visibleIncidents));
     if (expandedIncidentId && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
       setExpandedIncidentId(null);
     }
-  }, [selectedEvent, expandedIncidentId, visibleIncidents]);
+  }, [expandedIncidentId, visibleIncidents]);
 
   useEffect(() => {
     function onKey(keyEvent) {
@@ -6338,7 +6392,12 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>ReID device<input value={config.detector?.tracking?.reid_device ?? "AUTO"} onChange={(event) => updateConfig(["detector", "tracking", "reid_device"], event.target.value)} /><small>Runs in a separate isolated inference worker.</small></label>
             <label>Appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.reid_match_threshold ?? 0.82} onChange={(event) => updateConfig(["detector", "tracking", "reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce the chance of joining two similarly dressed people.</small></label>
             <label>Remember lost appearance<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.reid_max_age_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_age_seconds"], Number(event.target.value))} /><small>Seconds a lost person can recover the same track ID.</small></label>
-            <label>Maximum appearance checks<input type="number" min="1" max="64" step="1" value={config.detector?.tracking?.reid_max_embeddings_per_frame ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_embeddings_per_frame"], Number(event.target.value))} /><small>Bounds ReID work if a frame contains many person boxes.</small></label>
+            <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.vehicle_reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_enabled"], event.target.checked)} /> Reconnect vehicles by appearance</label>
+            <label>Vehicle ReID model<input value={config.detector?.tracking?.vehicle_reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_model_path"], event.target.value)} placeholder="vehicle-reid-0001.xml" /><small>OpenVINO whole-vehicle embedding model. This is separate from the person model.</small></label>
+            <label>Vehicle labels<input value={(config.detector?.tracking?.vehicle_reid_labels || ["car", "truck", "bus", "motorcycle"]).join(", ")} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_labels"], event.target.value.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))} /><small>Comma-separated detector labels that use vehicle appearance matching.</small></label>
+            <label>Vehicle ReID device<input value={config.detector?.tracking?.vehicle_reid_device ?? "AUTO"} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_device"], event.target.value)} /><small>Shares the isolated appearance worker but uses its own OpenVINO model.</small></label>
+            <label>Vehicle appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.vehicle_reid_match_threshold ?? 0.72} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce accidental merging of similar-looking vehicles.</small></label>
+            <label>Maximum appearance checks<input type="number" min="1" max="64" step="1" value={config.detector?.tracking?.reid_max_embeddings_per_frame ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_embeddings_per_frame"], Number(event.target.value))} /><small>Bounds combined person and vehicle ReID work in a crowded frame.</small></label>
             {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <>
               <label>BoT-SORT match tolerance<input type="number" min="0.1" max="1" step="0.05" value={config.detector?.tracking?.botsort_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "botsort_match_threshold"], Number(event.target.value))} /><small>Higher values allow more motion difference while retaining an ID.</small></label>
               <label>Appearance proximity<input type="number" min="0" max="1" step="0.05" value={config.detector?.tracking?.botsort_proximity_threshold ?? 0.1} onChange={(event) => updateConfig(["detector", "tracking", "botsort_proximity_threshold"], Number(event.target.value))} /><small>Minimum box overlap before appearance can reconnect a person. Zero allows appearance recovery anywhere in the frame.</small></label>
@@ -6354,6 +6413,15 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
                 {reidStatus.ready && reidStatus.model_load_ms != null ? <span>Model loaded in {Math.round(reidStatus.model_load_ms)} ms</span> : null}
               </div>
             ) : <div className="probe-result"><strong>Person appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start its isolated model worker.</span></div>
+          ) : null}
+          {config.detector?.tracking?.vehicle_reid_enabled ? (
+            reidStatus?.enabled ? (
+              <div className={`probe-result ${reidStatus.vehicle?.ready ? "ok" : "bad"}`}>
+                <strong>{reidStatus.vehicle?.ready ? "Vehicle appearance matching is ready" : "Vehicle appearance matching is unavailable"}</strong>
+                <span>{reidStatus.vehicle?.ready ? `${reidStatus.vehicle.device || "AUTO"} · ${reidStatus.vehicle.embedding_size || 0}-value vehicle signature · ${(reidStatus.vehicle.labels || []).join(", ")}` : reidStatus.vehicle?.error || "The vehicle ReID model did not start."}</span>
+                {reidStatus.vehicle?.ready && reidStatus.vehicle.model_load_ms != null ? <span>Model loaded in {Math.round(reidStatus.vehicle.model_load_ms)} ms</span> : null}
+              </div>
+            ) : <div className="probe-result"><strong>Vehicle appearance matching is not active yet</strong><span>Save the configuration and restart SurvNG to start the model.</span></div>
           ) : null}
         </details>
         <h3>Motion Triggers &amp; Filtering</h3>

@@ -45,6 +45,34 @@ class AppearanceEncoder(Protocol):
     def embed(self, person: np.ndarray) -> np.ndarray:
         ...
 
+    def supports_label(self, label: str) -> bool:
+        ...
+
+    def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
+        ...
+
+
+def _encoder_supports_label(
+    encoder: AppearanceEncoder,
+    config: ObjectTrackingConfig,
+    label: str,
+) -> bool:
+    if not config.reid_enabled_for_label(label):
+        return False
+    supports = getattr(encoder, "supports_label", None)
+    return bool(supports(label)) if callable(supports) else label == "person"
+
+
+def _encode_appearance(
+    encoder: AppearanceEncoder,
+    label: str,
+    crop: np.ndarray,
+) -> np.ndarray:
+    embed_for_label = getattr(encoder, "embed_for_label", None)
+    if callable(embed_for_label):
+        return np.asarray(embed_for_label(label, crop), dtype=np.float32)
+    return np.asarray(encoder.embed(crop), dtype=np.float32)
+
 
 class ObjectTrackerBackend(Protocol):
     def update(
@@ -409,7 +437,20 @@ class ByteTrackObjectTracker:
                     continue
                 if captured_at - track.last_seen > self.config.lost_timeout_seconds:
                     continue
-                score = self._geometry_score(track.predicted_box(captured_at), box)
+                elapsed = max(0.0, captured_at - track.last_seen)
+                startup_distance_multiplier = 1.0
+                if track.confirmed and track.hits == 1:
+                    expected_interval = 1.0 / max(0.1, self.config.sample_fps)
+                    startup_distance_multiplier = 1.0 + min(
+                        0.25,
+                        max(0.0, elapsed - expected_interval)
+                        / max(expected_interval, self.config.lost_timeout_seconds),
+                    )
+                score = self._geometry_score(
+                    track.predicted_box(captured_at),
+                    box,
+                    center_distance_multiplier=startup_distance_multiplier,
+                )
                 if score is not None:
                     candidates.append((score, track_id, index, detection, box))
         used_detections: set[int] = set()
@@ -429,7 +470,13 @@ class ByteTrackObjectTracker:
 
         self._associate_appearance(detections, captured_at, unmatched_tracks, assignments)
 
-    def _geometry_score(self, left: Box, right: Box) -> float | None:
+    def _geometry_score(
+        self,
+        left: Box,
+        right: Box,
+        *,
+        center_distance_multiplier: float = 1.0,
+    ) -> float | None:
         overlap = _iou(left, right)
         if overlap >= self.config.match_iou_threshold:
             return 1.0 + overlap
@@ -458,8 +505,12 @@ class ByteTrackObjectTracker:
             max(left_height, right_height),
         )))
         distance_ratio = distance / scale
-        if area_ratio >= 0.20 and distance_ratio <= self.config.match_center_distance_ratio:
-            return 0.5 + (1.0 - distance_ratio / self.config.match_center_distance_ratio)
+        center_limit = (
+            self.config.match_center_distance_ratio
+            * max(1.0, min(1.25, center_distance_multiplier))
+        )
+        if area_ratio >= 0.20 and distance_ratio <= center_limit:
+            return 0.5 + (1.0 - distance_ratio / center_limit)
         return None
 
     def _associate_appearance(
@@ -469,11 +520,12 @@ class ByteTrackObjectTracker:
         unmatched_tracks: set[int],
         assignments: dict[int, int],
     ) -> None:
-        if not self.config.reid_enabled:
+        if not self.config.appearance_reid_enabled:
             return
         candidates: list[tuple[float, int, bool, int, dict[str, Any], Box]] = []
         for index, detection, box in detections:
-            if index in assignments or str(detection.get("label") or "").lower() != "person":
+            label = str(detection.get("label") or "").lower()
+            if index in assignments or not self.config.reid_enabled_for_label(label):
                 continue
             embedding = _appearance(detection.get("_tracking_embedding"))
             if embedding is None:
@@ -519,7 +571,9 @@ class ByteTrackObjectTracker:
             reverse=True,
         ):
             if (
-                score < self.config.reid_match_threshold
+                score < self.config.reid_threshold_for_label(
+                    str(detection.get("label") or "")
+                )
                 or index in used_detections
                 or track_id in used_tracks
             ):
@@ -943,14 +997,18 @@ class ObjectTrackingSession:
         objects: list[dict[str, Any]],
     ) -> None:
         encoder = self.appearance_encoder
-        if encoder is None or not encoder.enabled or not self.config.reid_enabled:
+        if encoder is None or not encoder.enabled or not self.config.appearance_reid_enabled:
             return
         height, width = frame.shape[:2]
         candidates = sorted(
             (
                 detected
                 for detected in objects
-                if str(detected.get("label") or "").lower() == "person"
+                if _encoder_supports_label(
+                    encoder,
+                    self.config,
+                    str(detected.get("label") or "").lower(),
+                )
             ),
             key=_confidence,
             reverse=True,
@@ -967,7 +1025,12 @@ class ObjectTrackingSession:
             if crop.shape[0] < 16 or crop.shape[1] < 8:
                 continue
             try:
-                detected["_tracking_embedding"] = encoder.embed(crop)
+                label = str(detected.get("label") or "").lower()
+                detected["_tracking_embedding"] = _encode_appearance(
+                    encoder,
+                    label,
+                    crop,
+                )
             except Exception as exc:
                 safe_error = redact_secret_text(exc)[:240]
                 with self._lock:
@@ -977,7 +1040,7 @@ class ObjectTrackingSession:
                         "last_reid_error": safe_error,
                     }
                 LOGGER.debug(
-                    "person ReID unavailable for %s: %s",
+                    "appearance ReID unavailable for %s: %s",
                     self.camera.id,
                     safe_error,
                 )

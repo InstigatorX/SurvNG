@@ -1705,7 +1705,10 @@ class CameraWorker:
         )
         if outcome.event_id is not None and outcome.object_detected:
             initial_tracking_frame = None
-            if self.object_tracking.config.reid_enabled and outcome.snapshot_path:
+            if (
+                self.object_tracking.config.appearance_reid_enabled
+                and outcome.snapshot_path
+            ):
                 initial_tracking_frame = cv2.imread(outcome.snapshot_path)
             self.object_tracking.start(
                 outcome.event_id,

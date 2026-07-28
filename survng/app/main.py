@@ -2935,7 +2935,12 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
         request_started = time.perf_counter()
         enriched = _event_row(event)
         clip_started = time.perf_counter()
-        clip_path = _ensure_event_clip(enriched, before=0.0, after=duration, source="main")
+        comparison_input = _ensure_event_clip(
+            enriched,
+            before=0.0,
+            after=duration,
+            source="main",
+        )
         clip_ms = (time.perf_counter() - clip_started) * 1000.0
         start_epoch = event_epoch(enriched)
         runner = TrackingComparisonRunner(
@@ -2943,14 +2948,29 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
             detector=manager.detector,
             appearance_encoder=manager.person_reidentifier,
         )
-        result = runner.run(
-            camera,
+        detector_dimensions = [
+            int(value)
+            for value in (getattr(manager.detector, "input_shape", None) or [])
+            if isinstance(value, (int, float)) and int(value) > 0
+        ]
+        decode_started = time.perf_counter()
+        comparison_frames = list(
             sampled_video_frames(
-                clip_path,
+                comparison_input,
                 start_epoch=start_epoch,
                 sample_fps=config.detector.tracking.sample_fps,
                 duration_seconds=duration,
-            ),
+                ffmpeg_path=config.ffmpeg_path,
+                maximum_width=max([640, *detector_dimensions]),
+            )
+        )
+        decode_ms = (time.perf_counter() - decode_started) * 1000.0
+        result = runner.run(camera, comparison_frames)
+        frame_count = int(result.get("frames_processed") or 0)
+        result["frame_decode_ms"] = round(decode_ms, 2)
+        result["average_frame_decode_ms"] = round(
+            decode_ms / max(1, frame_count),
+            3,
         )
         response = {
             "event_id": event_id,

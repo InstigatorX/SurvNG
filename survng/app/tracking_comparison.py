@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import subprocess
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
@@ -12,7 +13,12 @@ import numpy as np
 
 from .config import CameraConfig, ObjectTrackingConfig
 from .detector import detection_failure
-from .object_tracking import ObjectTrackerRegistry, build_builtin_object_tracker_registry
+from .object_tracking import (
+    ObjectTrackerRegistry,
+    _encode_appearance,
+    _encoder_supports_label,
+    build_builtin_object_tracker_registry,
+)
 from .zones import apply_detection_zones
 
 
@@ -31,6 +37,10 @@ class AppearanceEncoder(Protocol):
 
     def embed(self, crop: np.ndarray) -> np.ndarray | None: ...
 
+    def supports_label(self, label: str) -> bool: ...
+
+    def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray | None: ...
+
 
 def sampled_video_frames(
     path: Path,
@@ -38,7 +48,25 @@ def sampled_video_frames(
     start_epoch: float,
     sample_fps: float,
     duration_seconds: float,
+    ffmpeg_path: str = "",
+    maximum_width: int = 640,
+    start_offset_seconds: float = 0.0,
+    concat_input: bool = False,
+    probe_path: Path | None = None,
 ) -> Iterator[tuple[float, np.ndarray]]:
+    if ffmpeg_path:
+        yield from _ffmpeg_sampled_video_frames(
+            path,
+            start_epoch=start_epoch,
+            sample_fps=sample_fps,
+            duration_seconds=duration_seconds,
+            ffmpeg_path=ffmpeg_path,
+            maximum_width=maximum_width,
+            start_offset_seconds=start_offset_seconds,
+            concat_input=concat_input,
+            probe_path=probe_path,
+        )
+        return
     capture = cv2.VideoCapture(str(path))
     try:
         if not capture.isOpened():
@@ -63,6 +91,114 @@ def sampled_video_frames(
             next_sample += interval
     finally:
         capture.release()
+
+
+def _ffmpeg_sampled_video_frames(
+    path: Path,
+    *,
+    start_epoch: float,
+    sample_fps: float,
+    duration_seconds: float,
+    ffmpeg_path: str,
+    maximum_width: int,
+    start_offset_seconds: float,
+    concat_input: bool,
+    probe_path: Path | None,
+) -> Iterator[tuple[float, np.ndarray]]:
+    # Opening another cv2.VideoCapture inside the server can contend with all
+    # active camera capture threads. ffprobe is isolated and substantially
+    # faster under a full camera workload. A constituent file is used when the
+    # decoder input itself is an ffconcat manifest.
+    source_width, source_height = _ffprobe_video_dimensions(
+        probe_path or path,
+        ffmpeg_path,
+    )
+    if source_width <= 0 or source_height <= 0:
+        raise RuntimeError("comparison video dimensions are unavailable")
+    output_width = max(2, min(source_width, max(64, int(maximum_width))))
+    output_height = max(2, int(round(source_height * output_width / source_width)))
+    output_width -= output_width % 2
+    output_height -= output_height % 2
+    frame_bytes = output_width * output_height * 3
+    input_options = ["-f", "concat", "-safe", "0"] if concat_input else []
+    command = [
+        ffmpeg_path,
+        "-nostdin",
+        "-v", "error",
+        *input_options,
+        "-i", str(path),
+        "-ss", f"{max(0.0, float(start_offset_seconds)):.3f}",
+        "-t", f"{max(0.1, float(duration_seconds)):.3f}",
+        "-vf", f"fps={max(0.1, float(sample_fps)):.6f},scale={output_width}:{output_height}",
+        "-an", "-sn", "-dn",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "pipe:1",
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=frame_bytes * 2,
+    )
+    frame_index = 0
+    try:
+        if process.stdout is None:
+            raise RuntimeError("comparison decoder output is unavailable")
+        while True:
+            payload = bytearray()
+            while len(payload) < frame_bytes:
+                chunk = process.stdout.read(frame_bytes - len(payload))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if not payload:
+                break
+            if len(payload) != frame_bytes:
+                raise RuntimeError("comparison decoder returned a partial frame")
+            frame = np.frombuffer(payload, dtype=np.uint8).reshape((output_height, output_width, 3)).copy()
+            yield start_epoch + frame_index / max(0.1, float(sample_fps)), frame
+            frame_index += 1
+        return_code = process.wait(timeout=5.0)
+        if return_code != 0:
+            raise RuntimeError("comparison video decoder failed")
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+
+
+def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
+    ffprobe_path = str(Path(ffmpeg_path).with_name("ffprobe"))
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0:s=x",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        dimensions = result.stdout.strip().split("x", 1)
+        if result.returncode == 0 and len(dimensions) == 2:
+            width, height = (int(value) for value in dimensions)
+            if width > 0 and height > 0:
+                return width, height
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    raise RuntimeError("comparison video dimensions are unavailable")
 
 
 class TrackingComparisonRunner:
@@ -216,7 +352,7 @@ class TrackingComparisonRunner:
         if (
             encoder is None
             or not encoder.enabled
-            or not self.config.reid_enabled
+            or not self.config.appearance_reid_enabled
         ):
             return 0
         height, width = frame.shape[:2]
@@ -228,7 +364,8 @@ class TrackingComparisonRunner:
         ):
             if remaining <= 0:
                 break
-            if str(detected.get("label") or "").lower() != "person":
+            label = str(detected.get("label") or "").lower()
+            if not _encoder_supports_label(encoder, self.config, label):
                 continue
             box = detected.get("box") or {}
             try:
@@ -245,7 +382,7 @@ class TrackingComparisonRunner:
                 continue
             remaining -= 1
             try:
-                embedding = encoder.embed(crop)
+                embedding = _encode_appearance(encoder, label, crop)
             except Exception:
                 return 1
             if embedding is not None:

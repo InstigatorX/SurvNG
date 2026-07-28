@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -128,6 +129,43 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
 
         self.assertEqual([epoch for epoch, _frame in frames], [50.0, 50.5, 51.0])
         self.assertTrue(capture.released)
+
+    def test_ffmpeg_sampler_decodes_only_model_sized_sampled_frames(self) -> None:
+        payload = bytes(range(96)) * 2
+        process = SimpleNamespace(
+            stdout=BytesIO(payload),
+            wait=Mock(return_value=0),
+            poll=Mock(return_value=0),
+            terminate=Mock(),
+            kill=Mock(),
+        )
+        with (
+            patch(
+                "survng.app.tracking_comparison.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="8x4\n"),
+            ) as ffprobe,
+            patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
+        ):
+            frames = list(sampled_video_frames(
+                Path("comparison.ffconcat"),
+                start_epoch=50.0,
+                sample_fps=2.0,
+                duration_seconds=1.0,
+                ffmpeg_path="ffmpeg",
+                maximum_width=4,
+                start_offset_seconds=1.25,
+                concat_input=True,
+                probe_path=Path("first-segment.mp4"),
+            ))
+
+        self.assertEqual(ffprobe.call_args.args[0][-1], "first-segment.mp4")
+        self.assertEqual([epoch for epoch, _frame in frames], [50.0, 50.5])
+        self.assertEqual([frame.shape for _epoch, frame in frames], [(4, 8, 3), (4, 8, 3)])
+        command = popen.call_args.args[0]
+        self.assertIn("fps=2.000000,scale=8:4", command)
+        self.assertEqual(command[command.index("-f") + 1], "concat")
+        self.assertEqual(command[command.index("-safe") + 1], "0")
+        self.assertEqual(command[command.index("-ss") + 1], "1.250")
 
 
 if __name__ == "__main__":

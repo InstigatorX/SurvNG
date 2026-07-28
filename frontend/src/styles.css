@@ -2635,6 +2635,7 @@ button.status-pill.hud-toggle:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -2653,6 +2654,8 @@ button.status-pill.hud-toggle:disabled {
 .overlay-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -6669,7 +6672,14 @@ button.status-pill.hud-toggle:disabled {
   }
 
   .event-detail-head {
+    align-items: flex-start;
     padding: 0 2px;
+  }
+
+  .event-detail-head .overlay-actions {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 5px;
   }
 
   .event-detail-head button {

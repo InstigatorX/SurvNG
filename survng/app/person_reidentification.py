@@ -19,15 +19,35 @@ LOGGER = logging.getLogger(__name__)
 class OpenVinoPersonReidentifier:
     """Generate normalized whole-person appearance embeddings."""
 
-    def __init__(self, config: DetectorConfig) -> None:
+    def __init__(
+        self,
+        config: DetectorConfig,
+        *,
+        kind: str = "Person",
+        enabled: bool | None = None,
+        model_path: str | None = None,
+        device: str | None = None,
+        match_threshold: float | None = None,
+        default_input_shape: tuple[int, int] = (128, 256),
+    ) -> None:
         self.config = config
         tracking = config.tracking
-        self.enabled = bool(tracking.reid_enabled)
+        self.kind = kind
+        self.enabled = bool(tracking.reid_enabled if enabled is None else enabled)
+        self.configured_model_path = (
+            tracking.reid_model_path if model_path is None else model_path
+        )
+        self.configured_device = tracking.reid_device if device is None else device
+        self.match_threshold = (
+            tracking.reid_match_threshold
+            if match_threshold is None
+            else match_threshold
+        )
         self.ready = False
         self.error = ""
         self.loaded_device = ""
         self.model_fingerprint = ""
-        self.input_shape = (128, 256)
+        self.input_shape = default_input_shape
         self.input_layout = "NCHW"
         self.embedding_size = 0
         self.model_load_ms: float | None = None
@@ -38,12 +58,12 @@ class OpenVinoPersonReidentifier:
         if self.enabled:
             self._load()
         else:
-            self.error = "Person ReID is disabled."
+            self.error = f"{self.kind} ReID is disabled."
 
     def _load(self) -> None:
-        model_path = Path(self.config.tracking.reid_model_path).expanduser()
+        model_path = Path(self.configured_model_path).expanduser()
         if not model_path.is_file():
-            self.error = "Configure a valid OpenVINO person ReID model path."
+            self.error = f"Configure a valid OpenVINO {self.kind.lower()} ReID model path."
             return
         started = time.perf_counter()
         try:
@@ -60,7 +80,7 @@ class OpenVinoPersonReidentifier:
                 core.set_property({"CACHE_DIR": str(cache_dir)})
             model = core.read_model(model=model_path)
             self.input_layout, self.input_shape = self._image_input(model.input(0).shape)
-            device = self.config.tracking.reid_device or "AUTO"
+            device = self.configured_device or "AUTO"
             compile_config = {"PERFORMANCE_HINT": "LATENCY"}
             if device.upper() != "AUTO":
                 compile_config["NUM_STREAMS"] = "1"
@@ -70,7 +90,7 @@ class OpenVinoPersonReidentifier:
             except Exception:
                 if device.upper() == "CPU":
                     raise
-                LOGGER.warning("Person ReID model failed on %s; retrying on CPU", device)
+                LOGGER.warning("%s ReID model failed on %s; retrying on CPU", self.kind, device)
                 compiled = core.compile_model(
                     model,
                     "CPU",
@@ -91,14 +111,15 @@ class OpenVinoPersonReidentifier:
             self.model_load_ms = round((time.perf_counter() - started) * 1000, 1)
             self.ready = True
             LOGGER.info(
-                "OpenVINO person ReID ready on %s in %.1f ms (%d dimensions)",
+                "OpenVINO %s ReID ready on %s in %.1f ms (%d dimensions)",
+                self.kind.lower(),
                 self.loaded_device,
                 self.model_load_ms,
                 self.embedding_size,
             )
         except Exception as exc:
-            self.error = str(exc) or "Person ReID model failed to load."
-            LOGGER.exception("OpenVINO person ReID model failed to load %s", model_path)
+            self.error = str(exc) or f"{self.kind} ReID model failed to load."
+            LOGGER.exception("OpenVINO %s ReID model failed to load %s", self.kind.lower(), model_path)
 
     @staticmethod
     def _image_input(raw_shape: Any) -> tuple[str, tuple[int, int]]:
@@ -132,9 +153,9 @@ class OpenVinoPersonReidentifier:
 
     def embed(self, person: np.ndarray) -> np.ndarray:
         if self._infer_request is None:
-            raise RuntimeError(self.error or "Person ReID is unavailable.")
+            raise RuntimeError(self.error or f"{self.kind} ReID is unavailable.")
         if person.ndim != 3 or person.shape[2] != 3 or min(person.shape[:2]) < 8:
-            raise ValueError("Person crop is too small for ReID.")
+            raise ValueError(f"{self.kind} crop is too small for ReID.")
         with self._lock:
             result = self._infer_request.infer({
                 self._input: self._image_tensor(person)
@@ -142,7 +163,7 @@ class OpenVinoPersonReidentifier:
         vector = np.asarray(result, dtype=np.float32).reshape(-1)
         norm = float(np.linalg.norm(vector))
         if not np.isfinite(norm) or norm <= 1e-9:
-            raise ValueError("Person ReID embedding was empty or invalid.")
+            raise ValueError(f"{self.kind} ReID embedding was empty or invalid.")
         return vector / norm
 
     def status(self) -> dict[str, Any]:
@@ -150,11 +171,72 @@ class OpenVinoPersonReidentifier:
             "enabled": self.enabled,
             "ready": self.ready,
             "error": self.error,
-            "device": self.loaded_device or self.config.tracking.reid_device,
-            "model_path": self.config.tracking.reid_model_path,
+            "kind": self.kind.lower(),
+            "device": self.loaded_device or self.configured_device,
+            "model_path": self.configured_model_path,
             "model_fingerprint": self.model_fingerprint,
             "input_shape": list(self.input_shape),
             "embedding_size": self.embedding_size,
             "model_load_ms": self.model_load_ms,
-            "match_threshold": self.config.tracking.reid_match_threshold,
+            "match_threshold": self.match_threshold,
+        }
+
+
+class OpenVinoAppearanceReidentifier:
+    """Route appearance crops to label-specific OpenVINO ReID models."""
+
+    def __init__(self, config: DetectorConfig) -> None:
+        tracking = config.tracking
+        self.config = tracking
+        self.person = OpenVinoPersonReidentifier(config)
+        self.vehicle = OpenVinoPersonReidentifier(
+            config,
+            kind="Vehicle",
+            enabled=tracking.vehicle_reid_enabled,
+            model_path=tracking.vehicle_reid_model_path,
+            device=tracking.vehicle_reid_device,
+            match_threshold=tracking.vehicle_reid_match_threshold,
+            default_input_shape=(208, 208),
+        )
+        self.enabled = tracking.appearance_reid_enabled
+
+    @property
+    def ready(self) -> bool:
+        enabled_engines = [
+            engine for engine in (self.person, self.vehicle) if engine.enabled
+        ]
+        return bool(enabled_engines) and all(engine.ready for engine in enabled_engines)
+
+    def supports_label(self, label: str) -> bool:
+        return self.config.reid_enabled_for_label(label)
+
+    def embed(self, person: np.ndarray) -> np.ndarray:
+        return self.person.embed(person)
+
+    def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
+        normalized = str(label or "").strip().lower()
+        if normalized == "person" and self.person.enabled:
+            return self.person.embed(crop)
+        if normalized in self.config.vehicle_reid_labels and self.vehicle.enabled:
+            return self.vehicle.embed(crop)
+        raise ValueError(f"ReID is not configured for label {normalized!r}")
+
+    def status(self) -> dict[str, Any]:
+        person = self.person.status()
+        vehicle = self.vehicle.status()
+        failures = [
+            status["error"]
+            for status in (person, vehicle)
+            if status["enabled"] and not status["ready"] and status["error"]
+        ]
+        return {
+            **person,
+            "enabled": self.enabled,
+            "ready": self.ready,
+            "error": "; ".join(failures),
+            "person": person,
+            "vehicle": {
+                **vehicle,
+                "labels": list(self.config.vehicle_reid_labels),
+            },
         }

@@ -164,10 +164,16 @@ class UltralyticsBotSortObjectTracker:
             config.sample_fps
             * (
                 max(config.lost_timeout_seconds, config.reid_max_age_seconds)
-                if config.reid_enabled
+                if config.appearance_reid_enabled
                 else config.lost_timeout_seconds
             )
         )
+        appearance_thresholds = []
+        if config.reid_enabled:
+            appearance_thresholds.append(config.reid_match_threshold)
+        if config.vehicle_reid_enabled:
+            appearance_thresholds.append(config.vehicle_reid_match_threshold)
+        appearance_threshold = min(appearance_thresholds, default=1.0)
         self._tracker = _ClassAwareBOTSORT(SimpleNamespace(
             track_high_thresh=self.high_confidence_threshold,
             track_low_thresh=config.low_confidence_threshold,
@@ -180,8 +186,8 @@ class UltralyticsBotSortObjectTracker:
             # Ultralytics thresholds its cosine distance after dividing by two,
             # so convert SurvNG's direct cosine-similarity threshold to the
             # equivalent [0, 1] similarity scale used by BoT-SORT.
-            appearance_thresh=(config.reid_match_threshold + 1.0) / 2.0,
-            with_reid=config.reid_enabled,
+            appearance_thresh=(appearance_threshold + 1.0) / 2.0,
+            with_reid=config.appearance_reid_enabled,
             model="auto",
             device="cpu",
         ))
@@ -207,7 +213,7 @@ class UltralyticsBotSortObjectTracker:
             : self.config.max_tracks_per_session
         ]
         tracker_input = self._results(usable, confirm_new=confirm_new)
-        features = self._features(usable) if self.config.reid_enabled else None
+        features = self._features(usable) if self.config.appearance_reid_enabled else None
         output = self._tracker.update(tracker_input, img=None, feats=features)
         tracked: list[dict[str, Any]] = []
         for row in np.asarray(output, dtype=np.float32).reshape(-1, 8):
@@ -278,7 +284,7 @@ class UltralyticsBotSortObjectTracker:
         return tracked
 
     def _prune_expired_reid_tracks(self, captured_at: float) -> None:
-        if not self.config.reid_enabled:
+        if not self.config.appearance_reid_enabled:
             return
         retained: list[Any] = []
         for native in self._tracker.lost_stracks:
@@ -346,12 +352,12 @@ class UltralyticsBotSortObjectTracker:
             _appearance(detection.get("_tracking_embedding"))
             for detection, _box_value in usable
         ]
-        dimension = next((vector.size for vector in vectors if vector is not None), 0)
+        dimension = max((vector.size for vector in vectors if vector is not None), default=0)
         if dimension <= 0:
             return None
         return np.stack([
-            vector
-            if vector is not None and vector.size == dimension
+            np.pad(vector, (0, dimension - vector.size))
+            if vector is not None and vector.size <= dimension
             else np.zeros(dimension, dtype=np.float32)
             for vector in vectors
         ])

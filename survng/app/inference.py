@@ -177,9 +177,9 @@ def _inference_worker_main(
 
             engine = OpenVinoFaceRecognizer(config)
         elif role == "reid":
-            from .person_reidentification import OpenVinoPersonReidentifier
+            from .person_reidentification import OpenVinoAppearanceReidentifier
 
-            engine = OpenVinoPersonReidentifier(config)
+            engine = OpenVinoAppearanceReidentifier(config)
         else:
             raise ValueError(f"unknown inference worker role: {role}")
         connection.send({
@@ -207,7 +207,7 @@ def _inference_worker_main(
                 connection.send({"id": request_id, "ok": True, "result": {"stopped": True}})
                 return
             try:
-                if operation in {"detect", "embed", "embed_person"}:
+                if operation in {"detect", "embed", "embed_person", "embed_reid"}:
                     shape = tuple(int(value) for value in request.get("shape") or ())
                     dtype_name = str(request.get("dtype") or "")
                     byte_count = int(request.get("byte_count") or 0)
@@ -231,6 +231,11 @@ def _inference_worker_main(
                         result = engine.embed(frame).astype(np.float32).tolist()
                     elif operation == "embed_person" and role == "reid":
                         result = engine.embed(frame).astype(np.float32).tolist()
+                    elif operation == "embed_reid" and role == "reid":
+                        result = engine.embed_for_label(
+                            str(request.get("label") or ""),
+                            frame,
+                        ).astype(np.float32).tolist()
                     else:
                         raise ValueError(f"{operation} is unavailable in the {role} worker")
                 elif operation == "status":
@@ -288,7 +293,15 @@ class _InferenceWorker:
         if self.role == "face":
             return self.config.face_recognition_device
         if self.role == "reid":
-            return self.config.tracking.reid_device
+            devices = {
+                self.config.tracking.reid_device
+                if self.config.tracking.reid_enabled
+                else "",
+                self.config.tracking.vehicle_reid_device
+                if self.config.tracking.vehicle_reid_enabled
+                else "",
+            } - {""}
+            return next(iter(devices)) if len(devices) == 1 else "AUTO"
         return self.config.device
 
     def start(self) -> bool:
@@ -340,6 +353,7 @@ class _InferenceWorker:
             payload["face_recognition_enabled"] = False
             if time.monotonic() < self._fallback_until:
                 payload["tracking"]["reid_device"] = "CPU"
+                payload["tracking"]["vehicle_reid_device"] = "CPU"
         return payload
 
     def _ensure_worker_locked(
@@ -620,7 +634,7 @@ class InferenceSupervisor:
             config,
             "reid",
             self._base_reid_status(),
-            start_enabled=bool(config.tracking.reid_enabled),
+            start_enabled=bool(config.tracking.appearance_reid_enabled),
         )
 
     def _base_detector_status(self) -> dict[str, Any]:
@@ -685,7 +699,7 @@ class InferenceSupervisor:
 
     def _base_reid_status(self) -> dict[str, Any]:
         return {
-            "enabled": bool(self.config.tracking.reid_enabled),
+            "enabled": bool(self.config.tracking.appearance_reid_enabled),
             "ready": False,
             "error": "Person ReID inference worker has not started.",
             "device": self.config.tracking.reid_device,
@@ -695,6 +709,19 @@ class InferenceSupervisor:
             "embedding_size": 0,
             "model_load_ms": None,
             "match_threshold": self.config.tracking.reid_match_threshold,
+            "person": {
+                "enabled": bool(self.config.tracking.reid_enabled),
+                "ready": False,
+                "model_path": self.config.tracking.reid_model_path,
+            },
+            "vehicle": {
+                "enabled": bool(self.config.tracking.vehicle_reid_enabled),
+                "ready": False,
+                "device": self.config.tracking.vehicle_reid_device,
+                "model_path": self.config.tracking.vehicle_reid_model_path,
+                "labels": list(self.config.tracking.vehicle_reid_labels),
+                "match_threshold": self.config.tracking.vehicle_reid_match_threshold,
+            },
         }
 
     def start(self) -> bool:
@@ -748,6 +775,15 @@ class InferenceSupervisor:
         result = self._reid.request(
             "embed_person",
             frame=person,
+            timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
+        )
+        return np.asarray(result, dtype=np.float32)
+
+    def embed_reid(self, label: str, crop: np.ndarray) -> np.ndarray:
+        result = self._reid.request(
+            "embed_reid",
+            frame=crop,
+            label=str(label or "").strip().lower(),
             timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
         )
         return np.asarray(result, dtype=np.float32)
@@ -832,7 +868,7 @@ class IsolatedPersonReidentifier:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.reid_enabled)
+        return bool(self.config.appearance_reid_enabled)
 
     @property
     def ready(self) -> bool:
@@ -840,6 +876,12 @@ class IsolatedPersonReidentifier:
 
     def embed(self, person: np.ndarray) -> np.ndarray:
         return self.supervisor.embed_person(person)
+
+    def supports_label(self, label: str) -> bool:
+        return self.config.reid_enabled_for_label(label)
+
+    def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
+        return self.supervisor.embed_reid(label, crop)
 
     def status(self) -> dict[str, Any]:
         return self.supervisor.reid_status()

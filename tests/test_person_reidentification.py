@@ -7,7 +7,10 @@ import unittest
 import numpy as np
 
 from survng.app.config import DetectorConfig
-from survng.app.person_reidentification import OpenVinoPersonReidentifier
+from survng.app.person_reidentification import (
+    OpenVinoAppearanceReidentifier,
+    OpenVinoPersonReidentifier,
+)
 
 
 class PersonReidentificationTest(unittest.TestCase):
@@ -78,6 +81,31 @@ class PersonReidentificationTest(unittest.TestCase):
             self.reidentifier.embed(np.zeros((32, 16, 3), dtype=np.uint8))
         with self.assertRaisesRegex(ValueError, "too small"):
             self.reidentifier.embed(np.zeros((4, 4, 3), dtype=np.uint8))
+
+    def test_appearance_router_uses_label_specific_models(self) -> None:
+        config = DetectorConfig.model_validate({
+            "tracking": {
+                "vehicle_reid_enabled": True,
+                "vehicle_reid_model_path": "missing-vehicle.xml",
+            },
+        })
+        router = OpenVinoAppearanceReidentifier(config)
+        router.vehicle._infer_request = type("Infer", (), {
+            "infer": staticmethod(
+                lambda _inputs: {"vehicle": np.asarray([[0.0, 2.0]])}
+            ),
+        })()
+        router.vehicle._input = "input"
+        router.vehicle._output = "vehicle"
+
+        vehicle = router.embed_for_label(
+            "car",
+            np.zeros((32, 32, 3), dtype=np.uint8),
+        )
+
+        self.assertTrue(router.supports_label("car"))
+        self.assertFalse(router.supports_label("dog"))
+        self.assertTrue(np.allclose(vehicle, [0.0, 1.0]))
 
 
 if __name__ == "__main__":

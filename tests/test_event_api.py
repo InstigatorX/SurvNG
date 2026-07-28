@@ -148,7 +148,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "TRACKING_COMPARISON_LIMITER", limiter),
             patch.object(main, "ultralytics_botsort_dependency_status", return_value={"available": True, "reason": ""}),
             patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")) as ensure_clip,
-            patch.object(main, "sampled_video_frames", return_value=[(1.0, np.zeros((2, 2, 3), dtype=np.uint8))]),
+            patch.object(main, "sampled_video_frames", return_value=[(1.0, np.zeros((2, 2, 3), dtype=np.uint8))]) as sampled_frames,
             patch.object(main, "TrackingComparisonRunner", return_value=runner),
         ):
             result = main.compare_event_tracking(43, duration_seconds=200.0)
@@ -159,6 +159,8 @@ class EventApiSerializationTest(unittest.TestCase):
         saved_result = event_store.save_tracking_comparison.call_args.kwargs["result"]
         self.assertNotIn("tracks", saved_result["engines"]["survng_hybrid"])
         ensure_clip.assert_called_once()
+        self.assertEqual(sampled_frames.call_args.kwargs["ffmpeg_path"], active_config.ffmpeg_path)
+        self.assertEqual(sampled_frames.call_args.kwargs["maximum_width"], 640)
         runner.run.assert_called_once()
         limiter.release.assert_called_once_with()
 
