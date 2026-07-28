@@ -127,6 +127,10 @@ def _inference_worker_main(
             from .face_recognition import OpenVinoFaceRecognizer
 
             engine = OpenVinoFaceRecognizer(config)
+        elif role == "reid":
+            from .person_reidentification import OpenVinoPersonReidentifier
+
+            engine = OpenVinoPersonReidentifier(config)
         else:
             raise ValueError(f"unknown inference worker role: {role}")
         connection.send({
@@ -154,7 +158,7 @@ def _inference_worker_main(
                 connection.send({"id": request_id, "ok": True, "result": {"stopped": True}})
                 return
             try:
-                if operation in {"detect", "embed"}:
+                if operation in {"detect", "embed", "embed_person"}:
                     shape = tuple(int(value) for value in request.get("shape") or ())
                     dtype_name = str(request.get("dtype") or "")
                     byte_count = int(request.get("byte_count") or 0)
@@ -175,6 +179,8 @@ def _inference_worker_main(
                             confidence_threshold=request.get("confidence_threshold"),
                         )
                     elif operation == "embed" and role == "face":
+                        result = engine.embed(frame).astype(np.float32).tolist()
+                    elif operation == "embed_person" and role == "reid":
                         result = engine.embed(frame).astype(np.float32).tolist()
                     else:
                         raise ValueError(f"{operation} is unavailable in the {role} worker")
@@ -232,6 +238,8 @@ class _InferenceWorker:
     def configured_device(self) -> str:
         if self.role == "face":
             return self.config.face_recognition_device
+        if self.role == "reid":
+            return self.config.tracking.reid_device
         return self.config.device
 
     def start(self) -> bool:
@@ -274,10 +282,15 @@ class _InferenceWorker:
             payload["face_recognition_enabled"] = False
             if time.monotonic() < self._fallback_until:
                 payload["device"] = "CPU"
-        else:
+        elif self.role == "face":
             payload["enabled"] = False
             if time.monotonic() < self._fallback_until:
                 payload["face_recognition_device"] = "CPU"
+        else:
+            payload["enabled"] = False
+            payload["face_recognition_enabled"] = False
+            if time.monotonic() < self._fallback_until:
+                payload["tracking"]["reid_device"] = "CPU"
         return payload
 
     def _ensure_worker_locked(
@@ -550,6 +563,12 @@ class InferenceSupervisor:
             self._base_face_status(),
             start_enabled=bool(config.face_recognition_enabled),
         )
+        self._reid = _InferenceWorker(
+            config,
+            "reid",
+            self._base_reid_status(),
+            start_enabled=bool(config.tracking.reid_enabled),
+        )
 
     def _base_detector_status(self) -> dict[str, Any]:
         return {
@@ -611,12 +630,28 @@ class InferenceSupervisor:
             "match_threshold": self.config.face_match_threshold,
         }
 
+    def _base_reid_status(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.config.tracking.reid_enabled),
+            "ready": False,
+            "error": "Person ReID inference worker has not started.",
+            "device": self.config.tracking.reid_device,
+            "model_path": self.config.tracking.reid_model_path,
+            "model_fingerprint": "",
+            "input_shape": [],
+            "embedding_size": 0,
+            "model_load_ms": None,
+            "match_threshold": self.config.tracking.reid_match_threshold,
+        }
+
     def start(self) -> bool:
         object_ready = self._object.start()
         face_ready = self._face.start()
-        return object_ready and face_ready
+        reid_ready = self._reid.start()
+        return object_ready and face_ready and reid_ready
 
     def stop(self) -> None:
+        self._reid.stop()
         self._face.stop()
         self._object.stop()
 
@@ -642,6 +677,10 @@ class InferenceSupervisor:
         result = self._face.request("embed", frame=face)
         return np.asarray(result, dtype=np.float32)
 
+    def embed_person(self, person: np.ndarray) -> np.ndarray:
+        result = self._reid.request("embed_person", frame=person)
+        return np.asarray(result, dtype=np.float32)
+
     def status(self) -> dict[str, Any]:
         status = self._object.status()
         runtime = dict(status.get("runtime") or {})
@@ -650,11 +689,15 @@ class InferenceSupervisor:
         runtime["pending_frames"] = runtime["queue_depth"]
         status["runtime"] = runtime
         status["configured_device"] = self.config.device
+        status["reid"] = self.reid_status()
         status["workers"] = self.worker_status()
         return status
 
     def face_status(self) -> dict[str, Any]:
         return self._face.status()
+
+    def reid_status(self) -> dict[str, Any]:
+        return self._reid.status()
 
     def probe_devices(self) -> dict[str, Any]:
         try:
@@ -683,6 +726,7 @@ class InferenceSupervisor:
         return {
             "object": self._object.isolation_status(),
             "face": self._face.isolation_status(),
+            "reid": self._reid.isolation_status(),
         }
 
 
@@ -708,3 +752,23 @@ class IsolatedFaceRecognizer:
 
     def status(self) -> dict[str, Any]:
         return self.supervisor.face_status()
+
+
+class IsolatedPersonReidentifier:
+    def __init__(self, supervisor: InferenceSupervisor) -> None:
+        self.supervisor = supervisor
+        self.config = supervisor.config.tracking
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.config.reid_enabled)
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.status().get("ready"))
+
+    def embed(self, person: np.ndarray) -> np.ndarray:
+        return self.supervisor.embed_person(person)
+
+    def status(self) -> dict[str, Any]:
+        return self.supervisor.reid_status()

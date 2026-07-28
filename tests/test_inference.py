@@ -15,6 +15,7 @@ from survng.app.inference import (
     InferenceSupervisor,
     InferenceUnavailable,
     IsolatedFaceRecognizer,
+    IsolatedPersonReidentifier,
     _InferenceWorker,
 )
 
@@ -45,6 +46,7 @@ class InferenceSupervisorTest(unittest.TestCase):
             self.assertEqual(comm_path.read_text(encoding="utf-8"), "survng-object\n")
         self.assertEqual(status["workers"]["object"]["role"], "object")
         self.assertFalse(status["workers"]["face"]["enabled"])
+        self.assertFalse(status["workers"]["reid"]["enabled"])
         self.assertFalse(status["enabled"])
 
         result = self.supervisor.detect(np.zeros((24, 32, 3), dtype=np.uint8))
@@ -74,6 +76,15 @@ class InferenceSupervisorTest(unittest.TestCase):
     def test_face_proxy_reports_worker_status(self) -> None:
         self.assertTrue(self.supervisor.start())
         proxy = IsolatedFaceRecognizer(self.supervisor)
+
+        self.assertFalse(proxy.ready)
+        self.assertFalse(proxy.enabled)
+        self.assertEqual(proxy.status()["device"], "AUTO")
+        self.assertFalse(proxy.status()["isolation"]["enabled"])
+
+    def test_person_reid_proxy_reports_disabled_worker_status(self) -> None:
+        self.assertTrue(self.supervisor.start())
+        proxy = IsolatedPersonReidentifier(self.supervisor)
 
         self.assertFalse(proxy.ready)
         self.assertFalse(proxy.enabled)

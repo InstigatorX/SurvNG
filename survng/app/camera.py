@@ -1679,10 +1679,14 @@ class CameraWorker:
             require_eligible_object=require_eligible_object,
         )
         if outcome.event_id is not None and outcome.object_detected:
+            initial_tracking_frame = None
+            if self.object_tracking.config.reid_enabled and outcome.snapshot_path:
+                initial_tracking_frame = cv2.imread(outcome.snapshot_path)
             self.object_tracking.start(
                 outcome.event_id,
                 event_at,
                 list(outcome.detected_objects),
+                initial_tracking_frame,
             )
         return outcome.as_dict()
 

@@ -52,8 +52,14 @@
       "min_confirmations": 2,
       "low_confidence_threshold": 0.25,
       "match_iou_threshold": 0.2,
+      "match_center_distance_ratio": 0.65,
       "max_active_cameras": 2,
-      "max_tracks_per_session": 100
+      "max_tracks_per_session": 100,
+      "reid_enabled": false,
+      "reid_model_path": "",
+      "reid_device": "AUTO",
+      "reid_match_threshold": 0.82,
+      "reid_max_age_seconds": 30.0
     }
   },
   "cameras": []

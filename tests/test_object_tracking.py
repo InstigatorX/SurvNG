@@ -60,6 +60,22 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual([item["observations"] for item in summaries], [2, 2])
         self.assertTrue(all(item["state"] == "confirmed" for item in summaries))
 
+    def test_center_distance_fallback_preserves_id_when_box_shape_changes(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        tracker.update(
+            [detection("person", 0.9, (700, 720, 950, 1040))],
+            10.0,
+            confirm_new=True,
+        )
+
+        tracked = tracker.update(
+            [detection("person", 0.9, (680, 800, 820, 1280))],
+            10.5,
+        )
+
+        self.assertEqual(tracked[0]["track_id"], 1)
+        self.assertEqual(len(tracker.summaries(10.5)), 1)
+
     def test_low_confidence_detection_recovers_track_but_does_not_start_one(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         initial = tracker.update(
@@ -115,6 +131,20 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual(tracked[0]["track_id"], 1)
         self.assertEqual(tracker.summaries(40.0)[0]["state"], "confirmed")
 
+    def test_delayed_initial_detection_keeps_event_time_but_starts_fresh(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        initial = detection("person", 0.9, (10, 10, 40, 80))
+        initial["_tracking_first_seen_at"] = 40.0
+
+        tracked = tracker.update([initial], 48.0, confirm_new=True)
+
+        summary = tracker.summaries(48.0)[0]
+        self.assertEqual(tracked[0]["track_id"], 1)
+        self.assertNotIn("_tracking_first_seen_at", tracked[0])
+        self.assertEqual(summary["first_seen"], datetime.fromtimestamp(40.0, timezone.utc).isoformat())
+        self.assertEqual(summary["last_seen"], datetime.fromtimestamp(48.0, timezone.utc).isoformat())
+        self.assertTrue(tracker.has_live_tracks(48.0))
+
     def test_ignored_zone_detection_cannot_start_new_track(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         ignored = detection("person", 0.9, (10, 10, 40, 80))
@@ -137,6 +167,40 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
         self.assertEqual([item["track_id"] for item in tracked], [1, 2])
         self.assertEqual(len(tracker.summaries(60.0)), 2)
+
+    def test_reid_revives_recently_lost_person_without_persisting_embedding(self) -> None:
+        config = self.config.model_copy(update={
+            "reid_enabled": True,
+            "reid_match_threshold": 0.8,
+            "reid_max_age_seconds": 30.0,
+        })
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+        first = detection("person", 0.9, (10, 10, 40, 80))
+        first["_tracking_embedding"] = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+        tracker.update([first], 10.0, confirm_new=True)
+        tracker.update([], 12.0)
+        reappeared = detection("person", 0.9, (500, 300, 600, 700))
+        reappeared["_tracking_embedding"] = np.asarray([0.99, 0.01, 0.0], dtype=np.float32)
+
+        tracked = tracker.update([reappeared], 15.0)
+
+        self.assertEqual(tracked[0]["track_id"], 1)
+        self.assertNotIn("_tracking_embedding", tracked[0])
+        self.assertEqual(len(tracker.summaries(15.0)), 1)
+
+    def test_reid_does_not_merge_dissimilar_people(self) -> None:
+        config = self.config.model_copy(update={"reid_enabled": True})
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+        first = detection("person", 0.9, (10, 10, 40, 80))
+        first["_tracking_embedding"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        tracker.update([first], 10.0, confirm_new=True)
+        tracker.update([], 12.0)
+        different = detection("person", 0.9, (500, 300, 600, 700))
+        different["_tracking_embedding"] = np.asarray([0.0, 1.0], dtype=np.float32)
+
+        tracked = tracker.update([different], 15.0)
+
+        self.assertEqual(tracked[0]["track_id"], 2)
 
     def test_tracker_registry_rejects_unknown_or_duplicate_implementations(self) -> None:
         registry = ObjectTrackerRegistry()

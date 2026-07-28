@@ -35,6 +35,15 @@ class ObjectDetectorBackend(Protocol):
         ...
 
 
+class AppearanceEncoder(Protocol):
+    @property
+    def enabled(self) -> bool:
+        ...
+
+    def embed(self, person: np.ndarray) -> np.ndarray:
+        ...
+
+
 class ObjectTrackerBackend(Protocol):
     def update(
         self,
@@ -115,6 +124,16 @@ def _iou(left: Box, right: Box) -> float:
     return intersection / max(1.0, left_area + right_area - intersection)
 
 
+def _appearance(value: object) -> np.ndarray | None:
+    if value is None:
+        return None
+    vector = np.asarray(value, dtype=np.float32).reshape(-1)
+    norm = float(np.linalg.norm(vector))
+    if vector.size == 0 or not np.all(np.isfinite(vector)) or norm <= 1e-9:
+        return None
+    return vector / norm
+
+
 @dataclass(slots=True)
 class ObjectTrack:
     track_id: int
@@ -130,6 +149,7 @@ class ObjectTrack:
     velocity: Box = (0.0, 0.0, 0.0, 0.0)
     zones: set[str] = field(default_factory=set)
     trajectory: list[tuple[float, float, float]] = field(default_factory=list)
+    appearance: np.ndarray | None = field(default=None, repr=False)
 
     def predicted_box(self, captured_at: float) -> Box:
         elapsed = max(0.0, min(captured_at - self.last_seen, 2.0))
@@ -159,6 +179,11 @@ class ObjectTrack:
         self.hits += 1
         self.missed = 0
         self.zones.update(str(zone) for zone in detection.get("zones", []) if zone)
+        next_appearance = _appearance(detection.get("_tracking_embedding"))
+        if next_appearance is not None:
+            if self.appearance is not None and self.appearance.shape == next_appearance.shape:
+                next_appearance = _appearance(self.appearance * 0.8 + next_appearance * 0.2)
+            self.appearance = next_appearance
         center_x = (box[0] + box[2]) / 2.0
         center_y = (box[1] + box[3]) / 2.0
         self.trajectory.append((round(captured_at, 3), round(center_x, 1), round(center_y, 1)))
@@ -236,21 +261,26 @@ class ByteTrackObjectTracker:
             if len(self._tracks) + len(self._completed) >= self.config.max_tracks_per_session:
                 break
             confidence = float(detection.get("confidence") or 0.0)
+            try:
+                first_seen = min(captured_at, float(detection.get("_tracking_first_seen_at")))
+            except (TypeError, ValueError):
+                first_seen = captured_at
             track = ObjectTrack(
                 track_id=self._next_track_id,
                 label=str(detection["label"]),
                 box=box,
-                first_seen=captured_at,
+                first_seen=first_seen,
                 last_seen=captured_at,
                 confidence=confidence,
                 max_confidence=confidence,
                 confirmed=confirm_new or self.config.min_confirmations <= 1,
                 zones={str(zone) for zone in detection.get("zones", []) if zone},
                 trajectory=[(
-                    round(captured_at, 3),
+                    round(first_seen, 3),
                     round((box[0] + box[2]) / 2.0, 1),
                     round((box[1] + box[3]) / 2.0, 1),
                 )],
+                appearance=_appearance(detection.get("_tracking_embedding")),
             )
             self._tracks[track.track_id] = track
             assignments[index] = track.track_id
@@ -270,7 +300,11 @@ class ByteTrackObjectTracker:
             if track is None:
                 continue
             tracked.append({
-                **detection,
+                **{
+                    key: value
+                    for key, value in detection.items()
+                    if not key.startswith("_tracking_")
+                },
                 "track_id": track_id,
                 "track_state": "confirmed" if track.confirmed else "tentative",
                 "track_observations": track.hits,
@@ -290,11 +324,17 @@ class ByteTrackObjectTracker:
                 track = self._tracks[track_id]
                 if track.label != str(detection.get("label")):
                     continue
-                score = _iou(track.predicted_box(captured_at), box)
-                if score >= self.config.match_iou_threshold:
+                if captured_at - track.last_seen > self.config.lost_timeout_seconds:
+                    continue
+                score = self._geometry_score(track.predicted_box(captured_at), box)
+                if score is not None:
                     candidates.append((score, track_id, index, detection, box))
         used_detections: set[int] = set()
-        for _score, track_id, index, detection, box in sorted(candidates, reverse=True):
+        for _score, track_id, index, detection, box in sorted(
+            candidates,
+            key=lambda item: item[0],
+            reverse=True,
+        ):
             if track_id not in unmatched_tracks or index in used_detections:
                 continue
             track = self._tracks[track_id]
@@ -303,6 +343,119 @@ class ByteTrackObjectTracker:
             unmatched_tracks.remove(track_id)
             used_detections.add(index)
             assignments[index] = track_id
+
+        self._associate_appearance(detections, captured_at, unmatched_tracks, assignments)
+
+    def _geometry_score(self, left: Box, right: Box) -> float | None:
+        overlap = _iou(left, right)
+        if overlap >= self.config.match_iou_threshold:
+            return 1.0 + overlap
+        left_width = left[2] - left[0]
+        left_height = left[3] - left[1]
+        right_width = right[2] - right[0]
+        right_height = right[3] - right[1]
+        left_area = left_width * left_height
+        right_area = right_width * right_height
+        intersection = (
+            max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+            * max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+        )
+        containment = intersection / max(1.0, min(left_area, right_area))
+        if containment >= 0.55:
+            return 0.9 + containment
+        area_ratio = min(left_area, right_area) / max(1.0, max(left_area, right_area))
+        left_center = ((left[0] + left[2]) / 2.0, (left[1] + left[3]) / 2.0)
+        right_center = ((right[0] + right[2]) / 2.0, (right[1] + right[3]) / 2.0)
+        distance = float(np.hypot(
+            left_center[0] - right_center[0],
+            left_center[1] - right_center[1],
+        ))
+        scale = max(1.0, float(np.hypot(
+            max(left_width, right_width),
+            max(left_height, right_height),
+        )))
+        distance_ratio = distance / scale
+        if area_ratio >= 0.20 and distance_ratio <= self.config.match_center_distance_ratio:
+            return 0.5 + (1.0 - distance_ratio / self.config.match_center_distance_ratio)
+        return None
+
+    def _associate_appearance(
+        self,
+        detections: list[tuple[int, dict[str, Any], Box]],
+        captured_at: float,
+        unmatched_tracks: set[int],
+        assignments: dict[int, int],
+    ) -> None:
+        if not self.config.reid_enabled:
+            return
+        candidates: list[tuple[float, int, bool, int, dict[str, Any], Box]] = []
+        for index, detection, box in detections:
+            if index in assignments:
+                continue
+            embedding = _appearance(detection.get("_tracking_embedding"))
+            if embedding is None:
+                continue
+            for track_id in unmatched_tracks:
+                track = self._tracks[track_id]
+                if (
+                    track.label != str(detection.get("label"))
+                    or track.appearance is None
+                    or captured_at - track.last_seen > self.config.reid_max_age_seconds
+                ):
+                    continue
+                if track.appearance.shape == embedding.shape:
+                    candidates.append((
+                        float(np.dot(track.appearance, embedding)),
+                        track_id,
+                        False,
+                        index,
+                        detection,
+                        box,
+                    ))
+            for track_id, track in self._completed.items():
+                if (
+                    track.label != str(detection.get("label"))
+                    or track.appearance is None
+                    or captured_at - track.last_seen > self.config.reid_max_age_seconds
+                    or track.appearance.shape != embedding.shape
+                ):
+                    continue
+                candidates.append((
+                    float(np.dot(track.appearance, embedding)),
+                    track_id,
+                    True,
+                    index,
+                    detection,
+                    box,
+                ))
+        used_detections: set[int] = set()
+        used_tracks: set[int] = set()
+        for score, track_id, completed, index, detection, box in sorted(
+            candidates,
+            key=lambda item: item[0],
+            reverse=True,
+        ):
+            if (
+                score < self.config.reid_match_threshold
+                or index in used_detections
+                or track_id in used_tracks
+            ):
+                continue
+            if completed:
+                track = self._completed.pop(track_id, None)
+                if track is None:
+                    continue
+                self._tracks[track_id] = track
+            else:
+                if track_id not in unmatched_tracks:
+                    continue
+                track = self._tracks[track_id]
+                unmatched_tracks.remove(track_id)
+            track.observe(detection, captured_at, box)
+            track.confirmed = track.confirmed or track.hits >= self.config.min_confirmations
+            assignments[index] = track_id
+            used_detections.add(index)
+            used_tracks.add(track_id)
 
     def _expire(self, captured_at: float) -> None:
         expired = [
@@ -348,6 +501,7 @@ class ObjectTrackingSession:
         publisher: TrackingPublisher | None,
         limiter: threading.BoundedSemaphore,
         tracker_registry: ObjectTrackerRegistry | None = None,
+        appearance_encoder: AppearanceEncoder | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -357,6 +511,7 @@ class ObjectTrackingSession:
         self.publisher = publisher
         self.limiter = limiter
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
+        self.appearance_encoder = appearance_encoder
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -384,15 +539,17 @@ class ObjectTrackingSession:
         event_id: int,
         event_at: datetime,
         initial_objects: list[dict[str, Any]],
+        initial_frame: np.ndarray | None = None,
     ) -> bool:
         with self._transition_lock:
-            return self._start_session(event_id, event_at, initial_objects)
+            return self._start_session(event_id, event_at, initial_objects, initial_frame)
 
     def _start_session(
         self,
         event_id: int,
         event_at: datetime,
         initial_objects: list[dict[str, Any]],
+        initial_frame: np.ndarray | None,
     ) -> bool:
         if not self.config.enabled or not any(
             item.get("label") and item.get("incident_eligible") is not False
@@ -426,7 +583,13 @@ class ObjectTrackingSession:
             self._deadline = time.monotonic() + self.config.max_session_seconds
             thread = threading.Thread(
                 target=self._run,
-                args=(event_id, event_at, [dict(item) for item in initial_objects], self._stop),
+                args=(
+                    event_id,
+                    event_at,
+                    [dict(item) for item in initial_objects],
+                    initial_frame.copy() if initial_frame is not None else None,
+                    self._stop,
+                ),
                 name=f"object-tracking-{self.camera.id}",
                 daemon=False,
             )
@@ -478,6 +641,7 @@ class ObjectTrackingSession:
         event_id: int,
         event_at: datetime,
         initial_objects: list[dict[str, Any]],
+        initial_frame: np.ndarray | None,
         stop: threading.Event,
     ) -> None:
         acquired = self.limiter.acquire(blocking=False)
@@ -515,7 +679,11 @@ class ObjectTrackingSession:
                 self.config,
                 float(self.detector.config.confidence_threshold),
             )
-            captured_at = event_at.timestamp()
+            if initial_frame is not None:
+                self._annotate_appearances(initial_frame, initial_objects)
+            captured_at = time.time()
+            for detected in initial_objects:
+                detected["_tracking_first_seen_at"] = event_at.timestamp()
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
             self._set_status(enabled=True, active=True, event_id=event_id, last_error="")
             self._persist(event_id, tracker, captured_at, initial_tracked, frames_processed, "active")
@@ -568,6 +736,7 @@ class ObjectTrackingSession:
                     int(frame.shape[0]),
                     float(self.detector.config.confidence_threshold),
                 )
+                self._annotate_appearances(frame, objects)
                 tracked = tracker.update(objects, sample_epoch)
                 frames_processed += 1
                 self._persist(event_id, tracker, sample_epoch, tracked, frames_processed, "active")
@@ -678,6 +847,37 @@ class ObjectTrackingSession:
         with self._lock:
             self._status = {**self._status, **values}
 
+    def _annotate_appearances(
+        self,
+        frame: np.ndarray,
+        objects: list[dict[str, Any]],
+    ) -> None:
+        encoder = self.appearance_encoder
+        if encoder is None or not encoder.enabled or not self.config.reid_enabled:
+            return
+        height, width = frame.shape[:2]
+        for detected in objects:
+            if str(detected.get("label") or "").lower() != "person":
+                continue
+            box = _box(detected.get("box"))
+            if box is None:
+                continue
+            x1 = max(0, min(width - 1, int(box[0])))
+            y1 = max(0, min(height - 1, int(box[1])))
+            x2 = max(x1 + 1, min(width, int(box[2])))
+            y2 = max(y1 + 1, min(height, int(box[3])))
+            crop = frame[y1:y2, x1:x2]
+            if crop.shape[0] < 16 or crop.shape[1] < 8:
+                continue
+            try:
+                detected["_tracking_embedding"] = encoder.embed(crop)
+            except Exception as exc:
+                LOGGER.debug(
+                    "person ReID unavailable for %s: %s",
+                    self.camera.id,
+                    redact_secret_text(exc),
+                )
+
 
 class ObjectTrackingSessionFactory:
     def __init__(
@@ -688,6 +888,7 @@ class ObjectTrackingSessionFactory:
         publisher: TrackingPublisher | None,
         limiter: threading.BoundedSemaphore,
         tracker_registry: ObjectTrackerRegistry | None = None,
+        appearance_encoder: AppearanceEncoder | None = None,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -695,6 +896,7 @@ class ObjectTrackingSessionFactory:
         self.publisher = publisher
         self.limiter = limiter
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
+        self.appearance_encoder = appearance_encoder
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
 
@@ -708,4 +910,5 @@ class ObjectTrackingSessionFactory:
             publisher=self.publisher,
             limiter=self.limiter,
             tracker_registry=self.tracker_registry,
+            appearance_encoder=self.appearance_encoder,
         )

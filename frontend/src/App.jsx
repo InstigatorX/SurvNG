@@ -1967,8 +1967,9 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
 function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, onFaceOpen }) {
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
-  const objects = eventObjects(incident).filter((object) => object.label && object.incident_eligible !== false);
-  const objectTracks = incident.object_tracking?.tracks || [];
+  const inspectedEvent = faceEvent || incident;
+  const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
+  const objectTracks = inspectedEvent.object_tracking?.tracks || [];
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(incident);
   const eventId = Number(incident.representative_event_id || incident.id);
@@ -1997,7 +1998,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
         }) : <p>No eligible object detections.</p>}
       </section>
       {objectTracks.length ? <section>
-        <h3>Object tracks</h3>
+        <h3>Object track segments</h3>
         {objectTracks.map((track) => <div className="inspector-detection" key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
           <small>{track.observations} observations · {formatDuration(track.duration_seconds || 0)}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
@@ -5791,7 +5792,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Objects that started the incident are trusted immediately.</small></label>
             <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
             <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
+            <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
             <label>Maximum tracks per incident<input type="number" min="1" max="1000" step="10" value={config.detector?.tracking?.max_tracks_per_session ?? 100} onChange={(event) => updateConfig(["detector", "tracking", "max_tracks_per_session"], Number(event.target.value))} /><small>Safety limit for unusually noisy detector output.</small></label>
+            <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.reid_enabled ?? false} onChange={(event) => updateConfig(["detector", "tracking", "reid_enabled"], event.target.checked)} /> Reconnect people by appearance</label>
+            <label>Person ReID model<input value={config.detector?.tracking?.reid_model_path ?? ""} onChange={(event) => updateConfig(["detector", "tracking", "reid_model_path"], event.target.value)} placeholder="person-reidentification.xml" /><small>Optional OpenVINO whole-person embedding model. Face-recognition models are not compatible.</small></label>
+            <label>ReID device<input value={config.detector?.tracking?.reid_device ?? "AUTO"} onChange={(event) => updateConfig(["detector", "tracking", "reid_device"], event.target.value)} /><small>Runs in a separate isolated inference worker.</small></label>
+            <label>Appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.reid_match_threshold ?? 0.82} onChange={(event) => updateConfig(["detector", "tracking", "reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce the chance of joining two similarly dressed people.</small></label>
+            <label>Remember lost appearance<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.reid_max_age_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_age_seconds"], Number(event.target.value))} /><small>Seconds a lost person can recover the same track ID.</small></label>
           </div>
         </details>
         <h3>Motion Triggers &amp; Filtering</h3>

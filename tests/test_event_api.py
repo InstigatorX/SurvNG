@@ -346,6 +346,36 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(incident["duration_seconds"], 0.0)
         self.assertEqual(incident["end_at"], "2026-07-27T12:17:07+00:00")
 
+    def test_incident_tracking_matches_representative_event_not_latest_event(self) -> None:
+        representative = {
+            "id": 43,
+            "camera_id": "foyer",
+            "created_at": "2026-07-27T12:17:07+00:00",
+            "has_objects": True,
+            "labels": ["person"],
+            "zones": [],
+            "objects": [{"label": "person", "confidence": 0.95}],
+            "object_tracking": {"state": "complete", "tracks": [{"track_id": 1}]},
+        }
+        later = {
+            "id": 44,
+            "camera_id": "foyer",
+            "created_at": "2026-07-27T12:17:20+00:00",
+            "has_objects": True,
+            "labels": ["person"],
+            "zones": [],
+            "objects": [{"label": "person", "confidence": 0.80}],
+            "object_tracking": {
+                "state": "complete",
+                "tracks": [{"track_id": index} for index in range(1, 5)],
+            },
+        }
+
+        incident = main._incident_row("foyer", [representative, later])
+
+        self.assertEqual(incident["representative_event_id"], 43)
+        self.assertEqual(len(incident["object_tracking"]["tracks"]), 1)
+
     def test_incident_payload_keeps_annotation_fields_without_detector_diagnostics(self) -> None:
         payload = main._incident_event_payload({
             "id": 42,

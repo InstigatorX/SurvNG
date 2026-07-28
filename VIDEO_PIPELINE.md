@@ -406,6 +406,13 @@ occlusion. Tracking ends when all tracks expire or `max_session_seconds` is
 reached. IDs are local to the event and camera; they are not identities and do
 not carry across a service restart or between cameras.
 
+Association first uses predicted overlap, then a conservative center-distance
+and containment fallback for rapidly changing boxes. Optional person ReID can
+reconnect a recently lost track using whole-body appearance embeddings. ReID
+runs in its own isolated inference worker and is disabled unless
+`reid_enabled` and a compatible OpenVINO person ReID model are configured.
+Face-recognition embedding models are not interchangeable with person ReID.
+
 Tracking runs only after an eligible object is found. It samples the main
 camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous
 sessions so a burst of camera activity cannot create unbounded inference and

@@ -3814,14 +3814,9 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         "zones": zones,
         "events": [_incident_event_payload(event) for event in reversed(ordered)],
         "motion_observations": list(reversed(motion_observations)),
-        "object_tracking": next(
-            (
-                event.get("object_tracking")
-                for event in reversed(ordered)
-                if isinstance(event.get("object_tracking"), dict)
-            ),
-            None,
-        ),
+        # Top-level incident media and objects come from the representative
+        # event, so its tracking metadata must use the same temporal context.
+        "object_tracking": representative.get("object_tracking"),
     }
     return incident
 

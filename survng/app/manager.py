@@ -17,7 +17,7 @@ from .events import EventStore
 from .faces import FaceStore
 from .detector import objects_to_json
 from .go2rtc import Go2RtcAdapter
-from .inference import InferenceSupervisor, IsolatedFaceRecognizer
+from .inference import InferenceSupervisor, IsolatedFaceRecognizer, IsolatedPersonReidentifier
 from .image_cache import LocalImageCache
 from .mqtt import MqttService
 from .object_tracking import ObjectTrackingSessionFactory
@@ -97,6 +97,7 @@ class AppManager:
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.detector = InferenceSupervisor(config.detector)
         self.face_recognizer = IsolatedFaceRecognizer(self.detector)
+        self.person_reidentifier = IsolatedPersonReidentifier(self.detector)
         self.faces = FaceStore(
             self.storage_dir,
             config.detector.face_max_observations,
@@ -132,6 +133,7 @@ class AppManager:
             update_event=self.events.update_object_tracking,
             publisher=self.publish_event,
             limiter=self._object_tracking_limiter,
+            appearance_encoder=self.person_reidentifier,
         )
         self.mqtt = MqttService(
             config.mqtt,

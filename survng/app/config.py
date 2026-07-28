@@ -232,8 +232,14 @@ class ObjectTrackingConfig(BaseModel):
     min_confirmations: int = Field(default=2, ge=1, le=10)
     low_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
     match_iou_threshold: float = Field(default=0.20, ge=0.05, le=0.90)
+    match_center_distance_ratio: float = Field(default=0.65, ge=0.1, le=2.0)
     max_active_cameras: int = Field(default=2, ge=1, le=16)
     max_tracks_per_session: int = Field(default=100, ge=1, le=1000)
+    reid_enabled: bool = False
+    reid_model_path: str = Field(default="", max_length=4096)
+    reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
+    reid_match_threshold: float = Field(default=0.82, ge=0.0, le=1.0)
+    reid_max_age_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
 
     @field_validator("implementation", mode="before")
     @classmethod
