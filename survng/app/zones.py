@@ -69,6 +69,7 @@ def apply_detection_zones(
     frame_width: int,
     frame_height: int,
     default_confidence: float,
+    require_incident_zone: bool = True,
 ) -> list[dict[str, Any]]:
     zones = [zone for zone in camera.zones if zone.enabled and len(zone.points) >= 3]
     if not zones:
@@ -128,5 +129,17 @@ def apply_detection_zones(
             for zone in matches
         ]
         detected["zone_point"] = {"x": round(x, 5), "y": round(y, 5)}
-        detected["incident_eligible"] = bool(not ignored and (admitted if incident_zones else meets_default))
+        zone_required = (
+            require_incident_zone
+            if camera.require_incident_zone is None
+            else camera.require_incident_zone
+        )
+        if zone_required and incident_zones:
+            eligible = admitted
+        else:
+            # In full-frame mode, a matching incident zone can admit an
+            # object at its zone-specific threshold, while objects elsewhere
+            # must still satisfy the detector's normal confidence threshold.
+            eligible = admitted or meets_default
+        detected["incident_eligible"] = bool(not ignored and eligible)
     return objects

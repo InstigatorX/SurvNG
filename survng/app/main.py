@@ -2802,7 +2802,14 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
     if detector_error:
         raise HTTPException(status_code=503, detail=detector_error)
     if camera:
-        apply_detection_zones(camera, objects, int(frame.shape[1]), int(frame.shape[0]), safe_confidence)
+        apply_detection_zones(
+            camera,
+            objects,
+            int(frame.shape[1]),
+            int(frame.shape[0]),
+            safe_confidence,
+            bool(config.detector.require_incident_zone),
+        )
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     for detected_object in objects:
         detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"

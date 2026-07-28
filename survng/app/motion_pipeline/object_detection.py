@@ -134,6 +134,7 @@ class RecordedMotionObjectDetector:
             int(frame.shape[1]),
             int(frame.shape[0]),
             configured_threshold,
+            bool(getattr(self.detector.config, "require_incident_zone", True)),
         )
         return objects
 

@@ -51,6 +51,84 @@ class DetectionZoneTest(unittest.TestCase):
         self.assertEqual(objects[0]["zones"], [])
         self.assertFalse(objects[0]["incident_eligible"])
 
+    def test_full_frame_mode_allows_object_outside_incident_zone(self) -> None:
+        self.camera.require_incident_zone = False
+        objects = [{
+            "label": "car",
+            "confidence": 0.95,
+            "box": {"x1": 2880, "y1": 897, "x2": 3264, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.35)
+
+        self.assertEqual(objects[0]["zones"], [])
+        self.assertTrue(objects[0]["incident_eligible"])
+
+    def test_global_full_frame_mode_is_used_when_camera_inherits(self) -> None:
+        objects = [{
+            "label": "car",
+            "confidence": 0.95,
+            "box": {"x1": 2880, "y1": 897, "x2": 3264, "y2": 2160},
+        }]
+
+        apply_detection_zones(
+            self.camera,
+            objects,
+            3840,
+            2160,
+            0.35,
+            require_incident_zone=False,
+        )
+
+        self.assertTrue(objects[0]["incident_eligible"])
+
+    def test_camera_can_require_zone_when_global_mode_allows_anywhere(self) -> None:
+        self.camera.require_incident_zone = True
+        objects = [{
+            "label": "car",
+            "confidence": 0.95,
+            "box": {"x1": 2880, "y1": 897, "x2": 3264, "y2": 2160},
+        }]
+
+        apply_detection_zones(
+            self.camera,
+            objects,
+            3840,
+            2160,
+            0.35,
+            require_incident_zone=False,
+        )
+
+        self.assertFalse(objects[0]["incident_eligible"])
+
+    def test_full_frame_mode_preserves_zone_specific_lower_threshold(self) -> None:
+        self.camera.require_incident_zone = False
+        self.camera.zones[0].confidence_threshold = 0.2
+        objects = [{
+            "label": "car",
+            "confidence": 0.3,
+            "box": {"x1": 438, "y1": 897, "x2": 1914, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.45)
+
+        self.assertEqual(objects[0]["zones"], ["Lower Driveway"])
+        self.assertTrue(objects[0]["incident_eligible"])
+
+    def test_ignore_zone_still_wins_in_full_frame_mode(self) -> None:
+        self.camera.require_incident_zone = False
+        self.camera.zones[0].behavior = "ignore"
+        objects = [{
+            "label": "car",
+            "confidence": 0.95,
+            "box": {"x1": 438, "y1": 897, "x2": 1914, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.35)
+
+        self.assertEqual(objects[0]["zones"], ["Lower Driveway"])
+        self.assertFalse(objects[0]["incident_eligible"])
+
     def test_reapplication_clears_stale_zone_metadata(self) -> None:
         detected = {
             "label": "car",

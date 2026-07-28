@@ -183,6 +183,7 @@ class CameraConfig(BaseModel):
     live_stream_url: str | None = Field(default=None, max_length=4096)
     record: bool = True
     record_sub: bool = False
+    require_incident_zone: bool | None = None
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
     baichuan: BaichuanConfig = Field(default_factory=BaichuanConfig)
@@ -316,6 +317,7 @@ class DetectorConfig(BaseModel):
     face_max_references: int = Field(default=20, ge=1, le=200)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
+    require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
 

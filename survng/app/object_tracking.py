@@ -996,6 +996,7 @@ class ObjectTrackingSession:
                     int(frame.shape[1]),
                     int(frame.shape[0]),
                     float(self.detector.config.confidence_threshold),
+                    bool(getattr(self.detector.config, "require_incident_zone", True)),
                 )
                 self._annotate_appearances(
                     frame,

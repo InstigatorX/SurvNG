@@ -103,10 +103,26 @@ class AppConfigTest(unittest.TestCase):
             config.cameras[0].motion_qualification.suppression_verification_rate
         )
         self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
+        self.assertTrue(config.detector.require_incident_zone)
+        self.assertIsNone(config.cameras[0].require_incident_zone)
         self.assertEqual(config.motion_qualification.pipeline.qualification, [])
         self.assertIsNone(
             config.cameras[0].motion_qualification.pipeline.qualification
         )
+
+    def test_camera_incident_zone_policy_can_override_global_default(self) -> None:
+        config = AppConfig.model_validate({
+            "detector": {"require_incident_zone": False},
+            "cameras": [{
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsp://example.invalid/main",
+                "require_incident_zone": True,
+            }],
+        })
+
+        self.assertFalse(config.detector.require_incident_zone)
+        self.assertTrue(config.cameras[0].require_incident_zone)
 
     def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
         with self.assertRaises(ValidationError):

@@ -273,6 +273,7 @@ class TrackingComparisonRunner:
                 int(frame_width),
                 int(frame_height),
                 float(self.detector.config.confidence_threshold),
+                bool(getattr(self.detector.config, "require_incident_zone", True)),
             )
             appearance_started = time.perf_counter()
             appearance_failures += self._annotate_appearances(frame, objects)

@@ -363,7 +363,14 @@ For each available target:
 3. Nudge the requested offset when damaged timestamps or keyframe placement
    prevent an exact read.
 4. Run the configured OpenVINO/Core ML detector.
-5. Apply camera detection zones and per-zone eligibility.
+5. Apply camera detection zones and the inherited incident-zone policy.
+
+`detector.require_incident_zone` is the global incident eligibility default,
+and each camera can inherit or override it with `require_incident_zone`. When
+required, a label that has a matching incident zone must enter one of those
+zones. When not required, objects meeting the normal detector threshold remain
+eligible anywhere, while matching incident zones may still admit objects at a
+zone-specific threshold. Ignore zones always take precedence in both modes.
 
 Object detection and face embedding execute in two independent spawned
 inference processes. The object worker owns the configured detector and uses

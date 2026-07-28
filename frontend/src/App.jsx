@@ -905,6 +905,7 @@ function defaultCamera(cameras, seed = {}) {
     live_stream_url: clearMaskedUrlPassword(seed.live_stream_url),
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
+    require_incident_zone: seed.require_incident_zone ?? null,
     motion_qualification: {
       mode: seed.motion_qualification?.mode || "inherit",
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
@@ -5473,6 +5474,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                 <label>Name<input value={selectedCamera.name} onChange={(event) => updateCamera(selectedCamera.id, ["name"], event.target.value)} /></label>
                 <label>Generated Camera ID<input value={slugify(selectedCamera.name || selectedCamera.id || "camera")} readOnly /></label>
                 <label>Detected Backend<input value={inferredBackendLabel(selectedCamera)} readOnly /></label>
+                <label>Incident eligibility<select value={selectedCamera.require_incident_zone == null ? "" : String(selectedCamera.require_incident_zone)} onChange={(event) => updateCamera(selectedCamera.id, ["require_incident_zone"], event.target.value === "" ? null : event.target.value === "true")}>
+                  <option value="">Use global ({(config.detector?.require_incident_zone ?? true) ? "Zones" : "Zones + Full Frame"})</option>
+                  <option value="true">Zones</option>
+                  <option value="false">Zones + Full Frame</option>
+                </select><small>Ignore zones always suppress their matching object classes.</small></label>
               </div>
               <div className="field-row stream-field-row">
                 <div className="stream-field">
@@ -6378,6 +6384,10 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
           <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
+          <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>
+            <option value="true">Zones</option>
+            <option value="false">Zones + Full Frame</option>
+          </select><small>Default for cameras using the global rule.</small></label>
         </div>
         <div className="field-row">
           <label>Detected Model<select value={detectorModels.some((model) => model.path === activeModelPath) ? activeModelPath : ""} onChange={(event) => selectOpenvinoModel(event.target.value)}>
