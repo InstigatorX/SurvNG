@@ -2037,6 +2037,13 @@ button.status-pill.hud-toggle:disabled {
   stroke-width: 2.5;
 }
 
+.reid-recovered .object-track-video-box {
+  fill: #fbbf24;
+  fill-opacity: .18;
+  stroke: #fbbf24;
+  stroke-width: 4;
+}
+
 .object-track-video-label {
   position: absolute;
   transform: translateY(-100%);
@@ -2048,6 +2055,11 @@ button.status-pill.hud-toggle:disabled {
   line-height: 19px;
   padding: 0 6px;
   white-space: nowrap;
+}
+
+.object-track-video-label.reid-recovered {
+  background: #fbbf24;
+  color: #201500;
 }
 
 .snapshot-focus-button {

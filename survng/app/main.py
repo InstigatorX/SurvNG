@@ -1633,8 +1633,13 @@ def telemetry(hours: int = 24) -> dict:
                 "reid_failures": int(tracking.get("reid_failures") or 0),
                 "reid_average_ms": float(tracking.get("reid_average_ms") or 0.0),
                 "reid_attempts_by_label": dict(tracking.get("reid_attempts_by_label") or {}),
+                "reid_attempts_by_reason": dict(tracking.get("reid_attempts_by_reason") or {}),
                 "reid_recoveries": int(tracking.get("reid_recoveries") or 0),
                 "reid_recoveries_by_label": dict(tracking.get("reid_recoveries_by_label") or {}),
+                "reid_avoided_geometry_matches": int(
+                    tracking.get("reid_avoided_geometry_matches") or 0
+                ),
+                "reid_avoided_by_label": dict(tracking.get("reid_avoided_by_label") or {}),
             },
             "activity": per_camera_activity.get(
                 camera_id,

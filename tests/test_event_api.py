@@ -96,8 +96,14 @@ class EventApiSerializationTest(unittest.TestCase):
                         "reid_failures": 1,
                         "reid_average_ms": 4.25,
                         "reid_attempts_by_label": {"car": 7},
+                        "reid_attempts_by_reason": {
+                            "track_seed": 2,
+                            "geometry_recovery": 5,
+                        },
                         "reid_recoveries": 2,
                         "reid_recoveries_by_label": {"car": 2},
+                        "reid_avoided_geometry_matches": 19,
+                        "reid_avoided_by_label": {"car": 19},
                     },
                 }]),
             )
@@ -111,6 +117,14 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)
             self.assertEqual(payload["cameras"][0]["tracking"]["reid_attempts"], 7)
             self.assertEqual(payload["cameras"][0]["tracking"]["reid_recoveries"], 2)
+            self.assertEqual(
+                payload["cameras"][0]["tracking"]["reid_avoided_geometry_matches"],
+                19,
+            )
+            self.assertEqual(
+                payload["cameras"][0]["tracking"]["reid_attempts_by_reason"]["geometry_recovery"],
+                5,
+            )
             fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
 
     def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:

@@ -315,6 +315,11 @@ class UltralyticsBotSortObjectTracker:
             if record.confirmed
         ]
 
+    def diagnostics(self) -> dict[str, Any]:
+        # BoT-SORT owns its association internals. Keep the shared persistence
+        # contract explicit without claiming SurvNG Hybrid diagnostics.
+        return {}
+
     def _results(
         self,
         usable: list[tuple[dict[str, Any], Box]],

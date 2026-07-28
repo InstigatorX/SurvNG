@@ -26,6 +26,23 @@ export function storedObjectTracks(event) {
         return [values];
       }).sort((left, right) => left[0] - right[0])
       : [];
+    const recoveryHistory = Array.isArray(track.reid_recovery_history)
+      ? track.reid_recovery_history.flatMap((recovery) => {
+        const capturedAt = finiteNumber(recovery?.captured_at);
+        const similarity = finiteNumber(recovery?.similarity);
+        const recoveryBox = Array.isArray(recovery?.box)
+          ? recovery.box.slice(0, 4).map(finiteNumber)
+          : [];
+        if (capturedAt === null || similarity === null || recoveryBox.length !== 4 || recoveryBox.some((value) => value === null)) return [];
+        if (recoveryBox[2] <= recoveryBox[0] || recoveryBox[3] <= recoveryBox[1]) return [];
+        return [{
+          capturedAt,
+          similarity,
+          resumedCompletedTrack: Boolean(recovery.resumed_completed_track),
+          box: recoveryBox,
+        }];
+      }).sort((left, right) => left.capturedAt - right.capturedAt)
+      : [];
     return [{
       ...track,
       trackId,
@@ -35,6 +52,7 @@ export function storedObjectTracks(event) {
       y2: coordinates[3],
       trajectory,
       boxHistory,
+      recoveryHistory,
     }];
   }).filter((track) => track.x2 > track.x1 && track.y2 > track.y1);
 }
@@ -61,5 +79,8 @@ export function trackFrameAt(track, epoch, holdSeconds = 1) {
   const path = (track.trajectory || []).filter((point) => point[0] <= epoch).map((point) => point.slice(1, 3));
   const center = [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
   if (!path.length || path[path.length - 1][0] !== center[0] || path[path.length - 1][1] !== center[1]) path.push(center);
-  return { box, path };
+  const recovery = [...(track.recoveryHistory || [])]
+    .reverse()
+    .find((item) => item.capturedAt <= epoch && epoch - item.capturedAt <= Math.max(0.75, holdSeconds));
+  return { box, path, recovery: recovery || null };
 }

@@ -1839,7 +1839,7 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
     <div className="object-track-video-layer" aria-hidden="true">
       <svg viewBox={`0 0 ${coordinateSize.width} ${coordinateSize.height}`} preserveAspectRatio="none" aria-hidden="true">
         {visibleTracks.map((track) => (
-          <g className={`object-track-color-${Math.abs(track.trackId) % 6}`} key={`video-path-${track.trackId}`}>
+          <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""}`} key={`video-path-${track.trackId}`}>
             {track.path.length > 1 ? <polyline className="object-track-trail" points={track.path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
             <rect className="object-track-video-box" x={track.box[0]} y={track.box[1]} width={track.box[2] - track.box[0]} height={track.box[3] - track.box[1]} vectorEffect="non-scaling-stroke" />
           </g>
@@ -1847,11 +1847,11 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
       </svg>
       {visibleTracks.map((track) => (
         <span
-          className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6}`}
+          className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""}`}
           key={`video-label-${track.trackId}`}
           style={{ left: `${track.box[0] / coordinateSize.width * 100}%`, top: `${track.box[1] / coordinateSize.height * 100}%` }}
         >
-          #{track.trackId} {track.label}
+          #{track.trackId} {track.label}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
         </span>
       ))}
     </div>
@@ -2131,6 +2131,9 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
         {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
           <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
+          {(track.reid_recovery_history || []).map((recovery, index) => (
+            <small key={`${track.track_id}-recovery-${recovery.captured_at}-${index}`}>ReID preserved this ID at {formatTimeOnly(new Date(Number(recovery.captured_at) * 1000).toISOString(), timeZone)} · {Math.round(Number(recovery.similarity || 0) * 100)}% similar</small>
+          ))}
         </div>)}
       </section>
       <section>
@@ -2348,6 +2351,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     } }
     : displayedEvent;
   const storedTracks = storedObjectTracks(trackingEvent);
+  const reidDiagnostics = trackingEvent.object_tracking?.reid_diagnostics || {};
+  const reidAttemptReasons = reidDiagnostics.inference_attempts_by_reason || {};
   const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
   const objects = eventObjects(displayedEvent);
   const detectedObjects = objects.filter((object) => object.label);
@@ -2896,6 +2901,13 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               <span className="muted">{trackingComparisonEngine ? "Comparison replay" : "Stored tracking"}</span>
               <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(trackingEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(trackingEvent.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
               <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
+              {Number(reidDiagnostics.inference_attempts || 0) || Number(reidDiagnostics.reid_avoided_geometry_matches || 0) ? (
+                <div className="tracking-comparison-shared">
+                  <span>Appearance checks <strong>{Number(reidDiagnostics.inference_attempts || 0)}</strong></span>
+                  <span>Checks avoided <strong>{Number(reidDiagnostics.reid_avoided_geometry_matches || 0)}</strong></span>
+                  {Object.entries(reidAttemptReasons).map(([reason, count]) => <span key={reason}>{String(reason).replaceAll("_", " ")} <strong>{count}</strong></span>)}
+                </div>
+              ) : null}
             </div>
           ) : null}
           {trackingComparisonError ? <div className="tracking-comparison-error">{trackingComparisonError}</div> : null}
@@ -2905,7 +2917,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 <div><span className="muted">Same-frame comparison</span><strong>{trackingComparison.frames_processed} frames · {Number(trackingComparison.duration_seconds || 0).toFixed(1)}s · {trackingComparison.sample_fps} FPS · {(Number(trackingComparison.elapsed_ms || 0) / 1000).toFixed(1)}s analysis</strong></div>
                 <small>Detection and appearance extraction are shared by both engines. Extra track IDs are a comparison signal, not ground-truth identity accuracy.</small>
               </div>
-              <div className="tracking-comparison-shared"><span>Recording decode <strong>{trackingComparison.average_frame_decode_ms} ms/frame</strong></span><span>OpenVINO detection <strong>{trackingComparison.average_detection_ms_per_frame} ms/frame</strong></span>{Number(trackingComparison.appearance_ms || 0) > 0 ? <span>Person appearance <strong>{trackingComparison.average_appearance_ms_per_frame} ms/frame</strong></span> : null}{trackingComparison.appearance_failures ? <span>Appearance failures <strong>{trackingComparison.appearance_failures}</strong></span> : null}<span>Clip preparation <strong>{(Number(trackingComparison.clip_preparation_ms || 0) / 1000).toFixed(1)}s</strong></span></div>
+              <div className="tracking-comparison-shared"><span>Recording decode <strong>{trackingComparison.average_frame_decode_ms} ms/frame</strong></span><span>OpenVINO detection <strong>{trackingComparison.average_detection_ms_per_frame} ms/frame</strong></span>{Number(trackingComparison.appearance_ms || 0) > 0 ? <span>Appearance extraction <strong>{trackingComparison.average_appearance_ms_per_frame} ms/frame</strong></span> : null}{trackingComparison.appearance_failures ? <span>Appearance failures <strong>{trackingComparison.appearance_failures}</strong></span> : null}<span>Clip preparation <strong>{(Number(trackingComparison.clip_preparation_ms || 0) / 1000).toFixed(1)}s</strong></span></div>
               <div className="tracking-comparison-grid">
                 {["survng_hybrid", "ultralytics_botsort"].map((implementation) => {
                   const engine = trackingComparison.engines?.[implementation];
@@ -2925,6 +2937,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                         <div><dt>Extra track IDs</dt><dd>{engine.fragmentation_proxy}</dd></div>
                         <div><dt>Observations</dt><dd>{engine.observations}</dd></div>
                         <div><dt>ReID recoveries</dt><dd>{engine.reid_recoveries}</dd></div>
+                        <div><dt>Geometry matches</dt><dd>{engine.reid_diagnostics?.association_counts?.geometry || 0}</dd></div>
                       </dl>
                       <button type="button" className="tile-control-button" onClick={() => replayTrackingComparison(implementation)}><Play size={15} /> Replay this result</button>
                     </article>
@@ -4770,8 +4783,10 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Motion passed / rejected</dt><dd>{camera.motion.passed} / {camera.motion.rejected}</dd></div>
                 <div><dt>Motion suppressed / dropped</dt><dd>{camera.motion.suppressed} / {camera.motion.dropped}</dd></div>
                 <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>
+                <div><dt>ReID checks avoided</dt><dd>{camera.tracking?.reid_avoided_geometry_matches || 0}</dd></div>
                 <div><dt>ReID latency / failures</dt><dd>{formatMilliseconds(camera.tracking?.reid_average_ms)} / {camera.tracking?.reid_failures || 0}</dd></div>
                 <div><dt>ReID checks by object</dt><dd>{Object.keys(camera.tracking?.reid_attempts_by_label || {}).length ? Object.entries(camera.tracking.reid_attempts_by_label).map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
+                <div><dt>ReID checks by reason</dt><dd>{Object.keys(camera.tracking?.reid_attempts_by_reason || {}).length ? Object.entries(camera.tracking.reid_attempts_by_reason).map(([reason, count]) => `${String(reason).replaceAll("_", " ")} ${count}`).join(" · ") : "None"}</dd></div>
               </dl>
             </article>
           ))}

@@ -419,7 +419,10 @@ to refresh a matched track's appearance. Ordinary geometry matches between
 refreshes do not invoke the ReID worker. `reid_refresh_interval_frames` controls
 the refresh cadence; `reid_max_embeddings_per_frame` bounds candidate work when
 detector output is unusually crowded or noisy. Per-camera attempts, latency,
-failures, object-label counts, and successful recoveries appear in Telemetry.
+failures, object-label counts, attempt reasons, avoided checks, and successful
+recoveries appear in Telemetry. Each stored recovery also includes its capture
+time, similarity, resumed-track state, and box. Incident replay highlights that
+box in amber so an operator can verify the handoff against the recording.
 Offline comparisons remain eager so both engines receive identical appearance
 inputs and comparison runs are reproducible.
 

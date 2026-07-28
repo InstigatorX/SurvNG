@@ -294,11 +294,14 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         })
         tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
         calls: list[int] = []
+        reasons: list[str] = []
 
         def detected(x: int) -> dict:
             item = detection("car", 0.9, (x, 10, x + 70, 60))
             item["_tracking_embedding_provider"] = lambda: (
-                calls.append(x) or np.asarray([1.0, 0.0], dtype=np.float32)
+                calls.append(x)
+                or reasons.append(str(item.get("_tracking_embedding_reason")))
+                or np.asarray([1.0, 0.0], dtype=np.float32)
             )
             return item
 
@@ -308,7 +311,17 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         tracker.update([detected(16)], 11.5)
 
         self.assertEqual(calls, [10, 16])
+        self.assertEqual(reasons, ["track_seed", "periodic_refresh"])
         self.assertEqual(tracker.summaries(11.5)[0]["observations"], 4)
+        self.assertEqual(tracker.diagnostics(), {
+            "association_counts": {
+                "new_track": 1,
+                "geometry": 3,
+                "appearance_recovery": 0,
+            },
+            "reid_avoided_geometry_matches": 2,
+            "reid_avoided_by_label": {"car": 2},
+        })
 
     def test_lazy_reid_is_resolved_for_geometry_failure_recovery(self) -> None:
         config = self.config.model_copy(update={
@@ -328,6 +341,10 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         def recover() -> np.ndarray:
             nonlocal calls
             calls += 1
+            self.assertEqual(
+                reappeared.get("_tracking_embedding_reason"),
+                "geometry_recovery",
+            )
             return np.asarray([0.99, 0.01], dtype=np.float32)
 
         reappeared = detection("car", 0.9, (500, 300, 700, 500))
@@ -337,7 +354,58 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(tracked[0]["track_id"], 1)
-        self.assertEqual(tracker.summaries(15.0)[0]["reid_matches"], 1)
+        summary = tracker.summaries(15.0)[0]
+        self.assertEqual(summary["reid_matches"], 1)
+        self.assertEqual(summary["reid_recovery_history"], [{
+            "captured_at": 15.0,
+            "similarity": 0.9999,
+            "resumed_completed_track": True,
+            "box": [500, 300, 700, 500],
+        }])
+
+    def test_upper_garage_style_vehicle_sequence_reports_saved_reid_work(self) -> None:
+        config = self.config.model_copy(update={
+            "vehicle_reid_enabled": True,
+            "vehicle_reid_model_path": "vehicle-reid.xml",
+            "vehicle_reid_match_threshold": 0.8,
+            "lost_timeout_seconds": 3.0,
+            "reid_refresh_interval_frames": 8,
+        })
+        tracker = ByteTrackObjectTracker(config, high_confidence_threshold=0.7)
+
+        def car(box, embedding=(1.0, 0.0)) -> dict:
+            item = detection("car", 0.9, box)
+            item["_tracking_embedding_provider"] = lambda: np.asarray(
+                embedding, dtype=np.float32
+            )
+            return item
+
+        tracker.update(
+            [car((3196, 1161, 3925, 1708))],
+            1785257053.547,
+            confirm_new=True,
+        )
+        startup = tracker.update(
+            [car((2652, 1095, 3282, 1471))],
+            1785257054.987,
+        )
+        tracker.update([], 1785257058.1)
+        recovered = tracker.update(
+            [car((900, 900, 1600, 1400), embedding=(0.99, 0.01))],
+            1785257058.2,
+        )
+
+        self.assertEqual(startup[0]["track_id"], 1)
+        self.assertEqual(recovered[0]["track_id"], 1)
+        self.assertEqual(len(tracker.summaries(1785257058.2)), 1)
+        self.assertEqual(
+            tracker.diagnostics()["association_counts"],
+            {"new_track": 1, "geometry": 1, "appearance_recovery": 1},
+        )
+        self.assertEqual(
+            tracker.diagnostics()["reid_avoided_geometry_matches"],
+            1,
+        )
 
     def test_confirmed_seed_tolerates_an_initial_sampling_gap(self) -> None:
         tracker = ByteTrackObjectTracker(
@@ -367,21 +435,36 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
 class ObjectTrackingSessionTest(unittest.TestCase):
     def test_reid_recovery_telemetry_accumulates_across_sessions(self) -> None:
+        persisted: dict = {}
+
+        def update_event(_event_id, tracking, _tracked):
+            persisted.update(tracking)
+            return {}
+
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
             config=ObjectTrackingConfig(),
             detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
             frame_provider=lambda: None,
-            update_event=lambda _event_id, _tracking, _tracked: {},
+            update_event=update_event,
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
         )
         session._reid_recovery_base = 2
         session._reid_recovery_base_by_label = {"car": 2}
-        tracker = SimpleNamespace(summaries=lambda _captured_at: [
-            {"label": "car", "reid_matches": 1},
-            {"label": "person", "reid_matches": 2},
-        ])
+        session._reid_avoided_base = 4
+        session._reid_avoided_base_by_label = {"car": 4}
+        tracker = SimpleNamespace(
+            summaries=lambda _captured_at: [
+                {"label": "car", "reid_matches": 1},
+                {"label": "person", "reid_matches": 2},
+            ],
+            diagnostics=lambda: {
+                "association_counts": {"geometry": 6},
+                "reid_avoided_geometry_matches": 3,
+                "reid_avoided_by_label": {"car": 3},
+            },
+        )
 
         session._persist(7, tracker, 10.0, None, 3, "active")
 
@@ -389,6 +472,12 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(
             session.status()["reid_recoveries_by_label"],
             {"car": 3, "person": 2},
+        )
+        self.assertEqual(session.status()["reid_avoided_geometry_matches"], 7)
+        self.assertEqual(session.status()["reid_avoided_by_label"], {"car": 7})
+        self.assertEqual(
+            persisted["reid_diagnostics"]["association_counts"],
+            {"geometry": 6},
         )
 
     def test_lazy_annotation_defers_inference_and_records_label_telemetry(self) -> None:
@@ -407,6 +496,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 return np.asarray([1.0, 0.0], dtype=np.float32)
 
         encoder = Encoder()
+        persisted: dict = {}
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
             config=ObjectTrackingConfig(
@@ -415,7 +505,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             ),
             detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
             frame_provider=lambda: None,
-            update_event=lambda _event_id, _tracking, _tracked: {},
+            update_event=lambda _event_id, tracking, _tracked: (
+                persisted.update(tracking) or {}
+            ),
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
             appearance_encoder=encoder,
@@ -431,12 +523,18 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         tracker = ByteTrackObjectTracker(session.config, high_confidence_threshold=0.7)
         tracker.update(objects, 10.0, confirm_new=True)
+        session._persist(7, tracker, 10.0, None, 1, "active")
 
         status = session.status()
         self.assertEqual(encoder.calls, 1)
         self.assertEqual(status["reid_attempts"], 1)
         self.assertEqual(status["reid_successes"], 1)
         self.assertEqual(status["reid_attempts_by_label"], {"car": 1})
+        self.assertEqual(status["reid_attempts_by_reason"], {"track_seed": 1})
+        self.assertEqual(
+            persisted["reid_diagnostics"]["inference_attempts_by_reason"],
+            {"track_seed": 1},
+        )
 
     def test_label_aware_encoder_annotates_people_and_vehicles(self) -> None:
         class Encoder:
@@ -865,7 +963,21 @@ class ObjectTrackingPersistenceTest(unittest.TestCase):
             )
             updated = store.update_object_tracking(
                 int(event["id"]),
-                {"state": "complete", "tracks": [{"track_id": 7}]},
+                {
+                    "state": "complete",
+                    "tracks": [{
+                        "track_id": 7,
+                        "reid_recovery_history": [{
+                            "captured_at": 10.0,
+                            "similarity": 0.91,
+                            "box": [10, 10, 40, 80],
+                        }],
+                    }],
+                    "reid_diagnostics": {
+                        "inference_attempts": 2,
+                        "reid_avoided_geometry_matches": 5,
+                    },
+                },
                 [{
                     **detection("person", 0.9, (10, 10, 40, 80)),
                     "track_id": 99,
@@ -878,6 +990,14 @@ class ObjectTrackingPersistenceTest(unittest.TestCase):
         tracking = [item for item in objects if item.get("status") == "object_tracking"]
         self.assertEqual(len(tracking), 1)
         self.assertEqual(tracking[0]["object_tracking"]["state"], "complete")
+        self.assertEqual(
+            tracking[0]["object_tracking"]["reid_diagnostics"]["reid_avoided_geometry_matches"],
+            5,
+        )
+        self.assertEqual(
+            tracking[0]["object_tracking"]["tracks"][0]["reid_recovery_history"][0]["similarity"],
+            0.91,
+        )
 
 
 if __name__ == "__main__":

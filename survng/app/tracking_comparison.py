@@ -307,6 +307,8 @@ class TrackingComparisonRunner:
             tracker.update([], final_epoch)
             processing_ms[implementation] += (time.perf_counter() - started) * 1000.0
             tracks = tracker.summaries(final_epoch)
+            diagnostics_method = getattr(tracker, "diagnostics", None)
+            diagnostics = diagnostics_method() if callable(diagnostics_method) else {}
             counts = Counter(str(track.get("label")) for track in tracks if track.get("label"))
             fragment_excess = sum(
                 max(0, count - maximum_simultaneous[implementation].get(label, 0))
@@ -323,6 +325,7 @@ class TrackingComparisonRunner:
                 "fragmentation_proxy": fragment_excess,
                 "labels": dict(sorted(counts.items())),
                 "tracks": tracks,
+                "reid_diagnostics": diagnostics,
             }
 
         return {
