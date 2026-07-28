@@ -18,6 +18,7 @@ import numpy as np
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
+from .object_tracking import ObjectTrackingSessionFactory
 from .security import redact_secret_text
 from .motion_pipeline import (
     MotionContext,
@@ -62,6 +63,7 @@ class CameraWorker:
         motion_pipeline_origins: dict[str, str],
         motion_decision_handler_factory: MotionDecisionHandlerFactory,
         motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
+        object_tracking_session_factory: ObjectTrackingSessionFactory,
         motion_analysis_limiter: threading.BoundedSemaphore,
         onvif_cache_dir: Path | None = None,
     ) -> None:
@@ -80,6 +82,10 @@ class CameraWorker:
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
+        )
+        self.object_tracking = object_tracking_session_factory.create(
+            camera=camera,
+            frame_provider=lambda: self._get_latest_frame("main"),
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
@@ -216,6 +222,7 @@ class CameraWorker:
             self._enabled = False
             self._stop.set()
             self._active_incident_event_id = None
+            self.object_tracking.stop()
             with self._frame_lock:
                 stops = list(self._source_stops.values())
                 threads = list(self._source_threads.items())
@@ -355,6 +362,7 @@ class CameraWorker:
             "onvif_last_motion_event_at": self.onvif.last_motion_event_at,
             "last_motion_at": self.last_motion_at,
             "detection_enabled": self._detection_enabled,
+            "object_tracking": self.object_tracking.status(),
             "onvif_last_error": self.onvif.last_error,
             "onvif_last_connected_at": self.onvif.last_connected_at,
             "onvif_last_poll_success_at": self.onvif.last_poll_success_at,
@@ -422,6 +430,8 @@ class CameraWorker:
 
     def set_detection_enabled(self, enabled: bool) -> None:
         self._detection_enabled = bool(enabled)
+        if not self._detection_enabled:
+            self.object_tracking.stop()
 
     def snapshot(self, source: str = "live") -> bytes | None:
         frame = self._get_latest_frame(source)
@@ -1655,13 +1665,20 @@ class CameraWorker:
         *,
         require_eligible_object: bool = False,
     ) -> dict[str, Any]:
-        return self.motion_decision_handler.handle(
+        outcome = self.motion_decision_handler.handle(
             topic,
             message,
             event_at,
             qualification,
             require_eligible_object=require_eligible_object,
-        ).as_dict()
+        )
+        if outcome.event_id is not None and outcome.object_detected:
+            self.object_tracking.start(
+                outcome.event_id,
+                event_at,
+                list(outcome.detected_objects),
+            )
+        return outcome.as_dict()
 
     def _related_incident_event_id(self, result: MotionQualificationResult) -> int | None:
         if result.reason not in INCIDENT_ACTIVITY_REASONS:

@@ -58,6 +58,7 @@ class MotionDecisionOutcome:
     event_id: int | None
     snapshot_path: str
     object_detected: bool | None
+    detected_objects: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +138,7 @@ class MotionDecisionHandler:
                 event_id=None,
                 snapshot_path="",
                 object_detected=False if detection_completed else None,
+                detected_objects=tuple(eligible_objects),
             )
 
         snapshot_path = ""
@@ -187,6 +189,7 @@ class MotionDecisionHandler:
             event_id=event_id,
             snapshot_path=snapshot_path,
             object_detected=bool(eligible_objects) if detection_completed else None,
+            detected_objects=tuple(eligible_objects),
         )
 
     def record_audit(

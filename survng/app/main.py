@@ -3555,6 +3555,16 @@ def _event_row(row: dict) -> dict:
     if not isinstance(objects, list):
         objects = []
     objects = [item for item in objects if isinstance(item, dict)]
+    tracking_entry = next(
+        (
+            item.get("object_tracking")
+            for item in reversed(objects)
+            if item.get("status") == "object_tracking"
+            and isinstance(item.get("object_tracking"), dict)
+        ),
+        None,
+    )
+    event["object_tracking"] = tracking_entry
 
     def positive_confidence(item: dict) -> bool:
         try:
@@ -3735,12 +3745,16 @@ def _incident_event_payload(event: dict) -> dict:
                 "zones",
                 "mask_polygon",
                 "incident_eligible",
+                "track_id",
+                "track_state",
+                "track_observations",
             )
             if key in item
         }
         for item in payload.get("objects", [])
         if isinstance(item, dict) and item.get("label")
     ]
+    payload["object_tracking"] = event.get("object_tracking")
     return payload
 
 
@@ -3762,7 +3776,13 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         ],
         key=event_epoch,
     )
-    final_item = max([last, *motion_observations], key=event_epoch)
+    tracking_updates = [
+        {"created_at": str(tracking.get("updated_at") or "")}
+        for event in ordered
+        if isinstance((tracking := event.get("object_tracking")), dict)
+        and tracking.get("updated_at")
+    ]
+    final_item = max([last, *motion_observations, *tracking_updates], key=event_epoch)
     last_epoch = event_epoch(final_item)
     object_count = sum(1 for event in ordered if event.get("has_objects"))
     incident = {
@@ -3786,6 +3806,14 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         "zones": zones,
         "events": [_incident_event_payload(event) for event in reversed(ordered)],
         "motion_observations": list(reversed(motion_observations)),
+        "object_tracking": next(
+            (
+                event.get("object_tracking")
+                for event in reversed(ordered)
+                if isinstance(event.get("object_tracking"), dict)
+            ),
+            None,
+        ),
     }
     return incident
 

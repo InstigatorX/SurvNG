@@ -223,6 +223,18 @@ class CameraConfig(BaseModel):
 
 
 
+class ObjectTrackingConfig(BaseModel):
+    enabled: bool = True
+    implementation: Literal["bytetrack"] = "bytetrack"
+    sample_fps: float = Field(default=2.0, ge=0.5, le=5.0)
+    max_session_seconds: float = Field(default=15.0, ge=3.0, le=120.0)
+    lost_timeout_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
+    min_confirmations: int = Field(default=2, ge=1, le=10)
+    low_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
+    match_iou_threshold: float = Field(default=0.20, ge=0.05, le=0.90)
+    max_active_cameras: int = Field(default=2, ge=1, le=16)
+
+
 class DetectorConfig(BaseModel):
     enabled: bool = False
     backend: Literal["openvino", "coreml"] = "openvino"
@@ -245,6 +257,7 @@ class DetectorConfig(BaseModel):
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     labels: list[str] = Field(default_factory=list)
+    tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
 
     def resolved_model_path(self) -> str:
         return self.model_path or self.model_xml

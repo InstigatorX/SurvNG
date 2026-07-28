@@ -14,9 +14,10 @@ import numpy as np
 import cv2
 
 from survng.app.camera import CameraWorker
-from survng.app.config import CameraConfig, MotionQualificationConfig
+from survng.app.config import CameraConfig, MotionQualificationConfig, ObjectTrackingConfig
 from survng.app.detector import objects_to_json
 from survng.app.motion import MotionQualificationResult
+from survng.app.object_tracking import ObjectTrackingSessionFactory
 from survng.app.motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
     MotionDecisionHandlerFactory,
@@ -109,6 +110,13 @@ def make_worker(
         motion_object_detector_factory=RecordedMotionObjectDetectorFactory(
             detector=detector_backend,
             recorder=recording_provider,
+        ),
+        object_tracking_session_factory=ObjectTrackingSessionFactory(
+            config=ObjectTrackingConfig(enabled=False),
+            detector=detector_backend,
+            update_event=lambda _event_id, _tracking, _objects: None,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
         ),
         motion_analysis_limiter=threading.BoundedSemaphore(2),
     )

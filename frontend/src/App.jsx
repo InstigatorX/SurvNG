@@ -1968,6 +1968,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, onFaceOpen }) {
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
   const objects = eventObjects(incident).filter((object) => object.label && object.incident_eligible !== false);
+  const objectTracks = incident.object_tracking?.tracks || [];
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(incident);
   const eventId = Number(incident.representative_event_id || incident.id);
@@ -1995,6 +1996,13 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
           );
         }) : <p>No eligible object detections.</p>}
       </section>
+      {objectTracks.length ? <section>
+        <h3>Object tracks</h3>
+        {objectTracks.map((track) => <div className="inspector-detection" key={track.track_id}>
+          <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
+          <small>{track.observations} observations · {formatDuration(track.duration_seconds || 0)}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
+        </div>)}
+      </section> : null}
       <section>
         <h3>Faces</h3>
         {faces.length ? faces.map((face, index) => (
@@ -5768,6 +5776,23 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label className="check-field"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /> Warm up detector at startup</label>
           <label>Saved Face Limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest faces are removed first; one confirmed reference is kept for each person.</small></label>
         </div>
+        <h3>Continuous Object Tracking</h3>
+        <p className="muted">After a person, vehicle, or other configured object is found, SurvNG follows each object with a separate numbered track. Tracking stops when every object leaves or the time limit is reached.</p>
+        <div className="field-row">
+          <label className="check-field"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /> Follow detected objects</label>
+          <label>Tracking detail<select value={String(config.detector?.tracking?.sample_fps ?? 2)} onChange={(event) => updateConfig(["detector", "tracking", "sample_fps"], Number(event.target.value))}><option value="1">Lower CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Smoother (3 frames/sec)</option><option value="5">Maximum detail (5 frames/sec)</option></select><small>OpenVINO runs once for every analyzed tracking frame.</small></label>
+          <label>Maximum tracking time<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after the initial object detection.</small></label>
+          <label>Wait after object disappears<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Keeps the same ID through a short obstruction or missed detection.</small></label>
+          <label>Simultaneous cameras<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Limits tracking load when several cameras trigger together.</small></label>
+        </div>
+        <details className="motion-tuning-details">
+          <summary>Advanced object tracking</summary>
+          <div className="field-row">
+            <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. The incident's initial high-confidence objects are trusted immediately.</small></label>
+            <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
+            <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
+          </div>
+        </details>
         <h3>Motion Triggers &amp; Filtering</h3>
         <EfficientMotionSetup
           active={isEfficientMotionSetup({

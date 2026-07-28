@@ -20,6 +20,7 @@ from .go2rtc import Go2RtcAdapter
 from .inference import InferenceSupervisor, IsolatedFaceRecognizer
 from .image_cache import LocalImageCache
 from .mqtt import MqttService
+from .object_tracking import ObjectTrackingSessionFactory
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
     EVIDENCE_REPOSITORY_SERVICE,
@@ -113,6 +114,9 @@ class AppManager:
         )
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()
+        self._object_tracking_limiter = threading.BoundedSemaphore(
+            config.detector.tracking.max_active_cameras
+        )
         self.motion_pipeline_registry = build_builtin_motion_registry()
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
@@ -121,6 +125,13 @@ class AppManager:
         self.motion_object_detector_factory = RecordedMotionObjectDetectorFactory(
             detector=self.detector,
             recorder=self.recorder,
+        )
+        self.object_tracking_session_factory = ObjectTrackingSessionFactory(
+            config=config.detector.tracking,
+            detector=self.detector,
+            update_event=self.events.update_object_tracking,
+            publisher=self.publish_event,
+            limiter=self._object_tracking_limiter,
         )
         self.mqtt = MqttService(
             config.mqtt,
@@ -215,6 +226,7 @@ class AppManager:
                 motion_pipeline_origins=graphs.origins,
                 motion_decision_handler_factory=self.motion_decision_handler_factory,
                 motion_object_detector_factory=self.motion_object_detector_factory,
+                object_tracking_session_factory=self.object_tracking_session_factory,
                 motion_analysis_limiter=self._motion_analysis_limiter,
                 onvif_cache_dir=self.database_dir / "onvif",
             )
@@ -603,6 +615,13 @@ class AppManager:
             }
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
         self.state_events.publish(event_type, payload)
+        if event_type == "object_tracking" and payload.get("state") != "active":
+            # Existing incident clients already use this event to coalesce refreshes.
+            self.state_events.publish("incident", {
+                "event_id": payload.get("event_id"),
+                "camera_id": camera_id,
+                "updated": True,
+            })
         if event_type == "object":
             camera = self.camera(camera_id)
             if camera is not None:

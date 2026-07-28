@@ -881,6 +881,63 @@ class EventStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def update_object_tracking(
+        self,
+        event_id: int,
+        tracking: dict[str, Any],
+        tracked_objects: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically replace tracking metadata without losing concurrent event data."""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select objects_json from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                objects = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                objects = []
+            if not isinstance(objects, list):
+                objects = []
+            objects = [
+                item
+                for item in objects
+                if not (isinstance(item, dict) and item.get("status") == "object_tracking")
+            ]
+            if tracked_objects:
+                assignments = {
+                    (
+                        str(item.get("label") or ""),
+                        json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
+                    ): item
+                    for item in tracked_objects
+                    if item.get("track_id") is not None
+                }
+                for item in objects:
+                    if not isinstance(item, dict) or not item.get("label"):
+                        continue
+                    assigned = assignments.get((
+                        str(item.get("label") or ""),
+                        json.dumps(item.get("box"), sort_keys=True, separators=(",", ":")),
+                    ))
+                    if assigned is not None:
+                        item["track_id"] = assigned["track_id"]
+                        item["track_state"] = assigned.get("track_state")
+                        item["track_observations"] = assigned.get("track_observations")
+            objects.append({"status": "object_tracking", "object_tracking": tracking})
+            objects_json = json.dumps(objects, separators=(",", ":"))
+            conn.execute(
+                "update events set objects_json = ? where id = ?",
+                (objects_json, event_id),
+            )
+            updated = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated) if updated is not None else None
+
     def for_camera_range(
         self,
         camera_id: str,

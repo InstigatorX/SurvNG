@@ -42,7 +42,18 @@
     "device": "CPU",
     "confidence_threshold": 0.45,
     "nms_threshold": 0.45,
-    "labels": []
+    "labels": [],
+    "tracking": {
+      "enabled": true,
+      "implementation": "bytetrack",
+      "sample_fps": 2.0,
+      "max_session_seconds": 15.0,
+      "lost_timeout_seconds": 3.0,
+      "min_confirmations": 2,
+      "low_confidence_threshold": 0.25,
+      "match_iou_threshold": 0.2,
+      "max_active_cameras": 2
+    }
   },
   "cameras": []
 }

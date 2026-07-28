@@ -388,6 +388,29 @@ preferred. SurvNG retries briefly while newly written recording segments are
 being finalized. If no recorded frame becomes readable, it fails over to the
 latest live frame and marks that source in event metadata.
 
+### Detection-triggered object tracking
+
+When the selected event frame contains an incident-eligible object and
+`detector.tracking.enabled` is true, SurvNG starts a bounded per-camera
+tracking session. The existing OpenVINO detector remains responsible for
+frame-level boxes, classes, and confidence. A separate ByteTrack-style
+tracking-by-detection stage associates those boxes over time and assigns
+camera-local track IDs.
+
+The initial high-confidence incident detections are confirmed immediately.
+During the session, lower-confidence boxes may preserve an existing track but
+cannot create a new track until a normal detector-confidence observation is
+seen. A short lost timeout preserves IDs through missed detections and brief
+occlusion. Tracking ends when all tracks expire or `max_session_seconds` is
+reached. IDs are local to the event and camera; they are not identities and do
+not carry across a service restart or between cameras.
+
+Tracking runs only after an eligible object is found. It samples the main
+camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous
+sessions so a burst of camera activity cannot create unbounded inference and
+decode load. Track summaries, trajectories, zones, observation counts, and
+first/last-seen timestamps are stored with the originating incident.
+
 Model thresholds are applied before zone eligibility. Detection boxes use the
 source image coordinate system and are persisted with labels, confidence,
 zones, and incident eligibility.

@@ -276,6 +276,44 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(incident["end_at"], "2026-07-27T12:17:16+00:00")
         self.assertEqual(incident["motion_observations"][0]["id"], 3278)
 
+    def test_object_tracking_extends_same_incident_and_exposes_track_ids(self) -> None:
+        event = main._event_row({
+            "id": 43,
+            "camera_id": "gate",
+            "created_at": "2026-07-27T12:17:07+00:00",
+            "objects_json": json.dumps([
+                {
+                    "label": "person",
+                    "confidence": 0.9,
+                    "incident_eligible": True,
+                    "track_id": 1,
+                    "track_state": "confirmed",
+                    "track_observations": 4,
+                },
+                {
+                    "status": "object_tracking",
+                    "object_tracking": {
+                        "state": "complete",
+                        "updated_at": "2026-07-27T12:17:15+00:00",
+                        "tracks": [{
+                            "track_id": 1,
+                            "label": "person",
+                            "state": "confirmed",
+                            "observations": 4,
+                        }],
+                    },
+                },
+            ]),
+        })
+
+        incident = main._incident_row("gate", [event])
+
+        self.assertEqual(incident["event_count"], 1)
+        self.assertEqual(incident["duration_seconds"], 8.0)
+        self.assertEqual(incident["end_at"], "2026-07-27T12:17:15+00:00")
+        self.assertEqual(incident["object_tracking"]["tracks"][0]["track_id"], 1)
+        self.assertEqual(incident["events"][0]["objects"][0]["track_id"], 1)
+
     def test_incident_payload_keeps_annotation_fields_without_detector_diagnostics(self) -> None:
         payload = main._incident_event_payload({
             "id": 42,
@@ -288,6 +326,9 @@ class EventApiSerializationTest(unittest.TestCase):
                 "zones": ["yard"],
                 "mask_polygon": [[1, 2], [3, 4]],
                 "incident_eligible": True,
+                "track_id": 3,
+                "track_state": "confirmed",
+                "track_observations": 5,
                 "raw_detection_tensor": [1, 2, 3],
                 "frame_source": "diagnostic-only",
             }],
@@ -297,6 +338,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertNotIn("message", payload)
         self.assertEqual(payload["objects"][0]["label"], "person")
         self.assertEqual(payload["objects"][0]["zones"], ["yard"])
+        self.assertEqual(payload["objects"][0]["track_id"], 3)
         self.assertNotIn("raw_detection_tensor", payload["objects"][0])
         self.assertNotIn("frame_source", payload["objects"][0])
 
