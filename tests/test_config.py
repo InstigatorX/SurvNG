@@ -19,6 +19,9 @@ from survng.app.config import (
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_person_reid_uses_conservative_similarity_default(self) -> None:
+        self.assertEqual(ObjectTrackingConfig().reid_match_threshold, 0.70)
+
     def test_person_reid_requires_a_model_when_enabled(self) -> None:
         with self.assertRaisesRegex(ValidationError, "reid_model_path"):
             ObjectTrackingConfig(reid_enabled=True)

@@ -239,7 +239,7 @@ class ObjectTrackingConfig(BaseModel):
     reid_enabled: bool = False
     reid_model_path: str = Field(default="", max_length=4096)
     reid_device: str = Field(default="AUTO", min_length=1, max_length=64)
-    reid_match_threshold: float = Field(default=0.82, ge=0.0, le=1.0)
+    reid_match_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     reid_max_age_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     reid_max_embeddings_per_frame: int = Field(default=8, ge=1, le=64)
     reid_refresh_interval_frames: int = Field(default=8, ge=1, le=120)
