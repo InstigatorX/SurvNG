@@ -69,6 +69,7 @@ import {
 } from "./liveTransport.mjs";
 import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
 import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
+import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -241,6 +242,12 @@ const ShakaVideo = forwardRef(function ShakaVideo({
       onFocus={(event) => {
         if (controls) setNativeControlsVisible(true);
         onFocus?.(event);
+      }}
+      onError={(event) => {
+        const mediaError = event.currentTarget.error;
+        callbacksRef.current.onError?.(mediaError
+          ? { code: mediaError.code, message: mediaError.message || "Native media playback failed" }
+          : new Error("Native media playback failed"));
       }}
     />
   );
@@ -3803,6 +3810,7 @@ function RecordingsPage({ timeZone }) {
   const latestAvailabilityRef = useRef(null);
   const pendingSeekEpochRef = useRef(null);
   const pendingSeekModeRef = useRef(null);
+  const playbackRetryRef = useRef({ attempts: 0, timer: null });
   const today = dateKeyForTimeZone(Date.now(), timeZone);
   const queryDate = initialQuery.get("date") || (initialEpoch ? dateKeyForTimeZone(initialEpoch * 1000, timeZone) : today);
   const querySource = initialQuery.get("source");
@@ -3817,9 +3825,13 @@ function RecordingsPage({ timeZone }) {
   const [playhead, setPlayhead] = useState(null);
   const [loading, setLoading] = useState(true);
   const [playbackError, setPlaybackError] = useState("");
+  const [playbackErrorStage, setPlaybackErrorStage] = useState("");
   const [playbackNotice, setPlaybackNotice] = useState("");
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [playbackWindow, setPlaybackWindow] = useState(null);
+  const [playbackWindowRevision, setPlaybackWindowRevision] = useState(0);
+  const [manifestRetryToken, setManifestRetryToken] = useState(0);
+  const [recordingIndexRevision, setRecordingIndexRevision] = useState(0);
   const [followTarget, setFollowTarget] = useState(null);
 
   const activeCameraId = cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
@@ -3858,7 +3870,7 @@ function RecordingsPage({ timeZone }) {
   }, [playbackDetail]);
   const loadedPlaybackWindow = playbackDetail;
   const manifestUrl = activeCameraId && playbackDetail && playbackTimeline.length
-    ? recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)
+    ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
   const manifestStartTime = useMemo(() => {
     if (!playbackTimeline.length) return null;
@@ -3926,6 +3938,11 @@ function RecordingsPage({ timeZone }) {
     };
   }
 
+  function requestPlaybackWindow(nextWindow) {
+    setPlaybackWindow(nextWindow);
+    setPlaybackWindowRevision((revision) => revision + 1);
+  }
+
   function requestRecordingPlay(video, showBlocked = true) {
     if (!video) return;
     video.play().then(() => {
@@ -3944,16 +3961,18 @@ function RecordingsPage({ timeZone }) {
     autoplayRef.current = autoplay;
     setFollowTarget(null);
     setPlaybackError("");
+    setPlaybackErrorStage("");
     setPlayhead(target);
     desiredEpochRef.current = target;
     const nextWindow = windowAround(target);
     const inCurrentWindow = loadedPlaybackWindow
       && target >= loadedPlaybackWindow.start
       && target < loadedPlaybackWindow.end;
+    const coveredByCurrentManifest = playbackRowsCoverEpoch(playbackTimeline, target);
     const video = videoRef.current;
     if (autoplay && video) requestRecordingPlay(video, false);
     const mediaTime = epochToPlaybackMediaTime(target);
-    if (inCurrentWindow && video && Number.isFinite(mediaTime)) {
+    if (inCurrentWindow && coveredByCurrentManifest && video && Number.isFinite(mediaTime)) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "local";
       playbackRequestRef.current += 1;
@@ -3966,7 +3985,7 @@ function RecordingsPage({ timeZone }) {
       pendingSeekEpochRef.current = target;
       pendingSeekModeRef.current = "window";
       setPlaybackNotice("Loading recording...");
-      setPlaybackWindow(nextWindow);
+      requestPlaybackWindow(nextWindow);
     }
   }
 
@@ -3979,7 +3998,10 @@ function RecordingsPage({ timeZone }) {
       })
       .then(setCameras)
       .catch((error) => {
-        if (error.name !== "AbortError") setPlaybackError("Unable to load cameras");
+        if (error.name !== "AbortError") {
+          setPlaybackErrorStage("index");
+          setPlaybackError("Unable to load cameras");
+        }
       });
     return () => controller.abort();
   }, []);
@@ -3989,6 +4011,7 @@ function RecordingsPage({ timeZone }) {
     const controller = new AbortController();
     setLoading(true);
     setPlaybackError("");
+    setPlaybackErrorStage("");
     setPlaybackBlocked(false);
     setRecordings([]);
     playbackRequestRef.current += 1;
@@ -3996,6 +4019,7 @@ function RecordingsPage({ timeZone }) {
     setEvents([]);
     setAvailableSources([]);
     setPlaybackWindow(null);
+    setManifestRetryToken(0);
     setFollowTarget(null);
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
@@ -4006,6 +4030,8 @@ function RecordingsPage({ timeZone }) {
       video.pause();
     }
     codecFallbackRef.current = false;
+    if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
+    playbackRetryRef.current = { attempts: 0, timer: null };
     fetch(recordingDayUrl(activeCameraId, dayStart, dayEnd, source), { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Recording index failed (${response.status})`);
@@ -4025,13 +4051,20 @@ function RecordingsPage({ timeZone }) {
         setEvents(payload.events || []);
       })
       .catch((error) => {
-        if (error.name !== "AbortError") setPlaybackError(error.message || "Unable to load recordings");
+        if (error.name !== "AbortError") {
+          setPlaybackErrorStage("index");
+          setPlaybackError(error.message || "Unable to load recordings");
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    return () => controller.abort();
-  }, [activeCameraId, source, dayStart, dayEnd]);
+    return () => {
+      controller.abort();
+      if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
+      playbackRetryRef.current = { attempts: 0, timer: null };
+    };
+  }, [activeCameraId, source, dayStart, dayEnd, recordingIndexRevision]);
 
   useEffect(() => {
     if (!activeCameraId || date !== today) return undefined;
@@ -4092,6 +4125,7 @@ function RecordingsPage({ timeZone }) {
           start: Number(payload.start_epoch),
           end: Number(payload.end_epoch),
           rows,
+          revision: requestId,
         });
       })
       .catch((error) => {
@@ -4099,11 +4133,12 @@ function RecordingsPage({ timeZone }) {
           pendingSeekEpochRef.current = null;
           pendingSeekModeRef.current = null;
           setPlaybackNotice("");
+          setPlaybackErrorStage("window");
           setPlaybackError(error.message || "Unable to load recording window");
         }
       });
     return () => controller.abort();
-  }, [activeCameraId, source, playbackWindow?.start, playbackWindow?.end]);
+  }, [activeCameraId, source, playbackWindow?.start, playbackWindow?.end, playbackWindowRevision]);
 
   useEffect(() => {
     if (!timeline.length || Number.isFinite(playhead)) return;
@@ -4133,6 +4168,8 @@ function RecordingsPage({ timeZone }) {
   }, [activeCameraId, date, source, dayStart, dayEnd]);
 
   function handleRecordingReady(_player, video) {
+    if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
+    playbackRetryRef.current = { attempts: 0, timer: null };
     const retained = Number.isFinite(pendingSeekEpochRef.current)
       ? pendingSeekEpochRef.current
       : desiredEpochRef.current;
@@ -4146,6 +4183,7 @@ function RecordingsPage({ timeZone }) {
     pendingSeekEpochRef.current = null;
     pendingSeekModeRef.current = null;
     setPlaybackError("");
+    setPlaybackErrorStage("");
     setPlaybackNotice("");
     if (autoplayRef.current) requestRecordingPlay(video);
   }
@@ -4171,14 +4209,58 @@ function RecordingsPage({ timeZone }) {
     setPlaybackNotice("");
   }
 
-  function handleRecordingError() {
-    if (source === "main" && availableSources.includes("live") && !codecFallbackRef.current) {
+  function handleRecordingError(error) {
+    const detail = describePlaybackError(error);
+    console.warn("Recording playback error", { camera: activeCameraId, source, detail, error });
+    if (source === "main" && availableSources.includes("live") && !codecFallbackRef.current && isUnsupportedPlaybackError(error)) {
       codecFallbackRef.current = true;
-      setPlaybackNotice("Main stream is not supported by this browser; using Sub.");
+      setPlaybackNotice(`Main stream is not supported by this browser; using Sub. (${detail})`);
       setSource("live");
       return;
     }
-    setPlaybackError("This browser could not play the selected recording stream");
+    if (playbackRetryRef.current.timer) return;
+    if (playbackRetryRef.current.attempts < 4 && manifestUrl) {
+      playbackRetryRef.current.attempts += 1;
+      const attempt = playbackRetryRef.current.attempts;
+      const delay = Math.min(5_000, 750 * (2 ** (attempt - 1)));
+      setPlaybackError("");
+      setPlaybackErrorStage("");
+      setPlaybackNotice(`Playback interrupted (${detail}). Retrying ${attempt}/4...`);
+      playbackRetryRef.current.timer = window.setTimeout(() => {
+        playbackRetryRef.current.timer = null;
+        setManifestRetryToken((token) => token + 1);
+      }, delay);
+      return;
+    }
+    setPlaybackNotice("");
+    setPlaybackErrorStage("media");
+    setPlaybackError(`Playback failed: ${detail}`);
+  }
+
+  function retryRecordingPlayback() {
+    if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
+    playbackRetryRef.current = { attempts: 0, timer: null };
+    setPlaybackError("");
+    setPlaybackErrorStage("");
+    setPlaybackNotice("Retrying recording...");
+    if (playbackErrorStage === "window" && playbackWindow) {
+      requestPlaybackWindow(playbackWindow);
+      return;
+    }
+    if (playbackErrorStage === "index") {
+      if (!activeCameraId) {
+        window.location.reload();
+        return;
+      }
+      setRecordingIndexRevision((revision) => revision + 1);
+      return;
+    }
+    if (manifestUrl) {
+      setManifestRetryToken((token) => token + 1);
+      return;
+    }
+    const target = Number.isFinite(desiredEpochRef.current) ? desiredEpochRef.current : Date.now() / 1000;
+    requestPlaybackWindow(windowAround(target));
   }
 
   function continueRecordingPlayback() {
@@ -4245,7 +4327,7 @@ function RecordingsPage({ timeZone }) {
           ) : null}
           {loading ? <div className="recordings-v2-message"><Film size={28} />Loading recordings</div> : null}
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
-          {playbackError ? <div className="recordings-v2-error">{playbackError}</div> : null}
+          {playbackError ? <div className="recordings-v2-error"><span>{playbackError}</span><button type="button" onClick={retryRecordingPlayback}><RefreshCcw size={14} />Retry</button></div> : null}
           {playbackNotice && !playbackError ? <div className="recordings-v2-notice">{playbackNotice}</div> : null}
           {playbackBlocked && !playbackError ? (
             <button type="button" className="recordings-v2-play" onClick={() => requestRecordingPlay(videoRef.current)}>

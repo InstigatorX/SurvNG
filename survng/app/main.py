@@ -3426,7 +3426,11 @@ def recording_day(
     selected_source = recording_source(source)
     source_availability = {
         candidate: manager.recorder.recording_availability_between(
-            camera_id, start_epoch, end_epoch, candidate
+            camera_id,
+            start_epoch,
+            end_epoch,
+            candidate,
+            discover_missing=False,
         )
         for candidate in ("main", "live")
     }
@@ -3496,6 +3500,7 @@ def recording_updates(
         update_start,
         end_epoch,
         selected_source,
+        discover_missing=False,
     )
     events = manager.events.for_camera_range(
         camera_id,

@@ -505,6 +505,27 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(availability["ranges"][1]["segment_count"], 1)
         self.assertNotIn("path", availability["ranges"][0])
 
+    def test_index_only_availability_does_not_touch_recording_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "clip.mp4"
+            clip.write_bytes(b"x" * 2048)
+            recorder._store_recording_rows(
+                "front-door",
+                "main",
+                [self._row(clip, start_epoch=1_784_000_000.0)],
+            )
+
+            with patch.object(Path, "is_file", side_effect=AssertionError("filesystem accessed")):
+                availability = recorder.recording_availability_between(
+                    "front-door",
+                    1_784_000_000.0,
+                    1_784_000_020.0,
+                    discover_missing=False,
+                )
+
+        self.assertEqual(availability["segment_count"], 1)
+
     def test_refresh_recording_edge_indexes_only_completed_recent_segments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

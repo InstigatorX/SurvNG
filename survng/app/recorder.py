@@ -618,15 +618,15 @@ class Recorder:
             return [dict(row) for row in indexed]
 
         rows = indexed_rows()
-        stale_paths = {str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()}
-        if stale_paths:
-            self._delete_index_paths(list(stale_paths))
-            rows = [row for row in rows if str(row["path"]) not in stale_paths]
-
         if not discover_missing:
             for row in rows:
                 row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
             return rows
+
+        stale_paths = {str(row["path"]) for row in rows if not Path(str(row["path"])).is_file()}
+        if stale_paths:
+            self._delete_index_paths(list(stale_paths))
+            rows = [row for row in rows if str(row["path"]) not in stale_paths]
 
         start_date = datetime.fromtimestamp(start_epoch).date() - timedelta(days=1)
         end_date = datetime.fromtimestamp(end_epoch).date() + timedelta(days=1)
@@ -686,6 +686,8 @@ class Recorder:
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
+        *,
+        discover_missing: bool = True,
     ) -> dict:
         source = "main" if source == "main" else "live"
         rows = [
@@ -695,6 +697,7 @@ class Recorder:
                 start_epoch,
                 end_epoch,
                 source,
+                discover_missing=discover_missing,
             )
             if int(row.get("size_bytes") or 0) > 1024
         ]

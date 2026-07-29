@@ -5,7 +5,7 @@ import struct
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
@@ -76,6 +76,50 @@ class RecordingApiTest(unittest.TestCase):
 
         self.assertTrue(path.name.startswith("42-0-2000-a3-"))
         self.assertIn("front-door", path.parts)
+
+    def test_recording_day_reads_both_sources_from_index_only(self) -> None:
+        recorder = Mock()
+        recorder.recording_availability_between.side_effect = (
+            lambda _camera_id, _start, _end, source, **_kwargs: {
+                "ranges": [{"start_epoch": 100.0, "end_epoch": 110.0}] if source == "main" else [],
+                "segment_count": 1 if source == "main" else 0,
+            }
+        )
+        manager = SimpleNamespace(
+            camera=lambda _camera_id: object(),
+            recorder=recorder,
+            events=SimpleNamespace(for_camera_range=lambda *_args, **_kwargs: []),
+        )
+
+        with patch.object(main, "manager", manager):
+            payload = main.recording_day("gate", 100.0, 200.0, "main")
+
+        self.assertEqual(payload["available_sources"], ["main"])
+        self.assertEqual(recorder.recording_availability_between.call_count, 2)
+        for call in recorder.recording_availability_between.call_args_list:
+            self.assertIs(call.kwargs["discover_missing"], False)
+
+    def test_recording_updates_refreshes_edge_then_reads_index_only(self) -> None:
+        recorder = Mock()
+        recorder.recording_availability_between.return_value = {
+            "ranges": [{"start_epoch": 180.0, "end_epoch": 200.0}],
+            "segment_count": 2,
+        }
+        manager = SimpleNamespace(
+            camera=lambda _camera_id: object(),
+            recorder=recorder,
+            events=SimpleNamespace(for_camera_range=lambda *_args, **_kwargs: []),
+        )
+
+        with patch.object(main, "manager", manager):
+            payload = main.recording_updates("gate", 100.0, 200.0, 190.0, "main")
+
+        recorder.refresh_recording_edge.assert_called_once_with("gate", "main", 190.0)
+        self.assertEqual(payload["availability"], [{"start_epoch": 180.0, "end_epoch": 200.0}])
+        self.assertIs(
+            recorder.recording_availability_between.call_args.kwargs["discover_missing"],
+            False,
+        )
 
 
 if __name__ == "__main__":

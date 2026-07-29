@@ -6149,13 +6149,31 @@ section.detection-settings-card {
 
 .recordings-v2-error {
   inset: auto 10px 10px;
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
   border: 1px solid rgba(194, 65, 93, .45);
   border-radius: 6px;
   background: rgba(40, 11, 18, .9);
   color: #ffb5c3;
   padding: 8px 10px;
   text-align: center;
+}
+
+.recordings-v2-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  border: 1px solid rgba(255, 181, 195, .35);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .08);
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+  padding: 5px 8px;
+  cursor: pointer;
 }
 
 .recordings-v2-controls {

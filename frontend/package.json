@@ -7,6 +7,7 @@
     "test:live-transport": "node tests/live-transport.mjs",
     "test:storage": "node tests/storage.mjs",
     "test:recordings-soak": "node tests/recordings-soak.mjs",
+    "test:recording-playback": "node tests/recording-playback.mjs",
     "test:object-tracks": "node tests/object-track-replay.mjs"
   },
   "dependencies": {
