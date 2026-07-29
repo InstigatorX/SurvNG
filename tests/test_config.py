@@ -146,6 +146,13 @@ class AppConfigTest(unittest.TestCase):
             AppConfig.model_validate({
                 "detector": {"event_class_confirmation_frames": {"person": 6}},
             })
+        for invalid in (True, 2.5):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                AppConfig.model_validate({
+                    "detector": {
+                        "event_class_confirmation_frames": {"person": invalid},
+                    },
+                })
 
     def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
         with self.assertRaises(ValidationError):

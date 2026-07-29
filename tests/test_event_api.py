@@ -308,6 +308,63 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertTrue(context["decision_outcome"]["object_detection_completed"])
         self.assertFalse(context["decision_outcome"]["filtered_before_object_detection"])
 
+    def test_motion_audit_ai_context_preserves_temporal_object_evidence(self) -> None:
+        config = AppConfig.model_validate({
+            "detector": {
+                "event_confirmation_frames": 2,
+                "event_class_confirmation_frames": {"robot_lawnmower": 3},
+            },
+            "cameras": [{
+                "id": "back-middle",
+                "name": "Back Middle",
+                "stream_url": "rtsp://camera.invalid/main",
+            }],
+        })
+        event = {
+            "objects_json": json.dumps([{
+                "label": "robot_lawnmower",
+                "confidence": 0.81,
+                "incident_eligible": False,
+                "temporal_consensus": False,
+                "temporal_sample_offset_seconds": -0.5,
+                "temporal_observations": 2,
+                "temporal_track_observations": 3,
+                "temporal_required_observations": 3,
+                "temporal_samples": 3,
+                "temporal_peak_confidence": 0.91,
+                "temporal_label_votes": {"robot_lawnmower": 2, "car": 1},
+            }]),
+        }
+        events = SimpleNamespace(
+            get=lambda _event_id: event,
+            motion_audits=lambda **_kwargs: ([], 0),
+            for_camera_range=lambda *_args, **_kwargs: [],
+        )
+
+        context = main._audit_ai_context(
+            {
+                "id": 9,
+                "camera_id": "back-middle",
+                "features_json": "{}",
+                "created_at": "2026-07-28T22:48:15+00:00",
+                "reason": "qualified",
+                "event_id": 33,
+                "object_detected": 0,
+            },
+            config,
+            SimpleNamespace(events=events),
+        )
+
+        detected = context["detected_objects"][0]
+        self.assertEqual(detected["temporal_observations"], 2)
+        self.assertEqual(detected["temporal_required_observations"], 3)
+        self.assertEqual(detected["temporal_label_votes"]["car"], 1)
+        self.assertEqual(context["effective_settings"]["object_confirmation_frames"], 2)
+        self.assertEqual(
+            context["effective_settings"]["object_class_confirmation_frames"],
+            {"robot_lawnmower": 3},
+        )
+
     def test_manual_camera_review_starts_a_background_job(self) -> None:
         config = AppConfig.model_validate({
             "audit_ai": {"enabled": True, "api_key": "secret"},
@@ -591,6 +648,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 "track_state": "confirmed",
                 "track_observations": 5,
                 "temporal_consensus": True,
+                "temporal_sample_offset_seconds": 0.5,
                 "temporal_observations": 3,
                 "temporal_track_observations": 4,
                 "temporal_required_observations": 2,
@@ -608,6 +666,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(payload["objects"][0]["zones"], ["yard"])
         self.assertEqual(payload["objects"][0]["track_id"], 3)
         self.assertEqual(payload["objects"][0]["temporal_observations"], 3)
+        self.assertEqual(payload["objects"][0]["temporal_sample_offset_seconds"], 0.5)
         self.assertEqual(payload["objects"][0]["temporal_required_observations"], 2)
         self.assertNotIn("raw_detection_tensor", payload["objects"][0])
         self.assertNotIn("frame_source", payload["objects"][0])

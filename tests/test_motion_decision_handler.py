@@ -119,7 +119,7 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         )
 
         self.assertIsNone(outcome.event_id)
-        self.assertEqual(outcome.snapshot_path, "")
+        self.assertEqual(outcome.snapshot_path, "verification.jpg")
         self.assertFalse(outcome.object_detected)
         self.assertFalse(qualification["suppression_verification_rescued"])
         self.assertFalse(qualification["effective_accepted"])

@@ -230,6 +230,7 @@ def _temporal_consensus(
             **detected,
             "incident_eligible": confirmed,
             "temporal_consensus": confirmed,
+            "temporal_sample_offset_seconds": selected.offset,
             "temporal_observations": len(track.winning_observations),
             "temporal_track_observations": len(track.observations),
             "temporal_required_observations": required_by_track[id(track)],
@@ -296,10 +297,28 @@ class RecordedMotionObjectDetector:
             time.sleep(min(wait_seconds, 3.0))
 
         deadline = time.monotonic() + max(0.0, RECORDED_EVENT_RETRY_SECONDS)
-        samples: list[_RecordedDetectionSample] = []
+        samples_by_offset: dict[float, _RecordedDetectionSample] = {}
+        default_required = max(
+            1,
+            min(
+                len(RECORDED_EVENT_FRAME_OFFSETS),
+                int(getattr(self.detector.config, "event_confirmation_frames", 2)),
+            ),
+        )
+        class_confirmations = {
+            str(label).strip().lower(): max(
+                1,
+                min(len(RECORDED_EVENT_FRAME_OFFSETS), int(confirmations)),
+            )
+            for label, confirmations in dict(
+                getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
+            ).items()
+        }
 
         while True:
             for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
+                if sample_offset in samples_by_offset:
+                    continue
                 if time.monotonic() >= deadline:
                     break
                 target_epoch = event_epoch + sample_offset
@@ -318,14 +337,31 @@ class RecordedMotionObjectDetector:
                 if frame is None:
                     continue
                 objects = self._detect_objects(frame)
-                samples.append(_RecordedDetectionSample(
+                samples_by_offset[sample_offset] = _RecordedDetectionSample(
                     offset=sample_offset,
                     frame=frame,
                     objects=objects,
                     recording_path=str(row["path"]),
-                ))
+                )
 
-            if samples:
+            samples = [
+                samples_by_offset[offset]
+                for offset in RECORDED_EVENT_FRAME_OFFSETS
+                if offset in samples_by_offset
+            ]
+            observed_required = max(
+                (
+                    class_confirmations.get(
+                        str(detected.get("label") or "").strip().lower(),
+                        default_required,
+                    )
+                    for sample in samples
+                    for detected in sample.objects
+                    if _eligible_detection(detected)
+                ),
+                default=default_required,
+            )
+            if len(samples) >= observed_required:
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -333,15 +369,9 @@ class RecordedMotionObjectDetector:
             time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
 
         if samples:
-            minimum_confirmations = int(
-                getattr(self.detector.config, "event_confirmation_frames", 2)
-            )
-            class_confirmations = dict(
-                getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
-            )
             selected, objects = _temporal_consensus(
                 samples,
-                minimum_confirmations,
+                default_required,
                 class_confirmations,
             )
             return selected.frame, objects, selected.recording_path

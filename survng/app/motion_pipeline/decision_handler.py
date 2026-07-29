@@ -133,17 +133,17 @@ class MotionDecisionHandler:
             qualification["effective_accepted"] = bool(eligible_objects)
             qualification["would_suppress"] = not bool(eligible_objects)
 
-        if require_eligible_object and not eligible_objects:
-            return MotionDecisionOutcome(
-                event_id=None,
-                snapshot_path="",
-                object_detected=False if detection_completed else None,
-                detected_objects=tuple(eligible_objects),
-            )
-
         snapshot_path = ""
         if frame is not None:
             snapshot_path = self.snapshot_writer(frame, event_at)
+
+        if require_eligible_object and not eligible_objects:
+            return MotionDecisionOutcome(
+                event_id=None,
+                snapshot_path=snapshot_path,
+                object_detected=False if detection_completed else None,
+                detected_objects=tuple(eligible_objects),
+            )
 
         stored_objects = [
             *objects,

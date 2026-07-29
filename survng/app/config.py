@@ -338,9 +338,15 @@ class DetectorConfig(BaseModel):
             if not label:
                 raise ValueError("event class confirmation labels cannot be empty")
             try:
-                confirmations = int(raw_confirmations)
+                numeric_confirmations = float(raw_confirmations)
             except (TypeError, ValueError) as exc:
                 raise ValueError("event class confirmations must be whole numbers") from exc
+            if (
+                isinstance(raw_confirmations, bool)
+                or not numeric_confirmations.is_integer()
+            ):
+                raise ValueError("event class confirmations must be whole numbers")
+            confirmations = int(numeric_confirmations)
             if confirmations < 1 or confirmations > 5:
                 raise ValueError("event class confirmations must be between 1 and 5")
             normalized[label] = confirmations

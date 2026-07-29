@@ -1990,6 +1990,22 @@ def _audit_ai_context(
                     "box": entry.get("box"),
                     "zones": entry.get("zones") or entry.get("zone_matches") or [],
                     "incident_eligible": entry.get("incident_eligible", True),
+                    "temporal_consensus": entry.get("temporal_consensus"),
+                    "temporal_sample_offset_seconds": entry.get(
+                        "temporal_sample_offset_seconds"
+                    ),
+                    "temporal_observations": entry.get("temporal_observations"),
+                    "temporal_track_observations": entry.get(
+                        "temporal_track_observations"
+                    ),
+                    "temporal_required_observations": entry.get(
+                        "temporal_required_observations"
+                    ),
+                    "temporal_samples": entry.get("temporal_samples"),
+                    "temporal_peak_confidence": entry.get(
+                        "temporal_peak_confidence"
+                    ),
+                    "temporal_label_votes": entry.get("temporal_label_votes"),
                 })
             if entry.get("status") == "motion_qualification":
                 candidate = entry.get("motion_qualification")
@@ -2029,6 +2045,12 @@ def _audit_ai_context(
         "post_trigger_seconds": active_config.motion_qualification.post_trigger_seconds,
         "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
         "analysis_preset": identify_analysis_preset(graphs.qualification),
+        "object_confirmation_frames": (
+            active_config.detector.event_confirmation_frames
+        ),
+        "object_class_confirmation_frames": dict(
+            active_config.detector.event_class_confirmation_frames
+        ),
         "fusion": fusion,
         "pipeline_origins": graphs.origins,
     }
@@ -4345,6 +4367,7 @@ def _incident_event_payload(event: dict) -> dict:
                 "mask_polygon",
                 "incident_eligible",
                 "temporal_consensus",
+                "temporal_sample_offset_seconds",
                 "temporal_observations",
                 "temporal_track_observations",
                 "temporal_required_observations",

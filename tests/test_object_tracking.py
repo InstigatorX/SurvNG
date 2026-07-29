@@ -915,7 +915,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
                 return [detection("person", 0.9, (10 + offset, 10, 40 + offset, 80))]
 
         def catchup_provider(start_epoch, end_epoch, sample_fps, frame_width):
-            self.assertGreaterEqual(start_epoch, event_at.timestamp() + 1.0)
+            self.assertAlmostEqual(start_epoch, event_at.timestamp() + 1.25, places=2)
             self.assertGreater(end_epoch, start_epoch)
             self.assertEqual(sample_fps, 2.0)
             self.assertEqual(frame_width, 100)
@@ -943,10 +943,12 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         )
         session.set_accepting(True)
 
+        initial = detection("person", 0.95, (10, 10, 40, 80))
+        initial["temporal_sample_offset_seconds"] = 0.75
         self.assertTrue(session.start(
             42,
             event_at,
-            [detection("person", 0.95, (10, 10, 40, 80))],
+            [initial],
             np.zeros((100, 100, 3), dtype=np.uint8),
         ))
         self.assertTrue(catchup_ready.wait(2.0))
@@ -955,6 +957,13 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         final_tracks = updates[-1]["tracks"]
         self.assertEqual(len(final_tracks), 1)
         self.assertEqual(final_tracks[0]["track_id"], 1)
+        self.assertEqual(
+            final_tracks[0]["first_seen"],
+            datetime.fromtimestamp(
+                event_at.timestamp() + 0.75,
+                timezone.utc,
+            ).isoformat(),
+        )
         self.assertGreaterEqual(final_tracks[0]["observations"], 7)
         self.assertGreaterEqual(updates[-1]["catchup_frames_processed"], 6)
 

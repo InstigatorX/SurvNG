@@ -19,6 +19,34 @@ DETECTION_FAILURE_STATUSES = frozenset({"detector_unavailable", "inference_error
 YOLO_END_TO_END_MAX_DETECTIONS = 1000
 
 
+def _class_aware_nms(
+    boxes: list[list[int]],
+    scores: list[float],
+    class_ids: list[int],
+    confidence_threshold: float,
+    nms_threshold: float,
+) -> list[int]:
+    """Suppress duplicate boxes within a class without hiding overlapping classes."""
+    selected: list[int] = []
+    for class_id in dict.fromkeys(class_ids):
+        group = [
+            index
+            for index, candidate_class in enumerate(class_ids)
+            if candidate_class == class_id
+        ]
+        indexes = cv2.dnn.NMSBoxes(
+            [boxes[index] for index in group],
+            [scores[index] for index in group],
+            confidence_threshold,
+            nms_threshold,
+        )
+        selected.extend(
+            group[int(local_index)]
+            for local_index in np.asarray(indexes).reshape(-1).tolist()
+        )
+    return sorted(selected, key=lambda index: scores[index], reverse=True)
+
+
 def detection_failure(objects: list[dict[str, Any]]) -> str:
     return next(
         (
@@ -687,10 +715,13 @@ class OpenVinoDetector:
 
         if not boxes:
             return []
-        indexes = cv2.dnn.NMSBoxes(
-            boxes, scores, self.config.confidence_threshold, self.config.nms_threshold
+        selected = _class_aware_nms(
+            boxes,
+            scores,
+            class_ids,
+            self.config.confidence_threshold,
+            self.config.nms_threshold,
         )
-        selected = np.asarray(indexes).reshape(-1).tolist() if len(indexes) else []
         objects: list[dict[str, Any]] = []
         for index in selected:
             x1, y1, width, height = boxes[index]
@@ -945,13 +976,13 @@ class OpenVinoDetector:
         if not boxes:
             return []
 
-        indexes = cv2.dnn.NMSBoxes(
+        selected = _class_aware_nms(
             boxes,
             scores,
+            class_ids,
             self.config.confidence_threshold,
             self.config.nms_threshold,
         )
-        selected = np.array(indexes).flatten().tolist() if len(indexes) else []
         objects: list[dict[str, Any]] = []
         for index in selected:
             x, y, width, height = boxes[index]

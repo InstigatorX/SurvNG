@@ -179,6 +179,11 @@ event_state_active and event_state_cooldown mean a repeated notification was sup
 event was already active or cooling down; they are duplicate-control outcomes, not motion failures.
 Check related_prior_event before claiming an incident was missed. Never claim object detection used
 the motion frame width: frame_width describes the adaptive motion-analysis copy, not detector input.
+Event object labels use spatially associated temporal consensus over available high-resolution
+recording samples. temporal_observations is the winning label vote count,
+temporal_track_observations includes alternate labels for the same physical object, and event
+confidence is the median winning-label confidence rather than the single highest score. Compare
+temporal_observations with temporal_required_observations before characterizing a classification.
 
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed and prefer camera-scoped changes over global changes. Recommend

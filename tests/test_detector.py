@@ -90,6 +90,24 @@ class OpenVinoDetectorTest(unittest.TestCase):
         self.assertEqual(len(objects), 1)
         self.assertEqual(objects[0]["label"], "person")
 
+    def test_yolo_nms_preserves_overlapping_different_classes(self) -> None:
+        detector = make_detector(["person", "car"])
+        metadata = {
+            "image_width": 640.0,
+            "image_height": 640.0,
+            "scale": 1.0,
+            "pad_x": 0.0,
+            "pad_y": 0.0,
+        }
+        output = np.array([[
+            [100.0, 100.0, 60.0, 80.0, 0.90, 0.05],
+            [100.0, 100.0, 60.0, 80.0, 0.05, 0.88],
+        ]], dtype=np.float32)
+
+        objects = detector._parse_yolo_output(output, metadata)
+
+        self.assertEqual([item["label"] for item in objects], ["person", "car"])
+
     def test_ssd_parser_clamps_boxes_and_supports_one_based_labels(self) -> None:
         detector = make_detector(["person", "car"])
         output = np.array(

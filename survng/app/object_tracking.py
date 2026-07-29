@@ -1060,11 +1060,22 @@ class ObjectTrackingSession:
                     initial_objects,
                     lazy=self.config.implementation == "survng_hybrid",
                 )
-            # Initial detections come from the event-time recording frame, not
-            # from the moment this background worker happens to start.
-            captured_at = event_at.timestamp()
+            # Preserve the actual selected recording sample time. Consensus may
+            # choose a frame up to one second on either side of the event.
+            seed_offsets = []
             for detected in initial_objects:
-                detected["_tracking_first_seen_at"] = event_at.timestamp()
+                try:
+                    offset = float(detected.get("temporal_sample_offset_seconds"))
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(offset):
+                    seed_offsets.append(offset)
+            seed_epoch = event_at.timestamp() + (
+                float(np.median(seed_offsets)) if seed_offsets else 0.0
+            )
+            captured_at = seed_epoch
+            for detected in initial_objects:
+                detected["_tracking_first_seen_at"] = seed_epoch
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
             self._set_status(enabled=True, active=True, event_id=event_id, last_error="")
             self._persist(event_id, tracker, captured_at, initial_tracked, frames_processed, "active")
@@ -1127,10 +1138,9 @@ class ObjectTrackingSession:
                 and initial_frame is not None
                 and catchup_until - captured_at > interval * 1.5
             ):
-                # Recorded validation may seed from as much as one second
-                # after the event. Begin beyond that selection window so
-                # catch-up never feeds an older image after a newer seed.
-                catchup_start = captured_at + 1.0 + interval
+                # Start immediately after the actual selected sample. The
+                # provider and loop still reject non-increasing timestamps.
+                catchup_start = captured_at + interval
                 try:
                     catchup_frames = iter(
                         self.catchup_frame_provider(

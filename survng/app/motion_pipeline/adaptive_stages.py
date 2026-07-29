@@ -280,11 +280,12 @@ class AdaptiveStatisticalThresholdStage:
                 masks.append(cv2.threshold(difference, threshold, 255, cv2.THRESH_BINARY)[1])
                 thresholds.append(threshold)
                 noises.append(noise)
+            noise_ema = state.noise_ema
 
         context.threshold_mask_history = tuple(masks)
         context.binary_motion_mask = masks[-1] if masks else None
         context.debug.values["adaptive_thresholds"] = [round(value, 3) for value in thresholds]
-        context.debug.values["threshold_noise"] = round(state.noise_ema, 4)
+        context.debug.values["threshold_noise"] = round(noise_ema, 4)
         return context
 
 
