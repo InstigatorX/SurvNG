@@ -2096,7 +2096,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
           event={preview}
           alt="incident snapshot"
           showAnnotations={expanded || thumbnailAnnotations}
-          showTracking={expanded && !inlineVideoActive}
+          showTracking={false}
           incidentEligibleOnly={!expanded}
           thumbnail
         >
@@ -2380,7 +2380,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [videoActive, setVideoActive] = useState(false);
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
-  const [trackingVisible, setTrackingVisible] = useState(true);
+  const [trackingVisible, setTrackingVisible] = useState(false);
   const [trackingComparison, setTrackingComparison] = useState(null);
   const [trackingComparisonEngine, setTrackingComparisonEngine] = useState(null);
   const [trackingComparisonLoading, setTrackingComparisonLoading] = useState(false);
@@ -2426,6 +2426,10 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const safeManualConfidence = Number.isFinite(manualConfidenceNumber) ? Math.max(0.01, Math.min(0.99, manualConfidenceNumber)) : 0.35;
   const manualEventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
   const downloadName = `survng-${String(viewerEvent.camera_id || "camera")}-${String(viewerEvent.created_at || viewerEvent.id || "event").replace(/[^0-9A-Za-z_-]+/g, "-")}.mp4`;
+
+  useEffect(() => {
+    setTrackingVisible(false);
+  }, [event.id]);
 
   useEffect(() => {
     let cancelled = false;
