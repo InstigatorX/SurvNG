@@ -170,6 +170,8 @@ class AuditAiTest(unittest.TestCase):
     def test_tuning_bounds_reject_unsafe_margin(self) -> None:
         with self.assertRaises(ValueError):
             validate_tuning_value("borderline_margin", 0.25)
+        with self.assertRaisesRegex(ValueError, "numeric"):
+            validate_tuning_value("borderline_margin", False)
 
     def test_mog2_tuning_is_bounded_but_validator_topology_is_operator_owned(self) -> None:
         self.assertEqual(validate_tuning_value("mog2_history_seconds", 45), 45.0)
@@ -207,6 +209,19 @@ class AuditAiTest(unittest.TestCase):
                 self.assertRaisesRegex(AuditAiError, "too large"),
             ):
                 advisor.analyze(image, {})
+
+        request.assert_not_called()
+
+    def test_non_finite_audit_context_is_rejected_before_provider_request(self) -> None:
+        advisor = AuditAiAdvisor(AuditAiConfig(enabled=True, provider="openai", api_key="secret"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image = Path(tmpdir) / "audit.jpg"
+            image.write_bytes(b"jpeg")
+            with (
+                patch.object(advisor, "_request") as request,
+                self.assertRaisesRegex(AuditAiError, "invalid numeric"),
+            ):
+                advisor.analyze(image, {"score": float("nan")})
 
         request.assert_not_called()
 

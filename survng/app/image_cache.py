@@ -29,11 +29,11 @@ class LocalImageCache:
         digest = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()
         directory = self.root / safe_namespace
         path = directory / f"{digest}.jpg"
-        if path.is_file():
+        if self._is_usable(path):
             return path
         lock = self._key_lock(f"{safe_namespace}:{digest}")
         with lock:
-            if path.is_file():
+            if self._is_usable(path):
                 return path
             payload = builder()
             if not payload:
@@ -49,6 +49,13 @@ class LocalImageCache:
                 temporary_path.unlink(missing_ok=True)
         self._maintain(directory)
         return path
+
+    @staticmethod
+    def _is_usable(path: Path) -> bool:
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
 
     def _key_lock(self, key: str) -> threading.Lock:
         with self._locks_guard:

@@ -27,6 +27,17 @@ class LocalImageCacheTest(unittest.TestCase):
             self.assertEqual(first.read_bytes(), b"jpeg")
             self.assertEqual(calls, 1)
 
+    def test_rebuilds_zero_byte_cache_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = LocalImageCache(Path(tmpdir))
+            cached = cache.get_or_create("events", "same-image", lambda: b"jpeg")
+            cached.write_bytes(b"")
+
+            rebuilt = cache.get_or_create("events", "same-image", lambda: b"replacement")
+
+            self.assertEqual(rebuilt, cached)
+            self.assertEqual(rebuilt.read_bytes(), b"replacement")
+
     def test_concurrent_requests_build_a_key_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache = LocalImageCache(Path(tmpdir))

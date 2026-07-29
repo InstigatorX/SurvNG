@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from queue import Queue
 import sqlite3
 import tempfile
 import threading
@@ -292,6 +293,38 @@ class FaceStoreTest(unittest.TestCase):
             self.assertLessEqual(store._recognition_queue.qsize(), store.max_observations + 1)
             self.assertEqual(len(store._recognition_pending), store._recognition_queue.qsize())
 
+    def test_full_recognition_queue_marks_pending_work_for_refill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                enabled=True,
+                status=lambda: {"model_fingerprint": "model-v1"},
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            store._recognition_queue = Queue(maxsize=1)
+            first_id = self.insert_observation(
+                store, 1, observed_at="2026-07-26T12:00:02+00:00"
+            )
+            second_id = self.insert_observation(
+                store, 2, observed_at="2026-07-26T12:00:01+00:00"
+            )
+
+            with self.assertLogs("survng.app.faces", level="WARNING"):
+                store._queue_pending_recognition()
+
+            self.assertTrue(store._recognition_refill_needed.is_set())
+            self.assertEqual(store._recognition_queue.get_nowait(), first_id)
+            with store._recognition_pending_lock:
+                store._recognition_pending.discard(first_id)
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set recognition_pending = 0 where id = ?",
+                    (first_id,),
+                )
+            store._recognition_refill_needed.clear()
+            store._queue_pending_recognition()
+
+            self.assertEqual(store._recognition_queue.get_nowait(), second_id)
+
     def test_concurrent_start_creates_only_one_recognition_thread(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recognizer = SimpleNamespace(
@@ -537,6 +570,17 @@ class FaceStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(InferenceUnavailable, "worker restarting"):
                 store._recognize_observation(1)
 
+    def test_enabled_recognizer_warmup_defers_instead_of_dropping_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                enabled=True,
+                status=lambda: {"ready": False, "isolation": {"worker_alive": True}},
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+
+            with self.assertRaisesRegex(InferenceUnavailable, "still starting"):
+                store._recognize_observation(1)
+
     def test_create_person_validates_observation_assignment_and_unique_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = FaceStore(Path(tmpdir), start_recognition=False)
@@ -635,6 +679,37 @@ class FaceStoreTest(unittest.TestCase):
 
             self.assertEqual(candidate_id, person["id"])
             self.assertEqual(confidence, 1.0)
+
+    def test_matching_ignores_identity_with_only_corrupt_embeddings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                config=SimpleNamespace(face_max_references=5, face_match_threshold=0.4),
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            person = store.create_person("Alice")
+            corrupt_id = self.insert_observation(
+                store,
+                1,
+                observed_at="2026-07-26T12:00:01+00:00",
+                person_id=person["id"],
+                embedding_model="model-v1",
+            )
+            target_id = self.insert_observation(
+                store, 2, observed_at="2026-07-26T12:00:02+00:00"
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set embedding_blob = ? where id = ?",
+                    (b"bad", corrupt_id),
+                )
+                match = store._best_match(
+                    connection,
+                    target_id,
+                    np.asarray([1.0, 0.0], dtype=np.float32),
+                    "model-v1",
+                )
+
+            self.assertEqual(match, (None, None))
 
     def test_delete_person_resets_confirmed_observation_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

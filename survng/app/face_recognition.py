@@ -144,11 +144,11 @@ class OpenVinoFaceRecognizer:
         shape = [int(value) for value in raw_shape]
         if len(shape) != 4:
             raise ValueError(f"expected a four-dimensional image input, got {shape}")
-        if shape[1] in (1, 3, 4):
+        if shape[1] == 3:
             return "NCHW", (shape[3], shape[2])
-        if shape[3] in (1, 3, 4):
+        if shape[3] == 3:
             return "NHWC", (shape[2], shape[1])
-        raise ValueError(f"could not determine input layout from {shape}")
+        raise ValueError(f"expected a three-channel image input, got {shape}")
 
     @staticmethod
     def _image_tensor(image: np.ndarray, shape: tuple[int, int], layout: str) -> np.ndarray:

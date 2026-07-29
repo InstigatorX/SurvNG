@@ -836,7 +836,8 @@ class EventStore:
             ).fetchone()
             if current is None:
                 raise KeyError("motion AI review not found")
-            if str(current["status"]) == "interrupted" and status != "interrupted":
+            current_status = str(current["status"])
+            if current_status in {"completed", "failed", "interrupted"}:
                 return self._motion_ai_review_row(
                     conn.execute(
                         "select * from motion_ai_reviews where id = ?",
@@ -1257,7 +1258,7 @@ class EventStore:
                 select * from events
                 where camera_id = ?
                     and created_at >= ?
-                    and created_at <= ?
+                    and created_at < ?
                 order by created_at asc
                 limit ?
                 """,

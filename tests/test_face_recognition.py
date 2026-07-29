@@ -11,6 +11,12 @@ from survng.app.face_recognition import OpenVinoFaceRecognizer
 
 
 class FaceRecognitionTest(unittest.TestCase):
+    def test_image_input_rejects_unsupported_channel_counts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "three-channel"):
+            OpenVinoFaceRecognizer._image_input([1, 1, 128, 128])
+        with self.assertRaisesRegex(ValueError, "three-channel"):
+            OpenVinoFaceRecognizer._image_input([1, 128, 128, 4])
+
     def test_landmark_and_embedding_inference_are_serialized_together(self) -> None:
         recognizer = OpenVinoFaceRecognizer(DetectorConfig(face_recognition_enabled=False))
         recognizer._infer_request = object()

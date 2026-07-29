@@ -57,6 +57,7 @@ class FaceStore:
         self._recognition_queue: Queue[int | None] = Queue(maxsize=self.max_observations + 1)
         self._recognition_pending: set[int] = set()
         self._recognition_pending_lock = threading.Lock()
+        self._recognition_refill_needed = threading.Event()
         self._recognition_stop = threading.Event()
         self._recognition_thread: threading.Thread | None = None
         self._init_db()
@@ -336,6 +337,7 @@ class FaceStore:
                 self._recognition_queue.put_nowait(observation_id)
             except Full:
                 LOGGER.warning("face recognition queue is full; deferred observation %s", observation_id)
+                self._recognition_refill_needed.set()
                 return
             self._recognition_pending.add(observation_id)
 
@@ -432,6 +434,9 @@ class FaceStore:
             except Empty:
                 if self._recognition_stop.is_set():
                     break
+                if self._recognition_refill_needed.is_set():
+                    self._recognition_refill_needed.clear()
+                    self._queue_pending_recognition()
                 if references_changed and self._try_refresh_unknown_recognition():
                     references_changed = False
                 continue
@@ -460,6 +465,9 @@ class FaceStore:
                     self._recognition_pending.discard(observation_id)
             if retry and not self._recognition_stop.wait(1.0):
                 self._queue_recognition(observation_id)
+            if self._recognition_refill_needed.is_set() and not self._recognition_stop.is_set():
+                self._recognition_refill_needed.clear()
+                self._queue_pending_recognition()
 
     def _recognize_observation(self, observation_id: int) -> bool:
         recognizer = self.recognizer
@@ -468,9 +476,9 @@ class FaceStore:
         recognizer_status = recognizer.status()
         if not recognizer_status.get("ready"):
             isolation = recognizer_status.get("isolation") or {}
-            if recognizer.enabled and not isolation.get("worker_alive", True):
+            if recognizer.enabled:
                 raise InferenceUnavailable(
-                    str(isolation.get("last_error") or "face inference worker is unavailable")
+                    str(isolation.get("last_error") or "face inference is still starting")
                 )
             return False
         model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
@@ -604,7 +612,6 @@ class FaceStore:
         }
         scores: dict[int, list[float]] = {}
         for row in rows:
-            person_scores = scores.setdefault(int(row["person_id"]), [])
             try:
                 reference = np.frombuffer(row["embedding_blob"], dtype=np.float32)
             except (TypeError, ValueError):
@@ -616,7 +623,7 @@ class FaceStore:
                 continue
             score = float(np.dot(embedding, reference / reference_norm))
             if math.isfinite(score):
-                person_scores.append(score)
+                scores.setdefault(int(row["person_id"]), []).append(score)
         ranked: list[tuple[float, int]] = []
         for person_id, values in scores.items():
             if person_id in rejected_people:

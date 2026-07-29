@@ -4263,7 +4263,8 @@ def _event_row(row: dict) -> dict:
 
     def positive_confidence(item: dict) -> bool:
         try:
-            return float(item.get("confidence") or 0) > 0
+            confidence = float(item.get("confidence") or 0)
+            return math.isfinite(confidence) and confidence > 0
         except (TypeError, ValueError):
             return False
 
@@ -4309,9 +4310,11 @@ def _best_incident_event(events: list[dict]) -> dict:
             if not isinstance(item, dict):
                 continue
             try:
-                confidences.append(float(item.get("confidence") or 0))
+                confidence = float(item.get("confidence") or 0)
             except (TypeError, ValueError):
                 continue
+            if math.isfinite(confidence):
+                confidences.append(confidence)
         best_confidence = max(confidences, default=0.0)
         return (best_confidence, int(event.get("id") or 0))
 
@@ -4410,7 +4413,13 @@ def _incidents_with_faces(incidents: list[dict]) -> list[dict]:
                 confidence = observation.get("candidate_confidence")
                 if confidence is None:
                     confidence = observation.get("confidence")
-            score = max(0.0, min(1.0, float(confidence or 0)))
+            try:
+                score = float(confidence or 0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if not math.isfinite(score):
+                score = 0.0
+            score = max(0.0, min(1.0, score))
             key = (status, identity_id)
             current = summaries.get(key)
             if current is None or score > current["confidence"]:

@@ -111,6 +111,8 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         if not isinstance(value, bool):
             raise ValueError(f"{setting} must be boolean")
         return value
+    if isinstance(value, bool):
+        raise ValueError(f"{setting} must be numeric")
     number = float(value)
     bounds = {
         "frame_width": (240.0, 960.0),
@@ -360,7 +362,15 @@ class AuditAiAdvisor:
             raise AuditAiError("audit image could not be read") from exc
         model = self.config.model.strip() or self._default_model()
         mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
-        context_json = json.dumps(context, separators=(",", ":"), default=str)
+        try:
+            context_json = json.dumps(
+                context,
+                separators=(",", ":"),
+                default=str,
+                allow_nan=False,
+            )
+        except ValueError as exc:
+            raise AuditAiError("audit telemetry contains invalid numeric values") from exc
         if len(context_json.encode("utf-8")) > MAX_AUDIT_CONTEXT_BYTES:
             raise AuditAiError("audit telemetry is too large for AI analysis")
         prompt = (
@@ -391,7 +401,7 @@ class AuditAiAdvisor:
     def _request(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         request = Request(
             url,
-            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            data=json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8"),
             headers={"Content-Type": "application/json", **headers},
             method="POST",
         )
@@ -408,7 +418,7 @@ class AuditAiAdvisor:
             raise AuditAiError(f"AI provider returned HTTP {exc.code}") from exc
         except AuditAiError:
             raise
-        except (URLError, TimeoutError, UnicodeError, json.JSONDecodeError) as exc:
+        except (URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise AuditAiError(f"AI provider request failed ({type(exc).__name__})") from exc
 
     @staticmethod

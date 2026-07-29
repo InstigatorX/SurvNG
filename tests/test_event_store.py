@@ -175,6 +175,50 @@ class EventStoreTest(unittest.TestCase):
                 1,
             )
 
+    def test_camera_range_uses_half_open_time_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            included = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                created_at="2026-07-15T12:00:00+00:00",
+            )
+            store.add_event(
+                camera_id="gate",
+                kind="motion",
+                created_at="2026-07-15T12:00:10+00:00",
+            )
+
+            rows = store.for_camera_range(
+                "gate",
+                "2026-07-15T12:00:00+00:00",
+                "2026-07-15T12:00:10+00:00",
+            )
+
+            self.assertEqual([row["id"] for row in rows], [included["id"]])
+
+    def test_terminal_motion_ai_review_cannot_be_reopened_by_stale_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            review = store.create_motion_ai_review("gate", 3)
+            completed = store.update_motion_ai_review(
+                int(review["id"]),
+                status="completed",
+                analyzed=3,
+                result={"summary": "done"},
+            )
+
+            stale = store.update_motion_ai_review(
+                int(review["id"]),
+                status="completed",
+                analyzed=1,
+                result={"summary": "stale"},
+            )
+
+            self.assertEqual(stale["status"], "completed")
+            self.assertEqual(stale["analyzed"], completed["analyzed"])
+            self.assertEqual(stale["result"], {"summary": "done"})
+
     def test_parallel_store_instances_wait_for_writers_instead_of_losing_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             first = EventStore(Path(tmpdir))

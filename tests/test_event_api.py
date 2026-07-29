@@ -531,13 +531,15 @@ class EventApiSerializationTest(unittest.TestCase):
             "objects_json": json.dumps([
                 "legacy",
                 {"label": "person", "confidence": "invalid", "zones": "not-a-list"},
+                {"label": "ghost", "confidence": float("inf")},
+                {"label": "shadow", "confidence": float("nan")},
                 {"label": "car", "confidence": 0.8, "zones": ["driveway"]},
             ]),
         })
 
         self.assertEqual(row["labels"], ["car"])
         self.assertEqual(row["zones"], ["driveway"])
-        self.assertEqual(len(row["objects"]), 2)
+        self.assertEqual(len(row["objects"]), 4)
 
         selected = main._best_incident_event([row])
         self.assertEqual(selected["id"], 1)
