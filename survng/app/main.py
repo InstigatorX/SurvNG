@@ -3056,19 +3056,22 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
         raise HTTPException(status_code=503, detail=dependency["reason"])
     if duration_seconds is not None and not math.isfinite(duration_seconds):
         raise HTTPException(status_code=422, detail="duration_seconds must be finite")
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        active_config = config.model_copy(deep=True)
+        event = active_manager.events.get(event_id)
     duration = max(
         3.0,
         min(
             30.0,
             float(duration_seconds)
             if duration_seconds is not None
-            else min(15.0, config.detector.tracking.max_session_seconds),
+            else min(15.0, active_config.detector.tracking.max_session_seconds),
         ),
     )
-    event = manager.events.get(event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
-    camera = camera_by_id(config, str(event.get("camera_id") or ""))
+    camera = camera_by_id(active_config, str(event.get("camera_id") or ""))
     if camera is None:
         raise HTTPException(status_code=404, detail="event camera is not configured")
     if not TRACKING_COMPARISON_LIMITER.acquire(blocking=False):
@@ -3090,34 +3093,24 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
         clip_ms = (time.perf_counter() - clip_started) * 1000.0
         start_epoch = event_epoch(enriched)
         runner = TrackingComparisonRunner(
-            config=config.detector.tracking,
-            detector=manager.detector,
-            appearance_encoder=manager.person_reidentifier,
+            config=active_config.detector.tracking,
+            detector=active_manager.detector,
+            appearance_encoder=active_manager.person_reidentifier,
         )
         detector_dimensions = [
             int(value)
-            for value in (getattr(manager.detector, "input_shape", None) or [])
+            for value in (getattr(active_manager.detector, "input_shape", None) or [])
             if isinstance(value, (int, float)) and int(value) > 0
         ]
-        decode_started = time.perf_counter()
-        comparison_frames = list(
-            sampled_video_frames(
-                comparison_input,
-                start_epoch=start_epoch,
-                sample_fps=config.detector.tracking.sample_fps,
-                duration_seconds=duration,
-                ffmpeg_path=config.ffmpeg_path,
-                maximum_width=max([640, *detector_dimensions]),
-            )
+        comparison_frames = sampled_video_frames(
+            comparison_input,
+            start_epoch=start_epoch,
+            sample_fps=active_config.detector.tracking.sample_fps,
+            duration_seconds=duration,
+            ffmpeg_path=active_config.ffmpeg_path,
+            maximum_width=max([640, *detector_dimensions]),
         )
-        decode_ms = (time.perf_counter() - decode_started) * 1000.0
         result = runner.run(camera, comparison_frames)
-        frame_count = int(result.get("frames_processed") or 0)
-        result["frame_decode_ms"] = round(decode_ms, 2)
-        result["average_frame_decode_ms"] = round(
-            decode_ms / max(1, frame_count),
-            3,
-        )
         response = {
             "event_id": event_id,
             "camera_id": camera.id,
@@ -3127,7 +3120,7 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
             "elapsed_ms": round((time.perf_counter() - request_started) * 1000.0, 1),
             **result,
         }
-        comparison = manager.events.save_tracking_comparison(
+        comparison = active_manager.events.save_tracking_comparison(
             event_id=event_id,
             camera_id=camera.id,
             event_created_at=str(enriched.get("created_at") or ""),
@@ -3136,7 +3129,7 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
         response["comparison_id"] = comparison["id"]
         response["verdict"] = comparison["verdict"]
         response["comparison"] = comparison
-        response["evidence_summary"] = manager.events.tracking_comparison_summary(
+        response["evidence_summary"] = active_manager.events.tracking_comparison_summary(
             camera_id=camera.id,
         )
         return response

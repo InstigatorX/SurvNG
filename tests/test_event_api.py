@@ -265,7 +265,59 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(sampled_frames.call_args.kwargs["ffmpeg_path"], active_config.ffmpeg_path)
         self.assertEqual(sampled_frames.call_args.kwargs["maximum_width"], 640)
         runner.run.assert_called_once()
+        self.assertIs(
+            runner.run.call_args.args[1],
+            sampled_frames.return_value,
+        )
         limiter.release.assert_called_once_with()
+
+    def test_tracking_comparison_keeps_the_original_manager_during_reload(self) -> None:
+        event = {
+            "id": 43,
+            "camera_id": "gate",
+            "created_at": "2026-07-27T12:17:07+00:00",
+            "objects_json": "[]",
+        }
+        active_config = AppConfig(cameras=[CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera.invalid/main",
+        )])
+        active_events = SimpleNamespace(
+            get=Mock(return_value=event),
+            save_tracking_comparison=Mock(return_value={"id": 8, "verdict": ""}),
+            tracking_comparison_summary=Mock(return_value={"total": 1}),
+        )
+        replacement_events = SimpleNamespace(
+            save_tracking_comparison=Mock(side_effect=AssertionError("replacement used")),
+        )
+        replacement = SimpleNamespace(events=replacement_events)
+        active_manager = SimpleNamespace(
+            events=active_events,
+            detector=SimpleNamespace(input_shape=[]),
+            person_reidentifier=object(),
+        )
+
+        def run(_camera, _frames):
+            main.manager = replacement
+            return {
+                "frames_processed": 1,
+                "engines": {"survng_hybrid": {}, "ultralytics_botsort": {}},
+            }
+
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            patch.object(main, "ultralytics_botsort_dependency_status", return_value={"available": True, "reason": ""}),
+            patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")),
+            patch.object(main, "sampled_video_frames", return_value=[]),
+            patch.object(main, "TrackingComparisonRunner", return_value=SimpleNamespace(run=run)),
+        ):
+            result = main.compare_event_tracking(43)
+
+        self.assertEqual(result["comparison_id"], 8)
+        active_events.save_tracking_comparison.assert_called_once()
+        replacement_events.save_tracking_comparison.assert_not_called()
 
     def test_tracking_comparison_rejects_missing_optional_backend_without_work(self) -> None:
         with patch.object(

@@ -619,6 +619,21 @@ class _InferenceWorker:
         status["isolation"] = self.isolation_status()
         return status
 
+    def cached_status(self) -> dict[str, Any]:
+        """Return worker readiness without adding an IPC request to a hot path."""
+        with self._lock:
+            status = dict(self._status)
+            process = self._process
+            alive = bool(process is not None and process.is_alive())
+        if alive:
+            return status
+        status["ready"] = False
+        for key in ("person", "vehicle"):
+            child = status.get(key)
+            if isinstance(child, dict):
+                status[key] = {**child, "ready": False}
+        return status
+
     def isolation_status(self) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
@@ -857,6 +872,9 @@ class InferenceSupervisor:
     def reid_status(self) -> dict[str, Any]:
         return self._reid.status()
 
+    def cached_reid_status(self) -> dict[str, Any]:
+        return self._reid.cached_status()
+
     def probe_devices(self) -> dict[str, Any]:
         try:
             return dict(
@@ -929,7 +947,15 @@ class IsolatedPersonReidentifier:
         return self.supervisor.embed_person(person)
 
     def supports_label(self, label: str) -> bool:
-        return self.config.reid_enabled_for_label(label)
+        normalized = str(label or "").strip().lower()
+        if not self.config.reid_enabled_for_label(normalized):
+            return False
+        status = self.supervisor.cached_reid_status()
+        if normalized == "person":
+            engine = status.get("person", status)
+        else:
+            engine = status.get("vehicle", {})
+        return bool(isinstance(engine, dict) and engine.get("ready"))
 
     def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
         return self.supervisor.embed_reid(label, crop)

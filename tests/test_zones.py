@@ -64,6 +64,30 @@ class DetectionZoneTest(unittest.TestCase):
         self.assertEqual(objects[0]["zones"], [])
         self.assertTrue(objects[0]["incident_eligible"])
 
+    def test_zone_mode_rejects_class_not_admitted_by_any_incident_zone(self) -> None:
+        objects = [{
+            "label": "person",
+            "confidence": 0.95,
+            "box": {"x1": 438, "y1": 897, "x2": 1914, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.35)
+
+        self.assertEqual(objects[0]["zones"], [])
+        self.assertFalse(objects[0]["incident_eligible"])
+
+    def test_full_frame_mode_allows_class_not_named_by_a_zone(self) -> None:
+        self.camera.require_incident_zone = False
+        objects = [{
+            "label": "person",
+            "confidence": 0.95,
+            "box": {"x1": 438, "y1": 897, "x2": 1914, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.35)
+
+        self.assertTrue(objects[0]["incident_eligible"])
+
     def test_global_full_frame_mode_is_used_when_camera_inherits(self) -> None:
         objects = [{
             "label": "car",
@@ -170,6 +194,12 @@ class DetectionZoneTest(unittest.TestCase):
         self.camera.zones[0].confidence_threshold = 0.2
         self.assertEqual(detection_threshold(self.camera, 0.45), 0.2)
         self.camera.zones[0].enabled = False
+        self.assertEqual(detection_threshold(self.camera, 0.45), 0.45)
+
+    def test_ignore_zone_does_not_lower_the_camera_detection_threshold(self) -> None:
+        self.camera.zones[0].behavior = "ignore"
+        self.camera.zones[0].confidence_threshold = 0.2
+
         self.assertEqual(detection_threshold(self.camera, 0.45), 0.45)
 
     def test_no_zone_configuration_also_clears_stale_annotations(self) -> None:

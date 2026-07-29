@@ -85,6 +85,46 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertEqual(proxy.status()["device"], "AUTO")
         self.assertFalse(proxy.status()["isolation"]["enabled"])
 
+    def test_reid_proxy_only_supports_labels_with_a_ready_model(self) -> None:
+        config = DetectorConfig.model_validate({
+            "tracking": {
+                "reid_enabled": True,
+                "reid_model_path": "person.xml",
+                "vehicle_reid_enabled": True,
+                "vehicle_reid_model_path": "vehicle.xml",
+            },
+        })
+        supervisor = Mock(config=config)
+        supervisor.cached_reid_status.return_value = {
+            "ready": False,
+            "person": {"ready": False},
+            "vehicle": {"ready": True},
+        }
+        proxy = IsolatedPersonReidentifier(supervisor)
+
+        self.assertFalse(proxy.supports_label("person"))
+        self.assertTrue(proxy.supports_label("car"))
+        self.assertFalse(proxy.supports_label("dog"))
+
+    def test_cached_worker_status_does_not_report_stale_readiness_after_exit(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "reid",
+            {
+                "ready": True,
+                "person": {"ready": True},
+                "vehicle": {"ready": True},
+            },
+            start_enabled=False,
+        )
+        worker._process = Mock(is_alive=Mock(return_value=False))
+
+        status = worker.cached_status()
+
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["person"]["ready"])
+        self.assertFalse(status["vehicle"]["ready"])
+
     def test_person_reid_proxy_reports_disabled_worker_status(self) -> None:
         self.assertTrue(self.supervisor.start())
         proxy = IsolatedPersonReidentifier(self.supervisor)

@@ -97,6 +97,7 @@ class PersonReidentificationTest(unittest.TestCase):
         })()
         router.vehicle._input = "input"
         router.vehicle._output = "vehicle"
+        router.vehicle.ready = True
 
         vehicle = router.embed_for_label(
             "car",
@@ -106,6 +107,19 @@ class PersonReidentificationTest(unittest.TestCase):
         self.assertTrue(router.supports_label("car"))
         self.assertFalse(router.supports_label("dog"))
         self.assertTrue(np.allclose(vehicle, [0.0, 1.0]))
+
+    def test_appearance_router_does_not_retry_an_unavailable_model_per_frame(self) -> None:
+        config = DetectorConfig.model_validate({
+            "tracking": {
+                "reid_enabled": True,
+                "reid_model_path": "missing-person.xml",
+            },
+        })
+        router = OpenVinoAppearanceReidentifier(config)
+
+        self.assertTrue(router.enabled)
+        self.assertFalse(router.person.ready)
+        self.assertFalse(router.supports_label("person"))
 
 
 if __name__ == "__main__":

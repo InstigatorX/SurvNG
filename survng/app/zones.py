@@ -58,7 +58,12 @@ def detection_threshold(camera: CameraConfig, default: float) -> float:
     thresholds.extend(
         zone.confidence_threshold
         for zone in camera.zones
-        if zone.enabled and len(zone.points) >= 3 and zone.confidence_threshold is not None
+        if (
+            zone.enabled
+            and zone.behavior == "incident"
+            and len(zone.points) >= 3
+            and zone.confidence_threshold is not None
+        )
     )
     return max(0.01, min(float(value) for value in thresholds))
 
@@ -84,6 +89,7 @@ def apply_detection_zones(
                 detected["incident_eligible"] = True
         return objects
 
+    has_incident_zones = any(zone.behavior == "incident" for zone in zones)
     width = max(1, frame_width)
     height = max(1, frame_height)
     for detected in objects:
@@ -113,7 +119,6 @@ def apply_detection_zones(
         x = ((x1 + x2) / 2.0) / width
         y = y2 / height
         relevant = [zone for zone in zones if _class_applies(zone, label)]
-        incident_zones = [zone for zone in relevant if zone.behavior == "incident"]
         matches = []
         for zone in relevant:
             threshold = zone.confidence_threshold if zone.confidence_threshold is not None else default_confidence
@@ -134,7 +139,7 @@ def apply_detection_zones(
             if camera.require_incident_zone is None
             else camera.require_incident_zone
         )
-        if zone_required and incident_zones:
+        if zone_required and has_incident_zones:
             eligible = admitted
         else:
             # In full-frame mode, a matching incident zone can admit an

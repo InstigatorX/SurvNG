@@ -217,7 +217,14 @@ class OpenVinoAppearanceReidentifier:
         return bool(enabled_engines) and all(engine.ready for engine in enabled_engines)
 
     def supports_label(self, label: str) -> bool:
-        return self.config.reid_enabled_for_label(label)
+        normalized = str(label or "").strip().lower()
+        if normalized == "person":
+            return bool(self.person.enabled and self.person.ready)
+        return bool(
+            normalized in self.config.vehicle_reid_labels
+            and self.vehicle.enabled
+            and self.vehicle.ready
+        )
 
     def embed(self, person: np.ndarray) -> np.ndarray:
         return self.person.embed(person)
