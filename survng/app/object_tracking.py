@@ -266,6 +266,7 @@ class ObjectTrack:
     appearance: np.ndarray | None = field(default=None, repr=False)
     reid_matches: int = 0
     reid_recovery_history: list[dict[str, Any]] = field(default_factory=list)
+    seeded: bool = False
 
     def predicted_box(self, captured_at: float) -> Box:
         elapsed = max(0.0, min(captured_at - self.last_seen, 2.0))
@@ -295,6 +296,7 @@ class ObjectTrack:
         self.max_confidence = max(self.max_confidence, self.confidence)
         self.hits += 1
         self.missed = 0
+        self.seeded = False
         self.zones.update(str(zone) for zone in detection.get("zones", []) if zone)
         next_appearance = _appearance(detection.get("_tracking_embedding"))
         if next_appearance is not None:
@@ -429,6 +431,7 @@ class ByteTrackObjectTracker:
                     round(box[3], 1),
                 )],
                 appearance=_ensure_detection_appearance(detection, "track_seed"),
+                seeded=confirm_new,
             )
             self._tracks[track.track_id] = track
             assignments[index] = track.track_id
@@ -473,21 +476,11 @@ class ByteTrackObjectTracker:
                 track = self._tracks[track_id]
                 if track.label != str(detection.get("label")):
                     continue
-                if captured_at - track.last_seen > self.config.lost_timeout_seconds:
+                if captured_at - track.last_seen > self._association_stale_limit(track):
                     continue
-                elapsed = max(0.0, captured_at - track.last_seen)
-                startup_distance_multiplier = 1.0
-                if track.confirmed and track.hits == 1:
-                    expected_interval = 1.0 / max(0.1, self.config.sample_fps)
-                    startup_distance_multiplier = 1.0 + min(
-                        0.25,
-                        max(0.0, elapsed - expected_interval)
-                        / max(expected_interval, self.config.lost_timeout_seconds),
-                    )
                 score = self._geometry_score(
                     track.predicted_box(captured_at),
                     box,
-                    center_distance_multiplier=startup_distance_multiplier,
                 )
                 if score is not None:
                     candidates.append((score, track_id, index, detection, box))
@@ -500,33 +493,106 @@ class ByteTrackObjectTracker:
             if track_id not in unmatched_tracks or index in used_detections:
                 continue
             track = self._tracks[track_id]
-            supports_reid = (
-                self.config.appearance_reid_enabled
-                and self.config.reid_enabled_for_label(track.label)
-            )
-            refresh_due = (
-                track.appearance is None
-                or track.hits % self.config.reid_refresh_interval_frames == 0
-            )
-            if supports_reid and refresh_due:
-                _ensure_detection_appearance(
-                    detection,
-                    "track_seed" if track.appearance is None else "periodic_refresh",
-                )
-            elif supports_reid and callable(detection.get("_tracking_embedding_provider")):
-                self._reid_avoided_geometry_matches += 1
-                label = track.label.lower()
-                self._reid_avoided_by_label[label] = (
-                    self._reid_avoided_by_label.get(label, 0) + 1
-                )
-            track.observe(detection, captured_at, box)
-            track.confirmed = track.confirmed or track.hits >= self.config.min_confirmations
+            self._observe_geometry(track, detection, captured_at, box)
             unmatched_tracks.remove(track_id)
             used_detections.add(index)
             assignments[index] = track_id
             self._association_counts["geometry"] += 1
 
+        self._associate_unambiguous(
+            detections,
+            captured_at,
+            unmatched_tracks,
+            assignments,
+        )
         self._associate_appearance(detections, captured_at, unmatched_tracks, assignments)
+
+    def _associate_unambiguous(
+        self,
+        detections: list[tuple[int, dict[str, Any], Box]],
+        captured_at: float,
+        unmatched_tracks: set[int],
+        assignments: dict[int, int],
+    ) -> None:
+        """Bridge a short geometry jump when one identity is the only candidate.
+
+        Perspective changes and detector box jitter can move a nearby person's
+        center by more than the normal association threshold.  When exactly one
+        confirmed track and one detection remain for a label, a bounded relaxed
+        geometry check is safer than manufacturing a second identity.
+        """
+        labels = {
+            str(detection.get("label") or "")
+            for index, detection, _box_value in detections
+            if index not in assignments
+        }
+        maximum_gap = min(
+            self.config.lost_timeout_seconds,
+            max(1.0, 2.0 / max(0.1, self.config.sample_fps)),
+        )
+        for label in labels:
+            remaining_detections = [
+                item
+                for item in detections
+                if item[0] not in assignments
+                and str(item[1].get("label") or "") == label
+            ]
+            remaining_tracks = [
+                track_id
+                for track_id in unmatched_tracks
+                if self._tracks[track_id].label == label
+                and self._tracks[track_id].confirmed
+                and captured_at - self._tracks[track_id].last_seen <= (
+                    self._association_stale_limit(self._tracks[track_id])
+                    if self._tracks[track_id].seeded
+                    else maximum_gap
+                )
+            ]
+            if len(remaining_detections) != 1 or len(remaining_tracks) != 1:
+                continue
+            index, detection, box = remaining_detections[0]
+            track_id = remaining_tracks[0]
+            track = self._tracks[track_id]
+            score = self._geometry_score(
+                track.predicted_box(captured_at),
+                box,
+                center_distance_multiplier=2.0 if track.seeded else 1.75,
+            )
+            if score is None:
+                continue
+            self._observe_geometry(track, detection, captured_at, box)
+            unmatched_tracks.remove(track_id)
+            assignments[index] = track_id
+            self._association_counts["geometry"] += 1
+
+    def _observe_geometry(
+        self,
+        track: ObjectTrack,
+        detection: dict[str, Any],
+        captured_at: float,
+        box: Box,
+    ) -> None:
+        supports_reid = (
+            self.config.appearance_reid_enabled
+            and self.config.reid_enabled_for_label(track.label)
+        )
+        refresh_due = (
+            track.appearance is None
+            or track.hits % self.config.reid_refresh_interval_frames == 0
+        )
+        if supports_reid and refresh_due:
+            _ensure_detection_appearance(
+                detection,
+                "track_seed" if track.appearance is None else "periodic_refresh",
+            )
+        elif supports_reid and callable(detection.get("_tracking_embedding_provider")):
+            self._reid_avoided_geometry_matches += 1
+            label = track.label.lower()
+            self._reid_avoided_by_label[label] = (
+                self._reid_avoided_by_label.get(label, 0) + 1
+            )
+        track.observe(detection, captured_at, box)
+        track.confirmed = track.confirmed or track.hits >= self.config.min_confirmations
 
     def _geometry_score(
         self,
@@ -565,7 +631,7 @@ class ByteTrackObjectTracker:
         distance_ratio = distance / scale
         center_limit = (
             self.config.match_center_distance_ratio
-            * max(1.0, min(1.25, center_distance_multiplier))
+            * max(1.0, min(2.0, center_distance_multiplier))
         )
         if area_ratio >= 0.20 and distance_ratio <= center_limit:
             return 0.5 + (1.0 - distance_ratio / center_limit)
@@ -697,6 +763,14 @@ class ByteTrackObjectTracker:
         ]
         return sorted([*completed, *active], key=lambda item: int(item["track_id"]))
 
+    def _association_stale_limit(self, track: ObjectTrack) -> float:
+        if track.seeded:
+            return max(
+                self.config.lost_timeout_seconds,
+                min(8.0, self.config.max_session_seconds),
+            )
+        return self.config.lost_timeout_seconds
+
     def diagnostics(self) -> dict[str, Any]:
         return {
             "association_counts": dict(self._association_counts),
@@ -752,6 +826,8 @@ class ObjectTrackingSession:
         self._reid_avoided_base_by_label: dict[str, int] = {}
         self._reid_attempt_base = 0
         self._reid_attempt_base_by_reason: dict[str, int] = {}
+        self._frame_width = 0
+        self._frame_height = 0
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -931,18 +1007,24 @@ class ObjectTrackingSession:
         tracker: ObjectTrackerBackend | None = None
         frames_processed = 0
         try:
+            self._frame_width = 0
+            self._frame_height = 0
             tracker = self.tracker_registry.create(
                 self.config.implementation,
                 self.config,
                 float(self.detector.config.confidence_threshold),
             )
             if initial_frame is not None:
+                self._frame_height = int(initial_frame.shape[0])
+                self._frame_width = int(initial_frame.shape[1])
                 self._annotate_appearances(
                     initial_frame,
                     initial_objects,
                     lazy=self.config.implementation == "survng_hybrid",
                 )
-            captured_at = time.time()
+            # Initial detections come from the event-time recording frame, not
+            # from the moment this background worker happens to start.
+            captured_at = event_at.timestamp()
             for detected in initial_objects:
                 detected["_tracking_first_seen_at"] = event_at.timestamp()
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
@@ -978,6 +1060,8 @@ class ObjectTrackingSession:
                     next_sample = time.monotonic() + interval
                     continue
                 last_frame_token = frame_token
+                self._frame_height = int(frame.shape[0])
+                self._frame_width = int(frame.shape[1])
                 objects = self.detector.detect(
                     frame,
                     confidence_threshold=self.config.low_confidence_threshold,
@@ -1086,6 +1170,9 @@ class ObjectTrackingSession:
                 },
             },
         }
+        if self._frame_width > 0 and self._frame_height > 0:
+            payload["frame_width"] = self._frame_width
+            payload["frame_height"] = self._frame_height
         if self.update_event(event_id, payload, tracked_objects) is None:
             raise RuntimeError(f"tracking event {event_id} no longer exists")
         self._set_status(

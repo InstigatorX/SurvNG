@@ -66,7 +66,7 @@ import {
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
 import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
-import { storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
+import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -1781,28 +1781,18 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   );
 }
 
-function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, sampleFps }) {
+function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps }) {
   const [playbackEpoch, setPlaybackEpoch] = useState(null);
-  const baselineRef = useRef(null);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !Number.isFinite(windowStartEpoch)) return undefined;
+    if (!video || !Number.isFinite(windowStartEpoch) || !Number.isFinite(mediaStartTime)) return undefined;
     let timer = null;
     let stopped = false;
 
-    function establishBaseline() {
-      if (!baselineRef.current && Number.isFinite(video.currentTime)) {
-        baselineRef.current = { mediaTime: video.currentTime, epoch: windowStartEpoch };
-      }
-    }
-
     function update() {
-      establishBaseline();
-      const baseline = baselineRef.current;
-      if (baseline && Number.isFinite(video.currentTime)) {
-        setPlaybackEpoch(baseline.epoch + video.currentTime - baseline.mediaTime);
-      }
+      const epoch = playbackEpochAt(windowStartEpoch, video.currentTime, mediaStartTime);
+      if (epoch !== null) setPlaybackEpoch(epoch);
     }
 
     function schedule() {
@@ -1812,7 +1802,6 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
     }
 
     function onPlaying() {
-      establishBaseline();
       if (timer !== null) window.clearTimeout(timer);
       schedule();
     }
@@ -1831,9 +1820,8 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("timeupdate", update);
-      baselineRef.current = null;
     };
-  }, [videoRef, windowStartEpoch]);
+  }, [videoRef, windowStartEpoch, mediaStartTime, mediaKey]);
 
   const visibleTracks = useMemo(() => {
     if (!Number.isFinite(playbackEpoch)) return [];
@@ -1843,6 +1831,15 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
       return frame ? [{ ...track, ...frame }] : [];
     });
   }, [playbackEpoch, sampleFps, tracks]);
+
+  const secondsUntilTracking = useMemo(() => {
+    if (!Number.isFinite(playbackEpoch) || visibleTracks.length) return null;
+    const nextEpoch = tracks
+      .flatMap((track) => track.boxHistory.length ? [track.boxHistory[0][0]] : [])
+      .filter((epoch) => epoch > playbackEpoch)
+      .sort((left, right) => left - right)[0];
+    return Number.isFinite(nextEpoch) ? Math.max(1, Math.ceil(nextEpoch - playbackEpoch)) : null;
+  }, [playbackEpoch, tracks, visibleTracks.length]);
 
   if (!coordinateSize?.width || !coordinateSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
   return (
@@ -1864,6 +1861,7 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
           #{track.trackId} {track.label}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
         </span>
       ))}
+      {secondsUntilTracking ? <span className="object-track-video-waiting">Tracking begins in {secondsUntilTracking}s</span> : null}
     </div>
   );
 }
@@ -2107,7 +2105,8 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
-  const objectTracks = inspectedEvent.object_tracking?.tracks || [];
+  const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
+  const objectTracks = incidentTracking?.tracks || [];
   const faces = faceEvent?.faces || [];
   const zones = incidentZones(incident);
   const eventId = Number(incident.representative_event_id || incident.id);
@@ -2137,7 +2136,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
       </section>
       <section>
         <h3>Tracked objects</h3>
-        {objectTracks.length ? <p>{String(inspectedEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(inspectedEvent.object_tracking?.sample_fps || 0) || "?"} FPS. Open the viewer to see paths.</p> : <p>No stored tracks for this event. Open the viewer to compare trackers offline.</p>}
+        {objectTracks.length ? <p>{String(incidentTracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(incidentTracking?.sample_fps || 0) || "?"} FPS. Open the viewer to see paths.</p> : <p>No stored tracks for this incident. Open the viewer to compare trackers offline.</p>}
         {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
           <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
@@ -2321,6 +2320,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [clipLoading, setClipLoading] = useState(false);
   const [clipError, setClipError] = useState("");
   const [playback, setPlayback] = useState(null);
+  const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
   const [videoActive, setVideoActive] = useState(false);
   const [detectionDebug, setDetectionDebug] = useState(false);
   const [detectionDebugStats, setDetectionDebugStats] = useState(null);
@@ -2338,9 +2338,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [manualDetection, setManualDetection] = useState(null);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState("");
-  const incidentTrackingEvent = event.representative_event_id && !event.object_tracking?.tracks?.length
-    ? (event.events || []).find((candidate) => candidate.object_tracking?.tracks?.length)
-    : null;
+  const trackingSource = incidentTrackingSource(event);
+  const incidentTrackingEvent = trackingSource && trackingSource !== event ? trackingSource : null;
   const viewerEvent = incidentTrackingEvent ? {
     ...incidentTrackingEvent,
     start_epoch: event.start_epoch,
@@ -2383,6 +2382,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       }
       setClipInfo(null);
       setPlayback(null);
+      setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
       setVideoActive(false);
@@ -2410,6 +2410,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
         after: window.after,
         duration: window.before + window.after,
         windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null,
+        initialPlaybackOffset: Math.max(0, window.before - safeBefore),
       };
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
@@ -2720,12 +2721,14 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       streamUrl: eventStreamUrl(manualEventId, 0, after),
       downloadUrl: eventClipUrl(manualEventId, 0, after),
       windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch : null,
+      initialPlaybackOffset: 0,
     };
     setTrackingComparisonEngine(implementation);
     setTrackingVisible(true);
     setDetectionDebug(false);
     setClipError("");
     setClipLoading(true);
+    setPlaybackOriginTime(null);
     setClipInfo(nextClip);
     setPlayback({
       url: nextClip.streamUrl,
@@ -2863,10 +2866,27 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 controls
                 playsInline
                 preload="metadata"
-                onReady={() => { setClipLoading(false); setClipError(""); }}
+                onReady={(_player, video) => {
+                  const originTime = Number.isFinite(video?.currentTime) ? video.currentTime : 0;
+                  setPlaybackOriginTime(originTime);
+                  const initialOffset = Math.max(0, Number(clipInfo.initialPlaybackOffset) || 0);
+                  if (initialOffset > 0 && video) {
+                    const seekToSelectedEvent = () => {
+                      const targetTime = originTime + initialOffset;
+                      video.currentTime = Number.isFinite(video.duration)
+                        ? Math.min(targetTime, Math.max(originTime, video.duration - 0.25))
+                        : targetTime;
+                    };
+                    if (video.paused) video.addEventListener("playing", seekToSelectedEvent, { once: true });
+                    else seekToSelectedEvent();
+                  }
+                  setClipLoading(false);
+                  setClipError("");
+                }}
                 onError={() => {
                   if (playback.url !== clipInfo.downloadUrl) {
                     setClipLoading(true);
+                    setPlaybackOriginTime(null);
                     setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
                   } else {
                     setClipLoading(false);
@@ -2891,6 +2911,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                     height: Number(trackingEvent.object_tracking?.frame_height) || mediaSize?.height,
                   }}
                   windowStartEpoch={clipInfo.windowStartEpoch}
+                  mediaStartTime={playbackOriginTime}
+                  mediaKey={playback.key || playback.url}
                   sampleFps={trackingEvent.object_tracking?.sample_fps}
                 />
               ) : null}

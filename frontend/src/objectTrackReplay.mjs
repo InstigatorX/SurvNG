@@ -3,6 +3,30 @@ function finiteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function eventEpoch(event) {
+  const parsed = Date.parse(String(event?.created_at || ""));
+  if (Number.isFinite(parsed)) return parsed / 1000;
+  return finiteNumber(event?.start_epoch);
+}
+
+export function incidentTrackingSource(event, incident = null) {
+  if (event?.object_tracking?.tracks?.length) return event;
+  const incidentEvents = event?.events?.length ? event.events : incident?.events || [];
+  const candidates = incidentEvents.filter(
+    (candidate) => candidate?.object_tracking?.tracks?.length,
+  );
+  if (!candidates.length) return null;
+  const target = eventEpoch(event);
+  if (target === null) return candidates[0];
+  return candidates.reduce((best, candidate) => {
+    const candidateTime = eventEpoch(candidate);
+    const bestTime = eventEpoch(best);
+    const candidateDistance = candidateTime === null ? Number.POSITIVE_INFINITY : Math.abs(candidateTime - target);
+    const bestDistance = bestTime === null ? Number.POSITIVE_INFINITY : Math.abs(bestTime - target);
+    return candidateDistance < bestDistance ? candidate : best;
+  });
+}
+
 export function storedObjectTracks(event) {
   const tracks = event?.object_tracking?.tracks;
   if (!Array.isArray(tracks)) return [];
@@ -83,4 +107,12 @@ export function trackFrameAt(track, epoch, holdSeconds = 1) {
     .reverse()
     .find((item) => item.capturedAt <= epoch && epoch - item.capturedAt <= Math.max(0.75, holdSeconds));
   return { box, path, recovery: recovery || null };
+}
+
+export function playbackEpochAt(windowStartEpoch, mediaTime, mediaStartTime) {
+  const startEpoch = finiteNumber(windowStartEpoch);
+  const currentTime = finiteNumber(mediaTime);
+  const originTime = finiteNumber(mediaStartTime);
+  if (startEpoch === null || currentTime === null || originTime === null) return null;
+  return startEpoch + currentTime - originTime;
 }

@@ -281,7 +281,7 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertTrue(qualification["effective_accepted"])
         self.assertFalse(qualification["would_suppress"])
 
-    def test_reid_seeds_tracking_from_the_event_snapshot(self) -> None:
+    def test_tracking_seeds_timing_and_dimensions_from_the_event_snapshot(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         events = Mock()
         events.add_event.return_value = {"id": 42}
@@ -292,8 +292,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), events=events)
             worker.object_tracking.config = ObjectTrackingConfig(
                 enabled=True,
-                reid_enabled=True,
-                reid_model_path="person-reid.xml",
+                reid_enabled=False,
             )
             with (
                 patch.object(

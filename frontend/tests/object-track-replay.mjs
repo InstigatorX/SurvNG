@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { storedObjectTracks, trackFrameAt } from "../src/objectTrackReplay.mjs";
+import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../src/objectTrackReplay.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
   track_id: 7,
@@ -25,5 +25,38 @@ assert.equal(trackFrameAt(tracks[0], 11.5, 1)?.recovery?.similarity, 0.91);
 assert.equal(trackFrameAt(tracks[0], 12.1, 1), null);
 
 assert.deepEqual(storedObjectTracks({ object_tracking: { tracks: [{ track_id: 1, label: "person", box: {} }] } }), []);
+
+const earlierTracked = {
+  id: 10,
+  created_at: "2026-07-28T22:36:29+00:00",
+  object_tracking: { tracks: [{ track_id: 1 }] },
+};
+const laterTracked = {
+  id: 12,
+  created_at: "2026-07-28T22:36:49+00:00",
+  object_tracking: { tracks: [{ track_id: 2 }] },
+};
+const selectedChild = {
+  id: 11,
+  created_at: "2026-07-28T22:36:31+00:00",
+  start_epoch: Date.parse("2026-07-28T22:30:00+00:00") / 1000,
+  events: [laterTracked, earlierTracked],
+};
+assert.equal(incidentTrackingSource(selectedChild)?.id, 10);
+assert.equal(incidentTrackingSource({
+  ...selectedChild,
+  created_at: "2026-07-28T22:36:47+00:00",
+})?.id, 12);
+assert.equal(incidentTrackingSource(earlierTracked), earlierTracked);
+assert.equal(incidentTrackingSource({ id: 13, events: [] }), null);
+assert.equal(
+  incidentTrackingSource({ id: 14, events: [] }, { events: [earlierTracked] })?.id,
+  10,
+);
+
+assert.equal(playbackEpochAt(1000, 8, 8), 1000);
+assert.equal(playbackEpochAt(1000, 29, 8), 1021);
+assert.equal(playbackEpochAt(1000, 0, 0), 1000);
+assert.equal(playbackEpochAt(1000, "bad", 0), null);
 
 console.log("object track replay tests passed");

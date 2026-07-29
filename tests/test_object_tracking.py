@@ -423,6 +423,39 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
         self.assertEqual(tracked[0]["track_id"], 1)
         self.assertEqual(len(tracker.summaries(1785257054.987)), 1)
 
+    def test_downstairs_sequence_bridges_startup_delay_and_perspective_jump(self) -> None:
+        tracker = ByteTrackObjectTracker(
+            self.config.model_copy(update={
+                "lost_timeout_seconds": 3.0,
+                "sample_fps": 2.0,
+                "reid_enabled": True,
+                "reid_model_path": "person-reid.xml",
+            }),
+            high_confidence_threshold=0.7,
+        )
+        seed = detection("person", 0.9507, (1712, 784, 2084, 1523))
+        seed["_tracking_embedding"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        tracker.update([seed], 1785278189.0, confirm_new=True)
+
+        first_live = detection("person", 0.94, (1450, 604, 1597, 996))
+        first_live["_tracking_embedding_provider"] = lambda: np.asarray(
+            [0.0, 1.0], dtype=np.float32
+        )
+        second_live = detection("person", 0.95, (1128, 585, 1232, 857))
+        second_live["_tracking_embedding_provider"] = lambda: np.asarray(
+            [0.0, 1.0], dtype=np.float32
+        )
+
+        first = tracker.update([first_live], 1785278194.225)
+        second = tracker.update([second_live], 1785278194.657)
+
+        self.assertEqual(first[0]["track_id"], 1)
+        self.assertEqual(second[0]["track_id"], 1)
+        summaries = tracker.summaries(1785278194.657)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["observations"], 3)
+        self.assertEqual(summaries[0]["box_history"][0][0], 1785278189.0)
+
     def test_tracker_registry_rejects_unknown_or_duplicate_implementations(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("byte", ByteTrackObjectTracker)
@@ -835,10 +868,12 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         )
         session.set_accepting(True)
 
+        event_at = datetime.now(timezone.utc)
         started = session.start(
             42,
-            datetime.now(timezone.utc),
+            event_at,
             [detection("person", 0.9, (10, 10, 40, 80))],
+            np.zeros((100, 160, 3), dtype=np.uint8),
         )
         self.assertTrue(started)
         self.assertTrue(update_ready.wait(2.0))
@@ -847,6 +882,9 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(detector.threshold, 0.25)
         self.assertEqual(updates[-1]["state"], "complete")
         self.assertGreaterEqual(updates[-1]["frames_processed"], 1)
+        self.assertEqual(updates[0]["tracks"][0]["box_history"][0][0], round(event_at.timestamp(), 3))
+        self.assertEqual(updates[0]["frame_width"], 160)
+        self.assertEqual(updates[0]["frame_height"], 100)
         self.assertFalse(session.status()["active"])
 
     def test_detector_failures_persist_terminal_failure_state(self) -> None:
