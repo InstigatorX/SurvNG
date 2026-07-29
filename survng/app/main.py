@@ -3188,14 +3188,15 @@ async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict
 
 @app.get("/api/cameras/{camera_id}/snapshot.jpg")
 def snapshot(camera_id: str, source: str = "live") -> Response:
-    worker = manager.workers.get(camera_id)
-    camera = manager.camera(camera_id)
+    active_manager = manager
+    worker = active_manager.workers.get(camera_id)
+    camera = active_manager.camera(camera_id)
     if worker is None or camera is None:
         raise HTTPException(status_code=404, detail="camera not found")
     if not worker.status().get("running"):
         raise HTTPException(status_code=503, detail="camera is powered off")
     try:
-        image = manager.go2rtc.snapshot(camera, source)
+        image = active_manager.go2rtc.snapshot(camera, source)
     except Go2RtcError:
         fallback_source = "live" if source == "main" and camera.source_url("main") == camera.source_url("live") else source
         image = worker.snapshot(fallback_source)
@@ -3206,22 +3207,23 @@ def snapshot(camera_id: str, source: str = "live") -> Response:
 
 @app.get("/api/cameras/{camera_id}/zone-snapshot.jpg")
 def zone_snapshot(camera_id: str, source: str = "live") -> Response:
-    worker = manager.workers.get(camera_id)
-    camera = manager.camera(camera_id)
+    active_manager = manager
+    worker = active_manager.workers.get(camera_id)
+    camera = active_manager.camera(camera_id)
     if worker is None or camera is None:
         raise HTTPException(status_code=404, detail="camera not found")
     image = None
     if worker.status().get("running"):
         try:
-            image = manager.go2rtc.snapshot(camera, source)
+            image = active_manager.go2rtc.snapshot(camera, source)
         except Go2RtcError:
             fallback_source = "live" if source == "main" and camera.source_url("main") == camera.source_url("live") else source
             image = worker.snapshot(fallback_source)
     if image is not None:
         return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
-    storage_root = Path(config.storage_dir).resolve()
-    for event in manager.events.recent(1000):
+    storage_root = active_manager.storage_dir.resolve()
+    for event in active_manager.events.recent(1000):
         if event.get("camera_id") != camera_id:
             continue
         snapshot_path = Path(str(event.get("snapshot_path") or ""))
@@ -3238,11 +3240,15 @@ def zone_snapshot(camera_id: str, source: str = "live") -> Response:
 @app.get("/api/cameras/{camera_id}/live-info")
 def live_info(camera_id: str, response: Response, source: str = "live") -> dict:
     response.headers["Cache-Control"] = "no-store"
-    camera = manager.camera(camera_id)
-    if camera is None:
+    active_manager = manager
+    camera = active_manager.camera(camera_id)
+    worker = active_manager.workers.get(camera_id)
+    if camera is None or worker is None:
         raise HTTPException(status_code=404, detail="camera not found")
+    if not worker.status().get("running"):
+        raise HTTPException(status_code=503, detail="camera is powered off")
     try:
-        return manager.go2rtc.stream_info(camera, source)
+        return active_manager.go2rtc.stream_info(camera, source)
     except Go2RtcError as exc:
         return {
             "available": False,
@@ -3262,9 +3268,12 @@ async def stream(
     source: str = "live",
     fps: float = 4.0,
 ) -> StreamingResponse:
-    worker = manager.workers.get(camera_id)
+    active_manager = manager
+    worker = active_manager.workers.get(camera_id)
     if worker is None:
         raise HTTPException(status_code=404, detail="camera not found")
+    if not worker.status().get("running"):
+        raise HTTPException(status_code=503, detail="camera is powered off")
     frame_interval = 1.0 / max(0.5, min(4.0, fps))
 
     async def frames():
@@ -3293,18 +3302,22 @@ async def stream(
 async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport: str) -> None:
     """Relay one camera's go2rtc WebSocket without exposing the go2rtc API."""
     try:
-        camera = manager.camera(camera_id)
-        if camera is None:
+        active_manager = manager
+        camera = active_manager.camera(camera_id)
+        worker = active_manager.workers.get(camera_id)
+        if camera is None or worker is None:
             raise Go2RtcError("camera not found")
+        if not worker.status().get("running"):
+            raise Go2RtcError("camera is powered off")
         upstream_url = await asyncio.to_thread(
-            manager.go2rtc.websocket_url,
+            active_manager.go2rtc.websocket_url,
             camera,
             websocket.query_params.get("source", "live"),
         )
     except (Go2RtcError, OSError, RuntimeError):
         await websocket.close(code=1008)
         return
-    await websocket.accept()
+    accepted = False
     tasks: list[asyncio.Task] = []
     try:
         async with websockets.connect(
@@ -3317,6 +3330,12 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
             max_queue=4,
             compression=None,
         ) as upstream:
+            # Do not report an open browser relay until the upstream go2rtc
+            # socket is actually ready. This lets the client advance to its
+            # next transport immediately when go2rtc is unavailable.
+            await websocket.accept()
+            accepted = True
+
             async def browser_to_go2rtc() -> None:
                 while True:
                     message = await websocket.receive()
@@ -3353,7 +3372,7 @@ async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         try:
-            await websocket.close()
+            await websocket.close(code=1000 if accepted else 1013)
         except RuntimeError:
             pass
 

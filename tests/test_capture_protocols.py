@@ -17,7 +17,11 @@ from survng.app.baichuan_native import (
     MediaFrameReader,
 )
 from survng.app.config import CameraConfig
-from survng.app.onvif_events import OnvifEventListener
+from survng.app.onvif_events import (
+    OnvifEventListener,
+    STOP_FORCE_SECONDS,
+    STOP_GRACE_SECONDS,
+)
 
 
 def camera(*, onvif: bool = False) -> CameraConfig:
@@ -164,6 +168,21 @@ class CaptureProtocolTest(unittest.TestCase):
 
         self.assertEqual(order, ["unsubscribe", "close"])
         self.assertFalse(listener.running)
+
+    def test_onvif_worker_is_daemonized_and_forced_stop_is_bounded(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        thread = Mock()
+        thread.is_alive.return_value = True
+        with patch("survng.app.onvif_events.threading.Thread", return_value=thread) as factory:
+            listener.start()
+            listener.stop()
+
+        self.assertTrue(factory.call_args.kwargs["daemon"])
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in thread.join.call_args_list],
+            [STOP_GRACE_SECONDS, STOP_FORCE_SECONDS],
+        )
+        self.assertLessEqual(STOP_GRACE_SECONDS + STOP_FORCE_SECONDS, 15)
 
     def test_onvif_numeric_off_state_is_not_reported_as_motion(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())

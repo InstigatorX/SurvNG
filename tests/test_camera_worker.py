@@ -1605,6 +1605,30 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertIsNone(worker._motion_analysis_thread)
             self.assertIsNone(worker._motion_thread)
 
+    def test_close_refuses_to_race_an_active_motion_worker(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._motion_thread = Mock(is_alive=lambda: True)
+
+            with self.assertRaisesRegex(RuntimeError, "motion events"):
+                worker.close()
+
+    def test_close_attempts_every_motion_pipeline_after_a_failure(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker.motion_pipeline = Mock()
+            worker.motion_observation_pipeline = Mock()
+            worker.motion_fusion_pipeline = Mock()
+            worker.motion_pipeline.close.side_effect = RuntimeError("close failed")
+
+            with self.assertRaisesRegex(RuntimeError, "failed to close"):
+                worker.close()
+
+        worker.motion_observation_pipeline.close.assert_called_once_with()
+        worker.motion_fusion_pipeline.close.assert_called_once_with()
+
     def test_disabled_detection_ignores_motion_event(self) -> None:
         camera = CameraConfig(
             id="back-middle",

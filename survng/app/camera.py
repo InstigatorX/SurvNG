@@ -357,9 +357,42 @@ class CameraWorker:
             self.onvif.stop()
 
     def close(self) -> None:
-        self.motion_pipeline.close()
-        self.motion_observation_pipeline.close()
-        self.motion_fusion_pipeline.close()
+        with self._lifecycle_lock:
+            active = [
+                label
+                for label, thread in (
+                    ("motion events", self._motion_thread),
+                    ("motion analysis", self._motion_analysis_thread),
+                )
+                if thread is not None and thread.is_alive()
+            ]
+            if active:
+                raise RuntimeError(
+                    f"cannot close camera {self.camera.id} pipelines while "
+                    f"{', '.join(active)} is running"
+                )
+            failures: list[BaseException] = []
+            for label, pipeline in (
+                ("qualification", self.motion_pipeline),
+                ("observation", self.motion_observation_pipeline),
+                ("fusion", self.motion_fusion_pipeline),
+            ):
+                try:
+                    pipeline.close()
+                except BaseException as exc:
+                    failures.append(exc)
+                    LOGGER.exception(
+                        "%s motion pipeline cleanup failed for %s",
+                        label,
+                        self.camera.id,
+                    )
+            if failures:
+                first_error = failures[0]
+                if not isinstance(first_error, Exception):
+                    raise first_error
+                raise RuntimeError(
+                    f"one or more motion pipelines failed to close for {self.camera.id}"
+                ) from first_error
 
     def status(self) -> dict[str, Any]:
         with self._lifecycle_lock:

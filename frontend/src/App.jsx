@@ -887,6 +887,9 @@ function streamUrlDefaults(url) {
 }
 
 function inferredBackendLabel(camera) {
+  if (camera.video_backend === "baichuan_native" && camera.baichuan?.enabled) {
+    return "Reolink Baichuan (URL fallback)";
+  }
   const defaults = streamUrlDefaults(camera.stream_url || camera.live_stream_url || "");
   if (defaults.scheme === "reolink") return "Reolink Baichuan";
   if (defaults.scheme === "rtsp") return "RTSP";
@@ -899,9 +902,10 @@ function cameraWithDerivedConnection(camera) {
   if (!defaults.host) return camera;
   const isReolink = defaults.scheme === "reolink";
   const isRtsp = defaults.scheme === "rtsp";
+  const nativeSelected = camera.video_backend === "baichuan_native" && camera.baichuan?.enabled;
   return {
     ...camera,
-    video_backend: isReolink ? "baichuan_native" : isRtsp ? "url" : camera.video_backend,
+    video_backend: isReolink || nativeSelected ? "baichuan_native" : isRtsp ? "url" : camera.video_backend,
     onvif: {
       ...camera.onvif,
       host: camera.onvif?.host || defaults.host,
@@ -910,7 +914,7 @@ function cameraWithDerivedConnection(camera) {
     },
     baichuan: {
       ...camera.baichuan,
-      enabled: isReolink,
+      enabled: isReolink || nativeSelected,
       host: isReolink ? defaults.host : camera.baichuan?.host || defaults.host,
       port: isReolink ? defaults.port || 9000 : camera.baichuan?.port || 9000,
       username: isReolink ? defaults.username : camera.baichuan?.username || defaults.username,

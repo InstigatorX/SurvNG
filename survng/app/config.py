@@ -460,7 +460,10 @@ def apply_stream_url_defaults(camera: CameraConfig) -> None:
             "password": password or camera.baichuan.password,
             "channel": channel,
         })
-    elif scheme == "rtsp":
+    elif camera.video_backend != "baichuan_native":
+        # Non-Reolink URLs use their configured URL backend by default, but an
+        # explicit native Baichuan selection is valid with an RTSP/HTTP URL
+        # retained as the snapshot and detection fallback.
         camera.video_backend = "url"
         camera.baichuan.enabled = False
 

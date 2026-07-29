@@ -20,7 +20,8 @@ RETRY_MAX_SECONDS = 60.0
 POLL_RETRY_SECONDS = 2.0
 PULL_TIMEOUT_SECONDS = 5
 TRANSPORT_OPERATION_TIMEOUT_SECONDS = 45
-STOP_JOIN_SECONDS = TRANSPORT_OPERATION_TIMEOUT_SECONDS + 5
+STOP_GRACE_SECONDS = PULL_TIMEOUT_SECONDS + 2
+STOP_FORCE_SECONDS = 5
 MAX_POLL_FAILURES = 6
 TIMEOUT_WORDS = ("timed out", "timeout", "read timed out", "operation timed out")
 PULLPOINT_NAMESPACE = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
@@ -91,7 +92,10 @@ class OnvifEventListener:
             thread = threading.Thread(
                 target=self._run,
                 name=f"onvif-{self.camera.id}",
-                daemon=False,
+                # Some camera SDK calls can ignore a closed HTTP transport.
+                # Cleanup below is bounded, so a broken camera must not pin
+                # the whole SurvNG process after shutdown completes.
+                daemon=True,
             )
             self._thread = thread
             try:
@@ -109,10 +113,10 @@ class OnvifEventListener:
             # PullMessages has a short bounded timeout. Let the owning worker
             # return from it and send Unsubscribe while its transport is still
             # usable before resorting to forcibly closing the session.
-            thread.join(timeout=PULL_TIMEOUT_SECONDS + 5)
+            thread.join(timeout=STOP_GRACE_SECONDS)
             if thread.is_alive():
                 self._close_transport()
-                thread.join(timeout=STOP_JOIN_SECONDS)
+                thread.join(timeout=STOP_FORCE_SECONDS)
                 if thread.is_alive():
                     LOGGER.error("ONVIF worker did not stop for %s", self.camera.id)
         self.connected = False

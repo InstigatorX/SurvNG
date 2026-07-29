@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 from urllib.request import urlopen
 
 from .config import CameraConfig
@@ -32,7 +32,7 @@ class Go2RtcAdapter:
 
     def stream(self, camera: CameraConfig, source: str = "live") -> Go2RtcStream:
         parsed = urlsplit(camera.source_url(camera.normalized_source(source)))
-        stream_name = parsed.path.strip("/")
+        stream_name = unquote(parsed.path.strip("/"))
         if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname or not stream_name:
             raise Go2RtcError("camera source is not a go2rtc RTSP restream")
         return Go2RtcStream(parsed.hostname, stream_name)
@@ -85,10 +85,14 @@ class Go2RtcAdapter:
                 media_ready = media_ready or codec.get("codec_type") in {"audio", "video"}
                 if codec.get("codec_type") != "audio":
                     continue
+                try:
+                    sample_rate = int(codec.get("sample_rate") or 0)
+                except (TypeError, ValueError):
+                    sample_rate = 0
                 return {
                     "available": True,
                     "codec": str(codec.get("codec_name") or "").strip().lower(),
-                    "sample_rate": int(codec.get("sample_rate") or 0),
+                    "sample_rate": sample_rate,
                 }
             for media in producer.get("medias") or []:
                 if not isinstance(media, str):

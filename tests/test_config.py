@@ -262,6 +262,31 @@ class AppConfigTest(unittest.TestCase):
                 onvif={"username": "configured"},
             )
 
+    def test_non_reolink_urls_preserve_explicit_native_backend_selection(self) -> None:
+        for scheme in ("rtsp", "rtsps", "https"):
+            with self.subTest(scheme=scheme):
+                camera = CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url=f"{scheme}://camera.local/main",
+                    video_backend="baichuan_native",
+                    baichuan={"enabled": True, "host": "camera.local"},
+                )
+
+                self.assertEqual(camera.video_backend, "baichuan_native")
+                self.assertTrue(camera.baichuan.enabled)
+
+    def test_non_reolink_urls_keep_default_url_backend(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsps://camera.local/main",
+            baichuan={"enabled": True, "host": "camera.local"},
+        )
+
+        self.assertEqual(camera.video_backend, "url")
+        self.assertFalse(camera.baichuan.enabled)
+
     def test_failed_config_serialization_preserves_previous_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.json"

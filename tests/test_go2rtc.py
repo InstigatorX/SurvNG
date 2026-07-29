@@ -136,6 +136,35 @@ class Go2RtcAdapterTest(unittest.TestCase):
         )
         self.assertEqual(adapter._base_url("fd00::10"), "http://[fd00::10]:1984")
 
+    def test_encoded_stream_names_are_decoded_once_before_websocket_quoting(self) -> None:
+        adapter = Go2RtcAdapter()
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://10.1.1.1:8554/front%20gate",
+        )
+
+        self.assertEqual(adapter.stream(camera, "main").name, "front gate")
+        self.assertTrue(adapter.websocket_url(camera, "main").endswith("src=front%20gate"))
+
+    def test_invalid_receiver_sample_rate_is_treated_as_unknown(self) -> None:
+        adapter = Go2RtcAdapter()
+        payload = {
+            "producers": [{
+                "receivers": [{
+                    "codec": {
+                        "codec_name": "aac",
+                        "codec_type": "audio",
+                        "sample_rate": "invalid",
+                    },
+                }],
+            }],
+        }
+        with patch.object(adapter, "_stream_details", return_value=payload):
+            info = adapter.audio_stream_info(self.camera(), "main")
+
+        self.assertEqual(info["sample_rate"], 0)
+
     def test_invalid_stream_response_clears_an_existing_cache_entry(self) -> None:
         adapter = Go2RtcAdapter()
         adapter._streams_cache["10.1.1.1"] = (0.0, {"stale": {}})

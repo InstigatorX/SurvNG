@@ -127,32 +127,42 @@ class MqttService:
             self._accept_incidents = False
             was_connected = bool(client is not None and self.connected)
             if was_connected:
-                self.flush_incidents()
-            self._cancel_incident_timers()
+                try:
+                    self.flush_incidents()
+                except Exception:
+                    LOGGER.exception("failed to flush pending MQTT incidents")
             try:
-                if client is not None:
-                    if was_connected:
-                        self.publish("status", {"online": False}, retain=True)
-                    # Invalidate the client before disconnecting so callbacks
-                    # racing with shutdown cannot restore connected state or
-                    # enqueue commands for a service that is stopping.
-                    self.client = None
-                    self.connected = False
-                    self.command_subscriptions_active = False
-                    if was_connected:
-                        client.disconnect()
-                    client.loop_stop()
+                self._cancel_incident_timers()
             except Exception:
-                LOGGER.exception("failed to stop MQTT client cleanly")
-            finally:
+                LOGGER.exception("failed to cancel pending MQTT incident timers")
+            if client is not None:
+                if was_connected:
+                    self.publish("status", {"online": False}, retain=True)
+                # Invalidate the client before disconnecting so callbacks
+                # racing with shutdown cannot restore connected state or
+                # enqueue commands for a service that is stopping.
+                self.client = None
                 self.connected = False
                 self.command_subscriptions_active = False
-                self.client = None
-                self._stop_command_worker()
+                if was_connected:
+                    try:
+                        client.disconnect()
+                    except Exception:
+                        LOGGER.exception("failed to disconnect MQTT client cleanly")
+                try:
+                    client.loop_stop()
+                except Exception:
+                    LOGGER.exception("failed to stop MQTT network loop cleanly")
+            self.connected = False
+            self.command_subscriptions_active = False
+            self.client = None
+            self._stop_command_worker()
 
     def _start_command_worker(self) -> None:
         thread = self._command_thread
         if thread is not None and thread.is_alive():
+            if self._command_stop.is_set():
+                raise RuntimeError("previous MQTT command worker is still stopping")
             return
         while True:
             try:
@@ -163,7 +173,11 @@ class MqttService:
         thread = threading.Thread(
             target=self._run_commands,
             name="mqtt-commands",
-            daemon=False,
+            # Command callbacks are bounded by normal application operations,
+            # but a third-party or filesystem call can still wedge. stop()
+            # waits for the worker; daemon status is the final process-exit
+            # safeguard after that deadline expires.
+            daemon=True,
         )
         self._command_thread = thread
         thread.start()
@@ -808,6 +822,8 @@ class MqttService:
             value = raw
         normalized = str(value).strip().upper()
         if normalized not in {"ON", "OFF", "TRUE", "FALSE", "1", "0"}:
+            with self._lock:
+                self.commands_rejected += 1
             LOGGER.warning("ignored invalid MQTT camera %s command for %s: %s", feature, camera_id, raw[:100])
             return
         turn_on = normalized in {"ON", "TRUE", "1"}

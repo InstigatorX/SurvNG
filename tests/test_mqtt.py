@@ -236,6 +236,55 @@ class MqttServiceTest(unittest.TestCase):
         callback.assert_not_called()
         self.assertEqual(service.commands_rejected, 1)
 
+    def test_invalid_command_value_is_counted_as_rejected(self) -> None:
+        callback = Mock(return_value=True)
+        service = self.service(recording_callback=callback)
+
+        service._on_message(service.client, None, SimpleNamespace(
+            topic="survng/camera/gate/recording/set",
+            payload=b"maybe",
+        ))
+
+        callback.assert_not_called()
+        self.assertEqual(service.commands_rejected, 1)
+
+    def test_disconnect_failure_does_not_skip_network_loop_shutdown(self) -> None:
+        service = self.service()
+        client = service.client
+        client.disconnect = Mock(side_effect=RuntimeError("disconnect failed"))
+        client.loop_stop = Mock()
+
+        service.stop()
+
+        client.loop_stop.assert_called_once_with()
+        self.assertIsNone(service.client)
+
+    def test_incident_flush_failure_does_not_skip_client_shutdown(self) -> None:
+        service = self.service()
+        client = service.client
+        client.disconnect = Mock()
+        client.loop_stop = Mock()
+        service.flush_incidents = Mock(side_effect=RuntimeError("bad incident"))
+
+        service.stop()
+
+        client.disconnect.assert_called_once_with()
+        client.loop_stop.assert_called_once_with()
+        self.assertIsNone(service.client)
+
+    def test_command_worker_is_daemonized_as_a_shutdown_safeguard(self) -> None:
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+        )
+        with patch("survng.app.mqtt.threading.Thread") as thread_factory:
+            thread_factory.return_value.is_alive.return_value = False
+            service._start_command_worker()
+
+        self.assertTrue(thread_factory.call_args.kwargs["daemon"])
+
     def test_start_failure_releases_client_and_command_worker(self) -> None:
         service = MqttService(
             MqttConfig(enabled=True, host="broker"),
