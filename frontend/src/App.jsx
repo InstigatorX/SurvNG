@@ -4,6 +4,7 @@ import {
   Activity,
   ArrowLeft,
   Camera,
+  CircleAlert,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -42,6 +43,7 @@ import {
   Users,
   Rows3,
   Video,
+  Wrench,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -4885,6 +4887,44 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   );
 }
 
+function MaintenanceViewer({ state }) {
+  if (!state || state.status === "idle") {
+    return <div className="empty-state">Run a storage scan to compare files on disk with SurvNG’s local databases.</div>;
+  }
+  if (state.status === "running") {
+    return <div className="maintenance-running" role="status"><RefreshCcw className="spin" size={20} /><div><strong>{state.mode === "repair" ? "Repairing storage records…" : "Scanning storage…"}</strong><span>Large recording libraries or network storage may take several minutes.</span></div></div>;
+  }
+  if (state.status === "failed") {
+    return <div className="error-banner"><strong>Maintenance failed</strong><span>{state.error || "Check Logs for details."}</span></div>;
+  }
+  const result = state.result || {};
+  const summary = result.summary || {};
+  const repairs = result.repairs || {};
+  const missingReferences = (summary.missing_event_snapshots || 0) + (summary.missing_event_recordings || 0) + (summary.missing_motion_snapshots || 0) + (summary.missing_face_snapshots || 0);
+  const databaseIssues = (summary.missing_index_rows || 0) + (summary.unindexed_recording_files || 0) + missingReferences;
+  const cameraRows = Object.entries(summary.per_camera || {});
+  const repaired = Object.values(repairs).reduce((total, value) => total + (Number(value) || 0), 0);
+  return (
+    <div className="maintenance-viewer">
+      <div className={`maintenance-result-banner ${databaseIssues ? "warning" : "healthy"}`}>
+        {databaseIssues ? <CircleAlert size={20} /> : <CircleDot size={20} />}
+        <div><strong>{databaseIssues ? `${databaseIssues.toLocaleString()} database mismatch${databaseIssues === 1 ? "" : "es"} found` : "Storage records are consistent"}</strong><span>{result.note}</span></div>
+      </div>
+      <div className="telemetry-summary-grid maintenance-summary-grid">
+        <article><span>Recording files</span><strong>{Number(summary.recording_files || 0).toLocaleString()}</strong><small>{Number(summary.indexed_recordings || 0).toLocaleString()} indexed · {Number(summary.recent_recording_files || 0).toLocaleString()} active/recent protected</small></article>
+        <article><span>Recording index</span><strong>{Number(summary.missing_index_rows || 0).toLocaleString()} missing</strong><small>{Number(summary.unindexed_recording_files || 0).toLocaleString()} files need indexing</small></article>
+        <article><span>Missing incident media</span><strong>{missingReferences.toLocaleString()}</strong><small>{summary.missing_event_snapshots || 0} incident · {summary.missing_motion_snapshots || 0} motion · {summary.missing_face_snapshots || 0} face images</small></article>
+        <article><span>Unlinked media</span><strong>{Number(summary.orphan_media_files || 0).toLocaleString()}</strong><small>{formatBytes(summary.orphan_media_bytes)} reported only; never auto-deleted</small></article>
+        <article><span>Regenerable cache</span><strong>{formatBytes(summary.regenerable_cache_bytes)}</strong><small>Playback, event clip, and HLS working files</small></article>
+        <article><span>Storage free</span><strong>{formatBytes(summary.storage_free_bytes)}</strong><small>{formatBytes(summary.storage_used_bytes)} used of {formatBytes(summary.storage_total_bytes)}</small></article>
+      </div>
+      {result.mode === "repair" ? <section className="telemetry-section"><div className="telemetry-section-head"><div><h3>Last repair</h3><p>{repaired.toLocaleString()} records updated; no incidents or media files were deleted.</p></div></div><dl className="telemetry-details maintenance-repair-details"><div><dt>Recording rows removed / added</dt><dd>{repairs.stale_index_rows_removed || 0} / {repairs.recordings_reindexed || 0}</dd></div><div><dt>Incident media links cleared</dt><dd>{repairs.event_media_references_cleared || 0}</dd></div><div><dt>Motion / face links cleared</dt><dd>{repairs.motion_sample_references_cleared || 0} / {repairs.face_media_references_cleared || 0}</dd></div></dl></section> : null}
+      {cameraRows.length ? <section className="telemetry-section"><div className="telemetry-section-head"><div><h3>Affected cameras</h3><p>Missing media references grouped by camera.</p></div></div><div className="maintenance-camera-list">{cameraRows.map(([cameraId, counts]) => <div key={cameraId}><strong>{cameraId}</strong><span>{Object.entries(counts).map(([kind, count]) => `${String(kind).replaceAll("_", " ")} ${count}`).join(" · ")}</span></div>)}</div></section> : null}
+      {(summary.missing_reference_samples?.length || summary.orphan_media_samples?.length || summary.missing_index_samples?.length || summary.unindexed_samples?.length) ? <details className="maintenance-details"><summary>Technical details and sample paths</summary><div>{summary.missing_reference_samples?.length ? <><h4>Missing media references</h4><pre>{summary.missing_reference_samples.map((item) => `${item.camera_id} · ${item.kind} · ${item.path}`).join("\n")}</pre></> : null}{summary.missing_index_samples?.length ? <><h4>Missing recording files still indexed</h4><pre>{summary.missing_index_samples.join("\n")}</pre></> : null}{summary.unindexed_samples?.length ? <><h4>Recording files not indexed</h4><pre>{summary.unindexed_samples.join("\n")}</pre></> : null}{summary.orphan_media_samples?.length ? <><h4>Unlinked media (report only)</h4><pre>{summary.orphan_media_samples.join("\n")}</pre></> : null}</div></details> : null}
+    </div>
+  );
+}
+
 function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
@@ -4925,6 +4965,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
   const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", "");
+  const [maintenance, setMaintenance] = useState(null);
+  const [maintenanceError, setMaintenanceError] = useState("");
   const configLoadSequence = useRef(0);
   const auditPageSize = 24;
 
@@ -5068,6 +5110,43 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     const timer = window.setInterval(() => void loadTelemetry(), 10000);
     return () => window.clearInterval(timer);
   }, [settingsTab]);
+
+  async function loadMaintenance() {
+    try {
+      const response = await fetch("/api/maintenance/storage");
+      if (!response.ok) throw new Error(`Maintenance status failed to load (${response.status})`);
+      setMaintenance(await response.json());
+      setMaintenanceError("");
+    } catch (error) {
+      setMaintenanceError(error.message || "Unable to load maintenance status.");
+    }
+  }
+
+  async function startMaintenance(apply = false) {
+    if (apply && !window.confirm("Repair the local database references now? Incident history and media files will not be deleted.")) return;
+    setMaintenanceError("");
+    try {
+      const response = await fetch("/api/maintenance/storage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apply }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Maintenance could not start (${response.status})`);
+      }
+      setMaintenance(await response.json());
+    } catch (error) {
+      setMaintenanceError(error.message || "Unable to start storage maintenance.");
+    }
+  }
+
+  useEffect(() => {
+    if (settingsTab !== "maintenance") return undefined;
+    void loadMaintenance();
+    const timer = window.setInterval(() => void loadMaintenance(), maintenance?.status === "running" ? 1500 : 5000);
+    return () => window.clearInterval(timer);
+  }, [settingsTab, maintenance?.status]);
 
   const cameras = config?.cameras || [];
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
@@ -5341,6 +5420,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           <button className={settingsTab === "cameras" ? "active" : ""} onClick={() => setSettingsTab("cameras")} role="tab" aria-selected={settingsTab === "cameras"}><Camera size={16} /> Camera Settings</button>
           <button className={settingsTab === "audit" ? "active" : ""} onClick={() => setSettingsTab("audit")} role="tab" aria-selected={settingsTab === "audit"}><Activity size={16} /> Motion Audit</button>
           <button className={settingsTab === "telemetry" ? "active" : ""} onClick={() => setSettingsTab("telemetry")} role="tab" aria-selected={settingsTab === "telemetry"}><Gauge size={16} /> Telemetry</button>
+          <button className={settingsTab === "maintenance" ? "active" : ""} onClick={() => setSettingsTab("maintenance")} role="tab" aria-selected={settingsTab === "maintenance"}><Wrench size={16} /> Maintenance</button>
           <button className={settingsTab === "logs" ? "active" : ""} onClick={() => setSettingsTab("logs")} role="tab" aria-selected={settingsTab === "logs"}><ListTree size={16} /> Logs</button>
         </div>
         {saveNotice ? <span className={`camera-save-indicator settings-header-status ${saveNotice.state}`} role="status">{saveNotice.state === "saving" ? <RefreshCcw size={14} /> : saveNotice.state === "error" ? <CircleAlert size={14} /> : <CircleDot size={14} />}{saveNotice.text}</span> : null}
@@ -5441,6 +5521,27 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           </div>
           {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
           <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
+        </section>
+        </>
+      ) : settingsTab === "maintenance" ? (
+        <>
+        <section className="bento-card camera-tree config-tree settings-section-tree">
+          <div className="section-head compact"><div><h2>Maintenance</h2><p>Safe system tools</p></div></div>
+          <div className="tree-list">
+            <button type="button" className="active"><HardDrive size={16} /><span>Storage Reconciliation</span></button>
+          </div>
+          <div className="maintenance-help"><strong>What it does</strong><p>Checks media on disk against SurvNG’s local databases. Use this after manually moving or deleting files.</p><p>Repairs never delete media or incident history.</p></div>
+        </section>
+        <section className="bento-card config-editor settings-panel maintenance-panel">
+          <div className="section-head">
+            <div><h2>Storage Reconciliation</h2><p>Find missing references, stale recording rows, and unlinked media</p></div>
+            <div className="camera-command-area maintenance-actions">
+              <button onClick={() => void startMaintenance(false)} disabled={maintenance?.status === "running"}><RefreshCcw className={maintenance?.status === "running" && maintenance?.mode === "scan" ? "spin" : ""} size={16} /> Scan</button>
+              <button className="primary" onClick={() => void startMaintenance(true)} disabled={maintenance?.status === "running"}><Wrench className={maintenance?.status === "running" && maintenance?.mode === "repair" ? "spin" : ""} size={16} /> Repair Database</button>
+            </div>
+          </div>
+          {maintenanceError ? <div className="error-banner">{maintenanceError}</div> : null}
+          <MaintenanceViewer state={maintenance} />
         </section>
         </>
       ) : settingsTab === "logs" ? (

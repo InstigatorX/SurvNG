@@ -965,6 +965,70 @@ class Recorder:
         self._store_recording_rows(camera_id, source, rows)
         self._prune_recording_index(camera_id, source, files)
 
+    def storage_index_health(self) -> dict[str, object]:
+        """Compare stable recording files with the local recording index."""
+        files_by_source = self._recording_files_by_source()
+        all_disk_paths = {
+            str(path)
+            for files in files_by_source.values()
+            for path in files
+        }
+        stable_disk_paths = {
+            str(path)
+            for files in files_by_source.values()
+            for path in files
+            if not self._recording_file_may_be_active(path)
+        }
+        with self._index_connection() as connection:
+            indexed_rows = connection.execute(
+                "SELECT path, camera_id, source FROM recordings"
+            ).fetchall()
+        indexed_paths = {str(row["path"]) for row in indexed_rows}
+        stale = sorted(indexed_paths - all_disk_paths)
+        unindexed = sorted(stable_disk_paths - indexed_paths)
+        return {
+            "recording_files": len(all_disk_paths),
+            "recent_recording_files": len(all_disk_paths - stable_disk_paths),
+            "indexed_recordings": len(indexed_paths),
+            "missing_index_files": stale,
+            "unindexed_files": unindexed,
+            "files_by_source": files_by_source,
+        }
+
+    def reconcile_storage_index(self) -> dict[str, int]:
+        """Synchronize the local index with stable files found in recording storage."""
+        health = self.storage_index_health()
+        files_by_source = health.pop("files_by_source")
+        added = 0
+        unindexed = set(health["unindexed_files"])
+        for (camera_id, source), files in files_by_source.items():
+            rows = self._recording_rows_for_files(camera_id, source, files)
+            if rows:
+                self._store_recording_rows(camera_id, source, rows)
+                added += sum(1 for row in rows if str(row["path"]) in unindexed)
+        stale = list(health["missing_index_files"])
+        self._delete_index_paths(stale)
+        return {"recordings_reindexed": added, "stale_index_rows_removed": len(stale)}
+
+    def _recording_files_by_source(self) -> dict[RecorderKey, list[Path]]:
+        """Discover current and legacy recording layouts without relying on config state."""
+        grouped: dict[RecorderKey, list[Path]] = {}
+        if not self.recordings_dir.exists():
+            return grouped
+        for path in self.recordings_dir.glob("*/**/*.mp4"):
+            try:
+                parts = path.relative_to(self.recordings_dir).parts
+            except ValueError:
+                continue
+            if len(parts) == 5 and parts[1] in {"main", "live"}:
+                camera_id, source = parts[0], parts[1]
+            elif len(parts) == 4:
+                camera_id, source = parts[0], "main"
+            else:
+                continue
+            grouped.setdefault((camera_id, source), []).append(path)
+        return grouped
+
     def refresh_recording_index(
         self,
         camera_map: dict[str, CameraConfig],

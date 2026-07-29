@@ -4877,6 +4877,136 @@ section.detection-settings-card {
   overflow: hidden;
 }
 
+.maintenance-panel {
+  min-height: 440px;
+}
+
+.maintenance-viewer {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
+.maintenance-running,
+.maintenance-result-banner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 13px;
+  background: var(--control-muted);
+}
+
+.maintenance-running div,
+.maintenance-result-banner div {
+  display: grid;
+  gap: 3px;
+}
+
+.maintenance-running span,
+.maintenance-result-banner span,
+.maintenance-help p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.maintenance-result-banner.healthy {
+  border-color: rgba(15, 118, 110, 0.35);
+  background: var(--active);
+  color: var(--active-ink);
+}
+
+.maintenance-result-banner.warning {
+  border-color: rgba(217, 119, 6, 0.38);
+}
+
+.maintenance-summary-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.maintenance-actions {
+  flex-wrap: wrap;
+}
+
+.maintenance-help {
+  margin: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.maintenance-help p {
+  margin: 6px 0 0;
+}
+
+.maintenance-repair-details {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.maintenance-camera-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.maintenance-camera-list > div {
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  background: var(--card);
+}
+
+.maintenance-camera-list span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.maintenance-details {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.maintenance-details summary {
+  cursor: pointer;
+  padding: 11px 13px;
+  font-weight: 750;
+}
+
+.maintenance-details > div {
+  border-top: 1px solid var(--line);
+  padding: 12px;
+}
+
+.maintenance-details h4 {
+  margin: 10px 0 6px;
+}
+
+.maintenance-details h4:first-child {
+  margin-top: 0;
+}
+
+.maintenance-details pre {
+  overflow: auto;
+  margin: 0;
+  border-radius: 5px;
+  padding: 9px;
+  background: var(--code-bg, rgba(0, 0, 0, 0.2));
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .maintenance-summary-grid,
+  .maintenance-repair-details,
+  .maintenance-camera-list {
+    grid-template-columns: 1fr;
+  }
+}
+
 .telemetry-section-head {
   display: flex;
   justify-content: space-between;

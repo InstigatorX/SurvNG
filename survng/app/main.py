@@ -75,6 +75,7 @@ from .object_tracking import ultralytics_botsort_dependency_status
 from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .zones import apply_detection_zones, detection_threshold
 from .security import redact_secret_text
+from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
 
 config = load_config()
 manager = AppManager(config)
@@ -125,6 +126,7 @@ GPU_SAMPLE: dict[str, object] = {"at": 0.0, "pids": (), "engines": {}}
 TELEMETRY_HISTORY_LOCK = threading.Lock()
 TELEMETRY_HISTORY: deque[dict[str, object]] = deque(maxlen=360)
 TELEMETRY_HISTORY_STATE: dict[str, float] = {"last_sample_at": 0.0}
+STORAGE_MAINTENANCE = StorageMaintenanceRunner()
 
 
 class RecordingPrewarmCancelled(Exception):
@@ -801,6 +803,31 @@ def logs(limit: int = 300, level: str = "", q: str = "") -> dict:
     if query:
         rows = [row for row in rows if query in f"{row.get('level', '')} {row.get('logger', '')} {row.get('message', '')}".lower()]
     return {"lines": rows[-safe_limit:], "total": len(LOG_LINES)}
+
+
+class StorageMaintenanceRequest(BaseModel):
+    apply: bool = False
+
+
+@app.get("/api/maintenance/storage")
+def storage_maintenance_status() -> dict:
+    return STORAGE_MAINTENANCE.status()
+
+
+@app.post("/api/maintenance/storage", status_code=202)
+def start_storage_maintenance(request: StorageMaintenanceRequest) -> dict:
+    active_manager = manager
+    try:
+        return STORAGE_MAINTENANCE.start(
+            lambda: StorageReconciler(
+                active_manager.storage_dir,
+                active_manager.events.db_path,
+                active_manager.recorder,
+            ),
+            apply=request.apply,
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 
