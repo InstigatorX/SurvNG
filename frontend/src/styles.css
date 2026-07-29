@@ -1630,7 +1630,7 @@ button.status-pill.hud-toggle:disabled {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
-  width: min(96vw, 1440px);
+  width: min(96vw, 1440px, calc((94vh - 76px) * var(--media-ratio, 1.777778) + 24px));
   max-height: 94vh;
   border: 1px solid var(--line-strong);
   border-radius: 8px;

@@ -1255,6 +1255,18 @@ function mediaAspect(element) {
   return `${width} / ${height}`;
 }
 
+function mediaAspectRatio(aspect) {
+  const [width, height] = String(aspect || "").split("/").map((value) => Number(value.trim()));
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return 16 / 9;
+  }
+  return width / height;
+}
+
+function liveAspectStorageKey(cameraId, source) {
+  return `survng.liveAspect.${cameraId}.${source === "main" ? "main" : "live"}`;
+}
+
 function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
@@ -1483,18 +1495,26 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
 }
 
 function LiveCameraOverlay({ camera, timeZone, onClose }) {
-  const mediaRef = useRef(null);
-  const [aspect, setAspect] = useState("16 / 9");
   const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
   const [mediaReady, setMediaReady] = useState(false);
   const [transport, setTransport] = useState("webrtc");
   const activeSource = source === "main" ? "main" : "live";
   const [deliveredSource, setDeliveredSource] = useState(activeSource);
+  const [aspect, setAspect] = useState(() => readStoredValue(
+    browserStorage(window),
+    liveAspectStorageKey(camera.id, activeSource),
+    "16 / 9",
+  ));
 
   useEffect(() => {
     setMediaReady(false);
     setTransport("webrtc");
     setDeliveredSource(activeSource);
+    setAspect(readStoredValue(
+      browserStorage(window),
+      liveAspectStorageKey(camera.id, activeSource),
+      "16 / 9",
+    ));
   }, [camera.id, activeSource]);
 
   useEffect(() => {
@@ -1505,14 +1525,26 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  function updateMediaAspect() {
-    setAspect(mediaAspect(mediaRef.current));
+  function rememberAspect(media, sourceName = activeSource) {
+    const nextAspect = mediaAspect(media);
+    setAspect(nextAspect);
+    writeStoredValue(
+      browserStorage(window),
+      liveAspectStorageKey(camera.id, sourceName),
+      nextAspect,
+    );
   }
 
   return (
     <div className="live-overlay" role="dialog" aria-modal="true" aria-label={`${camera.name} full live view`}>
       <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close live view" />
-      <section className="live-overlay-panel" style={{ "--media-aspect": aspect }}>
+      <section
+        className="live-overlay-panel"
+        style={{
+          "--media-aspect": aspect,
+          "--media-ratio": mediaAspectRatio(aspect),
+        }}
+      >
         <div className="live-overlay-head">
           <div>
             <h2>{camera.name}</h2>
@@ -1539,7 +1571,6 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             </div>
           ) : null}
           <WebRtcLive
-            ref={mediaRef}
             cameraId={camera.id}
             source={activeSource}
             timeZone={timeZone}
@@ -1551,7 +1582,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
               if (nextSource !== deliveredSource) setMediaReady(false);
             }}
             onReady={(media, readyTransport) => {
-              setAspect(mediaAspect(media));
+              rememberAspect(media, deliveredSource);
               setMediaReady(true);
               if (readyTransport) setTransport(readyTransport);
             }}
