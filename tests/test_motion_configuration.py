@@ -520,7 +520,34 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "stage 'threshold'.*could not be configured",
+            "stage 'threshold'.*option 'sigma'.*valid number",
+        ):
+            validate_motion_pipeline_configuration(config)
+
+    def test_application_preflight_rejects_nonfinite_nested_fusion_values(self) -> None:
+        config = AppConfig.model_validate({
+            "motion_qualification": {
+                "pipeline": {
+                    "fusion": [{
+                        "stage_id": "fusion",
+                        "implementation": "buffered_evidence_fusion",
+                        "options": {
+                            "source_thresholds": {"mog2": float("nan")},
+                        },
+                    }, {
+                        "stage_id": "state",
+                        "implementation": "score_event_state",
+                    }, {
+                        "stage_id": "trigger",
+                        "implementation": "score_trigger",
+                    }],
+                },
+            },
+        })
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source threshold for mog2 must be finite",
         ):
             validate_motion_pipeline_configuration(config)
 

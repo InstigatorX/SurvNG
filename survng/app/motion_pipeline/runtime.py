@@ -42,14 +42,19 @@ class MotionRuntimeState:
 
     @staticmethod
     def _close_states(states: tuple[Any, ...]) -> None:
+        failure: BaseException | None = None
         for state in states:
             close = getattr(state, "close", None)
             if not callable(close):
                 continue
             try:
                 close()
-            except Exception:
+            except BaseException as error:
                 LOGGER.exception("motion runtime state cleanup failed")
+                if not isinstance(error, Exception) and failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
 
     def clone(self) -> "MotionRuntimeState":
         """Copy stage state for a disposable replay without sharing mutable state."""

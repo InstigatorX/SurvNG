@@ -23,6 +23,7 @@ from survng.app.motion_pipeline import (
     MotionRuntimeState,
     MotionStageConfig,
     MotionStageDependencies,
+    MotionStageOption,
     MotionStageRegistration,
     MotionStageRegistry,
     build_builtin_motion_registry,
@@ -163,6 +164,27 @@ def build_lifecycle_stage(
 
 
 class MotionPipelineTest(unittest.TestCase):
+    def test_factory_validates_declared_option_contract_before_building(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="configured",
+            builder=build_lifecycle_stage,
+            options=(
+                MotionStageOption("rate", "Rate", "number", 0.5, minimum=0, maximum=1),
+                MotionStageOption("enabled", "Enabled", "boolean", True),
+            ),
+        ))
+        factory = MotionPipelineFactory(registry)
+
+        for options, message in (
+            ({"rate": float("nan")}, "must be a valid number"),
+            ({"rate": 2.0}, "must be at most 1"),
+            ({"enabled": "false"}, "must be a valid boolean"),
+            ({"typo": 1}, "unknown options: typo"),
+        ):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, message):
+                factory.create("gate", [MotionStageConfig("configured", "configured", options)])
+
     def test_factory_rejects_wrong_builder_stage_id_and_closes_stage(self) -> None:
         constructed: list[LifecycleStage] = []
 
@@ -537,6 +559,63 @@ class MotionPipelineTest(unittest.TestCase):
         pipeline.close()
 
         self.assertTrue(stage.closed)
+
+    def test_pipeline_closes_stages_in_reverse_order_before_runtime(self) -> None:
+        closed: list[str] = []
+
+        @dataclass
+        class OrderedStage:
+            stage_id: str
+
+            def process(self, context: MotionContext) -> MotionContext:
+                return context
+
+            def close(self) -> None:
+                closed.append(self.stage_id)
+
+        def build_ordered(stage_id, options, dependencies):
+            del options, dependencies
+            return OrderedStage(stage_id)
+
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="ordered",
+            builder=build_ordered,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("first", "ordered"), MotionStageConfig("second", "ordered")],
+        )
+        pipeline.runtime.state_for(
+            "runtime",
+            lambda: type("RuntimeResource", (), {"close": lambda self: closed.append("runtime")})(),
+        )
+
+        pipeline.close()
+
+        self.assertEqual(closed, ["second", "first", "runtime"])
+
+    def test_runtime_cleanup_continues_after_base_exception(self) -> None:
+        closed: list[str] = []
+        runtime = MotionRuntimeState("gate")
+
+        class InterruptingResource:
+            def close(self) -> None:
+                closed.append("interrupting")
+                raise KeyboardInterrupt("stop")
+
+        class FollowingResource:
+            def close(self) -> None:
+                closed.append("following")
+
+        runtime.state_for("interrupting", InterruptingResource)
+        runtime.state_for("following", FollowingResource)
+
+        with self.assertRaisesRegex(KeyboardInterrupt, "stop"):
+            runtime.close()
+
+        self.assertEqual(closed, ["interrupting", "following"])
+        self.assertEqual(runtime.stage_state, {})
 
     def test_pipeline_close_from_observer_fails_instead_of_deadlocking(self) -> None:
         class ClosingObserver:
@@ -935,10 +1014,30 @@ class MotionPipelineTest(unittest.TestCase):
             [MotionStageConfig("first", "record", {"marker": "one", "api_key": "secret"})],
         )
 
-        configuration = pipeline.audit_snapshot()["configuration"]
+        try:
+            configuration = pipeline.audit_snapshot()["configuration"]
+        finally:
+            pipeline.close()
 
         self.assertEqual(configuration[0]["options"]["marker"], "one")
         self.assertEqual(configuration[0]["options"]["api_key"], "[redacted]")
+
+    def test_audit_snapshot_replaces_nonfinite_values(self) -> None:
+        registry = MotionStageRegistry()
+        registry.register(MotionStageRegistration(
+            implementation="record",
+            builder=build_recording_stage,
+        ))
+        pipeline = MotionPipelineFactory(registry).create(
+            "gate",
+            [MotionStageConfig("record", "record", {"diagnostic": float("nan")})],
+        )
+        try:
+            configuration = pipeline.audit_snapshot()["configuration"]
+        finally:
+            pipeline.close()
+
+        self.assertIsNone(configuration[0]["options"]["diagnostic"])
 
     def test_pipeline_rejects_context_from_another_camera_or_runtime(self) -> None:
         factory = MotionPipelineFactory(build_builtin_motion_registry())

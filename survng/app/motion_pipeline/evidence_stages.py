@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 from typing import Any, Mapping
 
@@ -15,6 +16,23 @@ from .registry import (
 
 
 EVIDENCE_REPOSITORY_SERVICE = "motion_evidence_repository"
+
+
+def _finite_float(value: object, *, label: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be finite")
+    return number
+
+
+def _safe_unit_score(value: object, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(0.0, min(1.0, number))
 
 
 class Mog2EvidenceSourceStage:
@@ -158,17 +176,23 @@ class BufferedMotionFusionStage:
             raise ValueError(f"unsupported motion fusion policy: {policy}")
         self.policy = normalized_policy
         self.source_thresholds = {
-            str(source): max(0.0, min(1.0, float(threshold)))
+            str(source): max(0.0, min(1.0, _finite_float(
+                threshold, label=f"source threshold for {source}"
+            )))
             for source, threshold in (source_thresholds or {}).items()
         }
         self.source_weights = {
-            str(source): max(0.0, float(weight))
+            str(source): max(0.0, _finite_float(
+                weight, label=f"source weight for {source}"
+            ))
             for source, weight in (source_weights or {}).items()
         }
         self.weighted_threshold = (
             None
             if weighted_threshold is None
-            else max(0.0, min(1.0, float(weighted_threshold)))
+            else max(0.0, min(1.0, _finite_float(
+                weighted_threshold, label="weighted threshold"
+            )))
         )
         self.minimum_sources = max(0, int(minimum_sources))
         self.require_warmed = bool(require_warmed)
@@ -207,12 +231,12 @@ class BufferedMotionFusionStage:
             }
         best = max(
             samples,
-            key=lambda sample: float(sample.values.get("score", 0.0)),
+            key=lambda sample: _safe_unit_score(sample.values.get("score", 0.0)),
         )
         values = dict(best.values)
         aggregate = {
-            f"{source}_warmed": float(values.get("warmed", 1.0)),
-            f"{source}_score": max(0.0, min(1.0, float(values.get("score", 0.0)))),
+            f"{source}_warmed": _safe_unit_score(values.get("warmed", 1.0)),
+            f"{source}_score": _safe_unit_score(values.get("score", 0.0)),
             f"{source}_sample_count": len(samples),
         }
         aggregate.update(
@@ -258,9 +282,9 @@ class BufferedMotionFusionStage:
             if score_value is None:
                 continue
             warmed = aggregate.get(f"{source}_warmed", aggregate.get("warmed", 1.0))
-            if self.require_warmed and float(warmed or 0.0) < 1.0:
+            if self.require_warmed and _safe_unit_score(warmed) < 1.0:
                 continue
-            score = max(0.0, min(1.0, float(score_value)))
+            score = _safe_unit_score(score_value)
             source_scores[source] = score
             source_votes[source] = score >= self.source_thresholds.get(source, 0.5)
 

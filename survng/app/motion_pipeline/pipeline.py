@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -33,6 +34,8 @@ def _audit_safe_value(value: object, depth: int = 0) -> object:
         return [_audit_safe_value(item, depth + 1) for item in value[:64]]
     if isinstance(value, str):
         return value[:500]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)[:500]
@@ -431,24 +434,42 @@ class MotionPipeline:
                 self._lifecycle_condition.wait()
             executor = self._executor
             self._executor = None
+        failure: BaseException | None = None
         try:
             if executor is not None:
-                executor.shutdown(wait=True, cancel_futures=True)
-            for stage in self.stages:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except BaseException as error:
+                    failure = error
+                    LOGGER.exception(
+                        "Motion executor cleanup failed camera=%s", self.camera_id
+                    )
+            for stage in reversed(self.stages):
                 close = getattr(stage, "close", None)
                 if not callable(close):
                     continue
                 try:
                     close()
-                except Exception:
+                except BaseException as error:
                     LOGGER.exception(
                         "Motion stage cleanup failed camera=%s stage=%s",
                         self.camera_id,
                         stage.stage_id,
                     )
-            self.runtime.close()
+                    if not isinstance(error, Exception) and failure is None:
+                        failure = error
+            try:
+                self.runtime.close()
+            except BaseException as error:
+                LOGGER.exception(
+                    "Motion runtime cleanup failed camera=%s", self.camera_id
+                )
+                if failure is None:
+                    failure = error
         finally:
             with self._lifecycle_condition:
                 self._closing_thread_id = None
                 self._closed = True
                 self._lifecycle_condition.notify_all()
+        if failure is not None:
+            raise failure

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -107,6 +108,7 @@ class MotionPipelineFactory:
             if stage_id in stage_ids:
                 raise ValueError(f"duplicate motion stage ID: {stage_id}")
             registration = self.registry.registration(stage_config.implementation)
+            self._validate_options(stage_id, registration, stage_config.options)
             parallel_group = stage_config.parallel_group.strip()
             continues_parallel_group = bool(
                 parallel_group and parallel_group == current_parallel_group
@@ -314,6 +316,59 @@ class MotionPipelineFactory:
             ),
             stage_factory=build_isolated_stages,
         )
+
+    @staticmethod
+    def _validate_options(
+        stage_id: str,
+        registration: MotionStageRegistration,
+        values: Mapping[str, Any],
+    ) -> None:
+        """Validate configured values against the stage's public option contract."""
+        if not registration.options:
+            return
+        definitions = {option.key: option for option in registration.options}
+        unknown = sorted(set(values) - set(definitions))
+        if unknown:
+            raise ValueError(
+                f"motion stage {stage_id!r} has unknown options: "
+                + ", ".join(unknown)
+            )
+        for key, value in values.items():
+            option = definitions[key]
+            label = f"motion stage {stage_id!r} option {key!r}"
+            if option.value_type == "boolean":
+                valid = isinstance(value, bool)
+            elif option.value_type == "integer":
+                valid = isinstance(value, int) and not isinstance(value, bool)
+            elif option.value_type == "number":
+                valid = (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                )
+            elif option.value_type == "string":
+                valid = isinstance(value, str)
+            elif option.value_type == "string_list":
+                # A single string remains accepted for compatibility with the
+                # original configuration format; builders normalize it to one item.
+                valid = isinstance(value, str) or (
+                    isinstance(value, (list, tuple))
+                    and all(isinstance(item, str) for item in value)
+                )
+            else:
+                valid = isinstance(value, Mapping)
+            if not valid:
+                raise ValueError(f"{label} must be a valid {option.value_type}")
+            if option.value_type in {"integer", "number"}:
+                numeric = float(value)
+                if option.minimum is not None and numeric < option.minimum:
+                    raise ValueError(f"{label} must be at least {option.minimum:g}")
+                if option.maximum is not None and numeric > option.maximum:
+                    raise ValueError(f"{label} must be at most {option.maximum:g}")
+            if option.choices and value not in option.choices:
+                raise ValueError(
+                    f"{label} must be one of: " + ", ".join(option.choices)
+                )
 
     def _close_stages(self, stages: Iterable[MotionStage]) -> None:
         closed: set[int] = set()
