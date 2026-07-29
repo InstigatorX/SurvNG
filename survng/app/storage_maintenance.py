@@ -14,6 +14,7 @@ from .recorder import Recorder
 LOGGER = logging.getLogger(__name__)
 MEDIA_SAMPLE_LIMIT = 20
 RECENT_MEDIA_SECONDS = 60.0
+QUICK_MEDIA_REFERENCE_LIMIT = 500
 
 
 def _utc_now() -> str:
@@ -23,12 +24,22 @@ def _utc_now() -> str:
 class StorageReconciler:
     """Audit media references and repair indexes without deleting user media."""
 
-    def __init__(self, storage_dir: Path, database_path: Path, recorder: Recorder) -> None:
+    def __init__(
+        self,
+        storage_dir: Path,
+        database_path: Path,
+        recorder: Recorder,
+        *,
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str, int, int | None], None] | None = None,
+    ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.database_path = database_path
         self.recorder = recorder
+        self.cancel_event = cancel_event
+        self.progress = progress
 
-    def run(self, *, apply: bool = False) -> dict[str, object]:
+    def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
         repairs = {
             "stale_index_rows_removed": 0,
             "recordings_reindexed": 0,
@@ -37,11 +48,17 @@ class StorageReconciler:
             "face_media_references_cleared": 0,
         }
         if apply:
-            repairs.update(self.recorder.reconcile_storage_index())
-            repairs.update(self._clear_missing_references())
-        summary = self._scan()
+            self._report("Reconciling recording index", 0, None)
+            repairs.update(self.recorder.reconcile_storage_index(
+                full=full,
+                cancel_event=self.cancel_event,
+                progress=self._report,
+            ))
+            repairs.update(self._clear_missing_references(full=full))
+        summary = self._scan(full=full)
         return {
             "mode": "repair" if apply else "scan",
+            "full": full,
             "generated_at": _utc_now(),
             "summary": summary,
             "repairs": repairs,
@@ -51,6 +68,15 @@ class StorageReconciler:
                 else "No changes were made. Run Repair to reconcile the local databases."
             ),
         }
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise InterruptedError("storage maintenance was cancelled")
+
+    def _report(self, phase: str, current: int, total: int | None) -> None:
+        self._raise_if_cancelled()
+        if self.progress:
+            self.progress(phase, current, total)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=10.0)
@@ -77,13 +103,15 @@ class StorageReconciler:
     def _path_key(self, path_value: object) -> str:
         return str(self._media_path(path_value).absolute())
 
-    def _media_references(self) -> tuple[list[dict[str, object]], set[str]]:
+    def _media_references(self, *, limit: int | None = None) -> tuple[list[dict[str, object]], set[str]]:
         references: list[dict[str, object]] = []
         known_paths: set[str] = set()
+        suffix = f" ORDER BY id DESC LIMIT {max(1, int(limit))}" if limit is not None else ""
         with self._connect() as connection:
             for row in connection.execute(
-                "SELECT id, camera_id, snapshot_path, recording_path FROM events"
+                f"SELECT id, camera_id, snapshot_path, recording_path FROM events{suffix}"
             ):
+                self._raise_if_cancelled()
                 for kind, column in (("event_snapshot", "snapshot_path"), ("event_recording", "recording_path")):
                     path = str(row[column] or "")
                     if path:
@@ -94,8 +122,9 @@ class StorageReconciler:
                             "kind": kind, "column": column, "path": path,
                         })
             for row in connection.execute(
-                "SELECT id, camera_id, snapshot_path FROM motion_audits WHERE snapshot_path != ''"
+                f"SELECT id, camera_id, snapshot_path FROM motion_audits WHERE snapshot_path != ''{suffix}"
             ):
+                self._raise_if_cancelled()
                 path = str(row["snapshot_path"] or "")
                 known_paths.add(self._path_key(path))
                 references.append({
@@ -107,8 +136,9 @@ class StorageReconciler:
             ).fetchone()
             if face_table:
                 for row in connection.execute(
-                    "SELECT id, camera_id, snapshot_path FROM face_observations WHERE snapshot_path != ''"
+                    f"SELECT id, camera_id, snapshot_path FROM face_observations WHERE snapshot_path != ''{suffix}"
                 ):
+                    self._raise_if_cancelled()
                     path = str(row["snapshot_path"] or "")
                     known_paths.add(self._path_key(path))
                     references.append({
@@ -117,9 +147,16 @@ class StorageReconciler:
                     })
         return references, known_paths
 
-    def _scan(self) -> dict[str, object]:
-        all_references, known_paths = self._media_references()
-        recording_health = self.recorder.storage_index_health()
+    def _scan(self, *, full: bool) -> dict[str, object]:
+        reference_limit = None if full else QUICK_MEDIA_REFERENCE_LIMIT
+        self._report("Reading media references", 0, reference_limit)
+        all_references, known_paths = self._media_references(limit=reference_limit)
+        self._report("Checking recording index", 0, None)
+        recording_health = self.recorder.storage_index_health(
+            full=full,
+            cancel_event=self.cancel_event,
+            progress=self._report,
+        )
         files_by_source = recording_health.pop("files_by_source", {})
         recording_paths = {
             self._path_key(path)
@@ -129,17 +166,32 @@ class StorageReconciler:
         missing_index_files = list(recording_health.pop("missing_index_files", []))
         unindexed_files = list(recording_health.pop("unindexed_files", []))
         media_files: list[Path] = []
-        for directory_name in ("snapshots", "motion_samples"):
-            directory = self.storage_dir / directory_name
-            if directory.exists():
-                media_files.extend(path for path in directory.rglob("*") if path.is_file())
-        media_paths = {self._path_key(path) for path in media_files}
-        references = [
-            reference for reference in all_references
-            if self._path_key(reference["path"]) not in (
-                recording_paths if reference["kind"] == "event_recording" else media_paths
-            )
-        ]
+        if full:
+            for directory_name in ("snapshots", "motion_samples"):
+                directory = self.storage_dir / directory_name
+                if not directory.exists():
+                    continue
+                for index, path in enumerate(directory.rglob("*"), start=1):
+                    self._raise_if_cancelled()
+                    if path.is_file():
+                        media_files.append(path)
+                    if index % 500 == 0:
+                        self._report("Scanning all incident media", index, None)
+            media_paths = {self._path_key(path) for path in media_files}
+            references = [
+                reference for reference in all_references
+                if self._path_key(reference["path"]) not in (
+                    recording_paths if reference["kind"] == "event_recording" else media_paths
+                )
+            ]
+        else:
+            references = []
+            for index, reference in enumerate(all_references, start=1):
+                self._raise_if_cancelled()
+                if self._missing(reference["path"]):
+                    references.append(reference)
+                if index % 100 == 0:
+                    self._report("Checking recent media references", index, len(all_references))
         per_camera: dict[str, dict[str, int]] = {}
         counts = {
             "event_snapshot": 0,
@@ -170,12 +222,15 @@ class StorageReconciler:
                 continue
             orphan_files.append(path)
         orphan_bytes = sum(self._file_size(path) for path in orphan_files)
-        cache_bytes = sum(
-            self._directory_size(self.storage_dir / name)
-            for name in ("event_clips", "playback-cache", "hls")
+        cache_bytes = (
+            sum(self._directory_size(self.storage_dir / name) for name in ("event_clips", "playback-cache", "hls"))
+            if full else None
         )
+        self._report("Reading storage capacity", 1, 1)
         usage = shutil.disk_usage(self.storage_dir)
         return {
+            "scan_complete": full,
+            "reference_rows_scanned": len(all_references),
             "storage_total_bytes": usage.total,
             "storage_used_bytes": usage.used,
             "storage_free_bytes": usage.free,
@@ -210,12 +265,19 @@ class StorageReconciler:
             return "Unknown camera"
         return parts[0] if parts else "Unknown camera"
 
-    def _clear_missing_references(self) -> dict[str, int]:
-        references, _ = self._media_references()
-        references = [reference for reference in references if self._missing(reference["path"])]
+    def _clear_missing_references(self, *, full: bool) -> dict[str, int]:
+        references, _ = self._media_references(limit=None if full else QUICK_MEDIA_REFERENCE_LIMIT)
+        missing: list[dict[str, object]] = []
+        for index, reference in enumerate(references, start=1):
+            self._raise_if_cancelled()
+            if self._missing(reference["path"]):
+                missing.append(reference)
+            if index % 100 == 0:
+                self._report("Checking repair candidates", index, len(references))
         counts = {"events": 0, "motion_audits": 0, "face_observations": 0}
         with self._connect() as connection:
-            for reference in references:
+            for reference in missing:
+                self._raise_if_cancelled()
                 table = str(reference["table"])
                 column = str(reference["column"])
                 if table not in counts or column not in {"snapshot_path", "recording_path"}:
@@ -238,11 +300,17 @@ class StorageReconciler:
         except OSError:
             return 0
 
-    @classmethod
-    def _directory_size(cls, directory: Path) -> int:
+    def _directory_size(self, directory: Path) -> int:
         if not directory.exists():
             return 0
-        return sum(cls._file_size(path) for path in directory.rglob("*") if path.is_file())
+        total = 0
+        for index, path in enumerate(directory.rglob("*"), start=1):
+            self._raise_if_cancelled()
+            if path.is_file():
+                total += self._file_size(path)
+            if index % 500 == 0:
+                self._report("Measuring regenerable cache", index, None)
+        return total
 
 
 class StorageMaintenanceRunner:
@@ -251,42 +319,82 @@ class StorageMaintenanceRunner:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state: dict[str, object] = {"status": "idle"}
+        self._cancel_event: threading.Event | None = None
 
     def status(self) -> dict[str, object]:
         with self._lock:
             return dict(self._state)
 
-    def start(self, factory: Callable[[], StorageReconciler], *, apply: bool) -> dict[str, object]:
+    def start(
+        self,
+        factory: Callable[[threading.Event, Callable[[str, int, int | None], None]], StorageReconciler],
+        *,
+        apply: bool,
+        full: bool = False,
+    ) -> dict[str, object]:
         with self._lock:
-            if self._state.get("status") == "running":
+            if self._state.get("status") in {"running", "cancelling"}:
                 raise RuntimeError("storage maintenance is already running")
+            cancel_event = threading.Event()
+            self._cancel_event = cancel_event
             self._state = {
                 "status": "running",
                 "mode": "repair" if apply else "scan",
+                "full": full,
                 "started_at": _utc_now(),
+                "progress": {"phase": "Starting", "current": 0, "total": None},
             }
         thread = threading.Thread(
             target=self._run,
-            args=(factory, apply),
+            args=(factory, apply, full, cancel_event),
             name="storage-maintenance",
             daemon=True,
         )
         thread.start()
         return self.status()
 
-    def _run(self, factory: Callable[[], StorageReconciler], apply: bool) -> None:
+    def cancel(self) -> dict[str, object]:
+        with self._lock:
+            if self._state.get("status") not in {"running", "cancelling"} or self._cancel_event is None:
+                raise RuntimeError("storage maintenance is not running")
+            self._cancel_event.set()
+            self._state = {**self._state, "status": "cancelling"}
+            return dict(self._state)
+
+    def _update_progress(self, phase: str, current: int, total: int | None) -> None:
+        with self._lock:
+            if self._state.get("status") not in {"running", "cancelling"}:
+                return
+            self._state = {
+                **self._state,
+                "progress": {"phase": phase, "current": max(0, current), "total": total},
+            }
+
+    def _run(
+        self,
+        factory: Callable[[threading.Event, Callable[[str, int, int | None], None]], StorageReconciler],
+        apply: bool,
+        full: bool,
+        cancel_event: threading.Event,
+    ) -> None:
         try:
-            result = factory().run(apply=apply)
+            result = factory(cancel_event, self._update_progress).run(apply=apply, full=full)
+        except InterruptedError:
+            state: dict[str, object] = {
+                "status": "cancelled", "mode": "repair" if apply else "scan", "full": full,
+                "finished_at": _utc_now(),
+            }
         except Exception as error:
             LOGGER.exception("Storage maintenance failed")
-            state: dict[str, object] = {
+            state = {
                 "status": "failed", "mode": "repair" if apply else "scan",
-                "finished_at": _utc_now(), "error": str(error),
+                "full": full, "finished_at": _utc_now(), "error": str(error),
             }
         else:
             state = {
                 "status": "complete", "mode": "repair" if apply else "scan",
-                "finished_at": _utc_now(), "result": result,
+                "full": full, "finished_at": _utc_now(), "result": result,
             }
         with self._lock:
             self._state = state
+            self._cancel_event = None

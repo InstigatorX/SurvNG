@@ -4891,8 +4891,13 @@ function MaintenanceViewer({ state }) {
   if (!state || state.status === "idle") {
     return <div className="empty-state">Run a storage scan to compare files on disk with SurvNG’s local databases.</div>;
   }
-  if (state.status === "running") {
-    return <div className="maintenance-running" role="status"><RefreshCcw className="spin" size={20} /><div><strong>{state.mode === "repair" ? "Repairing storage records…" : "Scanning storage…"}</strong><span>Large recording libraries or network storage may take several minutes.</span></div></div>;
+  if (state.status === "running" || state.status === "cancelling") {
+    const progress = state.progress || {};
+    const percent = Number.isFinite(progress.total) && progress.total > 0 ? Math.min(100, Math.round(Number(progress.current || 0) / progress.total * 100)) : null;
+    return <div className="maintenance-running" role="status"><RefreshCcw className="spin" size={20} /><div><strong>{state.status === "cancelling" ? "Cancelling safely…" : state.mode === "repair" ? "Repairing storage records…" : state.full ? "Running full storage scan…" : "Running quick storage check…"}</strong><span>{progress.phase || "Starting"}{percent != null ? ` · ${percent}%` : progress.current ? ` · ${Number(progress.current).toLocaleString()} checked` : ""}</span></div></div>;
+  }
+  if (state.status === "cancelled") {
+    return <div className="maintenance-result-banner warning"><CircleAlert size={20} /><div><strong>Maintenance cancelled</strong><span>No media files were deleted. Run a quick check whenever you are ready.</span></div></div>;
   }
   if (state.status === "failed") {
     return <div className="error-banner"><strong>Maintenance failed</strong><span>{state.error || "Check Logs for details."}</span></div>;
@@ -4902,20 +4907,21 @@ function MaintenanceViewer({ state }) {
   const repairs = result.repairs || {};
   const missingReferences = (summary.missing_event_snapshots || 0) + (summary.missing_event_recordings || 0) + (summary.missing_motion_snapshots || 0) + (summary.missing_face_snapshots || 0);
   const databaseIssues = (summary.missing_index_rows || 0) + (summary.unindexed_recording_files || 0) + missingReferences;
+  const fullScan = result.full === true;
   const cameraRows = Object.entries(summary.per_camera || {});
   const repaired = Object.values(repairs).reduce((total, value) => total + (Number(value) || 0), 0);
   return (
     <div className="maintenance-viewer">
       <div className={`maintenance-result-banner ${databaseIssues ? "warning" : "healthy"}`}>
         {databaseIssues ? <CircleAlert size={20} /> : <CircleDot size={20} />}
-        <div><strong>{databaseIssues ? `${databaseIssues.toLocaleString()} database mismatch${databaseIssues === 1 ? "" : "es"} found` : "Storage records are consistent"}</strong><span>{result.note}</span></div>
+        <div><strong>{databaseIssues ? `${databaseIssues.toLocaleString()} database mismatch${databaseIssues === 1 ? "" : "es"} found` : fullScan ? "Storage records are consistent" : "Quick check found no mismatches"}</strong><span>{fullScan ? "Full library checked." : `${Number(summary.index_rows_scanned || 0).toLocaleString()} newest index rows and ${Number(summary.recording_hours_scanned || 0)} recent recording hours checked.`} {result.note}</span></div>
       </div>
       <div className="telemetry-summary-grid maintenance-summary-grid">
-        <article><span>Recording files</span><strong>{Number(summary.recording_files || 0).toLocaleString()}</strong><small>{Number(summary.indexed_recordings || 0).toLocaleString()} indexed · {Number(summary.recent_recording_files || 0).toLocaleString()} active/recent protected</small></article>
+        <article><span>{fullScan ? "Recording files" : "Recent files checked"}</span><strong>{Number(summary.recording_files || 0).toLocaleString()}</strong><small>{Number(summary.indexed_recordings || 0).toLocaleString()} total indexed · {Number(summary.recent_recording_files || 0).toLocaleString()} active/recent protected</small></article>
         <article><span>Recording index</span><strong>{Number(summary.missing_index_rows || 0).toLocaleString()} missing</strong><small>{Number(summary.unindexed_recording_files || 0).toLocaleString()} files need indexing</small></article>
         <article><span>Missing incident media</span><strong>{missingReferences.toLocaleString()}</strong><small>{summary.missing_event_snapshots || 0} incident · {summary.missing_motion_snapshots || 0} motion · {summary.missing_face_snapshots || 0} face images</small></article>
-        <article><span>Unlinked media</span><strong>{Number(summary.orphan_media_files || 0).toLocaleString()}</strong><small>{formatBytes(summary.orphan_media_bytes)} reported only; never auto-deleted</small></article>
-        <article><span>Regenerable cache</span><strong>{formatBytes(summary.regenerable_cache_bytes)}</strong><small>Playback, event clip, and HLS working files</small></article>
+        <article><span>Unlinked media</span><strong>{fullScan ? Number(summary.orphan_media_files || 0).toLocaleString() : "Full scan"}</strong><small>{fullScan ? `${formatBytes(summary.orphan_media_bytes)} reported only; never auto-deleted` : "Not walked during the bounded quick check"}</small></article>
+        <article><span>Regenerable cache</span><strong>{fullScan ? formatBytes(summary.regenerable_cache_bytes) : "Full scan"}</strong><small>Playback, event clip, and HLS working files</small></article>
         <article><span>Storage free</span><strong>{formatBytes(summary.storage_free_bytes)}</strong><small>{formatBytes(summary.storage_used_bytes)} used of {formatBytes(summary.storage_total_bytes)}</small></article>
       </div>
       {result.mode === "repair" ? <section className="telemetry-section"><div className="telemetry-section-head"><div><h3>Last repair</h3><p>{repaired.toLocaleString()} records updated; no incidents or media files were deleted.</p></div></div><dl className="telemetry-details maintenance-repair-details"><div><dt>Recording rows removed / added</dt><dd>{repairs.stale_index_rows_removed || 0} / {repairs.recordings_reindexed || 0}</dd></div><div><dt>Incident media links cleared</dt><dd>{repairs.event_media_references_cleared || 0}</dd></div><div><dt>Motion / face links cleared</dt><dd>{repairs.motion_sample_references_cleared || 0} / {repairs.face_media_references_cleared || 0}</dd></div></dl></section> : null}
@@ -5122,14 +5128,15 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     }
   }
 
-  async function startMaintenance(apply = false) {
-    if (apply && !window.confirm("Repair the local database references now? Incident history and media files will not be deleted.")) return;
+  async function startMaintenance(apply = false, full = false) {
+    if (full && !apply && !window.confirm("A full scan walks the entire NFS media library and may take a long time. You can cancel it at any point. Continue?")) return;
+    if (apply && !window.confirm(`Repair the ${full ? "full" : "recent"} database findings now? Incident history and media files will not be deleted.`)) return;
     setMaintenanceError("");
     try {
       const response = await fetch("/api/maintenance/storage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apply }),
+        body: JSON.stringify({ apply, full }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
@@ -5141,10 +5148,23 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     }
   }
 
+  async function cancelMaintenance() {
+    try {
+      const response = await fetch("/api/maintenance/storage", { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Maintenance could not be cancelled (${response.status})`);
+      }
+      setMaintenance(await response.json());
+    } catch (error) {
+      setMaintenanceError(error.message || "Unable to cancel storage maintenance.");
+    }
+  }
+
   useEffect(() => {
     if (settingsTab !== "maintenance") return undefined;
     void loadMaintenance();
-    const timer = window.setInterval(() => void loadMaintenance(), maintenance?.status === "running" ? 1500 : 5000);
+    const timer = window.setInterval(() => void loadMaintenance(), ["running", "cancelling"].includes(maintenance?.status) ? 1000 : 5000);
     return () => window.clearInterval(timer);
   }, [settingsTab, maintenance?.status]);
 
@@ -5530,14 +5550,13 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           <div className="tree-list">
             <button type="button" className="active"><HardDrive size={16} /><span>Storage Reconciliation</span></button>
           </div>
-          <div className="maintenance-help"><strong>What it does</strong><p>Checks media on disk against SurvNG’s local databases. Use this after manually moving or deleting files.</p><p>Repairs never delete media or incident history.</p></div>
+          <div className="maintenance-help"><strong>What it does</strong><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repairs never delete media or incident history.</p></div>
         </section>
         <section className="bento-card config-editor settings-panel maintenance-panel">
           <div className="section-head">
             <div><h2>Storage Reconciliation</h2><p>Find missing references, stale recording rows, and unlinked media</p></div>
             <div className="camera-command-area maintenance-actions">
-              <button onClick={() => void startMaintenance(false)} disabled={maintenance?.status === "running"}><RefreshCcw className={maintenance?.status === "running" && maintenance?.mode === "scan" ? "spin" : ""} size={16} /> Scan</button>
-              <button className="primary" onClick={() => void startMaintenance(true)} disabled={maintenance?.status === "running"}><Wrench className={maintenance?.status === "running" && maintenance?.mode === "repair" ? "spin" : ""} size={16} /> Repair Database</button>
+              {["running", "cancelling"].includes(maintenance?.status) ? <button onClick={() => void cancelMaintenance()} disabled={maintenance?.status === "cancelling"}><X size={16} /> {maintenance?.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : <><button onClick={() => void startMaintenance(false, false)}><RefreshCcw size={16} /> Quick Check</button><button onClick={() => void startMaintenance(false, true)}><Search size={16} /> Full Scan</button><button className="primary" onClick={() => void startMaintenance(true, maintenance?.result?.full === true)}><Wrench size={16} /> Repair Database</button></>}
             </div>
           </div>
           {maintenanceError ? <div className="error-banner">{maintenanceError}</div> : null}

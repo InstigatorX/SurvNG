@@ -62,7 +62,7 @@ class StorageReconcilerTest(unittest.TestCase):
             stale.unlink()
 
             reconciler = StorageReconciler(storage, events.db_path, recorder)
-            scan = reconciler.run()
+            scan = reconciler.run(full=True)
             summary = scan["summary"]
             self.assertEqual(summary["missing_event_snapshots"], 1)
             self.assertEqual(summary["missing_event_recordings"], 1)
@@ -74,7 +74,7 @@ class StorageReconcilerTest(unittest.TestCase):
             self.assertEqual(summary["missing_index_samples"], ["recordings/gate/main/2026-01-01/00/20260101-000010.mp4"])
             self.assertEqual(summary["unindexed_samples"], ["recordings/gate/main/2026-01-01/00/20260101-000000.mp4"])
 
-            repaired = reconciler.run(apply=True)
+            repaired = reconciler.run(apply=True, full=True)
             self.assertEqual(repaired["repairs"]["stale_index_rows_removed"], 1)
             self.assertEqual(repaired["repairs"]["recordings_reindexed"], 1)
             self.assertEqual(repaired["repairs"]["event_media_references_cleared"], 2)
@@ -96,18 +96,39 @@ class StorageReconcilerTest(unittest.TestCase):
         blocker = __import__("threading").Event()
 
         class BlockingReconciler:
-            def run(self, *, apply: bool = False) -> dict[str, object]:
+            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
                 blocker.wait(1)
                 return {"mode": "repair" if apply else "scan"}
 
-        runner.start(lambda: BlockingReconciler(), apply=False)
+        factory = lambda _cancel, _progress: BlockingReconciler()
+        runner.start(factory, apply=False)
         with self.assertRaisesRegex(RuntimeError, "already running"):
-            runner.start(lambda: BlockingReconciler(), apply=True)
+            runner.start(factory, apply=True)
         blocker.set()
         deadline = time.time() + 1
         while runner.status()["status"] == "running" and time.time() < deadline:
             time.sleep(0.01)
         self.assertEqual(runner.status()["status"], "complete")
+
+    def test_runner_cancels_active_job(self) -> None:
+        runner = StorageMaintenanceRunner()
+
+        class CancellableReconciler:
+            def __init__(self, cancelled) -> None:
+                self.cancelled = cancelled
+
+            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+                while not self.cancelled.wait(0.01):
+                    pass
+                raise InterruptedError("cancelled")
+
+        runner.start(lambda cancelled, _progress: CancellableReconciler(cancelled), apply=False, full=True)
+        state = runner.cancel()
+        self.assertEqual(state["status"], "cancelling")
+        deadline = time.time() + 1
+        while runner.status()["status"] == "cancelling" and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(runner.status()["status"], "cancelled")
 
 
 if __name__ == "__main__":

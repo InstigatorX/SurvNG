@@ -403,6 +403,24 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in rows], [first.name, second.name])
 
+    def test_index_only_recording_range_does_not_scan_media_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "indexed.mp4"
+            clip.write_bytes(b"x" * 2048)
+            row = self._row(clip)
+            recorder._store_recording_rows("gate", "main", [row])
+
+            with patch.object(recorder, "_recording_search_dirs", side_effect=AssertionError("media scan")):
+                rows = recorder.recording_rows_between(
+                    "gate",
+                    row["start_epoch"] - 1,
+                    row["end_epoch"] + 1,
+                    discover_missing=False,
+                )
+
+        self.assertEqual([item["path"] for item in rows], [str(clip)])
+
     def test_active_recorder_does_not_hide_last_historical_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

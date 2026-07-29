@@ -807,6 +807,7 @@ def logs(limit: int = 300, level: str = "", q: str = "") -> dict:
 
 class StorageMaintenanceRequest(BaseModel):
     apply: bool = False
+    full: bool = False
 
 
 @app.get("/api/maintenance/storage")
@@ -819,13 +820,24 @@ def start_storage_maintenance(request: StorageMaintenanceRequest) -> dict:
     active_manager = manager
     try:
         return STORAGE_MAINTENANCE.start(
-            lambda: StorageReconciler(
+            lambda cancel_event, progress: StorageReconciler(
                 active_manager.storage_dir,
                 active_manager.events.db_path,
                 active_manager.recorder,
+                cancel_event=cancel_event,
+                progress=progress,
             ),
             apply=request.apply,
+            full=request.full,
         )
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.delete("/api/maintenance/storage", status_code=202)
+def cancel_storage_maintenance() -> dict:
+    try:
+        return STORAGE_MAINTENANCE.cancel()
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
@@ -3515,6 +3527,7 @@ def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, so
             start_epoch,
             end_epoch,
             selected_source,
+            discover_missing=False,
         )
         if int(row.get("size_bytes") or 0) > 1024
     ]
@@ -3854,6 +3867,7 @@ def _recording_prewarm_loop() -> None:
                         window_start,
                         window_end,
                         source,
+                        discover_missing=False,
                     )
                     targets = [rows[0], row] if rows else []
                     warmed: set[str] = set()
@@ -4479,6 +4493,7 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
             window_start,
             window_end,
             recording_source(source),
+            discover_missing=False,
         ):
         if candidate.get("start_epoch") is None or candidate.get("end_epoch") is None:
             continue

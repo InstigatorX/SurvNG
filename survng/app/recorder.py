@@ -13,6 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from .baichuan_native import (
     BaichuanFfmpegPipe,
@@ -598,6 +599,8 @@ class Recorder:
         start_epoch: float,
         end_epoch: float,
         source: str = "main",
+        *,
+        discover_missing: bool = True,
     ) -> list[dict]:
         source = "main" if source == "main" else "live"
         def indexed_rows() -> list[dict]:
@@ -619,6 +622,11 @@ class Recorder:
         if stale_paths:
             self._delete_index_paths(list(stale_paths))
             rows = [row for row in rows if str(row["path"]) not in stale_paths]
+
+        if not discover_missing:
+            for row in rows:
+                row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
+            return rows
 
         start_date = datetime.fromtimestamp(start_epoch).date() - timedelta(days=1)
         end_date = datetime.fromtimestamp(end_epoch).date() + timedelta(days=1)
@@ -965,9 +973,24 @@ class Recorder:
         self._store_recording_rows(camera_id, source, rows)
         self._prune_recording_index(camera_id, source, files)
 
-    def storage_index_health(self) -> dict[str, object]:
-        """Compare stable recording files with the local recording index."""
-        files_by_source = self._recording_files_by_source()
+    def storage_index_health(
+        self,
+        *,
+        full: bool = False,
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str, int, int | None], None] | None = None,
+        quick_index_limit: int = 1000,
+        quick_hours: int = 6,
+    ) -> dict[str, object]:
+        """Compare recording files with the index using bounded or exhaustive discovery."""
+        if full:
+            files_by_source = self._recording_files_by_source(cancel_event=cancel_event, progress=progress)
+        else:
+            files_by_source = self._recent_recording_files_by_source(
+                hours=quick_hours,
+                cancel_event=cancel_event,
+                progress=progress,
+            )
         all_disk_paths = {
             str(path)
             for files in files_by_source.values()
@@ -980,24 +1003,51 @@ class Recorder:
             if not self._recording_file_may_be_active(path)
         }
         with self._index_connection() as connection:
-            indexed_rows = connection.execute(
-                "SELECT path, camera_id, source FROM recordings"
-            ).fetchall()
-        indexed_paths = {str(row["path"]) for row in indexed_rows}
-        stale = sorted(indexed_paths - all_disk_paths)
-        unindexed = sorted(stable_disk_paths - indexed_paths)
+            indexed_total = int(connection.execute("SELECT count(*) FROM recordings").fetchone()[0])
+            if full:
+                indexed_rows = connection.execute(
+                    "SELECT path, camera_id, source FROM recordings"
+                ).fetchall()
+            else:
+                indexed_rows = connection.execute(
+                    "SELECT path, camera_id, source FROM recordings ORDER BY start_epoch DESC LIMIT ?",
+                    (max(1, quick_index_limit),),
+                ).fetchall()
+        indexed_sample = {str(row["path"]) for row in indexed_rows}
+        if full:
+            stale = sorted(indexed_sample - all_disk_paths)
+            indexed_for_discovery = indexed_sample
+        else:
+            stale = []
+            for index, path in enumerate(indexed_sample, start=1):
+                self._raise_if_cancelled(cancel_event)
+                if not Path(path).is_file():
+                    stale.append(path)
+                if progress and index % 100 == 0:
+                    progress("Checking indexed recordings", index, len(indexed_sample))
+            indexed_for_discovery = self._indexed_path_subset(stable_disk_paths)
+        unindexed = sorted(stable_disk_paths - indexed_for_discovery)
         return {
             "recording_files": len(all_disk_paths),
             "recent_recording_files": len(all_disk_paths - stable_disk_paths),
-            "indexed_recordings": len(indexed_paths),
+            "indexed_recordings": indexed_total,
+            "index_rows_scanned": len(indexed_sample),
+            "recording_hours_scanned": None if full else max(1, quick_hours),
+            "scan_complete": full,
             "missing_index_files": stale,
             "unindexed_files": unindexed,
             "files_by_source": files_by_source,
         }
 
-    def reconcile_storage_index(self) -> dict[str, int]:
+    def reconcile_storage_index(
+        self,
+        *,
+        full: bool = False,
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str, int, int | None], None] | None = None,
+    ) -> dict[str, int]:
         """Synchronize the local index with stable files found in recording storage."""
-        health = self.storage_index_health()
+        health = self.storage_index_health(full=full, cancel_event=cancel_event, progress=progress)
         files_by_source = health.pop("files_by_source")
         added = 0
         unindexed = set(health["unindexed_files"])
@@ -1010,12 +1060,18 @@ class Recorder:
         self._delete_index_paths(stale)
         return {"recordings_reindexed": added, "stale_index_rows_removed": len(stale)}
 
-    def _recording_files_by_source(self) -> dict[RecorderKey, list[Path]]:
+    def _recording_files_by_source(
+        self,
+        *,
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str, int, int | None], None] | None = None,
+    ) -> dict[RecorderKey, list[Path]]:
         """Discover current and legacy recording layouts without relying on config state."""
         grouped: dict[RecorderKey, list[Path]] = {}
         if not self.recordings_dir.exists():
             return grouped
-        for path in self.recordings_dir.glob("*/**/*.mp4"):
+        for index, path in enumerate(self.recordings_dir.glob("*/**/*.mp4"), start=1):
+            self._raise_if_cancelled(cancel_event)
             try:
                 parts = path.relative_to(self.recordings_dir).parts
             except ValueError:
@@ -1027,7 +1083,66 @@ class Recorder:
             else:
                 continue
             grouped.setdefault((camera_id, source), []).append(path)
+            if progress and index % 1000 == 0:
+                progress("Scanning all recording files", index, None)
         return grouped
+
+    def _recent_recording_files_by_source(
+        self,
+        *,
+        hours: int,
+        cancel_event: threading.Event | None = None,
+        progress: Callable[[str, int, int | None], None] | None = None,
+    ) -> dict[RecorderKey, list[Path]]:
+        grouped: dict[RecorderKey, list[Path]] = {}
+        if not self.recordings_dir.exists():
+            return grouped
+        camera_dirs = [path for path in self.recordings_dir.iterdir() if path.is_dir()]
+        targets = [datetime.now() - timedelta(hours=offset) for offset in range(max(1, hours) + 1)]
+        total = max(1, len(camera_dirs) * len(targets) * 2)
+        checked = 0
+        for camera_dir in camera_dirs:
+            self._raise_if_cancelled(cancel_event)
+            for source in ("main", "live"):
+                search_roots = [camera_dir / source]
+                if source == "main":
+                    search_roots.append(camera_dir)
+                files: list[Path] = []
+                for target in targets:
+                    for root in search_roots:
+                        self._raise_if_cancelled(cancel_event)
+                        hour_dir = root / target.strftime("%Y-%m-%d") / target.strftime("%H")
+                        if hour_dir.exists():
+                            files.extend(hour_dir.glob("*.mp4"))
+                    checked += 1
+                    if progress and checked % 10 == 0:
+                        progress("Scanning recent recording folders", min(checked, total), total)
+                if files:
+                    grouped[(camera_dir.name, source)] = list(set(files))
+        return grouped
+
+    def _indexed_path_subset(self, paths: set[str]) -> set[str]:
+        if not paths:
+            return set()
+        found: set[str] = set()
+        values = list(paths)
+        with self._index_connection() as connection:
+            for offset in range(0, len(values), 500):
+                batch = values[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                found.update(
+                    str(row[0])
+                    for row in connection.execute(
+                        f"SELECT path FROM recordings WHERE path IN ({placeholders})",
+                        batch,
+                    )
+                )
+        return found
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("storage maintenance was cancelled")
 
     def refresh_recording_index(
         self,
