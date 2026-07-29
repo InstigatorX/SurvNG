@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -38,6 +40,8 @@ from .state_events import StateEventBroker
 
 
 LOGGER = logging.getLogger("uvicorn.error")
+ONVIF_RELEASE_TIMEOUT_SECONDS = 15.0
+CAMERA_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
 
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
@@ -166,7 +170,21 @@ class AppManager:
                 workers[camera.id] = self._create_camera_worker(camera)
         except BaseException:
             for worker in reversed(tuple(workers.values())):
-                worker.close()
+                try:
+                    worker.close()
+                except Exception:
+                    LOGGER.exception("camera cleanup failed during manager construction")
+            for label, callback in (
+                ("MQTT", self.mqtt.stop),
+                ("face recognition", self.faces.close),
+                ("inference", self.detector.stop),
+                ("recorder", self.recorder.stop_all),
+                ("state event broker", self.state_events.close),
+            ):
+                try:
+                    callback()
+                except Exception:
+                    LOGGER.exception("%s cleanup failed during manager construction", label)
             raise
         self.workers = workers
 
@@ -270,9 +288,37 @@ class AppManager:
                 "detection_enabled": self._detection_enabled,
                 "camera_enabled": self._camera_enabled,
             }
-            temporary = self._runtime_state_path.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(self._runtime_state_path)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=self._runtime_state_path.parent,
+                    prefix=f".{self._runtime_state_path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(payload, handle, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self._runtime_state_path)
+                temporary = None
+                try:
+                    directory_fd = os.open(self._runtime_state_path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError:
+                    pass
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
 
     def recording_enabled(self, camera_id: str) -> bool:
         return self._recording_enabled.get(camera_id, True)
@@ -353,6 +399,11 @@ class AppManager:
         persist: bool = False,
     ) -> None:
         with self._lifecycle_lock:
+            previous = (
+                self._recording_enabled,
+                self._detection_enabled,
+                self._camera_enabled,
+            )
             camera_ids = set(self.workers)
             self._recording_enabled = {
                 camera_id: bool(enabled)
@@ -368,8 +419,16 @@ class AppManager:
                 camera_id: bool(preferences.get("camera_enabled", {}).get(camera_id, True))
                 for camera_id in camera_ids
             }
-            if persist:
-                self._save_runtime_state()
+            try:
+                if persist:
+                    self._save_runtime_state()
+            except BaseException:
+                (
+                    self._recording_enabled,
+                    self._detection_enabled,
+                    self._camera_enabled,
+                ) = previous
+                raise
 
     def start_all(self) -> None:
         with self._lifecycle_lock:
@@ -453,23 +512,32 @@ class AppManager:
                     )
 
             releases = [
-                threading.Thread(
+                (camera_id, threading.Thread(
                     target=release,
                     args=(camera_id, worker),
                     name=f"release-onvif-{camera_id}",
-                    daemon=False,
-                )
+                    daemon=True,
+                ))
                 for camera_id, worker in self.workers.items()
             ]
-            for thread in releases:
+            for _camera_id, thread in releases:
                 thread.start()
-            for thread in releases:
-                thread.join()
-            if failures:
-                cameras = ", ".join(camera_id for camera_id, _exc in failures)
+            deadline = time.monotonic() + ONVIF_RELEASE_TIMEOUT_SECONDS
+            for _camera_id, thread in releases:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            with failures_lock:
+                for camera_id, thread in releases:
+                    if thread.is_alive():
+                        failures.append((
+                            camera_id,
+                            RuntimeError("ONVIF subscription release timed out"),
+                        ))
+                failure_snapshot = list(failures)
+            if failure_snapshot:
+                cameras = ", ".join(camera_id for camera_id, _exc in failure_snapshot)
                 raise RuntimeError(
                     f"failed to release ONVIF subscriptions for: {cameras}"
-                ) from failures[0][1]
+                ) from failure_snapshot[0][1]
 
     def _shutdown_components(self) -> None:
         errors: list[tuple[str, Exception]] = []
@@ -500,22 +568,32 @@ class AppManager:
                 LOGGER.exception("camera shutdown failed for %s", camera_id)
 
         camera_shutdowns = [
-            threading.Thread(
+            (camera_id, threading.Thread(
                 target=stop_worker,
                 args=(camera_id, worker),
                 name=f"stop-camera-{camera_id}",
-                daemon=False,
-            )
+                daemon=True,
+            ))
             for camera_id, worker in self.workers.items()
         ]
-        for thread in camera_shutdowns:
+        for _camera_id, thread in camera_shutdowns:
             thread.start()
-        for thread in camera_shutdowns:
-            thread.join()
-        failed_cameras = {camera_id for camera_id, _exc in camera_errors}
-        errors.extend((f"camera {camera_id}", exc) for camera_id, exc in camera_errors)
+        deadline = time.monotonic() + CAMERA_SHUTDOWN_TIMEOUT_SECONDS
+        for _camera_id, thread in camera_shutdowns:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        timed_out_cameras = {
+            camera_id for camera_id, thread in camera_shutdowns if thread.is_alive()
+        }
+        with camera_errors_lock:
+            for camera_id in sorted(timed_out_cameras):
+                camera_errors.append((camera_id, RuntimeError("camera shutdown timed out")))
+            camera_error_snapshot = list(camera_errors)
+        errors.extend((f"camera {camera_id}", exc) for camera_id, exc in camera_error_snapshot)
         for camera_id, worker in self.workers.items():
-            if camera_id not in failed_cameras:
+            # close() is the final idempotent resource sweep and must still run
+            # when stop() reports a partial teardown failure. Do not race a
+            # stop() call that exceeded the manager-level deadline.
+            if camera_id not in timed_out_cameras:
                 attempt(f"camera {camera_id} resources", worker.close)
 
         LOGGER.info("SurvNG shutdown: stopping face recognition")

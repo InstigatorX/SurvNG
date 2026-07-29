@@ -4,7 +4,7 @@ import re
 
 
 _SECRET_URL_RE = re.compile(
-    r"(\b(?:rtsp|rtmp|http|https|reolink)://)([^:/@\s]+):([^@\s]+)@",
+    r"(\b(?:rtsp|rtsps|rtmp|http|https|reolink)://)([^:/@\s]+):([^@\s]+)@",
     re.IGNORECASE,
 )
 _SECRET_FIELD_RE = re.compile(

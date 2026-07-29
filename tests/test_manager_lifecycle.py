@@ -4,7 +4,7 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig
 from survng.app.manager import AppManager
@@ -74,6 +74,33 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertIsNone(manager.recorder._index_thread)
         self.assertIsNone(manager.recorder._watchdog_thread)
 
+    def test_constructor_failure_closes_services_created_before_workers(self) -> None:
+        detector = Mock()
+        faces = Mock()
+        recorder = Mock()
+        state_events = Mock()
+        mqtt = Mock()
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("survng.app.manager.InferenceSupervisor", return_value=detector),
+            patch("survng.app.manager.FaceStore", return_value=faces),
+            patch("survng.app.manager.Recorder", return_value=recorder),
+            patch("survng.app.manager.StateEventBroker", return_value=state_events),
+            patch("survng.app.manager.MqttService", return_value=mqtt),
+            patch.object(AppManager, "_create_camera_worker", side_effect=RuntimeError("worker failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                AppManager(AppConfig(
+                    storage_dir=tmpdir,
+                    cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
+                ))
+
+        mqtt.stop.assert_called_once_with()
+        faces.close.assert_called_once_with()
+        detector.stop.assert_called_once_with()
+        recorder.stop_all.assert_called_once_with()
+        state_events.close.assert_called_once_with()
+
     def test_manager_keeps_databases_and_onvif_caches_outside_media_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:
             camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
@@ -120,6 +147,53 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.recorder.stop_all.assert_called_once_with()
         manager.state_events.close.assert_called_once_with()
         self.assertTrue(manager._closed)
+
+    def test_camera_close_runs_even_when_camera_stop_fails(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+        manager.workers["gate"].stop.side_effect = RuntimeError("stop failed")
+
+        with self.assertRaisesRegex(RuntimeError, "camera gate"):
+            manager.stop_all()
+
+        manager.workers["gate"].close.assert_called_once_with()
+        manager.detector.stop.assert_called_once_with()
+        manager.recorder.stop_all.assert_called_once_with()
+
+    def test_manager_camera_shutdown_deadline_does_not_block_other_cleanup(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+        release = threading.Event()
+        manager.workers["gate"].stop.side_effect = lambda: release.wait(timeout=1)
+
+        try:
+            with (
+                patch("survng.app.manager.CAMERA_SHUTDOWN_TIMEOUT_SECONDS", 0.02),
+                self.assertRaisesRegex(RuntimeError, "camera gate"),
+            ):
+                manager.stop_all()
+        finally:
+            release.set()
+
+        manager.workers["gate"].close.assert_not_called()
+        manager.detector.stop.assert_called_once_with()
+        manager.recorder.stop_all.assert_called_once_with()
+
+    def test_onvif_release_deadline_is_bounded(self) -> None:
+        manager = manager_with_mocks()
+        release = threading.Event()
+        manager.workers["gate"].stop_onvif_events.side_effect = (
+            lambda: release.wait(timeout=1)
+        )
+
+        try:
+            with (
+                patch("survng.app.manager.ONVIF_RELEASE_TIMEOUT_SECONDS", 0.02),
+                self.assertRaisesRegex(RuntimeError, "gate"),
+            ):
+                manager.release_onvif_subscriptions()
+        finally:
+            release.set()
 
     def test_shutdown_releases_onvif_before_other_camera_components(self) -> None:
         manager = manager_with_mocks()
@@ -177,6 +251,23 @@ class ManagerLifecycleTest(unittest.TestCase):
             },
         )
 
+    def test_persisted_runtime_preferences_roll_back_on_write_failure(self) -> None:
+        manager = manager_with_mocks()
+        previous = manager.runtime_preferences()
+        manager._save_runtime_state.side_effect = OSError("disk full")
+
+        with self.assertRaisesRegex(OSError, "disk full"):
+            manager.apply_runtime_preferences(
+                {
+                    "recording_enabled": {"gate": False},
+                    "detection_enabled": {"gate": False},
+                    "camera_enabled": {"gate": False},
+                },
+                persist=True,
+            )
+
+        self.assertEqual(manager.runtime_preferences(), previous)
+
     def test_invalid_runtime_state_values_do_not_enable_features(self) -> None:
         self.assertEqual(
             AppManager._boolean_preferences(
@@ -196,6 +287,21 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         self.assertEqual(manager._recording_enabled, {"gate": True})
         manager.recorder.set_camera_enabled.assert_not_called()
+
+    def test_runtime_state_write_is_atomic_and_cleans_failed_temporary_file(self) -> None:
+        manager = manager_with_mocks()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager._runtime_state_lock = threading.Lock()
+            manager._runtime_state_path = Path(tmpdir) / "runtime_state.json"
+            manager._runtime_state_path.write_text('{"original": true}\n', encoding="utf-8")
+            with patch("survng.app.manager.json.dump", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    AppManager._save_runtime_state(manager)
+            contents = manager._runtime_state_path.read_text(encoding="utf-8")
+            temporary_files = list(Path(tmpdir).glob(".runtime_state.json.*.tmp"))
+
+        self.assertEqual(contents, '{"original": true}\n')
+        self.assertEqual(temporary_files, [])
 
     def test_disabled_camera_remains_stopped_during_manager_start(self) -> None:
         manager = manager_with_mocks()

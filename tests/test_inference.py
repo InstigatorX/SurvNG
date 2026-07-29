@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from pydantic import ValidationError
@@ -159,6 +159,30 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(face_process.is_alive())
         self.assertIsNone(supervisor.worker_status()["object"]["worker_pid"])
         self.assertIsNone(supervisor.worker_status()["face"]["worker_pid"])
+
+    def test_supervisor_attempts_every_worker_stop_after_failure(self) -> None:
+        supervisor = InferenceSupervisor(DetectorConfig(enabled=False))
+        supervisor._reid.stop = Mock(side_effect=RuntimeError("reid stuck"))
+        supervisor._face.stop = Mock()
+        supervisor._object.stop = Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "reid"):
+            supervisor.stop()
+
+        supervisor._face.stop.assert_called_once_with()
+        supervisor._object.stop.assert_called_once_with()
+
+    def test_supervisor_preserves_base_exception_after_stopping_every_worker(self) -> None:
+        supervisor = InferenceSupervisor(DetectorConfig(enabled=False))
+        supervisor._reid.stop = Mock(side_effect=KeyboardInterrupt())
+        supervisor._face.stop = Mock()
+        supervisor._object.stop = Mock()
+
+        with self.assertRaises(KeyboardInterrupt):
+            supervisor.stop()
+
+        supervisor._face.stop.assert_called_once_with()
+        supervisor._object.stop.assert_called_once_with()
 
     def test_final_shutdown_reaps_multiprocessing_resource_tracker(self) -> None:
         self.assertTrue(self.supervisor.start())

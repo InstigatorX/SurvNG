@@ -101,14 +101,16 @@ class ApiSecretBoundaryTest(unittest.TestCase):
     def test_secret_redaction_handles_urls_structured_fields_and_authorization(self) -> None:
         message = (
             'rtsp://user:camera-pass@host/live password="secret value" '
+            "rtsps://secure:tls-pass@host/live "
             "api_key=abc Authorization: Bearer token-value"
         )
 
         redacted = redact_secret_text(message)
 
-        for secret in ("camera-pass", "secret value", "abc", "token-value"):
+        for secret in ("camera-pass", "tls-pass", "secret value", "abc", "token-value"):
             self.assertNotIn(secret, redacted)
         self.assertIn("rtsp://user:***@host/live", redacted)
+        self.assertIn("rtsps://secure:***@host/live", redacted)
 
     def test_public_rows_do_not_expose_filesystem_paths(self) -> None:
         event = main._event_row(

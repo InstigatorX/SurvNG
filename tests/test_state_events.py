@@ -93,6 +93,43 @@ class StateEventBrokerTest(unittest.TestCase):
         self.assertEqual(subscriber.get_nowait().type, "camera_state")
         self.assertIsNone(subscriber.get_nowait())
 
+    def test_slow_payload_copy_does_not_block_broker_close(self) -> None:
+        broker = StateEventBroker()
+        copy_started = threading.Event()
+        allow_copy = threading.Event()
+
+        class SlowPayload:
+            def __deepcopy__(self, _memo):
+                copy_started.set()
+                allow_copy.wait(timeout=1)
+                return {"copied": True}
+
+        publisher = threading.Thread(
+            target=broker.publish,
+            args=("camera_state", SlowPayload()),
+        )
+        publisher.start()
+        self.assertTrue(copy_started.wait(timeout=1))
+
+        closer = threading.Thread(target=broker.close)
+        closer.start()
+        closer.join(timeout=0.2)
+        self.assertFalse(closer.is_alive())
+
+        allow_copy.set()
+        publisher.join(timeout=1)
+        self.assertFalse(publisher.is_alive())
+
+    def test_publish_after_close_does_not_copy_payload(self) -> None:
+        broker = StateEventBroker()
+        broker.close()
+
+        class UncopyablePayload:
+            def __deepcopy__(self, _memo):
+                raise AssertionError("closed broker must not copy payload")
+
+        self.assertIsNone(broker.publish("camera_state", UncopyablePayload()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -442,7 +442,10 @@ class _InferenceWorker:
         if process is not None:
             process.join(timeout=0.1)
         if connection is not None:
-            connection.close()
+            try:
+                connection.close()
+            except OSError:
+                LOGGER.exception("%s inference connection cleanup failed", self.role.capitalize())
         self._process = None
         self._connection = None
         self._last_exit_code = exit_code
@@ -731,9 +734,23 @@ class InferenceSupervisor:
         return object_ready and face_ready and reid_ready
 
     def stop(self) -> None:
-        self._reid.stop()
-        self._face.stop()
-        self._object.stop()
+        failures: list[tuple[str, BaseException]] = []
+        for role, worker in (
+            ("reid", self._reid),
+            ("face", self._face),
+            ("object", self._object),
+        ):
+            try:
+                worker.stop()
+            except BaseException as exc:
+                failures.append((role, exc))
+                LOGGER.exception("%s inference worker shutdown failed", role.capitalize())
+        if failures:
+            roles = ", ".join(role for role, _exc in failures)
+            first_error = failures[0][1]
+            if not isinstance(first_error, Exception):
+                raise first_error
+            raise RuntimeError(f"inference worker shutdown failed for: {roles}") from first_error
 
     def stop_resource_tracker(self) -> bool:
         alive = [

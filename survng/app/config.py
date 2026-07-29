@@ -411,13 +411,13 @@ def slugify_camera_id(value: str) -> str:
     cleaned = []
     previous_dash = False
     for char in (value or "").strip().lower():
-        if char.isalnum():
+        if char.isascii() and char.isalnum():
             cleaned.append(char)
             previous_dash = False
         elif not previous_dash:
             cleaned.append("-")
             previous_dash = True
-    return "".join(cleaned).strip("-") or "camera"
+    return ("".join(cleaned).strip("-") or "camera")[:128]
 
 
 def apply_stream_url_defaults(camera: CameraConfig) -> None:
@@ -434,24 +434,32 @@ def apply_stream_url_defaults(camera: CameraConfig) -> None:
     password = unquote(parsed.password or "")
     host = parsed.hostname
     if host:
-        camera.onvif.host = camera.onvif.host or host
-        camera.onvif.username = camera.onvif.username or username
-        camera.onvif.password = camera.onvif.password or password
+        camera.onvif = OnvifConfig.model_validate({
+            **camera.onvif.model_dump(mode="json"),
+            "host": camera.onvif.host or host,
+            "username": camera.onvif.username or username,
+            "password": camera.onvif.password or password,
+        })
 
     if scheme == "reolink":
         query = parse_qs(parsed.query)
         channel_values = query.get("channel") or query.get("chn") or []
         try:
             channel = int(channel_values[0]) if channel_values else camera.baichuan.channel
-        except (TypeError, ValueError):
-            channel = camera.baichuan.channel
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Reolink channel must be a whole number") from exc
+        if channel < 0 or channel > 255:
+            raise ValueError("Reolink channel must be between 0 and 255")
         camera.video_backend = "baichuan_native"
-        camera.baichuan.enabled = True
-        camera.baichuan.host = host
-        camera.baichuan.port = parsed.port or camera.baichuan.port or 9000
-        camera.baichuan.username = username
-        camera.baichuan.password = password
-        camera.baichuan.channel = channel
+        camera.baichuan = BaichuanConfig.model_validate({
+            **camera.baichuan.model_dump(mode="json"),
+            "enabled": True,
+            "host": host,
+            "port": parsed.port or camera.baichuan.port or 9000,
+            "username": username or camera.baichuan.username,
+            "password": password or camera.baichuan.password,
+            "channel": channel,
+        })
     elif scheme == "rtsp":
         camera.video_backend = "url"
         camera.baichuan.enabled = False
@@ -465,7 +473,8 @@ def normalize_config(config: AppConfig, assign_ids: bool = False) -> AppConfig:
             candidate = base
             index = 2
             while candidate in used:
-                candidate = f"{base}-{index}"
+                suffix = f"-{index}"
+                candidate = f"{base[:128 - len(suffix)]}{suffix}"
                 index += 1
             camera.id = candidate
             used.add(candidate)

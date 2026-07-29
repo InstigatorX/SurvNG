@@ -14,6 +14,7 @@ from survng.app.config import (
     MqttConfig,
     ObjectTrackingConfig,
     load_config,
+    normalize_config,
     save_config,
 )
 
@@ -209,6 +210,57 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertEqual(config.cameras[0].id, "old")
         self.assertEqual(saved.cameras[0].id, "front-door")
+
+    def test_assigned_camera_ids_remain_ascii_path_safe_and_bounded(self) -> None:
+        long_name = "A" * 128
+        config = AppConfig(cameras=[
+            CameraConfig(id="one", name="Cámara 🚪", stream_url="rtsp://camera/one"),
+            CameraConfig(id="two", name=long_name, stream_url="rtsp://camera/two"),
+            CameraConfig(id="three", name=long_name, stream_url="rtsp://camera/three"),
+        ])
+
+        normalized = normalize_config(config, assign_ids=True)
+
+        self.assertEqual(normalized.cameras[0].id, "c-mara")
+        self.assertEqual(len(normalized.cameras[1].id), 128)
+        self.assertEqual(len(normalized.cameras[2].id), 128)
+        self.assertTrue(normalized.cameras[2].id.endswith("-2"))
+        AppConfig.model_validate(normalized.model_dump(mode="json"))
+
+    def test_reolink_url_preserves_explicit_credentials_and_bounds_channel(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="reolink://camera.local/stream?channel=3",
+            baichuan={"username": "configured", "password": "secret", "channel": 1},
+        )
+
+        self.assertEqual(camera.baichuan.username, "configured")
+        self.assertEqual(camera.baichuan.password, "secret")
+        self.assertEqual(camera.baichuan.channel, 3)
+        with self.assertRaisesRegex(ValidationError, "between 0 and 255"):
+            CameraConfig(
+                id="invalid",
+                name="Invalid",
+                stream_url="reolink://camera.local/stream?channel=999",
+            )
+
+    def test_url_derived_credentials_cannot_bypass_nested_field_limits(self) -> None:
+        oversized_username = "u" * 257
+        with self.assertRaises(ValidationError):
+            CameraConfig(
+                id="rtsp",
+                name="RTSP",
+                stream_url=f"rtsp://{oversized_username}:secret@camera.local/main",
+            )
+
+        with self.assertRaises(ValidationError):
+            CameraConfig(
+                id="reolink",
+                name="Reolink",
+                stream_url=f"reolink://{oversized_username}:secret@camera.local/main",
+                onvif={"username": "configured"},
+            )
 
     def test_failed_config_serialization_preserves_previous_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

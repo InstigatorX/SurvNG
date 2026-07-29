@@ -59,10 +59,16 @@ class StateEventBroker:
         with self._lock:
             if self._closed:
                 return None
+        # Potentially expensive or user-defined copying must not hold the
+        # broker lifecycle lock and stall every subscriber or close().
+        snapshot = deepcopy(data)
+        with self._lock:
+            if self._closed:
+                return None
             event = StateEvent(
                 f"{self.instance_id}:{self._next_id}",
                 str(event_type),
-                deepcopy(data),
+                snapshot,
             )
             self._next_id += 1
             self._history.append(event)
