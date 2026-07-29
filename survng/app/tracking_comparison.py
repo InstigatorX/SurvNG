@@ -331,6 +331,7 @@ class TrackingComparisonRunner:
 
         return {
             "sample_fps": self.config.sample_fps,
+            "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
             "frame_width": int(frame_width),
             "frame_height": int(frame_height),

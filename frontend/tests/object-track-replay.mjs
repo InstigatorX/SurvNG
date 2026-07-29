@@ -20,9 +20,22 @@ assert.deepEqual(tracks[0].recoveryHistory, [{ capturedAt: 11, similarity: 0.91,
 assert.equal(trackFrameAt(tracks[0], 9.9), null);
 assert.deepEqual(trackFrameAt(tracks[0], 10.5)?.box, [15, 10, 45, 80]);
 assert.deepEqual(trackFrameAt(tracks[0], 10.5)?.path, [[25, 45], [30, 45]]);
-assert.deepEqual(trackFrameAt(tracks[0], 11.5, 1)?.box, [20, 10, 50, 80]);
-assert.equal(trackFrameAt(tracks[0], 11.5, 1)?.recovery?.similarity, 0.91);
-assert.equal(trackFrameAt(tracks[0], 12.1, 1), null);
+assert.equal(trackFrameAt(tracks[0], 10.5)?.estimated, false);
+assert.deepEqual(trackFrameAt(tracks[0], 11.5, { holdSeconds: 1, sampleFps: 2 })?.box, [20, 10, 50, 80]);
+assert.equal(trackFrameAt(tracks[0], 11.5, { holdSeconds: 1, sampleFps: 2 })?.estimated, true);
+assert.equal(trackFrameAt(tracks[0], 11.5, { holdSeconds: 1, sampleFps: 2 })?.recovery?.similarity, 0.91);
+assert.equal(trackFrameAt(tracks[0], 12.1, { holdSeconds: 1, sampleFps: 2 }), null);
+
+const sparseTrack = storedObjectTracks({ object_tracking: { tracks: [{
+  track_id: 8,
+  label: "car",
+  box: { x1: 40, y1: 10, x2: 70, y2: 80 },
+  trajectory: [[10, 25, 45], [14, 55, 45]],
+  box_history: [[10, 10, 10, 40, 80], [14, 40, 10, 70, 80]],
+}] } })[0];
+assert.equal(trackFrameAt(sparseTrack, 10.5, { holdSeconds: 3, sampleFps: 2 })?.estimated, false);
+assert.equal(trackFrameAt(sparseTrack, 12, { holdSeconds: 3, sampleFps: 2 })?.estimated, true);
+assert.deepEqual(trackFrameAt(sparseTrack, 12, { holdSeconds: 3, sampleFps: 2 })?.box, [25, 10, 55, 80]);
 
 assert.deepEqual(storedObjectTracks({ object_tracking: { tracks: [{ track_id: 1, label: "person", box: {} }] } }), []);
 

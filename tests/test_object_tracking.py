@@ -885,6 +885,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[0]["tracks"][0]["box_history"][0][0], round(event_at.timestamp(), 3))
         self.assertEqual(updates[0]["frame_width"], 160)
         self.assertEqual(updates[0]["frame_height"], 100)
+        self.assertEqual(updates[0]["lost_timeout_seconds"], 3.0)
         self.assertFalse(session.status()["active"])
 
     def test_detector_failures_persist_terminal_failure_state(self) -> None:

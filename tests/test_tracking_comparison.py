@@ -49,6 +49,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         self.assertEqual(result["frames_processed"], 3)
         self.assertEqual(result["frame_width"], 120)
         self.assertEqual(result["duration_seconds"], 1.0)
+        self.assertEqual(result["lost_timeout_seconds"], 3.0)
         for engine in result["engines"].values():
             self.assertEqual(engine["track_count"], 1)
             self.assertEqual(engine["observations"], 3)

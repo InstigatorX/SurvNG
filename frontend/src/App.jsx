@@ -1781,7 +1781,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   );
 }
 
-function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps }) {
+function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds }) {
   const [playbackEpoch, setPlaybackEpoch] = useState(null);
 
   useEffect(() => {
@@ -1825,12 +1825,12 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
 
   const visibleTracks = useMemo(() => {
     if (!Number.isFinite(playbackEpoch)) return [];
-    const holdSeconds = Math.max(0.75, 2 / Math.max(0.1, Number(sampleFps) || 2));
+    const holdSeconds = Math.max(0.5, Number(lostTimeoutSeconds) || 3);
     return tracks.flatMap((track) => {
-      const frame = trackFrameAt(track, playbackEpoch, holdSeconds);
+      const frame = trackFrameAt(track, playbackEpoch, { holdSeconds, sampleFps });
       return frame ? [{ ...track, ...frame }] : [];
     });
-  }, [playbackEpoch, sampleFps, tracks]);
+  }, [lostTimeoutSeconds, playbackEpoch, sampleFps, tracks]);
 
   const secondsUntilTracking = useMemo(() => {
     if (!Number.isFinite(playbackEpoch) || visibleTracks.length) return null;
@@ -1846,7 +1846,7 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
     <div className="object-track-video-layer" aria-hidden="true">
       <svg viewBox={`0 0 ${coordinateSize.width} ${coordinateSize.height}`} preserveAspectRatio="none" aria-hidden="true">
         {visibleTracks.map((track) => (
-          <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""}`} key={`video-path-${track.trackId}`}>
+          <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`} key={`video-path-${track.trackId}`}>
             {track.path.length > 1 ? <polyline className="object-track-trail" points={track.path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
             <rect className="object-track-video-box" x={track.box[0]} y={track.box[1]} width={track.box[2] - track.box[0]} height={track.box[3] - track.box[1]} vectorEffect="non-scaling-stroke" />
           </g>
@@ -1854,11 +1854,11 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
       </svg>
       {visibleTracks.map((track) => (
         <span
-          className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""}`}
+          className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`}
           key={`video-label-${track.trackId}`}
           style={{ left: `${track.box[0] / coordinateSize.width * 100}%`, top: `${track.box[1] / coordinateSize.height * 100}%` }}
         >
-          #{track.trackId} {track.label}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
+          #{track.trackId} {track.label}{track.estimated ? " · estimated" : ""}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
         </span>
       ))}
       {secondsUntilTracking ? <span className="object-track-video-waiting">Tracking begins in {secondsUntilTracking}s</span> : null}
@@ -2355,6 +2355,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     ? { ...displayedEvent, object_tracking: {
       ...comparisonTracking,
       sample_fps: trackingComparison.sample_fps,
+      lost_timeout_seconds: trackingComparison.lost_timeout_seconds,
       frame_width: trackingComparison.frame_width,
       frame_height: trackingComparison.frame_height,
     } }
@@ -2914,6 +2915,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                   mediaStartTime={playbackOriginTime}
                   mediaKey={playback.key || playback.url}
                   sampleFps={trackingEvent.object_tracking?.sample_fps}
+                  lostTimeoutSeconds={trackingEvent.object_tracking?.lost_timeout_seconds}
                 />
               ) : null}
               {clipLoading ? <div className="event-video-preparing">Preparing incident video...</div> : null}
@@ -2932,7 +2934,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             <div className="event-track-summary">
               <span className="muted">{trackingComparisonEngine ? "Comparison replay" : "Stored tracking"}</span>
               <strong>{storedTracks.length} track{storedTracks.length === 1 ? "" : "s"} · {String(trackingEvent.object_tracking?.implementation || "tracker").replaceAll("_", " ")} · {Number(trackingEvent.object_tracking?.sample_fps || 0) || "?"} FPS</strong>
-              <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
+              <small>{replayTrackCount ? `${replayTrackCount} track${replayTrackCount === 1 ? "" : "s"} can replay over video. Dashed, faded boxes are estimated positions during the configured lost-object grace period. Snapshot boxes mark each track's last stored position.` : "Paths show sampled object centers over time. The box marks each track's last stored position."}</small>
               {Number(reidDiagnostics.inference_attempts || 0) || Number(reidDiagnostics.reid_avoided_geometry_matches || 0) ? (
                 <div className="tracking-comparison-shared">
                   <span>Appearance checks <strong>{Number(reidDiagnostics.inference_attempts || 0)}</strong></span>

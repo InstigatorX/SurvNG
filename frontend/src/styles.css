@@ -2046,6 +2046,12 @@ button.status-pill.hud-toggle:disabled {
   stroke-width: 4;
 }
 
+.track-estimated .object-track-video-box {
+  fill-opacity: .06;
+  stroke-dasharray: 9 6;
+  opacity: .68;
+}
+
 .object-track-video-label {
   position: absolute;
   transform: translateY(-100%);
@@ -2062,6 +2068,10 @@ button.status-pill.hud-toggle:disabled {
 .object-track-video-label.reid-recovered {
   background: #fbbf24;
   color: #201500;
+}
+
+.object-track-video-label.track-estimated {
+  opacity: .72;
 }
 
 .object-track-video-waiting {

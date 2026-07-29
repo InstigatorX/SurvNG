@@ -81,12 +81,14 @@ export function storedObjectTracks(event) {
   }).filter((track) => track.x2 > track.x1 && track.y2 > track.y1);
 }
 
-export function trackFrameAt(track, epoch, holdSeconds = 1) {
+export function trackFrameAt(track, epoch, { holdSeconds = 1, sampleFps = 2 } = {}) {
   const samples = track?.boxHistory;
   if (!Array.isArray(samples) || !samples.length || !Number.isFinite(epoch)) return null;
   const first = samples[0];
   const last = samples[samples.length - 1];
-  if (epoch < first[0] || epoch > last[0] + Math.max(0, Number(holdSeconds) || 0)) return null;
+  const safeHoldSeconds = Math.max(0, Number(holdSeconds) || 0);
+  const expectedInterval = 1 / Math.max(0.1, Number(sampleFps) || 2);
+  if (epoch < first[0] || epoch > last[0] + safeHoldSeconds) return null;
   let previous = first;
   let next = first;
   for (const sample of samples) {
@@ -100,13 +102,18 @@ export function trackFrameAt(track, epoch, holdSeconds = 1) {
   const span = next[0] - previous[0];
   const progress = span > 0 ? Math.max(0, Math.min(1, (epoch - previous[0]) / span)) : 0;
   const box = previous.slice(1, 5).map((value, index) => value + (next[index + 1] - value) * progress);
+  const estimated = epoch > last[0] || (
+    span > expectedInterval * 1.75
+    && epoch > previous[0] + expectedInterval * 1.25
+    && epoch < next[0] - expectedInterval * 0.25
+  );
   const path = (track.trajectory || []).filter((point) => point[0] <= epoch).map((point) => point.slice(1, 3));
   const center = [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
   if (!path.length || path[path.length - 1][0] !== center[0] || path[path.length - 1][1] !== center[1]) path.push(center);
   const recovery = [...(track.recoveryHistory || [])]
     .reverse()
-    .find((item) => item.capturedAt <= epoch && epoch - item.capturedAt <= Math.max(0.75, holdSeconds));
-  return { box, path, recovery: recovery || null };
+    .find((item) => item.capturedAt <= epoch && epoch - item.capturedAt <= Math.max(0.75, safeHoldSeconds));
+  return { box, path, recovery: recovery || null, estimated };
 }
 
 export function playbackEpochAt(windowStartEpoch, mediaTime, mediaStartTime) {
