@@ -619,6 +619,38 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["path"], str(clip))
         self.assertEqual(indexed["validated"], 0)
 
+    def test_recent_index_discovery_does_not_probe_healthy_recorder_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            now = datetime.now()
+            hour_dir = (
+                Path(tmpdir) / "recordings" / "front-door" / "main"
+                / now.strftime("%Y-%m-%d") / now.strftime("%H")
+            )
+            hour_dir.mkdir(parents=True)
+            clips = []
+            for offset in (30, 20, 10):
+                clip = hour_dir / datetime.fromtimestamp(
+                    now.timestamp() - offset
+                ).strftime("%Y%m%d-%H%M%S.mp4")
+                clip.write_bytes(b"x" * 2048)
+                clips.append(clip)
+            camera = Mock(id="front-door", record=True, record_sub=False, live_stream_url="")
+
+            with (
+                patch.object(recorder, "queue_recording_validation") as queue_validation,
+                patch.object(recorder, "_probe_recording") as probe,
+            ):
+                recorder.refresh_recording_index(
+                    {camera.id: camera},
+                    full=False,
+                    run_maintenance=False,
+                )
+
+        queue_validation.assert_not_called()
+        probe.assert_not_called()
+        self.assertEqual(recorder._validation_pending_set, set())
+
     def test_source_reconciliation_discovers_history_and_prunes_stale_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -697,14 +729,20 @@ class RecorderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             with (
-                patch.object(recorder, "_prune_missing_index_rows", side_effect=lambda limit: recorder._index_stop.set()),
-                patch.object(recorder, "_validate_index_batch"),
+                patch.object(recorder, "_prune_missing_index_rows") as prune,
+                patch.object(
+                    recorder,
+                    "_validate_index_batch",
+                    side_effect=lambda limit: recorder._index_stop.set(),
+                ) as validate,
                 patch.object(recorder, "_backfill_stream_fingerprints"),
                 patch.object(recorder, "_reconcile_recording_source") as reconcile,
                 patch.object(recorder._index_stop, "wait", return_value=False),
             ):
                 recorder._recording_index_maintenance_loop({})
 
+        prune.assert_not_called()
+        validate.assert_called_once_with(limit=20)
         reconcile.assert_not_called()
 
     def test_validation_batch_checks_unvalidated_startup_rows(self) -> None:
@@ -828,7 +866,21 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["fingerprint_checked"], 1)
         self.assertEqual(indexed["validated"], 1)
 
-    def test_maintenance_discovers_unqueued_validation_work(self) -> None:
+    def test_background_validation_ignores_unqueued_historical_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "unqueued.mp4"
+            clip.write_bytes(b"recording")
+            self._age_file(clip)
+            recorder._store_recording_rows("front-door", "main", [self._row(clip)])
+
+            with patch.object(recorder, "_probe_recording") as probe:
+                validated = recorder._validate_index_batch(limit=1)
+
+        self.assertEqual(validated, 0)
+        probe.assert_not_called()
+
+    def test_manual_maintenance_discovers_unqueued_validation_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "unqueued.mp4"
@@ -841,7 +893,10 @@ class RecorderTest(unittest.TestCase):
                 patch.object(recorder, "_probe_recording", return_value=(9.0, "")),
                 patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v2"),
             ):
-                self.assertEqual(recorder._validate_index_batch(limit=1), 1)
+                self.assertEqual(
+                    recorder._validate_index_batch(limit=1, discover_unqueued=True),
+                    1,
+                )
             with recorder._index_connection() as connection:
                 indexed = dict(connection.execute(
                     "SELECT validated, fingerprint_checked, stream_fingerprint FROM recordings WHERE path = ?",
@@ -852,7 +907,22 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(indexed["fingerprint_checked"], 1)
         self.assertEqual(indexed["stream_fingerprint"], "stream-v2")
 
-    def test_maintenance_discovers_unqueued_fingerprint_work(self) -> None:
+    def test_background_fingerprinting_ignores_unqueued_historical_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "fingerprint.mp4"
+            clip.write_bytes(b"recording")
+            row = self._row(clip)
+            row["validated"] = True
+            recorder._store_recording_rows("front-door", "main", [row])
+
+            with patch("survng.app.recorder.mp4_stream_fingerprint") as fingerprint:
+                updated = recorder._backfill_stream_fingerprints(limit=1)
+
+        self.assertEqual(updated, 0)
+        fingerprint.assert_not_called()
+
+    def test_manual_maintenance_discovers_unqueued_fingerprint_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             clip = Path(tmpdir) / "fingerprint.mp4"
@@ -862,7 +932,13 @@ class RecorderTest(unittest.TestCase):
             recorder._store_recording_rows("front-door", "main", [row])
 
             with patch("survng.app.recorder.mp4_stream_fingerprint", return_value="stream-v3"):
-                self.assertEqual(recorder._backfill_stream_fingerprints(limit=1), 1)
+                self.assertEqual(
+                    recorder._backfill_stream_fingerprints(
+                        limit=1,
+                        discover_unqueued=True,
+                    ),
+                    1,
+                )
             with recorder._index_connection() as connection:
                 indexed = dict(connection.execute(
                     "SELECT validated, fingerprint_checked, stream_fingerprint FROM recordings WHERE path = ?",

@@ -1465,6 +1465,46 @@ def _process_rss_bytes() -> int:
     return 0
 
 
+def _cgroup_memory_status(
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    process_cgroup: Path = Path("/proc/self/cgroup"),
+) -> dict[str, int]:
+    """Return service-wide cgroup v2 memory without conflating file cache with heap."""
+    empty = {
+        "total_bytes": 0,
+        "application_bytes": 0,
+        "file_cache_bytes": 0,
+        "reclaimable_file_cache_bytes": 0,
+        "kernel_bytes": 0,
+    }
+    try:
+        relative = next(
+            line.split(":", 2)[2].strip().lstrip("/")
+            for line in process_cgroup.read_text(encoding="utf-8").splitlines()
+            if line.startswith("0::")
+        )
+        base = cgroup_root / relative
+        total = int((base / "memory.current").read_text(encoding="utf-8").strip())
+        stats = {
+            key: int(value)
+            for key, value in (
+                line.split(maxsplit=1)
+                for line in (base / "memory.stat").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        }
+    except (OSError, StopIteration, ValueError):
+        return empty
+    shmem = max(0, stats.get("shmem", 0))
+    return {
+        "total_bytes": max(0, total),
+        "application_bytes": max(0, stats.get("anon", 0)) + shmem,
+        "file_cache_bytes": max(0, stats.get("file", 0) - shmem),
+        "reclaimable_file_cache_bytes": max(0, stats.get("inactive_file", 0) - shmem),
+        "kernel_bytes": max(0, stats.get("kernel", 0)),
+    }
+
+
 def _database_bytes() -> int:
     total = 0
     for path in manager.database_dir.glob("*.sqlite3*"):
@@ -1626,6 +1666,7 @@ def telemetry(hours: int = 24) -> dict:
     load_1m, load_5m, load_15m = os.getloadavg()
     memory = _linux_memory_status()
     process_rss_bytes = _process_rss_bytes()
+    service_memory = _cgroup_memory_status()
     cpu_count = os.cpu_count() or 1
     generated_at = datetime.now(timezone.utc).isoformat()
     cameras = []
@@ -1697,6 +1738,8 @@ def telemetry(hours: int = 24) -> dict:
             "memory_used_percent": float(memory.get("used_percent") or 0.0),
             "storage_used_percent": round((usage.used / usage.total) * 100.0, 3) if usage.total else 0.0,
             "process_rss_bytes": process_rss_bytes,
+            "service_application_bytes": service_memory["application_bytes"],
+            "service_file_cache_bytes": service_memory["file_cache_bytes"],
             "gpu_utilization_percent": gpu.get("utilization_percent"),
             "inference_ms": detector_runtime.get("average_inference_ms"),
             "detection_fps": detector_runtime.get("detection_fps"),
@@ -1711,6 +1754,7 @@ def telemetry(hours: int = 24) -> dict:
             "load_average": {"one": round(load_1m, 2), "five": round(load_5m, 2), "fifteen": round(load_15m, 2)},
             "memory": memory,
             "process_rss_bytes": process_rss_bytes,
+            "service_memory": service_memory,
             "storage": {
                 "path": str(storage_path),
                 "total_bytes": usage.total,

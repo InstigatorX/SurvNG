@@ -43,6 +43,8 @@ class StorageReconciler:
         repairs = {
             "stale_index_rows_removed": 0,
             "recordings_reindexed": 0,
+            "recordings_validated": 0,
+            "recording_fingerprints_added": 0,
             "event_media_references_cleared": 0,
             "motion_sample_references_cleared": 0,
             "face_media_references_cleared": 0,
@@ -61,6 +63,8 @@ class StorageReconciler:
                 progress=self._report,
                 health=recording_health,
             ))
+            self._report("Checking a bounded recording metadata batch", 0, 20)
+            repairs.update(self.recorder.maintain_historical_metadata(limit=20))
             repaired_recording_health = self._repaired_recording_health(recording_health, repairs)
             repairs.update(self._clear_missing_references(full=full))
         summary = self._scan(full=full, recording_health=repaired_recording_health)

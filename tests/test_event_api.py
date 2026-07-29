@@ -19,6 +19,27 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_cgroup_memory_separates_application_and_file_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            group = root / "system.slice" / "survng.service"
+            group.mkdir(parents=True)
+            process_cgroup = root / "process.cgroup"
+            process_cgroup.write_text("0::/system.slice/survng.service\n", encoding="utf-8")
+            (group / "memory.current").write_text("9000\n", encoding="utf-8")
+            (group / "memory.stat").write_text(
+                "anon 1500\nfile 7000\nshmem 500\ninactive_file 6200\nkernel 500\n",
+                encoding="utf-8",
+            )
+
+            status = main._cgroup_memory_status(root, process_cgroup)
+
+        self.assertEqual(status["total_bytes"], 9000)
+        self.assertEqual(status["application_bytes"], 2000)
+        self.assertEqual(status["file_cache_bytes"], 6500)
+        self.assertEqual(status["reclaimable_file_cache_bytes"], 5700)
+        self.assertEqual(status["kernel_bytes"], 500)
+
     def test_telemetry_history_throttles_samples_and_replaces_latest(self) -> None:
         history = main.deque(maxlen=360)
         state = {"last_sample_at": 0.0}

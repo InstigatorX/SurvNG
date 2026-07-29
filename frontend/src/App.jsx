@@ -4870,6 +4870,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const gpu = data.gpu || {};
   const storage = data.system?.storage || {};
   const memory = data.system?.memory || {};
+  const serviceMemory = data.system?.service_memory || {};
   const hourly = activity?.hourly || [];
   const history = data.history || [];
   const maxHourly = Math.max(1, ...hourly.map((item) => Number(item.events) || 0));
@@ -4907,7 +4908,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <TelemetryTrend title="Host pressure" description="Normalized 1-minute CPU load and memory use" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
           <TelemetryTrend title="GPU utilization" description="SurvNG inference workers" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "gpu_utilization_percent", label: "GPU", className: "gpu" }]} />
           <TelemetryTrend title="Inference latency" description="Rolling detector average" history={history} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Latency", className: "inference" }]} />
-          <TelemetryTrend title="SurvNG memory" description="Resident process memory" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "process_rss_bytes", label: "RSS", className: "process-memory" }]} />
+          <TelemetryTrend title="SurvNG memory" description="Application allocations versus filesystem cache" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "service_application_bytes", label: "Application", className: "process-memory" }, { key: "service_file_cache_bytes", label: "File cache", className: "storage" }]} />
           <TelemetryTrend title="Storage use" description="Recording filesystem" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "storage_used_percent", label: "Used", className: "storage" }]} />
           <TelemetryTrend title="Detection rate" description="Completed inference requests" history={history} timeZone={timeZone} valueFormatter={(value) => formatRate(value)} series={[{ key: "detection_fps", label: "Rate", className: "rate" }]} />
         </div>
@@ -4920,7 +4921,10 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>SurvNG uptime</dt><dd>{formatDuration(data.system?.uptime_seconds || 0)}</dd></div>
             <div><dt>CPU load (1 / 5 / 15 min)</dt><dd>{data.system?.load_average?.one ?? "--"} / {data.system?.load_average?.five ?? "--"} / {data.system?.load_average?.fifteen ?? "--"} <small>({data.system?.cpu_count || 1} cores)</small></dd></div>
             <div><dt>System memory</dt><dd>{memory.used_percent || 0}% · {formatBytes(memory.used_bytes)} used</dd></div>
-            <div><dt>SurvNG memory</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
+            <div><dt>SurvNG service total</dt><dd>{formatBytes(serviceMemory.total_bytes)}</dd></div>
+            <div><dt>Application memory</dt><dd>{formatBytes(serviceMemory.application_bytes)} <small>all workers and shared inference buffers</small></dd></div>
+            <div><dt>Filesystem cache</dt><dd>{formatBytes(serviceMemory.file_cache_bytes)} <small>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)} inactive/reclaimable</small></dd></div>
+            <div><dt>Main process RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
             <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
             <div><dt>Detector</dt><dd>{data.detector?.loaded_backend || "Not loaded"} · {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
             <div><dt>GPU</dt><dd>{gpu.available ? `${gpu.vendor} ${gpu.device_id} · ${gpu.driver || "DRM"}` : "Unavailable"}</dd></div>
@@ -5008,7 +5012,7 @@ function MaintenanceViewer({ state }) {
         <article><span>Regenerable cache</span><strong>{fullScan ? formatBytes(summary.regenerable_cache_bytes) : "Full scan"}</strong><small>Playback, event clip, and HLS working files</small></article>
         <article><span>Storage free</span><strong>{formatBytes(summary.storage_free_bytes)}</strong><small>{formatBytes(summary.storage_used_bytes)} used of {formatBytes(summary.storage_total_bytes)}</small></article>
       </div>
-      {result.mode === "repair" ? <section className="telemetry-section"><div className="telemetry-section-head"><div><h3>Last repair</h3><p>{repaired.toLocaleString()} records updated; no incidents or media files were deleted.</p></div></div><dl className="telemetry-details maintenance-repair-details"><div><dt>Recording rows removed / added</dt><dd>{repairs.stale_index_rows_removed || 0} / {repairs.recordings_reindexed || 0}</dd></div><div><dt>Incident media links cleared</dt><dd>{repairs.event_media_references_cleared || 0}</dd></div><div><dt>Motion / face links cleared</dt><dd>{repairs.motion_sample_references_cleared || 0} / {repairs.face_media_references_cleared || 0}</dd></div></dl></section> : null}
+      {result.mode === "repair" ? <section className="telemetry-section"><div className="telemetry-section-head"><div><h3>Last repair</h3><p>{repaired.toLocaleString()} records updated; no incidents or media files were deleted.</p></div></div><dl className="telemetry-details maintenance-repair-details"><div><dt>Recording rows removed / added</dt><dd>{repairs.stale_index_rows_removed || 0} / {repairs.recordings_reindexed || 0}</dd></div><div><dt>Recordings validated / fingerprinted</dt><dd>{repairs.recordings_validated || 0} / {repairs.recording_fingerprints_added || 0}</dd></div><div><dt>Incident media links cleared</dt><dd>{repairs.event_media_references_cleared || 0}</dd></div><div><dt>Motion / face links cleared</dt><dd>{repairs.motion_sample_references_cleared || 0} / {repairs.face_media_references_cleared || 0}</dd></div></dl></section> : null}
       {cameraRows.length ? <section className="telemetry-section"><div className="telemetry-section-head"><div><h3>Affected cameras</h3><p>Missing media references grouped by camera.</p></div></div><div className="maintenance-camera-list">{cameraRows.map(([cameraId, counts]) => <div key={cameraId}><strong>{cameraId}</strong><span>{Object.entries(counts).map(([kind, count]) => `${String(kind).replaceAll("_", " ")} ${count}`).join(" · ")}</span></div>)}</div></section> : null}
       {(summary.missing_reference_samples?.length || summary.orphan_media_samples?.length || summary.missing_index_samples?.length || summary.unindexed_samples?.length) ? <details className="maintenance-details"><summary>Technical details and sample paths</summary><div>{summary.missing_reference_samples?.length ? <><h4>Missing media references</h4><pre>{summary.missing_reference_samples.map((item) => `${item.camera_id} · ${item.kind} · ${item.path}`).join("\n")}</pre></> : null}{summary.missing_index_samples?.length ? <><h4>Missing recording files still indexed</h4><pre>{summary.missing_index_samples.join("\n")}</pre></> : null}{summary.unindexed_samples?.length ? <><h4>Recording files not indexed</h4><pre>{summary.unindexed_samples.join("\n")}</pre></> : null}{summary.orphan_media_samples?.length ? <><h4>Unlinked media (report only)</h4><pre>{summary.orphan_media_samples.join("\n")}</pre></> : null}</div></details> : null}
     </div>
@@ -5634,7 +5638,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           <div className="tree-list">
             <button type="button" className="active"><HardDrive size={16} /><span>Storage Reconciliation</span></button>
           </div>
-          <div className="maintenance-help"><strong>What it does</strong><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repairs never delete media or incident history.</p></div>
+          <div className="maintenance-help"><strong>What it does</strong><p>Quick Check is bounded to recent media and the newest index rows, so it will not saturate network storage.</p><p>Full Scan checks the entire library, reports progress, and can be cancelled. Repair Database also checks a small bounded batch of older recording metadata. Repairs never delete media or incident history.</p></div>
         </section>
         <section className="bento-card config-editor settings-panel maintenance-panel">
           <div className="section-head">

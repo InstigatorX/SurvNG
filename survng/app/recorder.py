@@ -957,7 +957,6 @@ class Recorder:
             return
         while not self._index_stop.is_set():
             try:
-                self._prune_missing_index_rows(limit=200)
                 self._validate_index_batch(limit=20)
                 self._backfill_stream_fingerprints(limit=20)
             except Exception:
@@ -1186,8 +1185,6 @@ class Recorder:
                         files.extend(hour_dir.glob("*.mp4"))
             rows = self._recording_rows_for_files(camera_id, source, files)
             self._store_recording_rows(camera_id, source, rows)
-            if rows:
-                self.queue_recording_validation([rows[-1]])
             if full:
                 self._prune_recording_index(camera_id, source, files)
         if run_maintenance:
@@ -1228,7 +1225,12 @@ class Recorder:
                     self._validation_pending.append(path)
                     self._validation_pending_set.add(path)
 
-    def _backfill_stream_fingerprints(self, limit: int = 20) -> int:
+    def _backfill_stream_fingerprints(
+        self,
+        limit: int = 20,
+        *,
+        discover_unqueued: bool = False,
+    ) -> int:
         batch_limit = max(1, limit)
         paths: list[str] = []
         with self._fingerprint_lock:
@@ -1236,7 +1238,7 @@ class Recorder:
                 path = self._fingerprint_pending.popleft()
                 self._fingerprint_pending_set.discard(path)
                 paths.append(path)
-        if len(paths) < batch_limit:
+        if discover_unqueued and len(paths) < batch_limit:
             with self._index_connection() as connection:
                 paths.extend(
                     str(row[0])
@@ -1310,7 +1312,12 @@ class Recorder:
         self._delete_index_paths(stale_paths)
         return len(stale_paths)
 
-    def _validate_index_batch(self, limit: int = 20) -> int:
+    def _validate_index_batch(
+        self,
+        limit: int = 20,
+        *,
+        discover_unqueued: bool = False,
+    ) -> int:
         batch_limit = max(1, limit)
         paths: list[str] = []
         with self._validation_lock:
@@ -1318,7 +1325,7 @@ class Recorder:
                 path = self._validation_pending.popleft()
                 self._validation_pending_set.discard(path)
                 paths.append(path)
-        if len(paths) < batch_limit:
+        if discover_unqueued and len(paths) < batch_limit:
             with self._index_connection() as connection:
                 paths.extend(
                     str(row[0])
@@ -1370,6 +1377,28 @@ class Recorder:
                     )
             validated += 1
         return validated
+
+    def maintain_historical_metadata(self, limit: int = 20) -> dict[str, int]:
+        """Advance legacy recording metadata only during an explicit repair.
+
+        Normal background work drains queues populated by recent indexing,
+        playback, and playback-failure recovery. This bounded opt-in path keeps
+        old validation and codec fingerprinting available without continuously
+        reading the historical recording library.
+        """
+        safe_limit = max(1, min(100, int(limit)))
+        validated = self._validate_index_batch(
+            limit=safe_limit,
+            discover_unqueued=True,
+        )
+        fingerprints = self._backfill_stream_fingerprints(
+            limit=safe_limit,
+            discover_unqueued=True,
+        )
+        return {
+            "recordings_validated": validated,
+            "recording_fingerprints_added": fingerprints,
+        }
 
     def _probe_recording(self, path: Path) -> tuple[float | None, str]:
         ffprobe = str(Path(self.ffmpeg_path).with_name("ffprobe")) if Path(self.ffmpeg_path).name == "ffmpeg" else "ffprobe"
