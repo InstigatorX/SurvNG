@@ -63,6 +63,65 @@ class Go2RtcAdapterTest(unittest.TestCase):
 
         self.assertEqual(info["compatibility"], "native")
 
+    def test_audio_stream_info_uses_receiver_codec_metadata(self) -> None:
+        adapter = Go2RtcAdapter()
+        payload = {
+            "producers": [{
+                "receivers": [{
+                    "codec": {
+                        "codec_name": "aac",
+                        "codec_type": "audio",
+                        "sample_rate": 8000,
+                    },
+                }],
+            }],
+        }
+        with patch.object(adapter, "_stream_details", return_value=payload):
+            info = adapter.audio_stream_info(self.camera(), "main")
+
+        self.assertEqual(info, {
+            "available": True,
+            "codec": "aac",
+            "sample_rate": 8000,
+        })
+
+    def test_audio_stream_info_reports_active_video_only_source(self) -> None:
+        adapter = Go2RtcAdapter()
+        payload = {
+            "producers": [{
+                "receivers": [{
+                    "codec": {"codec_name": "hevc", "codec_type": "video"},
+                }],
+            }],
+        }
+        with patch.object(adapter, "_stream_details", return_value=payload):
+            info = adapter.audio_stream_info(self.camera(), "live")
+
+        self.assertEqual(info, {"available": True, "codec": "", "sample_rate": 0})
+
+    def test_audio_stream_info_uses_sdp_media_while_receivers_initialize(self) -> None:
+        adapter = Go2RtcAdapter()
+        payload = {
+            "producers": [{
+                "medias": [
+                    "video, recvonly, H265",
+                    "audio, recvonly, MPEG4-GENERIC/8000",
+                ],
+                "receivers": [],
+            }],
+        }
+        with patch.object(adapter, "_stream_details", return_value=payload):
+            info = adapter.audio_stream_info(self.camera(), "main")
+
+        self.assertEqual(info, {"available": True, "codec": "aac", "sample_rate": 8000})
+
+    def test_audio_stream_info_does_not_call_initializing_producer_silent(self) -> None:
+        adapter = Go2RtcAdapter()
+        with patch.object(adapter, "_stream_details", return_value={"producers": [{}]}):
+            info = adapter.audio_stream_info(self.camera(), "main")
+
+        self.assertEqual(info, {"available": False, "codec": "", "sample_rate": 0})
+
     def test_ipv6_go2rtc_urls_use_bracketed_authorities(self) -> None:
         adapter = Go2RtcAdapter()
         camera = CameraConfig(

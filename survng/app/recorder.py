@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from .baichuan_native import (
     start_ffmpeg_pipe,
 )
 from .config import CameraConfig
+from .go2rtc import Go2RtcAdapter, Go2RtcError
 from .recording_media import mp4_stream_fingerprint
 
 
@@ -33,6 +35,13 @@ DTS_WARNING_WINDOW_SECONDS = 5.0
 DTS_WARNING_RESTART_COUNT = 12
 
 
+@dataclass(frozen=True)
+class AudioStreamInfo:
+    known: bool
+    codec: str = ""
+    sample_rate: int = 0
+
+
 class Recorder:
     def __init__(
         self,
@@ -41,9 +50,11 @@ class Recorder:
         segment_seconds: float = 10.0,
         hardware_acceleration: str = "auto",
         index_dir: Path | None = None,
+        go2rtc: Go2RtcAdapter | None = None,
     ) -> None:
         self.ffmpeg_path = ffmpeg_path
         self.hardware_acceleration = hardware_acceleration
+        self.go2rtc = go2rtc or Go2RtcAdapter(timeout=1.5, cache_seconds=120.0)
         self.segment_seconds = max(2.0, min(300.0, float(segment_seconds or 10.0)))
         self.recordings_dir = storage_dir / "recordings"
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
@@ -53,6 +64,8 @@ class Recorder:
         self.processes: dict[RecorderKey, ProcessItem] = {}
         self._starting: set[RecorderKey] = set()
         self._retry_after: dict[RecorderKey, float] = {}
+        self._audio_stream_cache: dict[tuple[str, str, str], AudioStreamInfo] = {}
+        self._audio_probe_unavailable_hosts: set[str] = set()
         self._disabled_cameras: set[str] = set()
         self.owner_token = f"survng-{os.getpid()}"
         self._lock = threading.Lock()
@@ -158,6 +171,7 @@ class Recorder:
             keeper = threading.Thread(target=self._keep_recording_dirs, args=(camera_dir, stop_event), daemon=True)
             keeper.start()
             output = str(camera_dir / "%Y-%m-%d" / "%H" / "%Y%m%d-%H%M%S%z.mp4")
+            audio_args = self._audio_output_args(camera, source)
             command = [
                 self.ffmpeg_path,
                 "-hide_banner",
@@ -166,8 +180,7 @@ class Recorder:
                 *ffmpeg_input_args(camera, source),
                 "-map",
                 "0:v:0",
-                "-map",
-                "0:a:0?",
+                *audio_args,
                 "-metadata",
                 f"survng_owner={self.owner_token}",
                 "-metadata",
@@ -176,10 +189,6 @@ class Recorder:
                 f"survng_source={source}",
                 "-c:v",
                 "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "64k",
                 *ffmpeg_timestamp_repair_args(camera),
                 "-f",
                 "segment",
@@ -235,6 +244,67 @@ class Recorder:
             with self._lock:
                 self._starting.discard(key)
         self.cleanup_duplicate_recorders({key})
+
+    def _audio_output_args(self, camera: CameraConfig, source: str) -> list[str]:
+        source_url = camera.source_url(source)
+        cache_key = (camera.id, source, source_url)
+        with self._lock:
+            info = self._audio_stream_cache.get(cache_key)
+        if info is None:
+            info = self._probe_audio_stream(camera, source)
+            if info.known:
+                with self._lock:
+                    self._audio_stream_cache[cache_key] = info
+        if info.known and not info.codec:
+            return []
+        if (info.known and info.codec == "aac") or (
+            not info.known and not is_native_baichuan(camera)
+        ):
+            return ["-map", "0:a:0?", "-c:a", "copy"]
+        bitrate_kbps = 64
+        if info.sample_rate > 0:
+            bitrate_kbps = max(24, min(64, info.sample_rate * 6 // 1000))
+        return ["-map", "0:a:0?", "-c:a", "aac", "-b:a", f"{bitrate_kbps}k"]
+
+    def _probe_audio_stream(self, camera: CameraConfig, source: str) -> AudioStreamInfo:
+        if is_native_baichuan(camera):
+            return AudioStreamInfo(known=False)
+        probe_host = ""
+        try:
+            stream_ref = self.go2rtc.stream(camera, source)
+            probe_host = stream_ref.host
+            with self._lock:
+                if probe_host in self._audio_probe_unavailable_hosts:
+                    return AudioStreamInfo(known=False)
+            stream: dict = {}
+            for attempt in range(2):
+                try:
+                    stream = self.go2rtc.audio_stream_info(camera, source)
+                    if stream.get("available"):
+                        break
+                except Go2RtcError:
+                    if attempt:
+                        raise
+                time.sleep(0.1)
+            if not stream.get("available"):
+                return AudioStreamInfo(known=False)
+            return AudioStreamInfo(
+                known=True,
+                codec=str(stream.get("codec") or "").strip().lower(),
+                sample_rate=int(stream.get("sample_rate") or 0),
+            )
+        except Go2RtcError as error:
+            if probe_host:
+                with self._lock:
+                    self._audio_probe_unavailable_hosts.add(probe_host)
+                LOGGER.warning(
+                    "Recorder audio metadata unavailable from go2rtc host %s: %s",
+                    probe_host,
+                    error,
+                )
+            return AudioStreamInfo(known=False)
+        except (ValueError, TypeError):
+            return AudioStreamInfo(known=False)
 
     def _monitor_ffmpeg_stderr(self, key: RecorderKey, process: subprocess.Popen) -> None:
         if process.stderr is None:

@@ -70,6 +70,56 @@ class Go2RtcAdapter:
             "transcoding": False,
         }
 
+    def audio_stream_info(self, camera: CameraConfig, source: str = "live") -> dict[str, Any]:
+        stream = self.stream(camera, source)
+        entry = self._stream_details(stream.host, stream.name)
+        producers = entry.get("producers") or []
+        media_ready = False
+        for producer in producers:
+            if not isinstance(producer, dict):
+                continue
+            for receiver in producer.get("receivers") or []:
+                codec = receiver.get("codec") if isinstance(receiver, dict) else None
+                if not isinstance(codec, dict):
+                    continue
+                media_ready = media_ready or codec.get("codec_type") in {"audio", "video"}
+                if codec.get("codec_type") != "audio":
+                    continue
+                return {
+                    "available": True,
+                    "codec": str(codec.get("codec_name") or "").strip().lower(),
+                    "sample_rate": int(codec.get("sample_rate") or 0),
+                }
+            for media in producer.get("medias") or []:
+                if not isinstance(media, str):
+                    continue
+                parts = [part.strip() for part in media.split(",")]
+                if len(parts) < 3 or parts[0].lower() not in {"audio", "video"}:
+                    continue
+                media_ready = True
+                if parts[0].lower() != "audio":
+                    continue
+                encoding = parts[2].split("/", 1)
+                codec = {
+                    "mpeg4-generic": "aac",
+                    "pcma": "pcm_alaw",
+                    "pcmu": "pcm_mulaw",
+                }.get(encoding[0].lower(), encoding[0].lower())
+                try:
+                    sample_rate = int(encoding[1].split("/", 1)[0]) if len(encoding) > 1 else 0
+                except ValueError:
+                    sample_rate = 0
+                return {
+                    "available": True,
+                    "codec": codec,
+                    "sample_rate": sample_rate,
+                }
+        return {
+            "available": media_ready,
+            "codec": "",
+            "sample_rate": 0,
+        }
+
     def websocket_url(self, camera: CameraConfig, source: str = "live") -> str:
         stream = self.stream(camera, source)
         return (
@@ -138,6 +188,17 @@ class Go2RtcAdapter:
         except OSError as exc:
             self.invalidate(host)
             raise Go2RtcError(f"go2rtc snapshot failed: {exc}") from exc
+
+    def _stream_details(self, host: str, stream_name: str) -> dict[str, Any]:
+        url = f"{self._base_url(host)}/api/streams?{urlencode({'src': stream_name})}"
+        try:
+            with urlopen(url, timeout=self.timeout) as response:
+                payload = json.load(response)
+        except (OSError, ValueError, TypeError) as exc:
+            raise Go2RtcError(f"go2rtc stream metadata unavailable: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise Go2RtcError("go2rtc stream metadata response was invalid")
+        return payload
 
     @staticmethod
     def _video_codecs(entry: dict[str, Any]) -> list[str]:

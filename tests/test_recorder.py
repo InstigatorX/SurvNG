@@ -10,7 +10,8 @@ from unittest.mock import Mock, patch
 
 from survng.app.baichuan_native import ffmpeg_input_args, ffmpeg_timestamp_repair_args
 from survng.app.config import CameraConfig
-from survng.app.recorder import Recorder
+from survng.app.go2rtc import Go2RtcError
+from survng.app.recorder import AudioStreamInfo, Recorder
 
 
 class RecorderTest(unittest.TestCase):
@@ -116,14 +117,18 @@ class RecorderTest(unittest.TestCase):
             popen.assert_not_called()
             self.assertNotIn((camera.id, "main"), recorder.processes)
 
-    def test_recorder_maps_only_primary_media_and_normalizes_audio_for_mp4(self) -> None:
+    def test_recorder_copies_mp4_compatible_aac_audio(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
             with patch(
                 "survng.app.recorder.subprocess.Popen",
                 side_effect=RuntimeError("capture command"),
-            ) as popen:
+            ) as popen, patch.object(
+                recorder,
+                "_probe_audio_stream",
+                return_value=AudioStreamInfo(known=True, codec="aac", sample_rate=8000),
+            ):
                 recorder.start(camera, "main")
 
         command = popen.call_args.args[0]
@@ -131,7 +136,81 @@ class RecorderTest(unittest.TestCase):
         second_map = command.index("-map", command.index("-map") + 1)
         self.assertEqual(command[second_map + 1], "0:a:0?")
         self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-b:a", command)
+
+    def test_recorder_transcodes_incompatible_low_rate_audio_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            with patch(
+                "survng.app.recorder.subprocess.Popen",
+                side_effect=RuntimeError("capture command"),
+            ) as popen, patch.object(
+                recorder,
+                "_probe_audio_stream",
+                return_value=AudioStreamInfo(known=True, codec="pcm_mulaw", sample_rate=8000),
+            ):
+                recorder.start(camera, "main")
+
+        command = popen.call_args.args[0]
         self.assertEqual(command[command.index("-c:a") + 1], "aac")
+        self.assertEqual(command[command.index("-b:a") + 1], "48k")
+
+    def test_recorder_omits_audio_options_when_source_has_no_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            with patch(
+                "survng.app.recorder.subprocess.Popen",
+                side_effect=RuntimeError("capture command"),
+            ) as popen, patch.object(
+                recorder,
+                "_probe_audio_stream",
+                return_value=AudioStreamInfo(known=True),
+            ):
+                recorder.start(camera, "main")
+
+        command = popen.call_args.args[0]
+        self.assertNotIn("0:a:0?", command)
+        self.assertNotIn("-c:a", command)
+
+    def test_audio_probe_recovers_from_transient_go2rtc_metadata_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            with (
+                patch.object(recorder.go2rtc, "stream", return_value=Mock(host="camera")),
+                patch.object(
+                    recorder.go2rtc,
+                    "audio_stream_info",
+                    side_effect=[
+                        Go2RtcError("producer is initializing"),
+                        {"available": True, "codec": "aac", "sample_rate": 8000},
+                    ],
+                ) as audio_info,
+                patch("survng.app.recorder.time.sleep"),
+            ):
+                info = recorder._probe_audio_stream(camera, "main")
+
+        self.assertEqual(info, AudioStreamInfo(known=True, codec="aac", sample_rate=8000))
+        self.assertEqual(audio_info.call_count, 2)
+
+    def test_unknown_url_audio_uses_recoverable_optional_passthrough(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+            with patch.object(
+                recorder,
+                "_probe_audio_stream",
+                return_value=AudioStreamInfo(known=False),
+            ) as probe:
+                first = recorder._audio_output_args(camera, "main")
+                second = recorder._audio_output_args(camera, "main")
+
+        self.assertEqual(first, ["-map", "0:a:0?", "-c:a", "copy"])
+        self.assertEqual(second, first)
+        self.assertEqual(probe.call_count, 2)
 
     @patch.object(Recorder, "_owned_ffmpeg_recorders", return_value={})
     def test_stop_during_start_cancels_new_recorder_before_registration(self, _owned_recorders) -> None:
@@ -148,6 +227,11 @@ class RecorderTest(unittest.TestCase):
             with (
                 patch("survng.app.recorder.subprocess.Popen", return_value=process),
                 patch("survng.app.recorder.start_ffmpeg_pipe", side_effect=cancel_start),
+                patch.object(
+                    recorder,
+                    "_probe_audio_stream",
+                    return_value=AudioStreamInfo(known=True, codec="aac", sample_rate=8000),
+                ),
                 patch.object(recorder, "_kill_pid") as kill_pid,
             ):
                 recorder.start(camera, "main")
