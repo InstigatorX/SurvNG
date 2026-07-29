@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -135,6 +136,75 @@ class StorageReconcilerTest(unittest.TestCase):
         while runner.status()["status"] == "cancelling" and time.time() < deadline:
             time.sleep(0.01)
         self.assertEqual(runner.status()["status"], "cancelled")
+
+    def test_runner_stop_cancels_and_joins_active_job(self) -> None:
+        runner = StorageMaintenanceRunner()
+
+        class CancellableReconciler:
+            def __init__(self, cancelled) -> None:
+                self.cancelled = cancelled
+
+            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+                self.cancelled.wait(1)
+                raise InterruptedError("cancelled")
+
+        runner.start(
+            lambda cancelled, _progress: CancellableReconciler(cancelled),
+            apply=False,
+        )
+
+        self.assertTrue(runner.stop(timeout=1.0))
+        self.assertEqual(runner.status()["status"], "cancelled")
+
+    def test_runner_status_does_not_expose_mutable_internal_progress(self) -> None:
+        runner = StorageMaintenanceRunner()
+        blocker = threading.Event()
+
+        class BlockingReconciler:
+            def run(self, *, apply: bool = False, full: bool = False) -> dict[str, object]:
+                blocker.wait(1)
+                return {}
+
+        runner.start(lambda _cancel, _progress: BlockingReconciler(), apply=False)
+        state = runner.status()
+        state["progress"]["phase"] = "tampered"
+
+        self.assertEqual(runner.status()["progress"]["phase"], "Starting")
+        blocker.set()
+        self.assertTrue(runner.stop(timeout=1.0))
+
+    def test_runner_start_failure_restores_idle_state(self) -> None:
+        runner = StorageMaintenanceRunner()
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("no thread")):
+            with self.assertRaisesRegex(RuntimeError, "no thread"):
+                runner.start(lambda _cancel, _progress: object(), apply=False)
+
+        self.assertEqual(runner.status(), {"status": "idle"})
+        self.assertTrue(runner.stop())
+
+    def test_repair_reports_unindexable_recording_as_still_unindexed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            database = root / "database"
+            index = root / "recording-index"
+            storage.mkdir()
+            events = EventStore(storage, database_dir=database)
+            recorder = Recorder("ffmpeg", storage, segment_seconds=10, index_dir=index)
+            hour = storage / "recordings" / "gate" / "main" / "2026-01-01" / "00"
+            hour.mkdir(parents=True)
+            malformed = hour / "not-a-segment.mp4"
+            malformed.write_bytes(b"segment")
+            old = time.time() - 120
+            os.utime(malformed, (old, old))
+
+            repaired = StorageReconciler(storage, events.db_path, recorder).run(
+                apply=True,
+                full=True,
+            )
+
+        self.assertEqual(repaired["repairs"]["recordings_reindexed"], 0)
+        self.assertEqual(repaired["summary"]["unindexed_recording_files"], 1)
 
 
 if __name__ == "__main__":

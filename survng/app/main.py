@@ -535,6 +535,10 @@ def reload_manager(
         previous_stop_attempted = False
         runtime_preferences = previous_manager.runtime_preferences()
         try:
+            if not STORAGE_MAINTENANCE.stop(timeout=5.0):
+                raise RuntimeError(
+                    "configuration reload cannot continue while storage maintenance is stopping"
+                )
             _stop_recording_prewarmer()
             previous_stop_attempted = True
             previous_manager.stop_all_with_runtime_preferences()
@@ -637,19 +641,25 @@ async def lifespan(app: FastAPI):
         if early_signal_installed:
             loop.remove_signal_handler(signal.SIGUSR1)
         try:
-            _stop_recording_prewarmer()
+            if not STORAGE_MAINTENANCE.stop(timeout=5.0):
+                logging.getLogger("uvicorn.error").warning(
+                    "storage maintenance did not stop before application shutdown"
+                )
         finally:
             try:
-                manager.stop_all()
+                _stop_recording_prewarmer()
             finally:
-                if early_onvif_thread is not None and early_onvif_thread.is_alive():
-                    early_onvif_thread.join()
                 try:
-                    manager.detector.stop_resource_tracker()
-                except Exception:
-                    logging.getLogger("uvicorn.error").exception(
-                        "final multiprocessing resource tracker cleanup failed"
-                    )
+                    manager.stop_all()
+                finally:
+                    if early_onvif_thread is not None and early_onvif_thread.is_alive():
+                        early_onvif_thread.join()
+                    try:
+                        manager.detector.stop_resource_tracker()
+                    except Exception:
+                        logging.getLogger("uvicorn.error").exception(
+                            "final multiprocessing resource tracker cleanup failed"
+                        )
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
@@ -3582,7 +3592,14 @@ def recording_updates(
     selected_source = recording_source(source)
     overlap_seconds = max(5.0, float(config.recording_segment_seconds) * 2)
     update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
-    manager.recorder.refresh_recording_edge(camera_id, selected_source, after_epoch)
+    # Keep NFS directory enumeration off the request thread. The index worker
+    # services this wake-up immediately and the next lightweight update poll
+    # observes newly finalized segments.
+    manager.recorder.request_recording_edge_refresh(
+        camera_id,
+        selected_source,
+        after_epoch,
+    )
     availability = manager.recorder.recording_availability_between(
         camera_id,
         update_start,

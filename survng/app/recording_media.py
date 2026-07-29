@@ -265,22 +265,16 @@ def mp4_stream_fingerprint(path: Path) -> str:
 
 
 def resolve_stream_fingerprints(values: list[str | None]) -> list[str]:
-    fingerprints = [str(value or "") for value in values]
-    first_known = next((value for value in fingerprints if value), "")
-    if not first_known:
-        return fingerprints
-
-    current = first_known
-    resolved: list[str] = []
-    for value in fingerprints:
-        if value:
-            current = value
-        resolved.append(current)
-    return resolved
+    # Unknown metadata must remain unknown. Borrowing a neighboring segment's
+    # fingerprint can make HLS reuse an incompatible init section exactly when
+    # a camera changes codec, resolution, or audio parameters.
+    return [str(value or "") for value in values]
 
 
 def hls_map_transition(previous: str | None, current: str, map_uri: str) -> tuple[list[str], str]:
-    if previous is not None and current == previous:
+    # A known identical fingerprint can safely reuse the current map. Unknown
+    # segments each receive their own map because compatibility is unproven.
+    if previous is not None and current and current == previous:
         return [], current
     lines = ["#EXT-X-DISCONTINUITY"] if previous is not None else []
     lines.append(f'#EXT-X-MAP:URI="{map_uri}"')

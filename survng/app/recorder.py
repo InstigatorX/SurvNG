@@ -223,16 +223,14 @@ class Recorder:
                     self._retry_after.pop(key, None)
             if not keep_process:
                 stop_event.set()
-                if pipe is not None:
-                    pipe.stop()
+                self._stop_pipe(pipe)
                 if process.poll() is None:
                     self._kill_pid(process.pid)
                 keeper.join(timeout=1)
                 return
         except Exception as error:
             stop_event.set()
-            if pipe is not None:
-                pipe.stop()
+            self._stop_pipe(pipe)
             if process is not None and process.poll() is None:
                 self._kill_pid(process.pid)
             if keeper is not None:
@@ -392,8 +390,7 @@ class Recorder:
     def _stop_item(self, item: ProcessItem) -> None:
         process, pipe, stop_event, keeper = item
         stop_event.set()
-        if pipe is not None:
-            pipe.stop()
+        self._stop_pipe(pipe)
         try:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -403,11 +400,23 @@ class Recorder:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=5)
-            except ProcessLookupError:
+            except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
         keeper.join(timeout=1)
 
+    @staticmethod
+    def _stop_pipe(pipe: BaichuanFfmpegPipe | None) -> None:
+        if pipe is None:
+            return
+        try:
+            pipe.stop()
+        except Exception:
+            # Recorder teardown must still terminate and reap FFmpeg even if a
+            # native camera feeder reports its own shutdown failure.
+            LOGGER.exception("Recorder input pipe shutdown failed")
+
     def status(self, keys: set[RecorderKey] | None = None) -> dict[RecorderKey, bool]:
+        stopped_items: list[ProcessItem] = []
         with self._lock:
             stopped = [
                 key
@@ -416,11 +425,16 @@ class Recorder:
             ]
             for key in stopped:
                 item = self.processes.pop(key, None)
-                if item is not None and item[1] is not None:
-                    item[2].set()
-                    item[1].stop()
-                    item[3].join(timeout=1)
+                if item is not None:
+                    stopped_items.append(item)
             tracked = {key: True for key in self.processes}
+
+        # Pipe shutdown and keeper joins may block. Never hold the recorder
+        # state lock while cleaning up a process that has already exited.
+        for _process, pipe, stop_event, keeper in stopped_items:
+            stop_event.set()
+            self._stop_pipe(pipe)
+            keeper.join(timeout=1)
 
         if keys:
             for key, pids in self._owned_ffmpeg_recorders(keys).items():
@@ -435,11 +449,17 @@ class Recorder:
             thread = getattr(self, thread_name)
             if thread is not None:
                 thread.join(timeout=10)
-                setattr(self, thread_name, None)
+                if thread.is_alive():
+                    LOGGER.error("Recorder worker %s did not stop", thread.name)
+                else:
+                    setattr(self, thread_name, None)
         self._watchdog_stop.set()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=2)
-            self._watchdog_thread = None
+            if self._watchdog_thread.is_alive():
+                LOGGER.error("Recorder watchdog did not stop")
+            else:
+                self._watchdog_thread = None
         with self._lock:
             stopped_keys = set(self.processes)
             items = list(self.processes.values())
@@ -485,7 +505,10 @@ class Recorder:
 
     def _watchdog(self, camera_map: dict[str, CameraConfig], interval: float) -> None:
         while not self._watchdog_stop.wait(interval):
-            self.reconcile(camera_map)
+            try:
+                self.reconcile(camera_map)
+            except Exception:
+                LOGGER.exception("Recorder watchdog reconciliation failed")
 
     def reconcile(self, camera_map: dict[str, CameraConfig]) -> None:
         wanted = self._wanted_keys(camera_map)
@@ -589,9 +612,26 @@ class Recorder:
         return [str(path) for path in files[-limit:]][::-1]
 
     def recording_rows(self, camera_id: str, limit: int = 1000, source: str = "main") -> list[dict]:
+        """Return recent playable recordings from the local index only."""
         source = "main" if source == "main" else "live"
-        files = [Path(path) for path in self.recent_files(camera_id, limit=limit, source=source)]
-        return self._recording_rows_for_files(camera_id, source, files)
+        with self._index_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds,
+                       end_epoch, source, playable, health_error, validated,
+                       stream_fingerprint, fingerprint_checked
+                FROM recordings
+                WHERE camera_id = ? AND source = ? AND playable = 1
+                ORDER BY start_epoch DESC LIMIT ?
+                """,
+                (camera_id, source, max(1, int(limit))),
+            ).fetchall()
+        payloads = [dict(row) for row in reversed(rows)]
+        for row in payloads:
+            row["start_at"] = datetime.fromtimestamp(
+                float(row["start_epoch"]), timezone.utc
+            ).isoformat()
+        return payloads
 
     def recording_rows_between(
         self,
@@ -906,22 +946,25 @@ class Recorder:
         camera_map = {camera.id: camera for camera in cameras if camera.record or camera.record_sub}
         self._index_stop.clear()
         self._index_wake.clear()
-        if self._index_thread is not None and self._index_thread.is_alive():
-            return
-        self._index_thread = threading.Thread(
-            target=self._recording_index_loop,
-            args=(camera_map,),
-            name="recording-indexer",
-            daemon=True,
-        )
-        self._index_thread.start()
-        self._index_maintenance_thread = threading.Thread(
-            target=self._recording_index_maintenance_loop,
-            args=(camera_map,),
-            name="recording-index-maintenance",
-            daemon=True,
-        )
-        self._index_maintenance_thread.start()
+        if self._index_thread is None or not self._index_thread.is_alive():
+            self._index_thread = threading.Thread(
+                target=self._recording_index_loop,
+                args=(camera_map,),
+                name="recording-indexer",
+                daemon=True,
+            )
+            self._index_thread.start()
+        if (
+            self._index_maintenance_thread is None
+            or not self._index_maintenance_thread.is_alive()
+        ):
+            self._index_maintenance_thread = threading.Thread(
+                target=self._recording_index_maintenance_loop,
+                args=(camera_map,),
+                name="recording-index-maintenance",
+                daemon=True,
+            )
+            self._index_maintenance_thread.start()
 
     def _recording_index_loop(self, camera_map: dict[str, CameraConfig]) -> None:
         try:
@@ -1023,7 +1066,7 @@ class Recorder:
         if full:
             stale = sorted(indexed_sample - all_disk_paths)
             discovery_candidates = stable_disk_paths - indexed_sample
-            indexed_for_discovery = indexed_sample | self._indexed_path_subset(discovery_candidates)
+            indexed_for_discovery = indexed_sample | self.indexed_path_subset(discovery_candidates)
         else:
             stale = []
             for index, path in enumerate(indexed_sample, start=1):
@@ -1032,7 +1075,7 @@ class Recorder:
                     stale.append(path)
                 if progress and index % 100 == 0:
                     progress("Checking indexed recordings", index, len(indexed_sample))
-            indexed_for_discovery = self._indexed_path_subset(stable_disk_paths)
+            indexed_for_discovery = self.indexed_path_subset(stable_disk_paths)
         unindexed = sorted(stable_disk_paths - indexed_for_discovery)
         return {
             "recording_files": len(all_disk_paths),
@@ -1136,7 +1179,8 @@ class Recorder:
                     grouped[(camera_dir.name, source)] = list(set(files))
         return grouped
 
-    def _indexed_path_subset(self, paths: set[str]) -> set[str]:
+    def indexed_path_subset(self, paths: set[str]) -> set[str]:
+        """Return paths present in the local index without touching media storage."""
         if not paths:
             return set()
         found: set[str] = set()

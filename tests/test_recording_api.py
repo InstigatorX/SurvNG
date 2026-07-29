@@ -99,7 +99,7 @@ class RecordingApiTest(unittest.TestCase):
         for call in recorder.recording_availability_between.call_args_list:
             self.assertIs(call.kwargs["discover_missing"], False)
 
-    def test_recording_updates_refreshes_edge_then_reads_index_only(self) -> None:
+    def test_recording_updates_requests_async_edge_refresh_then_reads_index_only(self) -> None:
         recorder = Mock()
         recorder.recording_availability_between.return_value = {
             "ranges": [{"start_epoch": 180.0, "end_epoch": 200.0}],
@@ -114,7 +114,12 @@ class RecordingApiTest(unittest.TestCase):
         with patch.object(main, "manager", manager):
             payload = main.recording_updates("gate", 100.0, 200.0, 190.0, "main")
 
-        recorder.refresh_recording_edge.assert_called_once_with("gate", "main", 190.0)
+        recorder.request_recording_edge_refresh.assert_called_once_with(
+            "gate",
+            "main",
+            190.0,
+        )
+        recorder.refresh_recording_edge.assert_not_called()
         self.assertEqual(payload["availability"], [{"start_epoch": 180.0, "end_epoch": 200.0}])
         self.assertIs(
             recorder.recording_availability_between.call_args.kwargs["discover_missing"],

@@ -247,7 +247,7 @@ class RecorderTest(unittest.TestCase):
 
         owned_recorders.assert_called_once_with({("front-door", "main")})
 
-    def test_recording_rows_use_configured_segment_duration(self) -> None:
+    def test_recording_rows_use_configured_segment_duration_from_local_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             hour_dir = Path(tmpdir) / "recordings" / "back-middle" / "2026-07-11" / "11"
@@ -257,7 +257,14 @@ class RecorderTest(unittest.TestCase):
             first.write_bytes(b"a")
             second.write_bytes(b"b")
 
-            rows = recorder.recording_rows("back-middle", limit=10)
+            indexed = recorder._recording_rows_for_files("back-middle", "main", [first, second])
+            recorder._store_recording_rows("back-middle", "main", indexed)
+            with patch.object(
+                recorder,
+                "recent_files",
+                side_effect=AssertionError("media storage scan"),
+            ):
+                rows = recorder.recording_rows("back-middle", limit=10)
 
         self.assertEqual([row["name"] for row in rows], ["20260711-113000.mp4", "20260711-113010.mp4"])
         self.assertEqual(rows[0]["duration_seconds"], 10.0)
@@ -284,11 +291,88 @@ class RecorderTest(unittest.TestCase):
             clip = hour_dir / "20260711-113000.mp4"
             clip.write_bytes(b"sub")
 
+            indexed = recorder._recording_rows_for_files("back-middle", "live", [clip])
+            recorder._store_recording_rows("back-middle", "live", indexed)
             rows = recorder.recording_rows("back-middle", limit=10, source="live")
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["name"], "20260711-113000.mp4")
         self.assertEqual(rows[0]["source"], "live")
+
+    def test_watchdog_survives_transient_reconciliation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            calls = 0
+
+            def reconcile(_camera_map) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError("temporary process listing failure")
+                recorder._watchdog_stop.set()
+
+            with patch.object(recorder, "reconcile", side_effect=reconcile):
+                recorder._watchdog({}, interval=0.001)
+
+        self.assertEqual(calls, 2)
+
+    def test_stop_item_tolerates_process_that_does_not_reap_after_sigkill(self) -> None:
+        process = Mock(pid=4321)
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            __import__("subprocess").TimeoutExpired("ffmpeg", 5),
+            __import__("subprocess").TimeoutExpired("ffmpeg", 5),
+        ]
+        stop_event = Mock()
+        keeper = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            with patch("survng.app.recorder.os.killpg"):
+                recorder._stop_item((process, None, stop_event, keeper))
+
+        stop_event.set.assert_called_once_with()
+        keeper.join.assert_called_once_with(timeout=1)
+
+    def test_stop_item_reaps_ffmpeg_when_native_pipe_stop_fails(self) -> None:
+        process = Mock(pid=4321)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        pipe = Mock()
+        pipe.stop.side_effect = RuntimeError("camera feeder stuck")
+        stop_event = Mock()
+        keeper = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            with patch("survng.app.recorder.os.killpg") as killpg:
+                recorder._stop_item((process, pipe, stop_event, keeper))
+
+        pipe.stop.assert_called_once_with()
+        killpg.assert_called_once_with(4321, __import__("signal").SIGTERM)
+        process.wait.assert_called_once_with(timeout=5)
+        keeper.join.assert_called_once_with(timeout=1)
+
+    def test_status_cleans_up_stopped_pipe_without_holding_state_lock(self) -> None:
+        process = Mock()
+        process.poll.return_value = 1
+        stop_event = Mock()
+        keeper = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            pipe = Mock()
+            pipe.stop.side_effect = lambda: recorder.camera_enabled("gate")
+            recorder.processes[("gate", "main")] = (
+                process,
+                pipe,
+                stop_event,
+                keeper,
+            )
+
+            status = recorder.status()
+
+        self.assertEqual(status, {})
+        pipe.stop.assert_called_once_with()
+        stop_event.set.assert_called_once_with()
+        keeper.join.assert_called_once_with(timeout=1)
 
     def test_recording_at_uses_local_index_without_scanning_media_storage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -566,6 +650,26 @@ class RecorderTest(unittest.TestCase):
                 recorder._recording_index_loop({})
 
         refresh.assert_called_once_with({}, full=False, run_maintenance=False)
+
+    def test_start_indexer_restores_missing_maintenance_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            index_thread = Mock(name="existing-index-thread")
+            index_thread.is_alive.return_value = True
+            recorder._index_thread = index_thread
+            maintenance_thread = Mock(name="replacement-maintenance-thread")
+            with patch(
+                "survng.app.recorder.threading.Thread",
+                return_value=maintenance_thread,
+            ) as thread_factory:
+                recorder.start_indexer([])
+
+        thread_factory.assert_called_once()
+        self.assertEqual(
+            thread_factory.call_args.kwargs["name"],
+            "recording-index-maintenance",
+        )
+        maintenance_thread.start.assert_called_once_with()
 
     def test_index_loop_services_requested_near_live_refresh_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

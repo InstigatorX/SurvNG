@@ -82,10 +82,10 @@ class RecordingMediaTest(unittest.TestCase):
     def test_recording_fragment_duration_remains_full_without_trim_flag(self) -> None:
         self.assertEqual(playback_segment_duration(100.0, 10.0, 104.0, False), 10.0)
 
-    def test_unknown_fingerprints_do_not_create_false_transitions(self) -> None:
+    def test_unknown_fingerprints_are_not_borrowed_from_neighboring_segments(self) -> None:
         self.assertEqual(
             resolve_stream_fingerprints(["", "h265", "", "h264", "", ""]),
-            ["h265", "h265", "h265", "h264", "h264", "h264"],
+            ["", "h265", "", "h264", "", ""],
         )
 
     def test_all_unknown_fingerprints_remain_unknown(self) -> None:
@@ -126,6 +126,17 @@ class RecordingMediaTest(unittest.TestCase):
             '#EXT-X-MAP:URI="day/2/init.mp4"',
         ])
         self.assertEqual(previous, "video-b")
+
+    def test_unknown_fingerprint_forces_a_fresh_map(self) -> None:
+        first_lines, previous = hls_map_transition(None, "", "day/0/init.mp4")
+        next_lines, previous = hls_map_transition(previous, "", "day/1/init.mp4")
+
+        self.assertEqual(first_lines, ['#EXT-X-MAP:URI="day/0/init.mp4"'])
+        self.assertEqual(next_lines, [
+            "#EXT-X-DISCONTINUITY",
+            '#EXT-X-MAP:URI="day/1/init.mp4"',
+        ])
+        self.assertEqual(previous, "")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import shutil
 import sqlite3
@@ -57,15 +58,26 @@ class StorageReconciler:
                 cancel_event=self.cancel_event,
                 progress=self._report,
             )
-            repairs.update(self.recorder.reconcile_storage_index(
+            index_repairs = self.recorder.reconcile_storage_index(
                 full=full,
                 cancel_event=self.cancel_event,
                 progress=self._report,
                 health=recording_health,
-            ))
+            )
+            repairs.update(index_repairs)
             self._report("Checking a bounded recording metadata batch", 0, 20)
             repairs.update(self.recorder.maintain_historical_metadata(limit=20))
-            repaired_recording_health = self._repaired_recording_health(recording_health, repairs)
+            unindexed_paths = {
+                str(path) for path in recording_health.get("unindexed_files", [])
+            }
+            remaining_unindexed = sorted(
+                unindexed_paths - self.recorder.indexed_path_subset(unindexed_paths)
+            )
+            repaired_recording_health = self._repaired_recording_health(
+                recording_health,
+                repairs,
+                remaining_unindexed=remaining_unindexed,
+            )
             repairs.update(self._clear_missing_references(full=full))
         summary = self._scan(full=full, recording_health=repaired_recording_health)
         return {
@@ -87,6 +99,8 @@ class StorageReconciler:
     def _repaired_recording_health(
         health: dict[str, object],
         repairs: dict[str, int],
+        *,
+        remaining_unindexed: list[str],
     ) -> dict[str, object]:
         """Describe the reconciled state of the exact storage snapshot used by repair."""
         stale_count = len(health.get("missing_index_files", []))
@@ -96,7 +110,7 @@ class StorageReconciler:
             **health,
             "indexed_recordings": max(0, indexed_count - stale_count + added_count),
             "missing_index_files": [],
-            "unindexed_files": [],
+            "unindexed_files": remaining_unindexed,
             "recording_snapshot_reused": True,
         }
 
@@ -364,10 +378,11 @@ class StorageMaintenanceRunner:
         self._lock = threading.Lock()
         self._state: dict[str, object] = {"status": "idle"}
         self._cancel_event: threading.Event | None = None
+        self._thread: threading.Thread | None = None
 
     def status(self) -> dict[str, object]:
         with self._lock:
-            return dict(self._state)
+            return copy.deepcopy(self._state)
 
     def start(
         self,
@@ -388,13 +403,23 @@ class StorageMaintenanceRunner:
                 "started_at": _utc_now(),
                 "progress": {"phase": "Starting", "current": 0, "total": None},
             }
-        thread = threading.Thread(
-            target=self._run,
-            args=(factory, apply, full, cancel_event),
-            name="storage-maintenance",
-            daemon=True,
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=self._run,
+                args=(factory, apply, full, cancel_event),
+                name="storage-maintenance",
+                daemon=True,
+            )
+            self._thread = thread
+            try:
+                # Start while holding the state lock so stop() cannot observe a
+                # published-but-not-yet-started thread and incorrectly declare
+                # the job stopped.
+                thread.start()
+            except BaseException:
+                self._thread = None
+                self._cancel_event = None
+                self._state = {"status": "idle"}
+                raise
         return self.status()
 
     def cancel(self) -> dict[str, object]:
@@ -403,7 +428,22 @@ class StorageMaintenanceRunner:
                 raise RuntimeError("storage maintenance is not running")
             self._cancel_event.set()
             self._state = {**self._state, "status": "cancelling"}
-            return dict(self._state)
+            return copy.deepcopy(self._state)
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Cancel an active job and wait briefly for cooperative shutdown."""
+        with self._lock:
+            thread = self._thread
+            cancel_event = self._cancel_event
+            if thread is None or not thread.is_alive():
+                return True
+            if cancel_event is not None:
+                cancel_event.set()
+                self._state = {**self._state, "status": "cancelling"}
+        if thread is threading.current_thread():
+            return False
+        thread.join(timeout=max(0.0, float(timeout)))
+        return not thread.is_alive()
 
     def _update_progress(self, phase: str, current: int, total: int | None) -> None:
         with self._lock:
@@ -428,7 +468,7 @@ class StorageMaintenanceRunner:
                 "status": "cancelled", "mode": "repair" if apply else "scan", "full": full,
                 "finished_at": _utc_now(),
             }
-        except Exception as error:
+        except BaseException as error:
             LOGGER.exception("Storage maintenance failed")
             state = {
                 "status": "failed", "mode": "repair" if apply else "scan",
@@ -440,5 +480,8 @@ class StorageMaintenanceRunner:
                 "full": full, "finished_at": _utc_now(), "result": result,
             }
         with self._lock:
-            self._state = state
-            self._cancel_event = None
+            if self._cancel_event is cancel_event:
+                self._state = state
+                self._cancel_event = None
+            if self._thread is threading.current_thread():
+                self._thread = None
