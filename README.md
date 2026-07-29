@@ -237,11 +237,13 @@ For ONVIF, use the camera host, ONVIF port, username, and password. Many Reolink
 
 ### Stream Source Strategy
 
-Use `stream_url` for the main/high-resolution stream and `live_stream_url` for the optional low-latency live preview/substream. SurvNG records the main stream continuously. ONVIF motion events trigger object detection by sampling five high-resolution frames from the recorded main stream around the event timestamp, then saving the best annotated frame as the event snapshot.
+Use `stream_url` for the main/high-resolution stream and `live_stream_url` for the optional low-latency live preview/substream. SurvNG records the main stream continuously. ONVIF motion events trigger object detection by sampling five high-resolution frames from the recorded main stream around the event timestamp. Spatially consistent detections are combined across those frames, confidence uses the median instead of the highest outlier, and only labels meeting the configured confirmation count become object incidents. The default is two matching frames; optional per-class overrides can require stronger or weaker evidence. The representative confirmed frame becomes the event snapshot.
 
 ## Object Detection
 
 Set `model_path` to an OpenVINO-readable model, such as `best.onnx` or an OpenVINO IR `.xml` file. Set `labels_path` to a newline-delimited class file such as `classes.txt`.
+
+`event_confirmation_frames` controls the global temporal confirmation requirement from one to five frames. `event_class_confirmation_frames` maps individual model labels to optional overrides, for example `{"robot_lawnmower": 3}`. These confirmation counts do not add inference work because SurvNG already analyzes the five event-time frames.
 
 The detector supports YOLO-style ONNX output shaped like `[1, 4 + classes, anchors]` and SSD-style output shaped like `[image_id, label, confidence, xmin, ymin, xmax, ymax]`.
 

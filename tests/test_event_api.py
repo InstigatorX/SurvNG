@@ -590,6 +590,13 @@ class EventApiSerializationTest(unittest.TestCase):
                 "track_id": 3,
                 "track_state": "confirmed",
                 "track_observations": 5,
+                "temporal_consensus": True,
+                "temporal_observations": 3,
+                "temporal_track_observations": 4,
+                "temporal_required_observations": 2,
+                "temporal_samples": 5,
+                "temporal_peak_confidence": 0.95,
+                "temporal_label_votes": {"person": 3, "dog": 1},
                 "raw_detection_tensor": [1, 2, 3],
                 "frame_source": "diagnostic-only",
             }],
@@ -600,6 +607,8 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(payload["objects"][0]["label"], "person")
         self.assertEqual(payload["objects"][0]["zones"], ["yard"])
         self.assertEqual(payload["objects"][0]["track_id"], 3)
+        self.assertEqual(payload["objects"][0]["temporal_observations"], 3)
+        self.assertEqual(payload["objects"][0]["temporal_required_observations"], 2)
         self.assertNotIn("raw_detection_tensor", payload["objects"][0])
         self.assertNotIn("frame_source", payload["objects"][0])
 

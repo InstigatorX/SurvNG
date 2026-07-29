@@ -6579,11 +6579,24 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
       : "Intel QSV not available to FFmpeg";
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
   const activeModel = detectorModels.find((model) => model.path === activeModelPath);
+  const eventClassConfirmations = config.detector?.event_class_confirmation_frames || {};
+  const eventConfirmationClasses = [...new Set([
+    ...(activeModel?.classes || []),
+    ...Object.keys(eventClassConfirmations),
+  ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
 
   function selectOpenvinoModel(path) {
     updateConfig(["detector", "model_path"], path);
     updateConfig(["detector", "model_xml"], "");
     if (path.endsWith(".xml")) updateConfig(["detector", "labels_path"], "");
+  }
+
+  function setEventClassConfirmation(label, value) {
+    const next = { ...eventClassConfirmations };
+    if (value === "") delete next[label];
+    else next[label] = Number(value);
+    updateConfig(["detector", "event_class_confirmation_frames"], next);
   }
 
   function resetLiveCameraOrder() {
@@ -6671,6 +6684,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
           <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
+          <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label in this many of five event-time frames. Confirmed is recommended and suppresses one-frame false identifications.</small></label>
           <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>
             <option value="true">Zones</option>
             <option value="false">Zones + Full Frame</option>
@@ -6693,6 +6707,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
               <label className="compact-toggle"><input type="checkbox" checked={config.detector?.warmup_enabled ?? true} onChange={(event) => updateConfig(["detector", "warmup_enabled"], event.target.checked)} /><span>Warm up at startup</span></label>
             </div>
           </details>
+          <details className="detection-compact-details">
+            <summary>Per-object confirmation</summary>
+            <p className="settings-help">Optional overrides for labels that need more or less evidence than the global Object confirmation setting. Higher values reduce one-frame misidentifications but can miss objects visible only briefly.</p>
+            {eventConfirmationClasses.length ? <div className="detection-field-grid">
+              {eventConfirmationClasses.map((label) => <label key={label}>{label}<select value={eventClassConfirmations[label] == null ? "" : String(eventClassConfirmations[label])} onChange={(event) => setEventClassConfirmation(label, event.target.value)}><option value="">Use global ({config.detector?.event_confirmation_frames ?? 2} frames)</option><option value="1">1 frame</option><option value="2">2 frames</option><option value="3">3 frames</option><option value="4">4 frames</option><option value="5">5 frames</option></select></label>)}
+            </div> : <span className="settings-help">Select a model with class metadata to configure per-object overrides.</span>}
+          </details>
         </section>
 
         <section className="detection-settings-card">
@@ -6711,7 +6732,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <summary>Association tuning</summary>
           <div className="detection-field-grid advanced-tracking-grid">
             <label>Tracking engine<select value={config.detector?.tracking?.implementation ?? "survng_hybrid"} onChange={(event) => updateConfig(["detector", "tracking", "implementation"], event.target.value)}>{(trackingCatalog?.implementations || [{ id: "survng_hybrid", name: "SurvNG Hybrid", available: true }]).map((item) => <option key={item.id} value={item.id} disabled={!item.available}>{item.name}{item.available ? "" : " (not installed)"}</option>)}</select><small>{trackingCatalog?.implementations?.find((item) => item.id === (config.detector?.tracking?.implementation ?? "survng_hybrid"))?.description || "Choose how detections retain the same numbered track."}</small>{trackingCatalog?.implementations?.find((item) => item.id === "ultralytics_botsort" && !item.available)?.reason ? <small>{trackingCatalog.implementations.find((item) => item.id === "ultralytics_botsort").reason} Install the optional tracking requirements to enable it.</small> : null}</label>
-            <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Objects that started the incident are trusted immediately.</small></label>
+            <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Incident-starting objects have already passed the event-frame confirmation above.</small></label>
             <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
             {config.detector?.tracking?.implementation !== "ultralytics_botsort" ? <>
               <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>

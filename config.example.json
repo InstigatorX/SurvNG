@@ -42,6 +42,10 @@
     "device": "CPU",
     "confidence_threshold": 0.45,
     "nms_threshold": 0.45,
+    "event_confirmation_frames": 2,
+    "event_class_confirmation_frames": {
+      "robot_lawnmower": 3
+    },
     "labels": [],
     "tracking": {
       "enabled": true,

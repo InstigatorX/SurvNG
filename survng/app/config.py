@@ -317,9 +317,34 @@ class DetectorConfig(BaseModel):
     face_max_references: int = Field(default=20, ge=1, le=200)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
+    event_confirmation_frames: int = Field(default=2, ge=1, le=5)
+    event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)
     require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
+
+    @field_validator("event_class_confirmation_frames", mode="before")
+    @classmethod
+    def normalize_event_class_confirmations(cls, value: object) -> dict[str, int]:
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("event class confirmations must be an object")
+        if len(value) > 256:
+            raise ValueError("event class confirmations cannot exceed 256 labels")
+        normalized: dict[str, int] = {}
+        for raw_label, raw_confirmations in value.items():
+            label = str(raw_label or "").strip().lower()
+            if not label:
+                raise ValueError("event class confirmation labels cannot be empty")
+            try:
+                confirmations = int(raw_confirmations)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("event class confirmations must be whole numbers") from exc
+            if confirmations < 1 or confirmations > 5:
+                raise ValueError("event class confirmations must be between 1 and 5")
+            normalized[label] = confirmations
+        return normalized
 
     def resolved_model_path(self) -> str:
         return self.model_path or self.model_xml

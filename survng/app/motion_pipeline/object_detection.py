@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any, Callable, Protocol
 
 import cv2
@@ -21,6 +24,231 @@ RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 12.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
+TEMPORAL_ASSOCIATION_MIN_IOU = 0.05
+TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO = 2.5
+
+
+@dataclass(frozen=True)
+class _RecordedDetectionSample:
+    offset: float
+    frame: Frame
+    objects: list[dict[str, Any]]
+    recording_path: str
+
+
+@dataclass
+class _TemporalDetectionEvidence:
+    observations: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+    def add(self, sample_index: int, detected: dict[str, Any]) -> None:
+        self.observations[sample_index] = detected
+
+    @property
+    def latest(self) -> dict[str, Any]:
+        return self.observations[max(self.observations)]
+
+    @property
+    def label_votes(self) -> dict[str, int]:
+        votes: dict[str, int] = {}
+        for detected in self.observations.values():
+            label = str(detected.get("label") or "").strip()
+            if label:
+                votes[label] = votes.get(label, 0) + 1
+        return votes
+
+    @property
+    def winning_label(self) -> str:
+        def label_score(label: str) -> tuple[int, float, float, str]:
+            confidences = [
+                _confidence(item)
+                for item in self.observations.values()
+                if str(item.get("label") or "").strip() == label
+            ]
+            return (
+                len(confidences),
+                float(median(confidences)),
+                max(confidences, default=0.0),
+                label,
+            )
+
+        return max(self.label_votes, key=label_score, default="")
+
+    @property
+    def winning_observations(self) -> list[dict[str, Any]]:
+        label = self.winning_label
+        return [
+            item
+            for item in self.observations.values()
+            if str(item.get("label") or "").strip() == label
+        ]
+
+    @property
+    def aggregate_confidence(self) -> float:
+        return float(median(_confidence(item) for item in self.winning_observations))
+
+    @property
+    def peak_confidence(self) -> float:
+        return max((_confidence(item) for item in self.winning_observations), default=0.0)
+
+
+def _confidence(detected: dict[str, Any]) -> float:
+    try:
+        return max(0.0, min(1.0, float(detected.get("confidence") or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _box(detected: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    box = detected.get("box")
+    if not isinstance(box, dict):
+        return None
+    try:
+        x1 = float(box["x1"])
+        y1 = float(box["y1"])
+        x2 = float(box["x2"])
+        y2 = float(box["y2"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _temporal_association_score(
+    previous: dict[str, Any],
+    detected: dict[str, Any],
+) -> float | None:
+    previous_box = _box(previous)
+    detected_box = _box(detected)
+    if previous_box is None or detected_box is None:
+        return None
+    px1, py1, px2, py2 = previous_box
+    dx1, dy1, dx2, dy2 = detected_box
+    intersection = max(0.0, min(px2, dx2) - max(px1, dx1)) * max(0.0, min(py2, dy2) - max(py1, dy1))
+    union = (px2 - px1) * (py2 - py1) + (dx2 - dx1) * (dy2 - dy1) - intersection
+    iou = intersection / union if union > 0 else 0.0
+    if iou >= TEMPORAL_ASSOCIATION_MIN_IOU:
+        return 2.0 + iou
+    previous_center = ((px1 + px2) / 2.0, (py1 + py2) / 2.0)
+    detected_center = ((dx1 + dx2) / 2.0, (dy1 + dy2) / 2.0)
+    center_distance = math.hypot(
+        detected_center[0] - previous_center[0],
+        detected_center[1] - previous_center[1],
+    )
+    scale = max(
+        math.hypot(px2 - px1, py2 - py1),
+        math.hypot(dx2 - dx1, dy2 - dy1),
+        1.0,
+    )
+    distance_ratio = center_distance / scale
+    if distance_ratio > TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO:
+        return None
+    return 1.0 - distance_ratio / TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO
+
+
+def _eligible_detection(detected: dict[str, Any]) -> bool:
+    return bool(detected.get("label") and detected.get("incident_eligible") is not False)
+
+
+def _temporal_consensus(
+    samples: list[_RecordedDetectionSample],
+    minimum_confirmations: int,
+    class_confirmations: dict[str, int] | None = None,
+) -> tuple[_RecordedDetectionSample, list[dict[str, Any]]]:
+    """Select one recorded frame and retain only repeatable object evidence."""
+    evidence: list[_TemporalDetectionEvidence] = []
+    assignments: dict[tuple[int, int], _TemporalDetectionEvidence] = {}
+    for sample_index, sample in enumerate(samples):
+        available = set(range(len(evidence)))
+        candidates = [item for item in sample.objects if _eligible_detection(item)]
+        for object_index, detected in sorted(
+            enumerate(candidates),
+            key=lambda item: _confidence(item[1]),
+            reverse=True,
+        ):
+            matches = [
+                (score, evidence_index)
+                for evidence_index in available
+                if (score := _temporal_association_score(evidence[evidence_index].latest, detected)) is not None
+            ]
+            if matches:
+                _, evidence_index = max(matches)
+                track = evidence[evidence_index]
+                available.remove(evidence_index)
+            else:
+                track = _TemporalDetectionEvidence()
+                evidence.append(track)
+                evidence_index = len(evidence) - 1
+            track.add(sample_index, detected)
+            assignments[(sample_index, id(detected))] = track
+
+    default_required = max(1, min(5, int(minimum_confirmations)))
+    normalized_class_confirmations = {
+        str(label).strip().lower(): max(1, min(5, int(confirmations)))
+        for label, confirmations in (class_confirmations or {}).items()
+    }
+    required_by_track = {
+        id(track): normalized_class_confirmations.get(track.winning_label.lower(), default_required)
+        for track in evidence
+    }
+    confirmed_ids = {
+        id(track)
+        for track in evidence
+        if len(track.winning_observations) >= required_by_track[id(track)]
+    }
+
+    def sample_score(item: tuple[int, _RecordedDetectionSample]) -> tuple[int, float, float, float]:
+        sample_index, sample = item
+        visible = [
+            track
+            for track in evidence
+            if id(track) in confirmed_ids
+            and sample_index in track.observations
+            and str(track.observations[sample_index].get("label") or "").strip() == track.winning_label
+        ]
+        raw_peak = max((_confidence(detected) for detected in sample.objects if _eligible_detection(detected)), default=0.0)
+        return (
+            len(visible),
+            sum(track.aggregate_confidence for track in visible),
+            raw_peak,
+            -abs(sample.offset),
+        )
+
+    selected_index, selected = max(enumerate(samples), key=sample_score)
+    annotated: list[dict[str, Any]] = []
+    for detected in selected.objects:
+        if not _eligible_detection(detected):
+            annotated.append(dict(detected))
+            continue
+        track = assignments.get((selected_index, id(detected)))
+        if track is None:
+            continue
+        confirmed = id(track) in confirmed_ids
+        label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
+        confirmed = confirmed and label_confirmed_here
+        enriched = {
+            **detected,
+            "incident_eligible": confirmed,
+            "temporal_consensus": confirmed,
+            "temporal_observations": len(track.winning_observations),
+            "temporal_track_observations": len(track.observations),
+            "temporal_required_observations": required_by_track[id(track)],
+            "temporal_samples": len(samples),
+            "temporal_peak_confidence": round(track.peak_confidence, 4),
+            "temporal_label_votes": track.label_votes,
+        }
+        if confirmed:
+            enriched["confidence"] = round(track.aggregate_confidence, 4)
+        annotated.append(enriched)
+
+    LOGGER.debug(
+        "recorded object consensus retained %d/%d candidates across %d frames (minimum %d)",
+        len(confirmed_ids),
+        len(evidence),
+        len(samples),
+        default_required,
+    )
+    return selected, annotated
 
 
 class MotionObjectDetectorBackend(Protocol):
@@ -46,7 +274,7 @@ LiveFrameProvider = Callable[[], Frame | None]
 
 
 class RecordedMotionObjectDetector:
-    """Finds the strongest recorded frame and runs downstream object inference."""
+    """Combines recorded event-time detections into repeatable object evidence."""
 
     def __init__(
         self,
@@ -68,11 +296,7 @@ class RecordedMotionObjectDetector:
             time.sleep(min(wait_seconds, 3.0))
 
         deadline = time.monotonic() + max(0.0, RECORDED_EVENT_RETRY_SECONDS)
-        best_frame: Frame | None = None
-        best_objects: list[dict[str, Any]] = []
-        best_score = -1.0
-        best_distance = float("inf")
-        best_recording_path = ""
+        samples: list[_RecordedDetectionSample] = []
 
         while True:
             for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
@@ -94,24 +318,33 @@ class RecordedMotionObjectDetector:
                 if frame is None:
                     continue
                 objects = self._detect_objects(frame)
-                score = self._object_score(objects)
-                distance = abs(sample_offset)
-                if score > best_score or (score == best_score and distance < best_distance):
-                    best_frame = frame
-                    best_objects = objects
-                    best_score = score
-                    best_distance = distance
-                    best_recording_path = str(row["path"])
+                samples.append(_RecordedDetectionSample(
+                    offset=sample_offset,
+                    frame=frame,
+                    objects=objects,
+                    recording_path=str(row["path"]),
+                ))
 
-            if best_frame is not None:
+            if samples:
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
 
-        if best_frame is not None:
-            return best_frame, best_objects, best_recording_path
+        if samples:
+            minimum_confirmations = int(
+                getattr(self.detector.config, "event_confirmation_frames", 2)
+            )
+            class_confirmations = dict(
+                getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
+            )
+            selected, objects = _temporal_consensus(
+                samples,
+                minimum_confirmations,
+                class_confirmations,
+            )
+            return selected.frame, objects, selected.recording_path
 
         fallback = self.live_frame_provider()
         if fallback is None:
@@ -218,18 +451,6 @@ class RecordedMotionObjectDetector:
             f" ({last_error})" if last_error else "",
         )
         return None
-
-    @staticmethod
-    def _object_score(objects: list[dict[str, Any]]) -> float:
-        score = 0.0
-        for detected in objects:
-            label = detected.get("label")
-            if not label or detected.get("incident_eligible") is False:
-                continue
-            confidence = detected.get("confidence")
-            score = max(score, float(confidence) if isinstance(confidence, (float, int)) else 0.01)
-        return score
-
 
 class RecordedMotionObjectDetectorFactory:
     def __init__(

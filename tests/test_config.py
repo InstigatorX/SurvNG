@@ -104,6 +104,8 @@ class AppConfigTest(unittest.TestCase):
         )
         self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
         self.assertTrue(config.detector.require_incident_zone)
+        self.assertEqual(config.detector.event_confirmation_frames, 2)
+        self.assertEqual(config.detector.event_class_confirmation_frames, {})
         self.assertIsNone(config.cameras[0].require_incident_zone)
         self.assertEqual(config.motion_qualification.pipeline.qualification, [])
         self.assertIsNone(
@@ -123,6 +125,27 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertFalse(config.detector.require_incident_zone)
         self.assertTrue(config.cameras[0].require_incident_zone)
+
+    def test_detector_normalizes_class_specific_event_confirmations(self) -> None:
+        config = AppConfig.model_validate({
+            "detector": {
+                "event_confirmation_frames": 2,
+                "event_class_confirmation_frames": {
+                    " Robot_Lawnmower ": 3,
+                    "PERSON": 1,
+                },
+            },
+        })
+
+        self.assertEqual(config.detector.event_class_confirmation_frames, {
+            "robot_lawnmower": 3,
+            "person": 1,
+        })
+
+        with self.assertRaises(ValidationError):
+            AppConfig.model_validate({
+                "detector": {"event_class_confirmation_frames": {"person": 6}},
+            })
 
     def test_camera_identity_and_stream_urls_are_safe_for_runtime_paths(self) -> None:
         with self.assertRaises(ValidationError):
