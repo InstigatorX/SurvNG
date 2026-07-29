@@ -2387,6 +2387,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [trackingComparisonError, setTrackingComparisonError] = useState("");
   const [trackingComparisonHistory, setTrackingComparisonHistory] = useState({ items: [], summary: null });
   const [trackingVerdictLoading, setTrackingVerdictLoading] = useState(false);
+  const [analysisToolsOpen, setAnalysisToolsOpen] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [mediaSize, setMediaSize] = useState(null);
   const zoomRef = useRef(zoom);
@@ -2420,8 +2421,6 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const reidDiagnostics = trackingEvent.object_tracking?.reid_diagnostics || {};
   const reidAttemptReasons = reidDiagnostics.inference_attempts_by_reason || {};
   const replayTrackCount = storedTracks.filter((track) => track.boxHistory.length).length;
-  const objects = eventObjects(displayedEvent);
-  const detectedObjects = objects.filter((object) => object.label);
   const manualConfidenceNumber = Number(manualConfidence);
   const safeManualConfidence = Number.isFinite(manualConfidenceNumber) ? Math.max(0.01, Math.min(0.99, manualConfidenceNumber)) : 0.35;
   const manualEventId = Number(viewerEvent.representative_event_id || viewerEvent.id);
@@ -2667,7 +2666,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     setMediaSize(null);
     setDetectionDebug(false);
     setDetectionDebugStats(null);
-    setTrackingVisible(true);
+    setTrackingVisible(false);
+    setAnalysisToolsOpen(false);
     setTrackingComparison(null);
     setTrackingComparisonEngine(null);
     setTrackingComparisonLoading(false);
@@ -2720,6 +2720,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 
   async function runTrackingComparison() {
     if (!Number.isFinite(manualEventId) || trackingComparisonLoading) return;
+    setAnalysisToolsOpen(true);
     setTrackingComparisonLoading(true);
     setTrackingComparisonError("");
     setTrackingComparisonEngine(null);
@@ -2990,6 +2991,13 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
           ) : null}
         </div>
         <div className="event-detail-body">
+          <details
+            className="event-analysis-details"
+            open={analysisToolsOpen}
+            onToggle={(toggleEvent) => setAnalysisToolsOpen(toggleEvent.currentTarget.open)}
+          >
+            <summary>Analysis tools &amp; diagnostics</summary>
+            <div className="event-analysis-details-body">
           {storedTracks.length ? (
             <div className="event-track-summary">
               <span className="muted">{trackingComparisonEngine ? "Comparison replay" : "Stored tracking"}</span>
@@ -3076,17 +3084,6 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               ) : null}
             </div>
           ) : null}
-          <div>
-            <span className="muted">Detection</span>
-            <div className="pill-row">
-              {detectedObjects.length ? detectedObjects.map((object, index) => (
-                <span className="pill" key={`${object.label}-${index}`}>
-                  {object.label}
-                  {object.confidence ? ` ${(object.confidence * 100).toFixed(1)}%` : ""}
-                </span>
-              )) : <span className="pill quiet">motion only</span>}
-            </div>
-          </div>
           <div className="manual-detect-panel" onClick={(event) => event.stopPropagation()}>
             <div className="manual-detect-head">
               <div>
@@ -3118,6 +3115,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               </div>
             ) : null}
           </div>
+            </div>
+          </details>
         </div>
       </section>
     </div>
