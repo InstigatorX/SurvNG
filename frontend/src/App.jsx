@@ -70,6 +70,7 @@ import {
 import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
 import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
+import { adjacentIncident } from "./incidentNavigation.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -2814,14 +2815,11 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
         return;
       }
       if (keyEvent.key !== "ArrowLeft" && keyEvent.key !== "ArrowRight") return;
-      const navItems = events.flatMap((candidate) => [candidate, ...(candidate.events || [])]);
-      if (!navItems.length) return;
-      const currentIndex = navItems.findIndex((candidate) => candidate.id === event.id);
-      if (currentIndex < 0) return;
-      keyEvent.preventDefault();
       const direction = keyEvent.key === "ArrowRight" ? 1 : -1;
-      const nextIndex = (currentIndex + direction + navItems.length) % navItems.length;
-      onSelect(navItems[nextIndex]);
+      const nextIncident = adjacentIncident(events, event, direction);
+      if (!nextIncident) return;
+      keyEvent.preventDefault();
+      onSelect(nextIncident);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
