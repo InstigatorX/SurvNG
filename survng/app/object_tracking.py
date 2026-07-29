@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 import logging
 import threading
 import time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 import numpy as np
 
@@ -22,8 +22,39 @@ TRACKING_STOP_TIMEOUT_SECONDS = 18.0
 Box = tuple[float, float, float, float]
 FrameSample = tuple[np.ndarray, float, float]
 FrameProvider = Callable[[], FrameSample | None]
+CatchupFrameProvider = Callable[[float, float, float, int], Iterable[tuple[float, np.ndarray]]]
 TrackingUpdate = Callable[[int, dict[str, Any], list[dict[str, Any]] | None], object | None]
 TrackingPublisher = Callable[[str, dict[str, Any]], None]
+
+
+def _rescale_detection_boxes(
+    objects: list[dict[str, Any]],
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+) -> None:
+    if (
+        source_width <= 0
+        or source_height <= 0
+        or target_width <= 0
+        or target_height <= 0
+        or (source_width == target_width and source_height == target_height)
+    ):
+        return
+    scale_x = target_width / source_width
+    scale_y = target_height / source_height
+    for detected in objects:
+        box = detected.get("box")
+        if not isinstance(box, dict):
+            continue
+        try:
+            box["x1"] = float(box["x1"]) * scale_x
+            box["y1"] = float(box["y1"]) * scale_y
+            box["x2"] = float(box["x2"]) * scale_x
+            box["y2"] = float(box["y2"]) * scale_y
+        except (KeyError, TypeError, ValueError):
+            continue
 
 
 class ObjectDetectorBackend(Protocol):
@@ -801,6 +832,7 @@ class ObjectTrackingSession:
         limiter: threading.BoundedSemaphore,
         tracker_registry: ObjectTrackerRegistry | None = None,
         appearance_encoder: AppearanceEncoder | None = None,
+        catchup_frame_provider: CatchupFrameProvider | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -811,6 +843,7 @@ class ObjectTrackingSession:
         self.limiter = limiter
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
         self.appearance_encoder = appearance_encoder
+        self.catchup_frame_provider = catchup_frame_provider
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -828,6 +861,7 @@ class ObjectTrackingSession:
         self._reid_attempt_base_by_reason: dict[str, int] = {}
         self._frame_width = 0
         self._frame_height = 0
+        self._catchup_frames_processed = 0
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -838,6 +872,7 @@ class ObjectTrackingSession:
             "track_count": 0,
             "confirmed_tracks": 0,
             "frames_processed": 0,
+            "catchup_frames_processed": 0,
             "last_error": "",
             "reid_failures": 0,
             "reid_attempts": 0,
@@ -985,6 +1020,7 @@ class ObjectTrackingSession:
                 "sample_fps": self.config.sample_fps,
                 "lost_timeout_seconds": self.config.lost_timeout_seconds,
                 "frames_processed": 0,
+                "catchup_frames_processed": 0,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "tracks": [],
             }
@@ -1010,6 +1046,7 @@ class ObjectTrackingSession:
         try:
             self._frame_width = 0
             self._frame_height = 0
+            self._catchup_frames_processed = 0
             tracker = self.tracker_registry.create(
                 self.config.implementation,
                 self.config,
@@ -1032,12 +1069,101 @@ class ObjectTrackingSession:
             self._set_status(enabled=True, active=True, event_id=event_id, last_error="")
             self._persist(event_id, tracker, captured_at, initial_tracked, frames_processed, "active")
             interval = 1.0 / self.config.sample_fps
+            consecutive_failures = 0
+
+            def process_frame(
+                frame: np.ndarray,
+                sample_epoch: float,
+                *,
+                catchup: bool,
+            ) -> bool:
+                nonlocal consecutive_failures, frames_processed
+                source_height = int(frame.shape[0])
+                source_width = int(frame.shape[1])
+                if self._frame_width <= 0 or self._frame_height <= 0:
+                    self._frame_width = source_width
+                    self._frame_height = source_height
+                objects = self.detector.detect(
+                    frame,
+                    confidence_threshold=self.config.low_confidence_threshold,
+                )
+                failure = detection_failure(objects)
+                if failure:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        raise RuntimeError(f"tracking detector failed repeatedly: {failure}")
+                    return False
+                consecutive_failures = 0
+                apply_detection_zones(
+                    self.camera,
+                    objects,
+                    source_width,
+                    source_height,
+                    float(self.detector.config.confidence_threshold),
+                    bool(getattr(self.detector.config, "require_incident_zone", True)),
+                )
+                self._annotate_appearances(
+                    frame,
+                    objects,
+                    lazy=self.config.implementation == "survng_hybrid",
+                )
+                _rescale_detection_boxes(
+                    objects,
+                    source_width,
+                    source_height,
+                    self._frame_width,
+                    self._frame_height,
+                )
+                tracked = tracker.update(objects, sample_epoch)
+                frames_processed += 1
+                if catchup:
+                    self._catchup_frames_processed += 1
+                self._persist(event_id, tracker, sample_epoch, tracked, frames_processed, "active")
+                return True
+
+            catchup_until = time.time()
+            if (
+                self.catchup_frame_provider is not None
+                and initial_frame is not None
+                and catchup_until - captured_at > interval * 1.5
+            ):
+                # Recorded validation may seed from as much as one second
+                # after the event. Begin beyond that selection window so
+                # catch-up never feeds an older image after a newer seed.
+                catchup_start = captured_at + 1.0 + interval
+                try:
+                    catchup_frames = iter(
+                        self.catchup_frame_provider(
+                            catchup_start,
+                            catchup_until,
+                            self.config.sample_fps,
+                            min(1280, int(initial_frame.shape[1])),
+                        )
+                    )
+                    try:
+                        for sample_epoch, frame in catchup_frames:
+                            if stop.is_set() or time.monotonic() >= self._deadline:
+                                break
+                            if sample_epoch <= captured_at or sample_epoch > catchup_until:
+                                continue
+                            process_frame(frame, sample_epoch, catchup=True)
+                            captured_at = sample_epoch
+                    finally:
+                        close_catchup = getattr(catchup_frames, "close", None)
+                        if callable(close_catchup):
+                            close_catchup()
+                except Exception:
+                    LOGGER.exception(
+                        "recorded tracking catch-up failed for %s event %d; continuing live",
+                        self.camera.id,
+                        event_id,
+                    )
+
             next_sample = time.monotonic()
             frame_acquisition_deadline = min(
                 self._deadline,
                 time.monotonic() + 5.0,
             )
-            consecutive_failures = 0
             last_frame_token: float | None = None
             while not stop.is_set():
                 with self._lock:
@@ -1055,42 +1181,19 @@ class ObjectTrackingSession:
                     next_sample = time.monotonic() + interval
                     continue
                 frame, sample_epoch, frame_token = sample
+                if self._catchup_frames_processed and sample_epoch <= captured_at:
+                    next_sample = time.monotonic() + interval
+                    continue
                 if last_frame_token is not None and frame_token <= last_frame_token:
                     if not tracker.has_live_tracks(now_epoch):
                         break
                     next_sample = time.monotonic() + interval
                     continue
                 last_frame_token = frame_token
-                self._frame_height = int(frame.shape[0])
-                self._frame_width = int(frame.shape[1])
-                objects = self.detector.detect(
-                    frame,
-                    confidence_threshold=self.config.low_confidence_threshold,
-                )
-                failure = detection_failure(objects)
-                if failure:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3:
-                        raise RuntimeError(f"tracking detector failed repeatedly: {failure}")
+                if not process_frame(frame, sample_epoch, catchup=False):
                     next_sample = time.monotonic() + interval
                     continue
-                consecutive_failures = 0
-                apply_detection_zones(
-                    self.camera,
-                    objects,
-                    int(frame.shape[1]),
-                    int(frame.shape[0]),
-                    float(self.detector.config.confidence_threshold),
-                    bool(getattr(self.detector.config, "require_incident_zone", True)),
-                )
-                self._annotate_appearances(
-                    frame,
-                    objects,
-                    lazy=self.config.implementation == "survng_hybrid",
-                )
-                tracked = tracker.update(objects, sample_epoch)
-                frames_processed += 1
-                self._persist(event_id, tracker, sample_epoch, tracked, frames_processed, "active")
+                captured_at = sample_epoch
                 if not tracker.has_live_tracks(sample_epoch):
                     break
                 next_sample = max(next_sample + interval, time.monotonic())
@@ -1103,6 +1206,7 @@ class ObjectTrackingSession:
                 track_count=len(tracker.summaries(final_epoch)),
                 confirmed_tracks=len(tracker.summaries(final_epoch)),
                 frames_processed=frames_processed,
+                catchup_frames_processed=self._catchup_frames_processed,
             )
         except Exception as exc:
             self._persist_failure(event_id, tracker, frames_processed, exc)
@@ -1148,6 +1252,7 @@ class ObjectTrackingSession:
             "sample_fps": self.config.sample_fps,
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
+            "catchup_frames_processed": self._catchup_frames_processed,
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "tracks": tracks,
             "reid_diagnostics": {
@@ -1184,6 +1289,7 @@ class ObjectTrackingSession:
             track_count=len(tracks),
             confirmed_tracks=len(tracks),
             frames_processed=frames_processed,
+            catchup_frames_processed=self._catchup_frames_processed,
             reid_recoveries=(
                 self._reid_recovery_base + sum(recoveries_by_label.values())
             ),
@@ -1222,6 +1328,7 @@ class ObjectTrackingSession:
             "sample_fps": self.config.sample_fps,
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
+            "catchup_frames_processed": self._catchup_frames_processed,
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "error": redact_secret_text(error)[:240],
             "tracks": tracker.summaries(captured_at) if tracker is not None else [],
@@ -1402,7 +1509,12 @@ class ObjectTrackingSessionFactory:
                 "ultralytics_botsort requires the optional Ultralytics tracking dependencies"
             )
 
-    def create(self, camera: CameraConfig, frame_provider: FrameProvider) -> ObjectTrackingSession:
+    def create(
+        self,
+        camera: CameraConfig,
+        frame_provider: FrameProvider,
+        catchup_frame_provider: CatchupFrameProvider | None = None,
+    ) -> ObjectTrackingSession:
         return ObjectTrackingSession(
             camera=camera,
             config=self.config,
@@ -1413,4 +1525,5 @@ class ObjectTrackingSessionFactory:
             limiter=self.limiter,
             tracker_registry=self.tracker_registry,
             appearance_encoder=self.appearance_encoder,
+            catchup_frame_provider=catchup_frame_provider,
         )

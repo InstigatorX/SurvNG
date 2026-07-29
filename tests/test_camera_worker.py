@@ -302,6 +302,7 @@ class CameraWorkerTest(unittest.TestCase):
                 ),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
                 patch("survng.app.camera.cv2.imread", return_value=seed) as imread,
+                patch.object(worker, "_get_latest_tracking_frame", return_value=None) as prewarm,
                 patch.object(worker.object_tracking, "start", return_value=True) as start,
             ):
                 worker._process_motion_event(
@@ -312,6 +313,7 @@ class CameraWorkerTest(unittest.TestCase):
                 )
 
         imread.assert_called_once_with("snapshot.jpg")
+        prewarm.assert_called_once_with("main")
         self.assertIs(start.call_args.args[3], seed)
 
     def test_borderline_candidate_without_object_remains_suppressed(self) -> None:

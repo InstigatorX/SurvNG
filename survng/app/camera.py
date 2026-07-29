@@ -12,7 +12,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import cv2
 import numpy as np
@@ -21,6 +21,7 @@ from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
 from .object_tracking import ObjectTrackingSessionFactory
+from .tracking_comparison import sampled_video_frames
 from .security import redact_secret_text
 from .motion_pipeline import (
     MotionContext,
@@ -94,6 +95,7 @@ class CameraWorker:
         self.object_tracking = object_tracking_session_factory.create(
             camera=camera,
             frame_provider=lambda: self._get_latest_tracking_frame("main"),
+            catchup_frame_provider=self._recorded_tracking_frames,
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
@@ -1696,6 +1698,10 @@ class CameraWorker:
         *,
         require_eligible_object: bool = False,
     ) -> dict[str, Any]:
+        if self.object_tracking.config.enabled:
+            # Main-stream capture opens concurrently with recorded validation,
+            # so the tracking handoff does not pay another RTSP startup delay.
+            self._get_latest_tracking_frame("main")
         outcome = self.motion_decision_handler.handle(
             topic,
             message,
@@ -1940,6 +1946,60 @@ class CameraWorker:
             ):
                 return None
             return frame.copy(), captured_at, frame_clock
+
+    def _recorded_tracking_frames(
+        self,
+        start_epoch: float,
+        end_epoch: float,
+        sample_fps: float,
+        frame_width: int,
+    ) -> Iterator[tuple[float, np.ndarray]]:
+        """Yield finalized main-stream frames that bridge event detection to live tracking."""
+        if end_epoch <= start_epoch or frame_width <= 0:
+            return
+        rows = self.motion_object_detector.recorder.recording_rows_between(
+            self.camera.id,
+            start_epoch,
+            end_epoch,
+            source="main",
+        )
+        interval = 1.0 / max(0.1, float(sample_fps))
+        last_epoch = start_epoch - interval
+        for row in rows:
+            row_start = float(row.get("start_epoch") or 0.0)
+            row_end = float(row.get("end_epoch") or row_start)
+            sample_start = max(start_epoch, row_start)
+            sample_end = min(end_epoch, row_end)
+            duration = sample_end - sample_start
+            if duration <= 0.0:
+                continue
+            path = Path(str(row.get("path") or ""))
+            if not path.is_file():
+                continue
+            try:
+                for captured_at, frame in sampled_video_frames(
+                    path,
+                    start_epoch=sample_start,
+                    sample_fps=sample_fps,
+                    duration_seconds=duration,
+                    ffmpeg_path=self.motion_object_detector.recorder.ffmpeg_path,
+                    maximum_width=frame_width,
+                    start_offset_seconds=max(0.0, sample_start - row_start),
+                    probe_path=path,
+                ):
+                    if captured_at <= last_epoch + interval * 0.5:
+                        continue
+                    if captured_at > end_epoch + 1e-6:
+                        break
+                    last_epoch = captured_at
+                    yield captured_at, frame
+            except RuntimeError as error:
+                LOGGER.warning(
+                    "recorded tracking catch-up skipped %s/%s: %s",
+                    self.camera.id,
+                    path.name,
+                    redact_secret_text(error),
+                )
 
     def _recorded_motion_frame(
         self,
