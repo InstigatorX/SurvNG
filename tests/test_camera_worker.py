@@ -190,6 +190,64 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(sampled_clock, frame_clock)
         self.assertIsNone(stale)
 
+    def test_tracking_frame_falls_back_to_live_until_main_is_ready(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+            live_stream_url="rtsp://example.invalid/sub",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            live_frame = np.full((20, 30, 3), 7, dtype=np.uint8)
+            live_epoch = time.time() - 0.1
+            live_clock = time.monotonic() - 0.1
+            with worker._frame_lock:
+                worker._source_frames["live"] = live_frame
+                worker._source_frame_epoch["live"] = live_epoch
+                worker._source_frame_monotonic["live"] = live_clock
+            with patch.object(worker, "_start_source", return_value=True) as start_source:
+                sample = worker._get_latest_tracking_frame_with_fallback()
+
+        self.assertIsNotNone(sample)
+        sampled_frame, sampled_at, sampled_clock = sample
+        self.assertEqual(int(sampled_frame[0, 0, 0]), 7)
+        self.assertEqual(sampled_at, live_epoch)
+        self.assertEqual(sampled_clock, live_clock)
+        self.assertEqual(
+            [call.args[0] for call in start_source.call_args_list],
+            ["main", "live"],
+        )
+
+    def test_tracking_frame_switches_to_main_when_main_is_ready(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+            live_stream_url="rtsp://example.invalid/sub",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
+            now_epoch = time.time() - 0.1
+            now_clock = time.monotonic() - 0.1
+            with worker._frame_lock:
+                worker._source_frames["main"] = np.full((40, 60, 3), 9, dtype=np.uint8)
+                worker._source_frame_epoch["main"] = now_epoch
+                worker._source_frame_monotonic["main"] = now_clock
+                worker._source_frames["live"] = np.full((20, 30, 3), 7, dtype=np.uint8)
+                worker._source_frame_epoch["live"] = now_epoch
+                worker._source_frame_monotonic["live"] = now_clock
+            with patch.object(worker, "_start_source", return_value=True) as start_source:
+                sample = worker._get_latest_tracking_frame_with_fallback()
+
+        self.assertIsNotNone(sample)
+        sampled_frame, _, _ = sample
+        self.assertEqual(sampled_frame.shape, (40, 60, 3))
+        self.assertEqual(int(sampled_frame[0, 0, 0]), 9)
+        start_source.assert_called_once_with("main")
+
     def test_snapshot_filename_uses_event_time_not_processing_time(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         event_at = datetime(2026, 7, 27, 15, 56, 55, 123456, tzinfo=timezone.utc)

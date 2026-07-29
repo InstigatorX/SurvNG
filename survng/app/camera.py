@@ -96,7 +96,7 @@ class CameraWorker:
         )
         self.object_tracking = object_tracking_session_factory.create(
             camera=camera,
-            frame_provider=lambda: self._get_latest_tracking_frame("main"),
+            frame_provider=self._get_latest_tracking_frame_with_fallback,
             catchup_frame_provider=self._recorded_tracking_frames,
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
@@ -1999,6 +1999,22 @@ class CameraWorker:
             ):
                 return None
             return frame.copy(), captured_at, frame_clock
+
+    def _get_latest_tracking_frame_with_fallback(
+        self,
+    ) -> tuple[np.ndarray, float, float] | None:
+        """Prefer main-stream detail without leaving a cold-start frame gap.
+
+        Main capture is started on the first request, but a high-resolution HEVC
+        stream may not yield a frame until its next keyframe. The live stream is
+        already continuously captured, so it provides a timestamped bridge until
+        main capture is ready. ObjectTrackingSession rescales detections from each
+        source into the incident coordinate space before association.
+        """
+        main_sample = self._get_latest_tracking_frame("main")
+        if main_sample is not None:
+            return main_sample
+        return self._get_latest_tracking_frame("live")
 
     def _remember_tracking_frame(self, frame: np.ndarray, captured_at: float) -> None:
         """Retain a bounded, detector-sized main-stream history for live catch-up."""
