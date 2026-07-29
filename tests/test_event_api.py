@@ -157,6 +157,63 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertTrue(implementations["survng_hybrid"]["available"])
         self.assertIn("ultralytics_botsort", implementations)
 
+    def test_manual_detection_stays_on_one_manager_generation_during_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            snapshot = root / "snapshots" / "gate" / "event.jpg"
+            snapshot.parent.mkdir(parents=True)
+            self.assertTrue(cv2.imwrite(str(snapshot), np.zeros((24, 32, 3), dtype=np.uint8)))
+            event = {
+                "id": 7,
+                "camera_id": "gate",
+                "snapshot_path": str(snapshot),
+                "recording_path": "",
+                "created_at": "2026-07-29T12:00:00+00:00",
+                "objects_json": "[]",
+            }
+            events = SimpleNamespace(
+                get=Mock(return_value=event),
+                replace_detected_objects=Mock(return_value=event),
+            )
+            replacement = SimpleNamespace(
+                detector=SimpleNamespace(detect=Mock(side_effect=AssertionError("new manager used"))),
+                events=SimpleNamespace(
+                    replace_detected_objects=Mock(side_effect=AssertionError("new manager used"))
+                ),
+            )
+
+            def detect(_frame, confidence_threshold=None):
+                main.manager = replacement
+                return [{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "box": {"x1": 1, "y1": 1, "x2": 10, "y2": 20},
+                }]
+
+            active_manager = SimpleNamespace(
+                storage_dir=root,
+                detector=SimpleNamespace(detect=detect),
+                events=events,
+                publish_event=Mock(),
+                detector_status=Mock(return_value={"enabled": True}),
+            )
+            active_config = AppConfig(
+                storage_dir=str(root),
+                cameras=[CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url="rtsp://camera.invalid/main",
+                )],
+            )
+
+            with patch.object(main, "manager", active_manager), patch.object(main, "config", active_config):
+                response = main.detect_event_snapshot(7)
+
+            self.assertEqual(response["object_count"], 1)
+            events.replace_detected_objects.assert_called_once()
+            active_manager.publish_event.assert_called_once()
+            replacement.events.replace_detected_objects.assert_not_called()
+
     def test_tracking_comparison_uses_bounded_shared_incident_frames(self) -> None:
         event = {
             "id": 43,

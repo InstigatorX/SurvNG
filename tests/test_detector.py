@@ -34,6 +34,7 @@ class OpenVinoDetectorTest(unittest.TestCase):
             "timed out",
         )
         self.assertEqual(detection_failure([]), "")
+        self.assertEqual(detection_failure(["legacy", None]), "")  # type: ignore[list-item]
 
     def test_manual_detection_merge_preserves_incident_metadata(self) -> None:
         existing = '[{"label":"old"},{"status":"no_recorded_frame"},{"status":"motion_qualification","motion_qualification":{"score":0.7}},{"status":"object_tracking","object_tracking":{"state":"complete"}}]'
@@ -70,6 +71,20 @@ class OpenVinoDetectorTest(unittest.TestCase):
         self.assertEqual(runtime["pending_frames"], 0)
         self.assertEqual(runtime["total_inferences"], 1)
         self.assertEqual(runtime["failed_inferences"], 1)
+
+    def test_non_finite_override_threshold_is_rejected_and_restored(self) -> None:
+        detector = make_detector()
+        detector.enabled = True
+        detector.cv_net = _FailingNet()
+        detector.output_format = "yolo"
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            detector.detect(
+                np.zeros((10, 10, 3), dtype=np.uint8),
+                confidence_threshold=float("nan"),
+            )
+
+        self.assertEqual(detector.config.confidence_threshold, 0.5)
 
     def test_yolo_parser_skips_non_finite_rows_without_losing_valid_detection(self) -> None:
         detector = make_detector(["person"])

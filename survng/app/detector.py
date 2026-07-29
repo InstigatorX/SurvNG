@@ -52,6 +52,7 @@ def detection_failure(objects: list[dict[str, Any]]) -> str:
         (
             str(item.get("error") or item.get("status") or "object detector unavailable")
             for item in objects
+            if isinstance(item, dict)
             if item.get("status") in DETECTION_FAILURE_STATUSES
         ),
         "",
@@ -305,7 +306,10 @@ class OpenVinoDetector:
             if not isinstance(frame, np.ndarray) or frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0:
                 raise ValueError("detector frame must be a non-empty uint8 BGR image")
             if confidence_threshold is not None:
-                self.config.confidence_threshold = max(0.01, min(0.99, float(confidence_threshold)))
+                requested_threshold = float(confidence_threshold)
+                if not np.isfinite(requested_threshold):
+                    raise ValueError("detector confidence threshold must be finite")
+                self.config.confidence_threshold = max(0.01, min(0.99, requested_threshold))
             if self.coreml_model is not None:
                 inference_started = time.perf_counter()
                 objects = self._detect_coreml(frame)

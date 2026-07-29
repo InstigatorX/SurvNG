@@ -312,6 +312,7 @@ class _InferenceWorker:
             return self._ensure_worker_locked(force=True)
 
     def stop(self) -> None:
+        stubborn_process = None
         with self._lock:
             self._stopping = True
             process = self._process
@@ -332,11 +333,26 @@ class _InferenceWorker:
                 if process.is_alive():
                     process.kill()
                     process.join(timeout=2.0)
+                if process.is_alive():
+                    stubborn_process = process
             if connection is not None:
-                connection.close()
+                try:
+                    connection.close()
+                except OSError:
+                    LOGGER.exception(
+                        "%s inference connection cleanup failed",
+                        self.role.capitalize(),
+                    )
             self._connection = None
-            self._process = None
-            self._frame_buffer = None
+            if stubborn_process is None:
+                self._process = None
+                self._frame_buffer = None
+            else:
+                self._process = stubborn_process
+        if stubborn_process is not None:
+            raise RuntimeError(
+                f"{self.role} inference worker did not stop after forced termination"
+            )
 
     def _active_config_payload(self) -> dict[str, Any]:
         payload = self.config.model_dump(mode="json")
@@ -473,6 +489,24 @@ class _InferenceWorker:
             if process.is_alive():
                 process.kill()
                 process.join(timeout=2.0)
+            if process.is_alive():
+                connection = self._connection
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except OSError:
+                        LOGGER.exception(
+                            "%s inference connection cleanup failed",
+                            self.role.capitalize(),
+                        )
+                self._connection = None
+                self._last_error = error
+                self._next_restart_at = time.monotonic() + INFERENCE_RESTART_DELAY_SECONDS
+                LOGGER.error(
+                    "%s; worker remained alive after forced termination",
+                    error,
+                )
+                return
         exit_code = process.exitcode if process is not None else None
         self._record_dead_worker_locked(exit_code if exit_code not in {0, None} else -1)
         self._last_error = error

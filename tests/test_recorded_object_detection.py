@@ -39,6 +39,18 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_non_finite_confidence_cannot_win_temporal_selection(self) -> None:
+        samples = [
+            sample(-0.5, [detected("ghost", float("nan"), (10, 10, 30, 30))]),
+            sample(0.0, [detected("car", 0.8, (100, 100, 150, 150))]),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=1)
+
+        self.assertEqual(selected.offset, 0.0)
+        self.assertEqual(objects[0]["label"], "car")
+        self.assertEqual(objects[0]["confidence"], 0.8)
+
     def test_single_high_confidence_outlier_is_not_incident_eligible(self) -> None:
         samples = [
             sample(-1.0, []),

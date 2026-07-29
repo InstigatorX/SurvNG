@@ -2894,14 +2894,17 @@ def face_crop(observation_id: int, padding: float = 0.2) -> FileResponse:
 
 @app.post("/api/events/{event_id}/detect")
 def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
-    event = manager.events.get(event_id)
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        active_config = config.model_copy(deep=True)
+        event = active_manager.events.get(event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
     snapshot_path = Path(str(event.get("snapshot_path") or ""))
     if not snapshot_path.exists() or not snapshot_path.is_file():
         raise HTTPException(status_code=404, detail="snapshot not found")
     try:
-        snapshot_path.resolve().relative_to(Path(config.storage_dir).resolve())
+        snapshot_path.resolve().relative_to(active_manager.storage_dir)
     except ValueError:
         raise HTTPException(status_code=403, detail="snapshot outside storage directory") from None
 
@@ -2913,9 +2916,9 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         raise HTTPException(status_code=422, detail="failed to read snapshot")
 
     started = time.perf_counter()
-    camera = camera_by_id(config, str(event.get("camera_id") or ""))
+    camera = camera_by_id(active_config, str(event.get("camera_id") or ""))
     effective_confidence = detection_threshold(camera, safe_confidence) if camera else safe_confidence
-    objects = manager.detector.detect(frame, confidence_threshold=effective_confidence)
+    objects = active_manager.detector.detect(frame, confidence_threshold=effective_confidence)
     detector_error = detection_failure(objects)
     if detector_error:
         raise HTTPException(status_code=503, detail=detector_error)
@@ -2926,14 +2929,14 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
             int(frame.shape[1]),
             int(frame.shape[0]),
             safe_confidence,
-            bool(config.detector.require_incident_zone),
+            bool(active_config.detector.require_incident_zone),
         )
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     for detected_object in objects:
         detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
         detected_object["detection_source"] = "manual_openvino"
         detected_object["manual_confidence_threshold"] = safe_confidence
-    persisted_event = manager.events.replace_detected_objects(
+    persisted_event = active_manager.events.replace_detected_objects(
         event_id,
         objects_to_json(objects),
     )
@@ -2944,7 +2947,7 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         if item.get("label") and item.get("box") and item.get("incident_eligible") is not False
     ]
     if detected:
-        manager.publish_event("object", {
+        active_manager.publish_event("object", {
             "event_id": event_id,
             "camera_id": str(event.get("camera_id") or ""),
             "timestamp": str(event.get("created_at") or datetime.now(timezone.utc).isoformat()),
@@ -2953,7 +2956,7 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
             "source": "manual_openvino",
             "objects": detected,
         })
-    detector_status = manager.detector_status()
+    detector_status = active_manager.detector_status()
     return {
         "event_id": event_id,
         "camera_id": event.get("camera_id"),
@@ -3176,9 +3179,11 @@ async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict
     if not math.isfinite(confidence):
         raise HTTPException(status_code=422, detail="confidence must be finite")
     safe_confidence = max(0.01, min(0.99, float(confidence)))
+    with MANAGER_RELOAD_LOCK:
+        active_detector = manager.detector
     started = time.perf_counter()
     objects = await asyncio.to_thread(
-        manager.detector.detect,
+        active_detector.detect,
         frame,
         confidence_threshold=safe_confidence,
     )

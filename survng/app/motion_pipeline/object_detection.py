@@ -93,9 +93,12 @@ class _TemporalDetectionEvidence:
 
 def _confidence(detected: dict[str, Any]) -> float:
     try:
-        return max(0.0, min(1.0, float(detected.get("confidence") or 0.0)))
+        confidence = float(detected.get("confidence") or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    if not math.isfinite(confidence):
+        return 0.0
+    return max(0.0, min(1.0, confidence))
 
 
 def _box(detected: dict[str, Any]) -> tuple[float, float, float, float] | None:

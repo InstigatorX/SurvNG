@@ -242,6 +242,61 @@ class InferenceSupervisorTest(unittest.TestCase):
         with self.assertRaisesRegex(InferenceUnavailable, "uint8 BGR"):
             worker._write_frame_locked(np.zeros((10, 10, 3), dtype=np.float32))
 
+    def test_stop_retains_and_reports_worker_that_survives_forced_termination(self) -> None:
+        class StubbornProcess:
+            exitcode = None
+
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+            @staticmethod
+            def join(timeout=None) -> None:
+                return None
+
+            @staticmethod
+            def terminate() -> None:
+                return None
+
+            @staticmethod
+            def kill() -> None:
+                return None
+
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+        process = StubbornProcess()
+        frame_buffer = object()
+        worker._process = process
+        worker._frame_buffer = frame_buffer
+
+        with self.assertRaisesRegex(RuntimeError, "did not stop"):
+            worker.stop()
+
+        self.assertIs(worker._process, process)
+        self.assertIs(worker._frame_buffer, frame_buffer)
+
+    def test_stop_clears_state_when_connection_close_fails(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+        connection = Mock()
+        connection.close.side_effect = OSError("already closed")
+        worker._connection = connection
+        worker._frame_buffer = object()
+
+        with self.assertLogs("uvicorn.error", level="ERROR"):
+            worker.stop()
+
+        self.assertIsNone(worker._connection)
+        self.assertIsNone(worker._frame_buffer)
+
 
 if __name__ == "__main__":
     unittest.main()
