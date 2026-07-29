@@ -65,6 +65,9 @@ class DummyRecorder:
     def recording_at(self, camera_id: str, epoch: float):
         return None
 
+    def recording_rows_between(self, camera_id, start_epoch, end_epoch, source="main"):
+        return []
+
 
 def make_worker(
     camera: CameraConfig,
@@ -131,6 +134,35 @@ def make_worker(
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_main_stream_buffer_bridges_unfinalized_recording_gap(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker.object_tracking.config = ObjectTrackingConfig(sample_fps=2.0)
+            first = np.full((900, 1600, 3), 1, dtype=np.uint8)
+            second = np.full((900, 1600, 3), 2, dtype=np.uint8)
+            worker._remember_tracking_frame(first, 100.0)
+            worker._remember_tracking_frame(second, 100.5)
+
+            samples = list(worker._recorded_tracking_frames(99.9, 101.0, 2.0, 1280))
+
+        self.assertEqual([sample[0] for sample in samples], [100.0, 100.5])
+        self.assertEqual(samples[0][1].shape, (360, 640, 3))
+        self.assertEqual(int(samples[0][1][0, 0, 0]), 1)
+        self.assertEqual(int(samples[1][1][0, 0, 0]), 2)
+
+    def test_main_stream_buffer_respects_tracking_sample_rate(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker.object_tracking.config = ObjectTrackingConfig(sample_fps=2.0)
+            frame = np.zeros((90, 160, 3), dtype=np.uint8)
+            worker._remember_tracking_frame(frame, 100.0)
+            worker._remember_tracking_frame(frame, 100.1)
+            worker._remember_tracking_frame(frame, 100.5)
+
+        self.assertEqual([sample[0] for sample in worker._tracking_frames], [100.0, 100.5])
+
     def test_tracking_frame_includes_capture_time_and_rejects_stale_cache(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:

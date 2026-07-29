@@ -50,6 +50,8 @@ CAPTURE_OPEN_CONCURRENCY = 2
 CAPTURE_OPEN_SLOTS = threading.BoundedSemaphore(CAPTURE_OPEN_CONCURRENCY)
 FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
+TRACKING_CATCHUP_SECONDS = 10.0
+TRACKING_CATCHUP_FRAME_WIDTH = 640
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
@@ -122,6 +124,14 @@ class CameraWorker:
         self._source_frame_monotonic: dict[str, float] = {}
         self._source_last_access: dict[str, float] = {}
         self._source_errors: dict[str, str] = {}
+        tracking_buffer_size = max(
+            4,
+            round(self.object_tracking.config.sample_fps * TRACKING_CATCHUP_SECONDS) + 2,
+        )
+        self._tracking_frames: deque[tuple[float, np.ndarray]] = deque(
+            maxlen=tracking_buffer_size
+        )
+        self._tracking_last_sample_epoch = 0.0
         ring_size = max(
             12,
             round(
@@ -299,6 +309,8 @@ class CameraWorker:
                 self._source_frame_monotonic.clear()
                 self._source_last_access.clear()
                 self._source_errors.clear()
+                self._tracking_frames.clear()
+                self._tracking_last_sample_epoch = 0.0
                 self._motion_frames.clear()
                 self._motion_last_sample = 0.0
                 self._motion_last_continuous_result = None
@@ -1743,6 +1755,9 @@ class CameraWorker:
             ):
                 return True
             stop_event = threading.Event()
+            if source == "main":
+                self._tracking_frames.clear()
+                self._tracking_last_sample_epoch = 0.0
             thread = threading.Thread(
                 target=self._run_source,
                 args=(source, stop_event),
@@ -1785,6 +1800,9 @@ class CameraWorker:
                 self._source_frame_epoch.pop(source, None)
                 self._source_frame_monotonic.pop(source, None)
                 self._source_errors.pop(source, None)
+                if source == "main":
+                    self._tracking_frames.clear()
+                    self._tracking_last_sample_epoch = 0.0
             else:
                 self._thread = None
 
@@ -1829,6 +1847,8 @@ class CameraWorker:
                                     self.last_frame_at = stamp
                             if source == "live":
                                 self._remember_motion_frame(frame, frame_clock)
+                            elif source == "main":
+                                self._remember_tracking_frame(frame, frame_epoch)
                 except Exception as exc:
                     failure_reason = f"stream error: {redact_secret_text(exc)[:160]}"
                     self._set_source_error(source, failure_reason)
@@ -1947,6 +1967,26 @@ class CameraWorker:
                 return None
             return frame.copy(), captured_at, frame_clock
 
+    def _remember_tracking_frame(self, frame: np.ndarray, captured_at: float) -> None:
+        """Retain a bounded, detector-sized main-stream history for live catch-up."""
+        interval = 1.0 / max(0.1, float(self.object_tracking.config.sample_fps))
+        with self._frame_lock:
+            if captured_at - self._tracking_last_sample_epoch < interval * 0.9:
+                return
+            self._tracking_last_sample_epoch = captured_at
+        height, width = frame.shape[:2]
+        if width > TRACKING_CATCHUP_FRAME_WIDTH:
+            scale = TRACKING_CATCHUP_FRAME_WIDTH / width
+            frame = cv2.resize(
+                frame,
+                (TRACKING_CATCHUP_FRAME_WIDTH, max(1, round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            frame = frame.copy()
+        with self._frame_lock:
+            self._tracking_frames.append((captured_at, frame))
+
     def _recorded_tracking_frames(
         self,
         start_epoch: float,
@@ -1954,9 +1994,10 @@ class CameraWorker:
         sample_fps: float,
         frame_width: int,
     ) -> Iterator[tuple[float, np.ndarray]]:
-        """Yield finalized main-stream frames that bridge event detection to live tracking."""
+        """Yield recorded and buffered frames that bridge detection to live tracking."""
         if end_epoch <= start_epoch or frame_width <= 0:
             return
+        samples: list[tuple[float, np.ndarray]] = []
         rows = self.motion_object_detector.recorder.recording_rows_between(
             self.camera.id,
             start_epoch,
@@ -1992,7 +2033,7 @@ class CameraWorker:
                     if captured_at > end_epoch + 1e-6:
                         break
                     last_epoch = captured_at
-                    yield captured_at, frame
+                    samples.append((captured_at, frame))
             except RuntimeError as error:
                 LOGGER.warning(
                     "recorded tracking catch-up skipped %s/%s: %s",
@@ -2000,6 +2041,18 @@ class CameraWorker:
                     path.name,
                     redact_secret_text(error),
                 )
+        with self._frame_lock:
+            samples.extend(
+                (captured_at, frame)
+                for captured_at, frame in self._tracking_frames
+                if start_epoch <= captured_at <= end_epoch
+            )
+        last_epoch = start_epoch - interval
+        for captured_at, frame in sorted(samples, key=lambda sample: sample[0]):
+            if captured_at <= last_epoch + interval * 0.5:
+                continue
+            last_epoch = captured_at
+            yield captured_at, frame
 
     def _recorded_motion_frame(
         self,
