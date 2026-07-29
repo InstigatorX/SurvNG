@@ -329,6 +329,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 "temporal_sample_offset_seconds": -0.5,
                 "temporal_observations": 2,
                 "temporal_track_observations": 3,
+                "temporal_incident_observations": 1,
                 "temporal_required_observations": 3,
                 "temporal_samples": 3,
                 "temporal_peak_confidence": 0.91,
@@ -357,6 +358,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
         detected = context["detected_objects"][0]
         self.assertEqual(detected["temporal_observations"], 2)
+        self.assertEqual(detected["temporal_incident_observations"], 1)
         self.assertEqual(detected["temporal_required_observations"], 3)
         self.assertEqual(detected["temporal_label_votes"]["car"], 1)
         self.assertEqual(context["effective_settings"]["object_confirmation_frames"], 2)
@@ -651,6 +653,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 "temporal_sample_offset_seconds": 0.5,
                 "temporal_observations": 3,
                 "temporal_track_observations": 4,
+                "temporal_incident_observations": 2,
                 "temporal_required_observations": 2,
                 "temporal_samples": 5,
                 "temporal_peak_confidence": 0.95,
@@ -666,6 +669,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(payload["objects"][0]["zones"], ["yard"])
         self.assertEqual(payload["objects"][0]["track_id"], 3)
         self.assertEqual(payload["objects"][0]["temporal_observations"], 3)
+        self.assertEqual(payload["objects"][0]["temporal_incident_observations"], 2)
         self.assertEqual(payload["objects"][0]["temporal_sample_offset_seconds"], 0.5)
         self.assertEqual(payload["objects"][0]["temporal_required_observations"], 2)
         self.assertNotIn("raw_detection_tensor", payload["objects"][0])

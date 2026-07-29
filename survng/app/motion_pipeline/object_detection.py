@@ -150,6 +150,16 @@ def _eligible_detection(detected: dict[str, Any]) -> bool:
     return bool(detected.get("label") and detected.get("incident_eligible") is not False)
 
 
+def _candidate_detection(detected: dict[str, Any]) -> bool:
+    """Return whether a detector result can corroborate a temporal object track.
+
+    Zone admission is intentionally not required here. An object that enters an
+    incident zone and then crosses its boundary is still the same object; the
+    completed track only needs one admitted observation to become eligible.
+    """
+    return bool(detected.get("label") and _box(detected) is not None)
+
+
 def _temporal_consensus(
     samples: list[_RecordedDetectionSample],
     minimum_confirmations: int,
@@ -160,7 +170,7 @@ def _temporal_consensus(
     assignments: dict[tuple[int, int], _TemporalDetectionEvidence] = {}
     for sample_index, sample in enumerate(samples):
         available = set(range(len(evidence)))
-        candidates = [item for item in sample.objects if _eligible_detection(item)]
+        candidates = [item for item in sample.objects if _candidate_detection(item)]
         for object_index, detected in sorted(
             enumerate(candidates),
             key=lambda item: _confidence(item[1]),
@@ -195,9 +205,10 @@ def _temporal_consensus(
         id(track)
         for track in evidence
         if len(track.winning_observations) >= required_by_track[id(track)]
+        and any(_eligible_detection(item) for item in track.winning_observations)
     }
 
-    def sample_score(item: tuple[int, _RecordedDetectionSample]) -> tuple[int, float, float, float]:
+    def sample_score(item: tuple[int, _RecordedDetectionSample]) -> tuple[int, int, float, float, float]:
         sample_index, sample = item
         visible = [
             track
@@ -206,8 +217,13 @@ def _temporal_consensus(
             and sample_index in track.observations
             and str(track.observations[sample_index].get("label") or "").strip() == track.winning_label
         ]
-        raw_peak = max((_confidence(detected) for detected in sample.objects if _eligible_detection(detected)), default=0.0)
+        admitted_visible = [
+            track for track in visible
+            if _eligible_detection(track.observations[sample_index])
+        ]
+        raw_peak = max((_confidence(detected) for detected in sample.objects if _candidate_detection(detected)), default=0.0)
         return (
+            len(admitted_visible),
             len(visible),
             sum(track.aggregate_confidence for track in visible),
             raw_peak,
@@ -217,7 +233,7 @@ def _temporal_consensus(
     selected_index, selected = max(enumerate(samples), key=sample_score)
     annotated: list[dict[str, Any]] = []
     for detected in selected.objects:
-        if not _eligible_detection(detected):
+        if not _candidate_detection(detected):
             annotated.append(dict(detected))
             continue
         track = assignments.get((selected_index, id(detected)))
@@ -233,6 +249,9 @@ def _temporal_consensus(
             "temporal_sample_offset_seconds": selected.offset,
             "temporal_observations": len(track.winning_observations),
             "temporal_track_observations": len(track.observations),
+            "temporal_incident_observations": sum(
+                1 for item in track.winning_observations if _eligible_detection(item)
+            ),
             "temporal_required_observations": required_by_track[id(track)],
             "temporal_samples": len(samples),
             "temporal_peak_confidence": round(track.peak_confidence, 4),
@@ -349,19 +368,15 @@ class RecordedMotionObjectDetector:
                 for offset in RECORDED_EVENT_FRAME_OFFSETS
                 if offset in samples_by_offset
             ]
-            observed_required = max(
-                (
-                    class_confirmations.get(
-                        str(detected.get("label") or "").strip().lower(),
-                        default_required,
-                    )
-                    for sample in samples
-                    for detected in sample.objects
-                    if _eligible_detection(detected)
-                ),
-                default=default_required,
-            )
-            if len(samples) >= observed_required:
+            if samples:
+                selected, objects = _temporal_consensus(
+                    samples,
+                    default_required,
+                    class_confirmations,
+                )
+                if any(item.get("temporal_consensus") is True for item in objects):
+                    return selected.frame, objects, selected.recording_path
+            if len(samples_by_offset) >= len(RECORDED_EVENT_FRAME_OFFSETS):
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:

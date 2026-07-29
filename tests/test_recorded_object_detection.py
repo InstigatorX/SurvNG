@@ -105,6 +105,42 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertFalse(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 1)
 
+    def test_zone_admission_in_one_frame_carries_across_the_same_confirmed_track(self) -> None:
+        admitted = detected("car", 0.82, (100, 100, 180, 180))
+        admitted["zones"] = ["Driveway"]
+        corroborating = detected("car", 0.88, (120, 100, 200, 180))
+        corroborating["incident_eligible"] = False
+        corroborating["zones"] = []
+        samples = [
+            sample(0.0, [admitted]),
+            sample(0.5, [corroborating]),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.offset, 0.0)
+        self.assertTrue(objects[0]["incident_eligible"])
+        self.assertTrue(objects[0]["temporal_consensus"])
+        self.assertEqual(objects[0]["temporal_observations"], 2)
+        self.assertEqual(objects[0]["temporal_incident_observations"], 1)
+        self.assertEqual(objects[0]["zones"], ["Driveway"])
+
+    def test_track_never_admitted_by_incident_policy_remains_ineligible(self) -> None:
+        first = detected("car", 0.91, (100, 100, 180, 180))
+        second = detected("car", 0.93, (120, 100, 200, 180))
+        first["incident_eligible"] = False
+        second["incident_eligible"] = False
+
+        _selected, objects = _temporal_consensus(
+            [sample(0.0, [first]), sample(0.5, [second])],
+            minimum_confirmations=2,
+        )
+
+        self.assertFalse(objects[0]["incident_eligible"])
+        self.assertFalse(objects[0]["temporal_consensus"])
+        self.assertEqual(objects[0]["temporal_observations"], 2)
+        self.assertEqual(objects[0]["temporal_incident_observations"], 0)
+
     def test_class_override_can_require_stronger_confirmation(self) -> None:
         samples = [
             sample(-0.5, [detected("robot_lawnmower", 0.84, (100, 100, 140, 140))]),
@@ -190,6 +226,55 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         self.assertEqual(detector.calls, 2)
         self.assertGreaterEqual(calls_by_offset[-0.5], 2)
+        self.assertTrue(objects[0]["incident_eligible"])
+        self.assertEqual(objects[0]["temporal_observations"], 2)
+
+    def test_detector_retries_when_sample_count_is_met_without_object_consensus(self) -> None:
+        event_epoch = 1_800_000_000.0
+        calls_by_offset: dict[float, int] = {}
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                offset = round(epoch - event_epoch, 1)
+                calls_by_offset[offset] = calls_by_offset.get(offset, 0) + 1
+                if offset in {-1.0, -0.5} or (offset == 0.0 and calls_by_offset[offset] >= 2):
+                    return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+                return None
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                return [detected("car", 0.85, (2, 2, 12, 12))] if int(frame[0, 0, 0]) != 2 else []
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+
+        def read_frame(path, _offset, **_kwargs):
+            value = 2 if "-0.5" in str(path) else 1
+            return np.full((20, 20, 3), value, dtype=np.uint8)
+
+        with (
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.1),
+            patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.001),
+            patch.object(backend, "_read_recorded_frame", side_effect=read_frame),
+        ):
+            _frame, objects, _path = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertGreaterEqual(calls_by_offset[0.0], 2)
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
 

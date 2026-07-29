@@ -1998,6 +1998,9 @@ def _audit_ai_context(
                     "temporal_track_observations": entry.get(
                         "temporal_track_observations"
                     ),
+                    "temporal_incident_observations": entry.get(
+                        "temporal_incident_observations"
+                    ),
                     "temporal_required_observations": entry.get(
                         "temporal_required_observations"
                     ),
@@ -4370,6 +4373,7 @@ def _incident_event_payload(event: dict) -> dict:
                 "temporal_sample_offset_seconds",
                 "temporal_observations",
                 "temporal_track_observations",
+                "temporal_incident_observations",
                 "temporal_required_observations",
                 "temporal_samples",
                 "temporal_peak_confidence",

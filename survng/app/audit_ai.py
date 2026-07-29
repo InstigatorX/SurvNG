@@ -181,7 +181,8 @@ Check related_prior_event before claiming an incident was missed. Never claim ob
 the motion frame width: frame_width describes the adaptive motion-analysis copy, not detector input.
 Event object labels use spatially associated temporal consensus over available high-resolution
 recording samples. temporal_observations is the winning label vote count,
-temporal_track_observations includes alternate labels for the same physical object, and event
+temporal_track_observations includes alternate labels for the same physical object,
+temporal_incident_observations counts winning-label frames admitted by full-frame or zone policy, and event
 confidence is the median winning-label confidence rather than the single highest score. Compare
 temporal_observations with temporal_required_observations before characterizing a classification.
 
