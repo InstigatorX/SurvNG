@@ -659,6 +659,27 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(removed, 1)
 
+    def test_full_health_does_not_mark_rows_added_during_storage_walk_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            new_segment = Path(tmpdir) / "new-segment.mp4"
+            new_segment.write_bytes(b"recording")
+
+            def discover(**_kwargs):
+                recorder._store_recording_rows(
+                    "front-door",
+                    "main",
+                    [self._row(new_segment, 200.0)],
+                )
+                # Simulate a directory that the long walk visited before this
+                # segment was finalized and indexed.
+                return {}
+
+            with patch.object(recorder, "_recording_files_by_source", side_effect=discover):
+                health = recorder.storage_index_health(full=True)
+
+        self.assertEqual(health["missing_index_files"], [])
+
     def test_index_can_be_stored_outside_recording_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as index:
             recorder = Recorder(

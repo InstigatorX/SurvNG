@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from survng.app.events import EventStore
 from survng.app.faces import FaceStore
@@ -74,12 +75,17 @@ class StorageReconcilerTest(unittest.TestCase):
             self.assertEqual(summary["missing_index_samples"], ["recordings/gate/main/2026-01-01/00/20260101-000010.mp4"])
             self.assertEqual(summary["unindexed_samples"], ["recordings/gate/main/2026-01-01/00/20260101-000000.mp4"])
 
-            repaired = reconciler.run(apply=True, full=True)
+            with patch.object(recorder, "storage_index_health", wraps=recorder.storage_index_health) as health:
+                repaired = reconciler.run(apply=True, full=True)
+            self.assertEqual(health.call_count, 1)
             self.assertEqual(repaired["repairs"]["stale_index_rows_removed"], 1)
             self.assertEqual(repaired["repairs"]["recordings_reindexed"], 1)
             self.assertEqual(repaired["repairs"]["event_media_references_cleared"], 2)
             self.assertEqual(repaired["repairs"]["motion_sample_references_cleared"], 1)
             self.assertEqual(repaired["repairs"]["face_media_references_cleared"], 1)
+            self.assertEqual(repaired["summary"]["missing_index_rows"], 0)
+            self.assertEqual(repaired["summary"]["unindexed_recording_files"], 0)
+            self.assertTrue(repaired["summary"]["recording_snapshot_reused"])
             with sqlite3.connect(events.db_path) as connection:
                 row = connection.execute(
                     "SELECT snapshot_path, recording_path FROM events WHERE id = ?", (event_id,)

@@ -47,15 +47,23 @@ class StorageReconciler:
             "motion_sample_references_cleared": 0,
             "face_media_references_cleared": 0,
         }
+        repaired_recording_health: dict[str, object] | None = None
         if apply:
             self._report("Reconciling recording index", 0, None)
+            recording_health = self.recorder.storage_index_health(
+                full=full,
+                cancel_event=self.cancel_event,
+                progress=self._report,
+            )
             repairs.update(self.recorder.reconcile_storage_index(
                 full=full,
                 cancel_event=self.cancel_event,
                 progress=self._report,
+                health=recording_health,
             ))
+            repaired_recording_health = self._repaired_recording_health(recording_health, repairs)
             repairs.update(self._clear_missing_references(full=full))
-        summary = self._scan(full=full)
+        summary = self._scan(full=full, recording_health=repaired_recording_health)
         return {
             "mode": "repair" if apply else "scan",
             "full": full,
@@ -63,10 +71,29 @@ class StorageReconciler:
             "summary": summary,
             "repairs": repairs,
             "note": (
-                "Repairs completed. Incident, motion-audit, and face history was preserved."
+                "Repairs completed from one recording-library snapshot. Recordings created or removed "
+                "after that snapshot are reconciled continuously. Incident, motion-audit, and face "
+                "history was preserved."
                 if apply
                 else "No changes were made. Run Repair to reconcile the local databases."
             ),
+        }
+
+    @staticmethod
+    def _repaired_recording_health(
+        health: dict[str, object],
+        repairs: dict[str, int],
+    ) -> dict[str, object]:
+        """Describe the reconciled state of the exact storage snapshot used by repair."""
+        stale_count = len(health.get("missing_index_files", []))
+        indexed_count = int(health.get("indexed_recordings", 0) or 0)
+        added_count = int(repairs.get("recordings_reindexed", 0) or 0)
+        return {
+            **health,
+            "indexed_recordings": max(0, indexed_count - stale_count + added_count),
+            "missing_index_files": [],
+            "unindexed_files": [],
+            "recording_snapshot_reused": True,
         }
 
     def _raise_if_cancelled(self) -> None:
@@ -147,16 +174,29 @@ class StorageReconciler:
                     })
         return references, known_paths
 
-    def _scan(self, *, full: bool) -> dict[str, object]:
+    def _scan(
+        self,
+        *,
+        full: bool,
+        recording_health: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         reference_limit = None if full else QUICK_MEDIA_REFERENCE_LIMIT
         self._report("Reading media references", 0, reference_limit)
         all_references, known_paths = self._media_references(limit=reference_limit)
-        self._report("Checking recording index", 0, None)
-        recording_health = self.recorder.storage_index_health(
-            full=full,
-            cancel_event=self.cancel_event,
-            progress=self._report,
-        )
+        if recording_health is None:
+            self._report("Checking recording index", 0, None)
+            recording_health = self.recorder.storage_index_health(
+                full=full,
+                cancel_event=self.cancel_event,
+                progress=self._report,
+            )
+        else:
+            self._report(
+                "Using repaired recording snapshot",
+                int(recording_health.get("recording_files", 0) or 0),
+                int(recording_health.get("recording_files", 0) or 0),
+            )
+        recording_health = dict(recording_health)
         files_by_source = recording_health.pop("files_by_source", {})
         recording_paths = {
             self._path_key(path)

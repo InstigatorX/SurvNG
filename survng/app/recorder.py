@@ -987,6 +987,15 @@ class Recorder:
     ) -> dict[str, object]:
         """Compare recording files with the index using bounded or exhaustive discovery."""
         if full:
+            # Freeze the index side before walking remote storage. A full NFS walk
+            # can take hours while the live index keeps receiving new segments.
+            # Reading it afterward would misclassify those new rows as files that
+            # disappeared merely because their directory was visited earlier.
+            with self._index_connection() as connection:
+                indexed_total = int(connection.execute("SELECT count(*) FROM recordings").fetchone()[0])
+                indexed_rows = connection.execute(
+                    "SELECT path, camera_id, source FROM recordings"
+                ).fetchall()
             files_by_source = self._recording_files_by_source(cancel_event=cancel_event, progress=progress)
         else:
             files_by_source = self._recent_recording_files_by_source(
@@ -994,6 +1003,12 @@ class Recorder:
                 cancel_event=cancel_event,
                 progress=progress,
             )
+            with self._index_connection() as connection:
+                indexed_total = int(connection.execute("SELECT count(*) FROM recordings").fetchone()[0])
+                indexed_rows = connection.execute(
+                    "SELECT path, camera_id, source FROM recordings ORDER BY start_epoch DESC LIMIT ?",
+                    (max(1, quick_index_limit),),
+                ).fetchall()
         all_disk_paths = {
             str(path)
             for files in files_by_source.values()
@@ -1005,21 +1020,11 @@ class Recorder:
             for path in files
             if not self._recording_file_may_be_active(path)
         }
-        with self._index_connection() as connection:
-            indexed_total = int(connection.execute("SELECT count(*) FROM recordings").fetchone()[0])
-            if full:
-                indexed_rows = connection.execute(
-                    "SELECT path, camera_id, source FROM recordings"
-                ).fetchall()
-            else:
-                indexed_rows = connection.execute(
-                    "SELECT path, camera_id, source FROM recordings ORDER BY start_epoch DESC LIMIT ?",
-                    (max(1, quick_index_limit),),
-                ).fetchall()
         indexed_sample = {str(row["path"]) for row in indexed_rows}
         if full:
             stale = sorted(indexed_sample - all_disk_paths)
-            indexed_for_discovery = indexed_sample
+            discovery_candidates = stable_disk_paths - indexed_sample
+            indexed_for_discovery = indexed_sample | self._indexed_path_subset(discovery_candidates)
         else:
             stale = []
             for index, path in enumerate(indexed_sample, start=1):
@@ -1048,18 +1053,26 @@ class Recorder:
         full: bool = False,
         cancel_event: threading.Event | None = None,
         progress: Callable[[str, int, int | None], None] | None = None,
+        health: dict[str, object] | None = None,
     ) -> dict[str, int]:
-        """Synchronize the local index with stable files found in recording storage."""
-        health = self.storage_index_health(full=full, cancel_event=cancel_event, progress=progress)
-        files_by_source = health.pop("files_by_source")
+        """Synchronize the local index with a recording-storage snapshot.
+
+        Callers that already collected health may supply it so a full repair does
+        not walk a large remote recording library a second time.
+        """
+        if health is None:
+            health = self.storage_index_health(full=full, cancel_event=cancel_event, progress=progress)
+        files_by_source = health.get("files_by_source", {})
+        if not isinstance(files_by_source, dict):
+            raise ValueError("recording health is missing its file snapshot")
         added = 0
-        unindexed = set(health["unindexed_files"])
+        unindexed = set(health.get("unindexed_files", []))
         for (camera_id, source), files in files_by_source.items():
             rows = self._recording_rows_for_files(camera_id, source, files)
             if rows:
                 self._store_recording_rows(camera_id, source, rows)
                 added += sum(1 for row in rows if str(row["path"]) in unindexed)
-        stale = list(health["missing_index_files"])
+        stale = list(health.get("missing_index_files", []))
         self._delete_index_paths(stale)
         return {"recordings_reindexed": added, "stale_index_rows_removed": len(stale)}
 
