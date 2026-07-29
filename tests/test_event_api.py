@@ -440,9 +440,18 @@ class EventApiSerializationTest(unittest.TestCase):
 
         async def messages() -> list[str]:
             manager = Manager()
+
+            async def inline_to_thread(function, *args, **kwargs):
+                # This test owns a synthetic manager and verifies the snapshot
+                # cursor boundary, not asyncio's executor. Running inline keeps
+                # the race deterministic and avoids leaking an executor thread
+                # when an isolated test runner is interrupted.
+                return function(*args, **kwargs)
+
             with (
                 patch.object(main, "manager", manager),
                 patch.object(main, "system_status", return_value={}),
+                patch.object(main.asyncio, "to_thread", new=inline_to_thread),
             ):
                 response = await main.application_event_stream(Request())
                 iterator = response.body_iterator

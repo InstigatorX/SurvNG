@@ -192,6 +192,18 @@ Pages:
 - `/recordings` continuous recording review with per-camera navigation
 - `/config` camera inventory, add/clone/edit workflow, and ONVIF/Reolink capability detection
 
+## Testing
+
+Run tests through the bounded wrapper so an interrupted or wedged native worker
+cannot remain resident after a review campaign:
+
+```bash
+scripts/run-tests.sh -q
+```
+
+The complete suite has a three-minute default limit. Override it for an
+intentional long-running campaign with `SURVNG_TEST_TIMEOUT_SECONDS`.
+
 ## Reolink Baichuan Video
 
 SurvNG can read Reolink Baichuan video directly from the camera on port `9000`.
