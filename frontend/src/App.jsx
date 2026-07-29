@@ -155,14 +155,20 @@ const ShakaVideo = forwardRef(function ShakaVideo({
   bufferingGoal = 20,
   autoPlay = false,
   muted = false,
+  controls = false,
   onReady,
   onError,
   ...videoProps
 }, forwardedRef) {
   const videoRef = useRef(null);
   const [runtime, setRuntime] = useState(null);
+  const [nativeControlsVisible, setNativeControlsVisible] = useState(false);
   const callbacksRef = useRef({ onReady, onError });
   useImperativeHandle(forwardedRef, () => videoRef.current);
+
+  useEffect(() => {
+    setNativeControlsVisible(false);
+  }, [controls, src]);
 
   useEffect(() => {
     callbacksRef.current = { onReady, onError };
@@ -219,7 +225,23 @@ const ShakaVideo = forwardRef(function ShakaVideo({
     };
   }, [runtime, src, mimeType, startTime]);
 
-  return <video ref={videoRef} muted={muted} {...videoProps} />;
+  const { onPointerDown, onFocus, ...restVideoProps } = videoProps;
+  return (
+    <video
+      ref={videoRef}
+      muted={muted}
+      {...restVideoProps}
+      controls={Boolean(controls && nativeControlsVisible)}
+      onPointerDown={(event) => {
+        if (controls) setNativeControlsVisible(true);
+        onPointerDown?.(event);
+      }}
+      onFocus={(event) => {
+        if (controls) setNativeControlsVisible(true);
+        onFocus?.(event);
+      }}
+    />
+  );
 });
 
 function RecordingFallback({ cameraId, source, timeZone, muted, controls, onReady, onError }) {
@@ -286,12 +308,18 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   const [stage, setStage] = useState(() => initialLiveTransport(cameraId, source));
   const [deliverySource, setDeliverySource] = useState(source);
   const [snapshotToken, setSnapshotToken] = useState(() => Date.now());
+  const [nativeControlsVisible, setNativeControlsVisible] = useState(false);
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
     setStage(initialLiveTransport(cameraId, source));
     setDeliverySource(source);
+    setNativeControlsVisible(false);
   }, [cameraId, source]);
+
+  useEffect(() => {
+    setNativeControlsVisible(false);
+  }, [controls, stage]);
 
   useEffect(() => {
     onStageChange?.(stage, deliverySource);
@@ -614,10 +642,12 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           ref={videoRef}
           className="live-video"
           muted={muted}
-          controls={controls}
+          controls={Boolean(controls && nativeControlsVisible)}
           autoPlay
           playsInline
           disableRemotePlayback
+          onPointerDown={() => controls && setNativeControlsVisible(true)}
+          onFocus={() => controls && setNativeControlsVisible(true)}
           onLoadedData={(event) => {
             event.currentTarget.play().catch(() => {});
             onReady?.(event.currentTarget, stage);
@@ -1456,14 +1486,12 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
   const mediaRef = useRef(null);
   const [aspect, setAspect] = useState("16 / 9");
   const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
-  const [showControls, setShowControls] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
   const [transport, setTransport] = useState("webrtc");
   const activeSource = source === "main" ? "main" : "live";
   const [deliveredSource, setDeliveredSource] = useState(activeSource);
 
   useEffect(() => {
-    setShowControls(false);
     setMediaReady(false);
     setTransport("webrtc");
     setDeliveredSource(activeSource);
@@ -1503,12 +1531,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             <X size={18} />
           </button>
         </div>
-        <div
-          className="live-overlay-media"
-          onClick={() => {
-            if (!showControls) setShowControls(true);
-          }}
-        >
+        <div className="live-overlay-media">
           {!mediaReady ? (
             <div className="live-media-status" role="status" aria-live="polite">
               <RefreshCcw className="spin" size={20} />
@@ -1521,7 +1544,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
             source={activeSource}
             timeZone={timeZone}
             muted
-            controls={showControls}
+            controls
             onStageChange={(nextTransport, nextSource) => {
               setTransport(nextTransport);
               setDeliveredSource(nextSource);
