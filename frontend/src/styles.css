@@ -3851,13 +3851,18 @@ section.detection-settings-card {
   background: var(--video-bg);
 }
 
-.zone-canvas img {
+.zone-canvas-media {
+  position: relative;
+  width: 100%;
+}
+
+.zone-canvas-media img {
   display: block;
   width: 100%;
   height: auto;
 }
 
-.zone-canvas svg {
+.zone-canvas-media svg {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -3866,7 +3871,7 @@ section.detection-settings-card {
   touch-action: none;
 }
 
-.zone-canvas circle {
+.zone-canvas-media circle {
   cursor: grab;
 }
 

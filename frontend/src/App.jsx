@@ -71,6 +71,7 @@ import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs
 import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { adjacentIncident } from "./incidentNavigation.mjs";
+import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const US_TIME_ZONES = [
@@ -5967,7 +5968,11 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
 
   function addPoint(event) {
     if (!selectedZone || event.target !== event.currentTarget) return;
-    replaceZone(selectedIndex, { points: [...(selectedZone.points || []), pointerPosition(event)] });
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = pointerPosition(event);
+    replaceZone(selectedIndex, {
+      points: insertZonePoint(selectedZone.points, point, { x: rect.width, y: rect.height }),
+    });
   }
 
   function movePoint(event) {
@@ -5989,43 +5994,45 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
       </div>
       <div className="zone-editor-layout">
         <div className="zone-canvas">
-          <img src={snapshotUrl} alt={`${camera.name} zone editor`} />
-          <svg
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
-            onPointerDown={addPoint}
-            onPointerMove={movePoint}
-            onPointerUp={() => setDragPoint(null)}
-            onPointerCancel={() => setDragPoint(null)}
-            aria-label="Zone polygon editor"
-          >
-            {zones.map((zone, zoneIndex) => {
-              const points = (zone.points || []).map((point) => `${point.x * 100},${point.y * 100}`).join(" ");
-              return (
-                <g key={`${zone.name}-${zoneIndex}`} opacity={zone.enabled === false ? 0.35 : 1}>
-                  {zone.points?.length >= 3 ? <polygon points={points} fill={`${zone.color || "#22c55e"}33`} stroke={zone.color || "#22c55e"} strokeWidth="0.55" vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null}
-                  {zone.points?.length === 2 ? <polyline points={points} fill="none" stroke={zone.color || "#22c55e"} strokeWidth="0.55" vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null}
-                  {zoneIndex === selectedIndex ? (zone.points || []).map((point, pointIndex) => (
-                    <circle
-                      key={pointIndex}
-                      cx={point.x * 100}
-                      cy={point.y * 100}
-                      r="0.85"
-                      fill="#fff"
-                      stroke={zone.color || "#22c55e"}
-                      strokeWidth="0.35"
-                      vectorEffect="non-scaling-stroke"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        event.currentTarget.setPointerCapture(event.pointerId);
-                        setDragPoint({ zoneIndex, pointIndex });
-                      }}
-                    />
-                  )) : null}
-                </g>
-              );
-            })}
-          </svg>
+          <div className="zone-canvas-media">
+            <img src={snapshotUrl} alt={`${camera.name} zone editor`} />
+            <svg
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+              onPointerDown={addPoint}
+              onPointerMove={movePoint}
+              onPointerUp={() => setDragPoint(null)}
+              onPointerCancel={() => setDragPoint(null)}
+              aria-label="Zone polygon editor"
+            >
+              {zones.map((zone, zoneIndex) => {
+                const points = (zone.points || []).map((point) => `${point.x * 100},${point.y * 100}`).join(" ");
+                return (
+                  <g key={`${zone.name}-${zoneIndex}`} opacity={zone.enabled === false ? 0.35 : 1}>
+                    {zone.points?.length >= 3 ? <polygon points={points} fill={`${zone.color || "#22c55e"}33`} stroke={zone.color || "#22c55e"} strokeWidth="0.55" vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null}
+                    {zone.points?.length === 2 ? <polyline points={points} fill="none" stroke={zone.color || "#22c55e"} strokeWidth="0.55" vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null}
+                    {zoneIndex === selectedIndex ? (zone.points || []).map((point, pointIndex) => (
+                      <circle
+                        key={pointIndex}
+                        cx={point.x * 100}
+                        cy={point.y * 100}
+                        r="0.85"
+                        fill="#fff"
+                        stroke={zone.color || "#22c55e"}
+                        strokeWidth="0.35"
+                        vectorEffect="non-scaling-stroke"
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          event.currentTarget.setPointerCapture(event.pointerId);
+                          setDragPoint({ zoneIndex, pointIndex });
+                        }}
+                      />
+                    )) : null}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
           {!selectedZone ? <div className="zone-canvas-empty">Add a zone to begin</div> : selectedZone.points?.length < 3 ? <div className="zone-canvas-hint">Click at least three points</div> : null}
         </div>
         <div className="zone-list">

@@ -9,7 +9,8 @@
     "test:recordings-soak": "node tests/recordings-soak.mjs",
     "test:recording-playback": "node tests/recording-playback.mjs",
     "test:object-tracks": "node tests/object-track-replay.mjs",
-    "test:incident-navigation": "node tests/incident-navigation.mjs"
+    "test:incident-navigation": "node tests/incident-navigation.mjs",
+    "test:zone-geometry": "node tests/zone-geometry.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
