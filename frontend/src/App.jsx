@@ -1680,11 +1680,13 @@ function objectBoxes(event, incidentEligibleOnly = false) {
 function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
+  const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}`;
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
   const [frameSize, setFrameSize] = useState(null);
   const [objectFocused, setObjectFocused] = useState(false);
-  const [progressiveReady, setProgressiveReady] = useState(false);
+  const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
+  const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
   const renderedImage = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
     const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
@@ -1706,10 +1708,6 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   }, [event?.id, event?.snapshot_path]);
 
   useEffect(() => {
-    setProgressiveReady(false);
-  }, [event?.id, fullResolution]);
-
-  useEffect(() => {
     const frame = frameRef.current;
     if (!frame) return undefined;
     function updateFrameSize() {
@@ -1729,6 +1727,15 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
       setImageSize(size);
       onImageSize?.(size);
     }
+  }
+
+  function markProgressiveReady(stage, loadEvent) {
+    onImageLoad(loadEvent);
+    setProgressiveState((current) => ({
+      ...(current.key === progressiveImageKey ? current : { key: progressiveImageKey, base: false, intermediate: false, full: false }),
+      key: progressiveImageKey,
+      [stage]: true,
+    }));
   }
 
   const renderedBoxes = useMemo(() => {
@@ -1799,18 +1806,35 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
         {event?.snapshot_path && eventSnapshotUrl(event) ? (
           progressive ? (
             <div className="snapshot-progressive-stack">
-              <img src={eventThumbnailUrl(event)} alt={alt} decoding="async" onLoad={onImageLoad} />
               <img
-                className={`snapshot-progressive-image ${progressiveReady ? "ready" : ""}`}
-                src={fullResolution ? eventSnapshotUrl(event) : eventThumbnailUrl(event, 1280, 86)}
-                alt=""
-                aria-hidden="true"
+                key={`${progressiveImageKey}-base`}
+                src={eventThumbnailUrl(event)}
+                alt={alt}
                 decoding="async"
-                onLoad={(loadEvent) => {
-                  onImageLoad(loadEvent);
-                  setProgressiveReady(true);
-                }}
+                onLoad={(loadEvent) => markProgressiveReady("base", loadEvent)}
               />
+              {progressiveReady.base ? (
+                <img
+                  key={`${progressiveImageKey}-intermediate`}
+                  className={`snapshot-progressive-image ${progressiveReady.intermediate ? "ready" : ""}`}
+                  src={eventThumbnailUrl(event, 1280, 86)}
+                  alt=""
+                  aria-hidden="true"
+                  decoding="async"
+                  onLoad={(loadEvent) => markProgressiveReady("intermediate", loadEvent)}
+                />
+              ) : null}
+              {fullResolution && progressiveReady.intermediate ? (
+                <img
+                  key={`${progressiveImageKey}-full`}
+                  className={`snapshot-progressive-image ${progressiveReady.full ? "ready" : ""}`}
+                  src={eventSnapshotUrl(event)}
+                  alt=""
+                  aria-hidden="true"
+                  decoding="async"
+                  onLoad={(loadEvent) => markProgressiveReady("full", loadEvent)}
+                />
+              ) : null}
             </div>
           ) : <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
@@ -2115,13 +2139,17 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
   );
 }
 
-function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange }) {
+function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
   const [selectedPreview, setSelectedPreview] = useState(null);
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
+  const [snapshotZoom, setSnapshotZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const previewRef = useRef(null);
+  const snapshotZoomRef = useRef(snapshotZoom);
+  const panGestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false });
   const preview = selectedPreview || incident;
   const trackingPreview = incidentTrackingSource(preview, incident) || preview;
   const labels = incidentLabels(incident);
@@ -2153,6 +2181,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   useEffect(() => {
     setInlineVideoActive(false);
+    resetSnapshotZoom();
   }, [preview.id, preview.created_at]);
 
   useEffect(() => {
@@ -2178,8 +2207,86 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   function openPreview(pointerEvent) {
     pointerEvent.stopPropagation();
+    if (panGestureRef.current.moved) {
+      panGestureRef.current.moved = false;
+      return;
+    }
+    if (desktopWorkspace && expanded && snapshotZoomRef.current.scale > 1) return;
     if (expanded) setInlineVideoActive(true);
     else toggle();
+  }
+
+  function clampSnapshotZoom(nextZoom) {
+    const scale = Math.max(1, Math.min(6, nextZoom.scale));
+    if (scale === 1) return { scale: 1, x: 0, y: 0 };
+    const box = previewRef.current?.getBoundingClientRect();
+    const limitX = box ? box.width * (scale - 1) / 2 : 0;
+    const limitY = box ? box.height * (scale - 1) / 2 : 0;
+    return {
+      scale,
+      x: Math.max(-limitX, Math.min(limitX, nextZoom.x || 0)),
+      y: Math.max(-limitY, Math.min(limitY, nextZoom.y || 0)),
+    };
+  }
+
+  function updateSnapshotZoom(updater) {
+    setSnapshotZoom((current) => {
+      const candidate = typeof updater === "function" ? updater(current) : updater;
+      const next = clampSnapshotZoom(candidate);
+      snapshotZoomRef.current = next;
+      return next;
+    });
+  }
+
+  function resetSnapshotZoom() {
+    const reset = { scale: 1, x: 0, y: 0 };
+    snapshotZoomRef.current = reset;
+    setSnapshotZoom(reset);
+  }
+
+  function onPreviewWheel(wheelEvent) {
+    if (!desktopWorkspace || !expanded) return;
+    wheelEvent.preventDefault();
+    const box = previewRef.current?.getBoundingClientRect();
+    if (!box) return;
+    const delta = Math.max(-120, Math.min(120, wheelEvent.deltaY));
+    const factor = Math.exp(-delta * 0.0017);
+    setInlineVideoActive(false);
+    updateSnapshotZoom((current) => {
+      const nextScale = Math.max(1, Math.min(6, current.scale * factor));
+      if (nextScale === 1) return { scale: 1, x: 0, y: 0 };
+      const anchorX = wheelEvent.clientX - box.left - box.width / 2;
+      const anchorY = wheelEvent.clientY - box.top - box.height / 2;
+      const scaleRatio = nextScale / current.scale;
+      return {
+        scale: nextScale,
+        x: anchorX - (anchorX - current.x) * scaleRatio,
+        y: anchorY - (anchorY - current.y) * scaleRatio,
+      };
+    });
+  }
+
+  function onPreviewPointerDown(pointerEvent) {
+    if (!desktopWorkspace || !expanded || pointerEvent.pointerType === "touch" || snapshotZoomRef.current.scale <= 1) return;
+    pointerEvent.preventDefault();
+    pointerEvent.currentTarget.setPointerCapture(pointerEvent.pointerId);
+    const current = snapshotZoomRef.current;
+    panGestureRef.current = { pointerId: pointerEvent.pointerId, startX: pointerEvent.clientX, startY: pointerEvent.clientY, panX: current.x, panY: current.y, moved: false };
+  }
+
+  function onPreviewPointerMove(pointerEvent) {
+    const gesture = panGestureRef.current;
+    if (gesture.pointerId !== pointerEvent.pointerId || snapshotZoomRef.current.scale <= 1) return;
+    pointerEvent.preventDefault();
+    const dx = pointerEvent.clientX - gesture.startX;
+    const dy = pointerEvent.clientY - gesture.startY;
+    if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
+    updateSnapshotZoom({ scale: snapshotZoomRef.current.scale, x: gesture.panX + dx, y: gesture.panY + dy });
+  }
+
+  function onPreviewPointerUp(pointerEvent) {
+    if (panGestureRef.current.pointerId !== pointerEvent.pointerId) return;
+    panGestureRef.current.pointerId = null;
   }
 
   function openOverlay(pointerEvent) {
@@ -2206,24 +2313,48 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
       onKeyDown={onKey}
       title={`${incident.camera_id} ${timeText}`}
     >
-      <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Play selected event video" : "Expand incident"}>
+      <div
+        ref={previewRef}
+        className={`incident-preview ${desktopWorkspace && expanded ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
+        onClick={openPreview}
+        onDoubleClick={(pointerEvent) => {
+          if (!desktopWorkspace || !expanded) return;
+          pointerEvent.preventDefault();
+          pointerEvent.stopPropagation();
+          resetSnapshotZoom();
+        }}
+        onWheel={onPreviewWheel}
+        onPointerDown={onPreviewPointerDown}
+        onPointerMove={onPreviewPointerMove}
+        onPointerUp={onPreviewPointerUp}
+        onPointerCancel={onPreviewPointerUp}
+        aria-label={expanded ? "Play selected event video" : "Expand incident"}
+        title={desktopWorkspace && expanded ? (snapshotZoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll to zoom. Click to play event video.") : undefined}
+      >
         <SnapshotImage
           event={expanded ? trackingPreview : preview}
           alt="incident snapshot"
+          layerStyle={desktopWorkspace && expanded ? { transform: `translate3d(${snapshotZoom.x}px, ${snapshotZoom.y}px, 0) scale(${snapshotZoom.scale})` } : null}
           showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
           showTracking={false}
           incidentEligibleOnly={!expanded}
-          thumbnail
+          thumbnail={!desktopWorkspace || !expanded}
+          onImageSize={expanded && onImageSize ? (size) => onImageSize({
+            ...size,
+            eventId: Number(trackingPreview.representative_event_id || trackingPreview.id),
+          }) : undefined}
         >
-          <div className="incident-snapshot-hud">
-            <div className="incident-snapshot-main">
-              <strong>{incident.camera_id}</strong>
-              <time>{expanded ? previewTimeText : timeText}</time>
+          {!desktopWorkspace || !expanded ? (
+            <div className="incident-snapshot-hud">
+              <div className="incident-snapshot-main">
+                <strong>{incident.camera_id}</strong>
+                <time>{expanded ? previewTimeText : timeText}</time>
+              </div>
+              <div className="pill-row compact incident-labels">
+                {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
+              </div>
             </div>
-            <div className="pill-row compact incident-labels">
-              {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
-            </div>
-          </div>
+          ) : null}
           <IncidentClipLayer
             event={incident}
             trackingEvent={trackingPreview}
@@ -2233,7 +2364,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
             onEnded={() => setInlineVideoActive(false)}
           />
           {desktopWorkspace
-            ? <span className="event-count" aria-label={countText}>{countText}</span>
+            ? (!expanded ? <span className="event-count" aria-label={countText}>{countText}</span> : null)
             : <button type="button" className="event-count" onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label="Open event overlay" title="Open event overlay">{countText}</button>}
         </SnapshotImage>
       </div>
@@ -2281,7 +2412,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   );
 }
 
-function IncidentInspector({ incident, faceEvent, appConfig, timeZone, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen }) {
+function IncidentInspector({ incident, faceEvent, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen }) {
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
@@ -2356,6 +2487,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, analysisM
           <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
           <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
           <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
+          <div><dt>Loaded image</dt><dd>{imageSize?.width && imageSize?.height ? `${imageSize.width} × ${imageSize.height} px` : "—"}</dd></div>
         </dl>
       </section>
       <div className="incident-inspector-actions">
@@ -3309,6 +3441,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const [desktopAnalysisMode, setDesktopAnalysisMode] = useStoredState("survng.incidentDesktopAnalysis.v1", "clean");
   const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
   const [desktopReplayRequest, setDesktopReplayRequest] = useState(0);
+  const [focusedImageSize, setFocusedImageSize] = useState(null);
   const mobileView = isMobileViewport();
   const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
   const incidentsPerPage = mobileView ? 12 : incidentThumbnailPageSize({ ...incidentRailSize, density: incidentDensity });
@@ -3323,6 +3456,9 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
     || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
     || focusedIncident;
+  const focusedSnapshotEvent = incidentTrackingSource(focusedEvent, focusedIncident) || focusedEvent;
+  const focusedSnapshotEventId = Number(focusedSnapshotEvent?.representative_event_id || focusedSnapshotEvent?.id);
+  const focusedLoadedImageSize = Number(focusedImageSize?.eventId) === focusedSnapshotEventId ? focusedImageSize : null;
   const galleryIncidents = visibleIncidents;
   const incidentPageCount = Math.max(1, Math.ceil(incidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
@@ -3580,11 +3716,11 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} /> : <div className="empty-state">No incidents match the current filters.</div>}
+                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
               </div>
             </section>
 
-            <IncidentInspector incident={focusedIncident} faceEvent={focusedEvent} appConfig={appConfig} timeZone={timeZone} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} />
+            <IncidentInspector incident={focusedIncident} faceEvent={focusedEvent} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}

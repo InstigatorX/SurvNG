@@ -1083,6 +1083,7 @@ p {
 
 .incident-inspector-actions {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   padding-top: 10px;
 }
@@ -1955,6 +1956,23 @@ button.status-pill.hud-toggle:disabled {
 .incident-preview:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+.incident-preview.zoomable {
+  cursor: zoom-in;
+  user-select: none;
+}
+
+.incident-preview.zoomable.zoomed {
+  cursor: grab;
+}
+
+.incident-preview.zoomable.zoomed:active {
+  cursor: grabbing;
+}
+
+.incident-desktop-focus .snapshot-layer {
+  transition: none;
 }
 
 .snapshot-frame {
