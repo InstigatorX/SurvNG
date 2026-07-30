@@ -663,6 +663,60 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(main._filter_incidents_by_event_type(incidents, "object"), [object_incident])
         self.assertEqual(main._filter_incidents_by_event_type(incidents, "all"), incidents)
 
+    def test_recent_incident_feed_filters_before_applying_page_limit(self) -> None:
+        rows = [
+            {
+                "id": 4,
+                "camera_id": "gate",
+                "kind": "motion",
+                "objects_json": "[]",
+                "created_at": "2026-07-30T14:03:00+00:00",
+            },
+            {
+                "id": 3,
+                "camera_id": "gate",
+                "kind": "motion",
+                "objects_json": "[]",
+                "created_at": "2026-07-30T14:02:00+00:00",
+            },
+            {
+                "id": 2,
+                "camera_id": "gate",
+                "kind": "object",
+                "objects_json": json.dumps([{"label": "car", "confidence": 0.9}]),
+                "created_at": "2026-07-29T14:01:00+00:00",
+            },
+            {
+                "id": 1,
+                "camera_id": "foyer",
+                "kind": "object",
+                "objects_json": json.dumps([{"label": "person", "confidence": 0.9}]),
+                "created_at": "2026-07-28T14:00:00+00:00",
+            },
+        ]
+        fake_manager = SimpleNamespace(
+            events=SimpleNamespace(recent_compact=lambda *_args, **_kwargs: rows)
+        )
+
+        with patch.object(main, "manager", fake_manager):
+            first, first_has_more, _ = main._recent_filtered_incident_summaries(
+                limit=1,
+                offset=0,
+                gap_seconds=45,
+                event_type="object",
+            )
+            second, second_has_more, _ = main._recent_filtered_incident_summaries(
+                limit=1,
+                offset=1,
+                gap_seconds=45,
+                event_type="object",
+            )
+
+        self.assertEqual(first[0]["labels"], ["car"])
+        self.assertTrue(first_has_more)
+        self.assertEqual(second[0]["labels"], ["person"])
+        self.assertFalse(second_has_more)
+
     def test_event_row_tolerates_malformed_legacy_object_entries(self) -> None:
         row = main._event_row({
             "id": 1,

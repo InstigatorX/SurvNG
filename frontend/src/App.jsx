@@ -71,7 +71,7 @@ import {
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, incidentThumbnailPageSize, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -1198,43 +1198,24 @@ function StatCard({ icon, label, value, tone = "default" }) {
   );
 }
 
-function usePollingData(includeIncidents = true) {
+function usePollingData() {
   const [cameras, setCameras] = useState([]);
-  const [incidents, setIncidents] = useState([]);
   const [appConfig, setAppConfig] = useState(null);
   const [loading, setLoading] = useState(true);
-  const incidentRefreshTimer = useRef(null);
   const loadSequence = useRef(0);
-  const incidentSequence = useRef(0);
-
-  async function loadIncidents() {
-    if (!includeIncidents) return;
-    const sequence = ++incidentSequence.current;
-    try {
-      const response = await fetch("/api/incidents?limit=120&gap_seconds=45");
-      if (!response.ok) return;
-      const payload = await response.json();
-      if (sequence === incidentSequence.current && Array.isArray(payload)) setIncidents(payload);
-    } catch {
-      // Preserve the last known incidents and retry on the next refresh.
-    }
-  }
 
   async function load() {
     const sequence = ++loadSequence.current;
     try {
-      const [cameraResponse, incidentResponse, configResponse] = await Promise.all([
+      const [cameraResponse, configResponse] = await Promise.all([
         fetch("/api/cameras"),
-        includeIncidents ? fetch("/api/incidents?limit=120&gap_seconds=45") : Promise.resolve(null),
         fetch("/api/config"),
       ]);
       if (!cameraResponse.ok) throw new Error(`Camera status failed (${cameraResponse.status})`);
       const cameraPayload = await cameraResponse.json();
-      const incidentPayload = incidentResponse?.ok ? await incidentResponse.json() : null;
       const configPayload = configResponse.ok ? await configResponse.json() : null;
       if (sequence !== loadSequence.current) return;
       if (Array.isArray(cameraPayload)) setCameras(cameraPayload);
-      if (Array.isArray(incidentPayload)) setIncidents(incidentPayload);
       if (configPayload) setAppConfig(configPayload);
     } catch {
       // SSE updates may still populate the page; periodic polling retries.
@@ -1255,9 +1236,6 @@ function usePollingData(includeIncidents = true) {
         next[index] = data;
         return next;
       });
-    } else if (type === "incident" && includeIncidents) {
-      window.clearTimeout(incidentRefreshTimer.current);
-      incidentRefreshTimer.current = window.setTimeout(loadIncidents, 250);
     }
   });
 
@@ -1266,13 +1244,11 @@ function usePollingData(includeIncidents = true) {
     const timer = window.setInterval(load, 60_000);
     return () => {
       loadSequence.current += 1;
-      incidentSequence.current += 1;
       window.clearInterval(timer);
-      window.clearTimeout(incidentRefreshTimer.current);
     };
-  }, [includeIncidents]);
+  }, []);
 
-  return { cameras, incidents, appConfig, loading, refresh: load };
+  return { cameras, appConfig, loading, refresh: load };
 }
 
 const STREAM_MODES = ["motion", "mjpeg", "webrtc"];
@@ -3275,7 +3251,7 @@ function refreshedIncidentSelection(selected, incidents) {
 }
 
 function IncidentsPage({ timeZone, onRecordingContextChange }) {
-  const { cameras, appConfig, refresh: refreshBase } = usePollingData(false);
+  const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
@@ -3660,7 +3636,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
 }
 
 function LivePage({ timeZone, onRecordingContextChange }) {
-  const { cameras, incidents, appConfig, refresh } = usePollingData();
+  const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
@@ -3673,13 +3649,27 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
+  const [incidents, setIncidents] = useState([]);
+  const [incidentFacets, setIncidentFacets] = useState({ camera_ids: [], labels: [], zones: [] });
+  const [incidentHasMore, setIncidentHasMore] = useState(false);
+  const [incidentLoading, setIncidentLoading] = useState(true);
+  const [incidentLoadError, setIncidentLoadError] = useState("");
+  const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
+  const incidentEventRefreshTimer = useRef(null);
+  const incidentFeedCacheRef = useRef(null);
+  if (!incidentFeedCacheRef.current) {
+    incidentFeedCacheRef.current = createIncidentPageCache(async (query) => {
+      const response = await fetch(`/api/incidents/feed?${query}`);
+      if (!response.ok) throw new Error("Unable to load recent incidents");
+      return response.json();
+    });
+  }
   const liveIncidentGalleryRef = useRef(null);
   const [liveIncidentGallerySize, setLiveIncidentGallerySize] = useState({ width: 0, height: 0 });
   const liveIncidentGalleryReady = liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0;
   const incidentsPerPage = liveIncidentGalleryReady
     ? incidentThumbnailPageSize({ ...liveIncidentGallerySize, density: "compact", columns: 2, gap: 10, horizontalPadding: 24 })
     : 12;
-  const previousLiveIncidentsPerPageRef = useRef(incidentsPerPage);
   const orderedCameras = useMemo(() => {
     let order = [];
     try {
@@ -3693,33 +3683,15 @@ function LivePage({ timeZone, onRecordingContextChange }) {
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
-  const incidentCameraOptions = useMemo(() => {
-    const ids = Array.from(new Set(incidents.map((incident) => incident.camera_id).filter(Boolean)));
-    return ids.sort((left, right) => (cameraNameById.get(left) || left).localeCompare(cameraNameById.get(right) || right));
-  }, [incidents, cameraNameById]);
-  const incidentObjectOptions = useMemo(() => {
-    const labels = new Set();
-    incidents.forEach((incident) => incidentLabels(incident).forEach((label) => labels.add(label)));
-    return Array.from(labels).sort((left, right) => left.localeCompare(right));
-  }, [incidents]);
-  const incidentZoneOptions = useMemo(() => {
-    const zones = new Set();
-    incidents.forEach((incident) => incidentZones(incident).forEach((zone) => zones.add(zone)));
-    return Array.from(zones).sort((left, right) => left.localeCompare(right));
-  }, [incidents]);
-  const visibleIncidents = useMemo(() => incidents.filter((incident) => {
-    if (eventFilter === "object" && !hasDetectedObjects(incident)) return false;
-    if (eventFilter === "motion" && hasDetectedObjects(incident)) return false;
-    if (incidentCameraFilter !== "all" && incident.camera_id !== incidentCameraFilter) return false;
-    if (incidentObjectFilter !== "all" && !incidentLabels(incident).includes(incidentObjectFilter)) return false;
-    if (incidentZoneFilter !== "all" && !incidentZones(incident).includes(incidentZoneFilter)) return false;
-    return true;
-  }), [incidents, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
+  const incidentCameraOptions = incidentFacets.camera_ids || [];
+  const incidentObjectOptions = incidentFacets.labels || [];
+  const incidentZoneOptions = incidentFacets.zones || [];
+  const visibleIncidents = incidents;
   const focusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
   const galleryIncidents = visibleIncidents;
-  const incidentPageCount = Math.max(1, Math.ceil(galleryIncidents.length / incidentsPerPage));
-  const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
-  const pagedIncidents = galleryIncidents.slice(clampedIncidentPage * incidentsPerPage, (clampedIncidentPage + 1) * incidentsPerPage);
+  const incidentPageCount = incidentPage + (incidentHasMore ? 2 : 1);
+  const clampedIncidentPage = incidentPage;
+  const pagedIncidents = galleryIncidents;
 
   useEffect(() => {
     clearLegacyIncidentFilterStorage();
@@ -3749,20 +3721,81 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   }
 
   useEffect(() => {
+    incidentFeedCacheRef.current.clear();
     setIncidentPage(0);
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
 
   useEffect(() => {
-    const previousPageSize = previousLiveIncidentsPerPageRef.current;
-    if (previousPageSize !== incidentsPerPage) {
-      setIncidentPage((page) => Math.floor(page * previousPageSize / incidentsPerPage));
-      previousLiveIncidentsPerPageRef.current = incidentsPerPage;
-    }
+    incidentFeedCacheRef.current.clear();
+    setIncidentPage(0);
   }, [incidentsPerPage]);
 
+  function refresh() {
+    refreshBase();
+    incidentFeedCacheRef.current.clear();
+    setIncidentRefreshToken((value) => value + 1);
+  }
+
+  useAppEvents(({ type }) => {
+    if (type !== "incident" || incidentPage !== 0 || document.hidden) return;
+    if (incidentEventRefreshTimer.current) return;
+    incidentEventRefreshTimer.current = window.setTimeout(() => {
+      incidentEventRefreshTimer.current = null;
+      incidentFeedCacheRef.current.clear();
+      setIncidentRefreshToken((value) => value + 1);
+    }, 1000);
+  });
+
+  useEffect(() => () => window.clearTimeout(incidentEventRefreshTimer.current), []);
+
   useEffect(() => {
-    if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
-  }, [incidentPage, incidentPageCount]);
+    if (!liveIncidentGalleryReady) return undefined;
+    let cancelled = false;
+    function feedQuery(page) {
+      const query = new URLSearchParams({
+        event_type: eventFilter,
+        limit: String(incidentsPerPage),
+        offset: String(page * incidentsPerPage),
+        gap_seconds: "45",
+      });
+      if (incidentCameraFilter !== "all") query.set("camera_id", incidentCameraFilter);
+      if (incidentObjectFilter !== "all") query.set("object_label", incidentObjectFilter);
+      if (incidentZoneFilter !== "all") query.set("zone", incidentZoneFilter);
+      return query.toString();
+    }
+    async function loadIncidentFeed() {
+      const query = feedQuery(incidentPage);
+      const cachedPayload = incidentFeedCacheRef.current.peek(query);
+      setIncidentLoading(!cachedPayload);
+      setIncidentLoadError("");
+      try {
+        const payload = cachedPayload || await incidentFeedCacheRef.current.load(query);
+        if (cancelled) return;
+        setIncidents(incidentsNewestFirst(payload.items || []));
+        setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
+        setIncidentHasMore(Boolean(payload.has_more));
+        const previousQuery = incidentPage > 0 ? feedQuery(incidentPage - 1) : "";
+        const nextQuery = payload.has_more ? feedQuery(incidentPage + 1) : "";
+        for (const adjacentQuery of [previousQuery, nextQuery].filter(Boolean)) {
+          incidentFeedCacheRef.current.load(adjacentQuery).catch(() => {
+            // A foreground navigation will retry a failed speculative request.
+          });
+        }
+        incidentFeedCacheRef.current.retain([previousQuery, query, nextQuery]);
+      } catch (error) {
+        if (cancelled) return;
+        setIncidents([]);
+        setIncidentHasMore(false);
+        setIncidentLoadError(error.message || "Unable to load recent incidents");
+      } finally {
+        if (!cancelled) setIncidentLoading(false);
+      }
+    }
+    loadIncidentFeed();
+    return () => {
+      cancelled = true;
+    };
+  }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken, liveIncidentGalleryReady]);
 
   useEffect(() => {
     const context = incidentRecordingContext(selectedEvent || focusedIncident);
@@ -3841,7 +3874,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
       </section>
       <section className="bento-card events-zone">
         <div className="section-head compact incident-head">
-          <div><h2>Incidents</h2></div>
+          <div><h2>Recent Incidents</h2></div>
           <div className="incident-head-actions">
             <div className="incident-filter-toggle compact" aria-label="Incident type filter">
               <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
@@ -3888,7 +3921,9 @@ function LivePage({ timeZone, onRecordingContextChange }) {
           </div>
         ) : null}
         <div className="incident-gallery" ref={liveIncidentGalleryRef}>
-          {visibleIncidents.length
+          {incidentLoading ? <div className="empty-state">Loading recent incidents...</div> : null}
+          {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+          {!incidentLoading && !incidentLoadError && visibleIncidents.length
             ? pagedIncidents.map((incident) => (
               <IncidentCard
                 key={incident.id}
@@ -3901,12 +3936,13 @@ function LivePage({ timeZone, onRecordingContextChange }) {
                 onSelect={setSelectedEvent}
               />
             ))
-            : <div className="empty-state">No incidents match the current filters.</div>}
+            : null}
+          {!incidentLoading && !incidentLoadError && !visibleIncidents.length ? <div className="empty-state">No incidents match the current filters.</div> : null}
         </div>
-        <div className={`incident-pager ${galleryIncidents.length > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={galleryIncidents.length <= incidentsPerPage}>
+        <div className={`incident-pager ${incidentPage > 0 || incidentHasMore ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={incidentPage === 0 && !incidentHasMore}>
           <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
           <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-          <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
+          <button type="button" onClick={() => setIncidentPage((page) => page + 1)} disabled={!incidentHasMore}>Next</button>
         </div>
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}

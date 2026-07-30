@@ -2839,12 +2839,65 @@ def incidents(limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS)
     return _incidents_with_faces(_hydrate_incidents(summaries))
 
 
+@app.get("/api/incidents/feed")
+def incident_feed(
+    event_type: str = "object",
+    camera_id: str = "",
+    object_label: str = "",
+    zone: str = "",
+    limit: int = 18,
+    offset: int = 0,
+    gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
+) -> dict:
+    bounded_limit = max(1, min(limit, 100))
+    bounded_offset = max(0, min(offset, 100_000))
+    bounded_gap = max(5, min(gap_seconds, 300))
+    page, has_more, scanned = _recent_filtered_incident_summaries(
+        limit=bounded_limit,
+        offset=bounded_offset,
+        gap_seconds=bounded_gap,
+        event_type=event_type,
+        camera_id=camera_id,
+        object_label=object_label,
+        zone=zone,
+    )
+    facets = {
+        "camera_ids": sorted({str(item.get("camera_id") or "") for item in scanned if item.get("camera_id")}),
+        "labels": sorted({str(label) for item in scanned for label in item.get("labels", []) if label}),
+        "zones": sorted({str(item_zone) for item in scanned for item_zone in item.get("zones", []) if item_zone}),
+    }
+    return {
+        "items": _incidents_with_faces(_hydrate_incidents(page)),
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+        "has_more": has_more,
+        "facets": facets,
+    }
+
+
 def _filter_incidents_by_event_type(incidents: list[dict], event_type: str) -> list[dict]:
     if event_type == "object":
         return [item for item in incidents if item.get("has_objects")]
     if event_type == "motion":
         return [item for item in incidents if not item.get("has_objects")]
     return incidents
+
+
+def _filter_incident_summaries(
+    summaries: list[dict],
+    event_type: str,
+    camera_id: str = "",
+    object_label: str = "",
+    zone: str = "",
+) -> list[dict]:
+    filtered = _filter_incidents_by_event_type(summaries, event_type)
+    if camera_id:
+        filtered = [item for item in filtered if item.get("camera_id") == camera_id]
+    if object_label:
+        filtered = [item for item in filtered if object_label in item.get("labels", [])]
+    if zone:
+        filtered = [item for item in filtered if zone in item.get("zones", [])]
+    return filtered
 
 
 @app.get("/api/incidents/search")
@@ -4557,6 +4610,44 @@ def _recent_incident_summaries(limit: int, gap_seconds: int) -> list[dict]:
         summaries = _incident_rows(compact_rows, gap_seconds)
         if len(summaries) > limit or len(batch) < batch_size:
             return summaries[:limit]
+        oldest = batch[-1]
+        before_created_at = str(oldest["created_at"])
+        before_id = int(oldest["id"])
+
+
+def _recent_filtered_incident_summaries(
+    *,
+    limit: int,
+    offset: int,
+    gap_seconds: int,
+    event_type: str,
+    camera_id: str = "",
+    object_label: str = "",
+    zone: str = "",
+) -> tuple[list[dict], bool, list[dict]]:
+    desired = offset + limit + 1
+    compact_rows: list[dict] = []
+    before_created_at: str | None = None
+    before_id: int | None = None
+    batch_size = 5000
+
+    while True:
+        batch = manager.events.recent_compact(batch_size, before_created_at, before_id)
+        if not batch:
+            summaries = _incident_rows(compact_rows, gap_seconds)
+            filtered = _filter_incident_summaries(
+                summaries, event_type, camera_id, object_label, zone
+            )
+            return filtered[offset:offset + limit], False, summaries
+        compact_rows.extend(_event_row(row) for row in batch)
+        summaries = _incident_rows(compact_rows, gap_seconds)
+        filtered = _filter_incident_summaries(
+            summaries, event_type, camera_id, object_label, zone
+        )
+        if len(filtered) >= desired:
+            return filtered[offset:offset + limit], True, summaries
+        if len(batch) < batch_size:
+            return filtered[offset:offset + limit], False, summaries
         oldest = batch[-1]
         before_created_at = str(oldest["created_at"])
         before_id = int(oldest["id"])

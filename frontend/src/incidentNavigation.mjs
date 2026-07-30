@@ -3,6 +3,68 @@ function sameEventId(left, right) {
   return String(left) === String(right);
 }
 
+function incidentRecencyEpoch(incident) {
+  for (const value of [
+    incident?.last_epoch,
+    incident?.end_at,
+    incident?.start_epoch,
+    incident?.created_epoch,
+    incident?.created_at,
+  ]) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = new Date(value || 0).getTime() / 1000;
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+export function incidentsNewestFirst(incidents) {
+  if (!Array.isArray(incidents)) return [];
+  return incidents
+    .map((incident, index) => ({ incident, index, epoch: incidentRecencyEpoch(incident) }))
+    .sort((left, right) => right.epoch - left.epoch || left.index - right.index)
+    .map(({ incident }) => incident);
+}
+
+export function createIncidentPageCache(loader) {
+  let entries = new Map();
+  return {
+    load(key) {
+      const existing = entries.get(key);
+      if (existing) return existing.pending;
+      const entry = { pending: null, value: undefined };
+      const pending = Promise.resolve()
+        .then(() => loader(key))
+        .then((value) => {
+          entry.value = value;
+          return value;
+        });
+      entry.pending = pending;
+      entries.set(key, entry);
+      pending.catch(() => {
+        if (entries.get(key) === entry) entries.delete(key);
+      });
+      return pending;
+    },
+    peek(key) {
+      return entries.get(key)?.value;
+    },
+    retain(keys) {
+      const retained = new Set(keys.filter(Boolean));
+      for (const key of entries.keys()) {
+        if (!retained.has(key)) entries.delete(key);
+      }
+    },
+    clear() {
+      entries = new Map();
+    },
+    size() {
+      return entries.size;
+    },
+  };
+}
+
 export function incidentIndexForEvent(incidents, event) {
   if (!Array.isArray(incidents) || !event) return -1;
   return incidents.findIndex((incident) => (
