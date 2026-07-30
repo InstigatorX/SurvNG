@@ -687,7 +687,7 @@ p {
 }
 
 .incident-desktop-focus .incident-card {
-  width: min(100%, 1100px);
+  width: 100%;
   margin: 0 auto;
 }
 
