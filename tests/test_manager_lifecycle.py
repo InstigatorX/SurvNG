@@ -34,6 +34,55 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_mqtt_reconfiguration_does_not_touch_camera_workers_or_recorders(self) -> None:
+        manager = manager_with_mocks()
+        previous = manager.mqtt
+        replacement = Mock()
+
+        with patch("survng.app.manager.MqttService", return_value=replacement) as service:
+            manager.reconfigure_mqtt(manager.config.mqtt)
+
+        previous.stop.assert_called_once_with()
+        replacement.start.assert_called_once_with()
+        service.assert_called_once()
+        manager.workers["gate"].stop.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+
+    def test_failed_mqtt_reconfiguration_restores_previous_runtime(self) -> None:
+        manager = manager_with_mocks()
+        previous = manager.mqtt
+        replacement = Mock()
+        replacement.start.side_effect = RuntimeError("mqtt start failed")
+
+        with patch("survng.app.manager.MqttService", return_value=replacement):
+            with self.assertRaisesRegex(RuntimeError, "mqtt start failed"):
+                manager.reconfigure_mqtt(manager.config.mqtt)
+
+        self.assertIs(manager.mqtt, previous)
+        replacement.stop.assert_called_once_with()
+        previous.start.assert_called_once_with()
+        manager.workers["gate"].stop.assert_not_called()
+
+    def test_recorder_reconfiguration_keeps_camera_capture_running(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+        next_config = manager.config.model_copy(update={"recording_segment_seconds": 30})
+
+        manager.reconfigure_recorders(next_config)
+
+        self.assertEqual(manager.recorder.set_camera_enabled.call_args_list, [
+            unittest.mock.call("gate", False),
+            unittest.mock.call("gate", True),
+        ])
+        manager.recorder.reconfigure_runtime.assert_called_once_with(
+            ffmpeg_path=next_config.ffmpeg_path,
+            hardware_acceleration=next_config.hardware_acceleration,
+            segment_seconds=30,
+        )
+        manager.recorder.start.assert_called_once_with(manager.config.cameras[0], "main")
+        manager.workers["gate"].stop.assert_not_called()
+        manager.workers["gate"].start.assert_not_called()
+
     def test_camera_state_fingerprint_includes_trigger_health_changes(self) -> None:
         status = {
             "id": "gate",

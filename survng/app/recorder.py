@@ -985,6 +985,31 @@ class Recorder:
     def request_retention_run(self, *, apply: bool = False) -> dict[str, object]:
         return self.retention.request_run(apply=apply)
 
+    def reconfigure_retention(
+        self,
+        config: RecordingRetentionConfig,
+        cameras: list[CameraConfig],
+    ) -> None:
+        self.retention.reconfigure(config, cameras)
+
+    def reconfigure_runtime(
+        self,
+        *,
+        ffmpeg_path: str,
+        hardware_acceleration: str,
+        segment_seconds: float,
+    ) -> None:
+        """Update recorder process settings after active recorders are stopped."""
+        with self._lock:
+            if self.processes or self._starting:
+                raise RuntimeError("active recorders must be stopped before reconfiguration")
+            self.ffmpeg_path = ffmpeg_path
+            self.hardware_acceleration = hardware_acceleration
+            self.segment_seconds = max(2.0, min(300.0, float(segment_seconds or 10.0)))
+            self._retry_after.clear()
+            self._audio_stream_cache.clear()
+            self._audio_probe_unavailable_hosts.clear()
+
     def _recording_index_loop(self, camera_map: dict[str, CameraConfig]) -> None:
         try:
             self.refresh_recording_index(camera_map, full=False, run_maintenance=False)

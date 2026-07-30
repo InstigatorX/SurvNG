@@ -5631,9 +5631,21 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         body: JSON.stringify(configToSave),
       });
       if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
       const reloaded = await load();
       setSaveNotice(reloaded
-        ? { state: "saved", text: "Saved. Camera workers reloaded." }
+        ? {
+          state: "saved",
+          text: payload.camera_workers_restarted
+            ? "Saved. Camera workers reloaded."
+            : payload.subsystems_restarted?.includes("recorders") && payload.subsystems_restarted?.includes("mqtt")
+              ? "Saved. Recorders restarted and MQTT reconnected; cameras kept running."
+              : payload.subsystems_restarted?.includes("recorders")
+                ? "Saved. Recorder processes restarted; cameras kept running."
+                : payload.subsystems_restarted?.includes("mqtt")
+                  ? "Saved. MQTT reconnected; cameras kept running."
+              : "Saved without interrupting cameras.",
+        }
         : { state: "error", text: "Saved, but the refreshed configuration could not be loaded. Retry this page." });
     } catch (error) {
       setSaveNotice({ state: "error", text: error.message || "Unable to save general settings." });
@@ -5685,7 +5697,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
           : item),
       }));
       setSelectedId(savedCamera.id);
-      setSaveNotice({ state: "saved", text: "Camera settings saved. Workers reloaded." });
+      setSaveNotice({
+        state: "saved",
+        text: payload.camera_workers_restarted
+          ? "Camera settings saved. Camera workers reloaded."
+          : "Camera retention saved without interrupting cameras.",
+      });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
     } catch (error) {

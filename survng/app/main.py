@@ -593,6 +593,150 @@ def reload_manager(
         return effective_config
 
 
+HOT_CONFIG_FIELDS = frozenset({
+    "base_path",
+    "event_clip_before_seconds",
+    "event_clip_after_seconds",
+    "incident_thumbnail_annotations",
+    "recording_cache_max_gb",
+    "recording_cache_max_days",
+    "recording_cache_prewarm",
+    "audit_ai",
+    "mqtt",
+    "retention",
+})
+RECORDER_CONFIG_FIELDS = frozenset({
+    "ffmpeg_path",
+    "hardware_acceleration",
+    "recording_segment_seconds",
+})
+
+
+def _manager_owned_config(config_value: AppConfig) -> dict:
+    """Return only settings that require rebuilding camera-owned services."""
+    payload = config_value.model_dump(mode="json")
+    for field_name in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
+        payload.pop(field_name, None)
+    for camera in payload.get("cameras", []):
+        camera.pop("retention", None)
+    return payload
+
+
+def _hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
+    changed = [
+        field_name
+        for field_name in sorted(HOT_CONFIG_FIELDS)
+        if getattr(current, field_name) != getattr(incoming, field_name)
+    ]
+    current_retention = {camera.id: camera.retention for camera in current.cameras}
+    incoming_retention = {camera.id: camera.retention for camera in incoming.cameras}
+    if current_retention != incoming_retention and "retention" not in changed:
+        changed.append("retention")
+    return changed
+
+
+def apply_config_update(
+    next_config: AppConfig,
+    *,
+    assign_ids: bool = False,
+    persist: bool = True,
+) -> tuple[AppConfig, dict[str, object]]:
+    """Apply configuration at the narrowest safe runtime boundary."""
+    global config
+    effective_config = normalize_config(
+        next_config.model_copy(deep=True),
+        assign_ids=assign_ids,
+    )
+    if _manager_owned_config(config) != _manager_owned_config(effective_config):
+        effective = reload_manager(
+            effective_config,
+            assign_ids=False,
+            persist=persist,
+        )
+        return effective, {
+            "apply_mode": "manager_reload",
+            "camera_workers_restarted": True,
+            "subsystems_restarted": ["manager"],
+        }
+
+    with MANAGER_RELOAD_LOCK:
+        previous_config = config
+        changes = _hot_config_changes(previous_config, effective_config)
+        mqtt_changed = previous_config.mqtt != effective_config.mqtt
+        retention_changed = "retention" in changes
+        recorder_changes = [
+            field_name
+            for field_name in sorted(RECORDER_CONFIG_FIELDS)
+            if getattr(previous_config, field_name) != getattr(effective_config, field_name)
+        ]
+        if persist:
+            save_config(effective_config, assign_ids=False)
+        manager.config = effective_config
+        recorder_attempted = False
+        mqtt_attempted = False
+        retention_attempted = False
+        try:
+            if recorder_changes:
+                recorder_attempted = True
+                manager.reconfigure_recorders(effective_config)
+            if mqtt_changed:
+                mqtt_attempted = True
+                manager.reconfigure_mqtt(effective_config.mqtt)
+            if retention_changed:
+                retention_attempted = True
+                manager.recorder.reconfigure_retention(
+                    effective_config.retention,
+                    effective_config.cameras,
+                )
+        except BaseException:
+            manager.config = previous_config
+            if retention_attempted:
+                try:
+                    manager.recorder.reconfigure_retention(
+                        previous_config.retention,
+                        previous_config.cameras,
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back recording retention configuration"
+                    )
+            if mqtt_attempted:
+                try:
+                    manager.reconfigure_mqtt(previous_config.mqtt)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back MQTT configuration"
+                    )
+            if recorder_attempted:
+                try:
+                    manager.reconfigure_recorders(previous_config)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back recorder configuration"
+                    )
+            if persist:
+                try:
+                    save_config(previous_config, assign_ids=False)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to restore persisted configuration after hot-apply failure"
+                    )
+            raise
+        config = effective_config
+        restarted = [
+            name
+            for name, changed
+            in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
+            if changed
+        ]
+        return effective_config, {
+            "apply_mode": "targeted" if restarted else "hot" if changes else "unchanged",
+            "camera_workers_restarted": False,
+            "subsystems_restarted": restarted,
+            "hot_updated": changes + recorder_changes,
+        }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
@@ -1806,8 +1950,8 @@ def put_config(next_config: AppConfig) -> dict:
         validate_motion_pipeline_configuration(next_config)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    effective_config = reload_manager(next_config, assign_ids=True)
-    return {"ok": True, "cameras": len(effective_config.cameras)}
+    effective_config, apply_result = apply_config_update(next_config, assign_ids=True)
+    return {"ok": True, "cameras": len(effective_config.cameras), **apply_result}
 
 
 @app.put("/api/config/cameras/{camera_id}/zones")
@@ -1898,8 +2042,12 @@ def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
             validate_motion_pipeline_configuration(next_config)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        reload_manager(next_config)
-    return {"ok": True, "camera": _redacted_camera_payload(camera_settings)}
+        _effective, apply_result = apply_config_update(next_config)
+    return {
+        "ok": True,
+        "camera": _redacted_camera_payload(camera_settings),
+        **apply_result,
+    }
 
 
 @app.delete("/api/config/cameras/{camera_id}")

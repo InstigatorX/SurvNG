@@ -4,6 +4,8 @@ Local-first surveillance app for RTSP/RTMP/ONVIF cameras with recording, camera 
 
 Continuous-recording quotas, age limits, free-space watermarks, and protected
 incident media are described in [Storage retention](docs/storage-retention.md).
+Configuration saves and their runtime restart boundaries are described in
+[Configuration application boundaries](docs/configuration-application.md).
 
 For the end-to-end ingest, motion qualification, inference, incident, recording,
 and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that

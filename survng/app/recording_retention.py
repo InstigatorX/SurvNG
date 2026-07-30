@@ -71,6 +71,24 @@ class RecordingRetentionService:
         )
         self._thread.start()
 
+    def reconfigure(
+        self,
+        config: RecordingRetentionConfig,
+        cameras: Sequence[CameraConfig],
+    ) -> None:
+        """Apply policy changes without interrupting recorders or cameras."""
+        with self._state_lock:
+            self.config = config
+            self._cameras = {camera.id: camera for camera in cameras}
+            self._status = {
+                **self._status,
+                "state": "queued",
+                "enabled": config.enabled,
+                "automatic_cleanup": config.automatic_cleanup,
+                "error": "",
+            }
+        self._wake.set()
+
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
         self._wake.set()

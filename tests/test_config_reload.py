@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-from survng.app.config import AppConfig
+from survng.app.config import AppConfig, CameraConfig
 from survng.app import main
 
 
@@ -120,6 +120,161 @@ class ConfigReloadTest(unittest.TestCase):
         )
         self.assertIs(main.manager, recovery)
         self.assertEqual(main.config.base_path, "/old")
+
+    def test_app_only_settings_hot_apply_without_restarting_cameras(self) -> None:
+        active = Mock()
+        current = AppConfig(base_path="/old", recording_cache_max_gb=5)
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(update={
+            "base_path": "/new",
+            "recording_cache_max_gb": 10,
+            "event_clip_before_seconds": 8,
+        })
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config") as save,
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        save.assert_called_once_with(effective, assign_ids=False)
+        active.reconfigure_mqtt.assert_not_called()
+        active.recorder.reconfigure_retention.assert_not_called()
+        self.assertEqual(result["apply_mode"], "hot")
+        self.assertFalse(result["camera_workers_restarted"])
+        self.assertIs(main.config, effective)
+        self.assertIs(active.config, effective)
+
+    def test_mqtt_change_restarts_only_mqtt(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.mqtt.host = "broker.local"
+        incoming.mqtt.enabled = True
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            _effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_mqtt.assert_called_once_with(incoming.mqtt)
+        active.recorder.reconfigure_retention.assert_not_called()
+        self.assertEqual(result["subsystems_restarted"], ["mqtt"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_camera_retention_override_hot_applies_only_retention(self) -> None:
+        active = Mock()
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+        current = AppConfig(cameras=[camera])
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].retention.main_days = 14
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_mqtt.assert_not_called()
+        active.recorder.reconfigure_retention.assert_called_once_with(
+            effective.retention,
+            effective.cameras,
+        )
+        self.assertIn("retention", result["hot_updated"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_camera_owned_change_uses_full_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        replacement = current.model_copy(update={"storage_dir": "/new/storage"})
+        effective = replacement.model_copy(deep=True)
+
+        with patch("survng.app.main.reload_manager", return_value=effective) as reload:
+            result_config, result = main.apply_config_update(replacement)
+
+        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        self.assertIs(result_config, effective)
+        self.assertEqual(result["apply_mode"], "manager_reload")
+        self.assertTrue(result["camera_workers_restarted"])
+
+    def test_recorder_setting_restarts_only_recorders(self) -> None:
+        active = Mock()
+        current = AppConfig(recording_segment_seconds=10)
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(update={"recording_segment_seconds": 30})
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_recorders.assert_called_once_with(effective)
+        active.reconfigure_mqtt.assert_not_called()
+        self.assertEqual(result["subsystems_restarted"], ["recorders"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_hot_apply_persistence_failure_rolls_runtime_back(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.retention.main_days = 3
+        incoming.mqtt.host = "new-broker.local"
+        active.reconfigure_mqtt.side_effect = [RuntimeError("mqtt failed"), None]
+
+        with patch("survng.app.main.save_config") as save:
+            with self.assertRaisesRegex(RuntimeError, "mqtt failed"):
+                main.apply_config_update(incoming)
+
+        self.assertEqual(active.reconfigure_mqtt.call_args_list, [
+            unittest.mock.call(incoming.mqtt),
+            unittest.mock.call(current.mqtt),
+        ])
+        active.recorder.reconfigure_retention.assert_not_called()
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(save.call_args_list[0].args[0], incoming)
+        self.assertIs(save.call_args_list[1].args[0], current)
+        self.assertIs(main.config, current)
+        self.assertIs(active.config, current)
+
+    def test_hot_apply_persistence_failure_does_not_touch_runtime(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.mqtt.host = "new-broker.local"
+
+        with patch("survng.app.main.save_config", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                main.apply_config_update(incoming)
+
+        active.reconfigure_mqtt.assert_not_called()
+        active.recorder.reconfigure_retention.assert_not_called()
+        self.assertIs(main.config, current)
+        self.assertIs(active.config, current)
 
     def test_start_does_not_revive_a_prewarmer_that_is_still_stopping(self) -> None:
         original_thread = main.RECORDING_PREWARM_THREAD

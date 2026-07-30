@@ -14,6 +14,7 @@ from .config import (
     CameraConfig,
     CameraMotionQualificationConfig,
     DetectionZone,
+    MqttConfig,
 )
 from .events import EventStore
 from .faces import FaceStore
@@ -141,13 +142,7 @@ class AppManager:
             limiter=self._object_tracking_limiter,
             appearance_encoder=self.person_reidentifier,
         )
-        self.mqtt = MqttService(
-            config.mqtt,
-            self._mqtt_power_command,
-            self.set_recording,
-            self.set_detection,
-            self._mqtt_connected,
-        )
+        self.mqtt = self._build_mqtt_service(config.mqtt)
         self._lifecycle_lock = threading.RLock()
         self._runtime_state_lock = threading.Lock()
         self._runtime_state_path = self.storage_dir / "runtime_state.json"
@@ -683,6 +678,67 @@ class AppManager:
 
     def _mqtt_power_command(self, camera_id: str, turn_on: bool) -> bool:
         return self.start_camera(camera_id) if turn_on else self.stop_camera(camera_id)
+
+    def _build_mqtt_service(self, mqtt_config: MqttConfig) -> MqttService:
+        return MqttService(
+            mqtt_config,
+            self._mqtt_power_command,
+            self.set_recording,
+            self.set_detection,
+            self._mqtt_connected,
+        )
+
+    def reconfigure_mqtt(self, mqtt_config: MqttConfig) -> None:
+        """Replace only the MQTT runtime, leaving cameras and recorders untouched."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            previous = self.mqtt
+            replacement = self._build_mqtt_service(mqtt_config)
+            previous.stop()
+            self.mqtt = replacement
+            try:
+                replacement.start()
+            except BaseException:
+                self.mqtt = previous
+                try:
+                    replacement.stop()
+                finally:
+                    previous.start()
+                raise
+
+    def reconfigure_recorders(self, next_config: AppConfig) -> None:
+        """Restart recorder processes only; camera capture workers remain active."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            cameras = list(self._unique_cameras())
+            desired_enabled = {
+                camera.id: (
+                    self._camera_enabled.get(camera.id, True)
+                    and self.recording_enabled(camera.id)
+                )
+                for camera in cameras
+            }
+            for camera in cameras:
+                self.recorder.set_camera_enabled(camera.id, False)
+            try:
+                self.recorder.reconfigure_runtime(
+                    ffmpeg_path=next_config.ffmpeg_path,
+                    hardware_acceleration=next_config.hardware_acceleration,
+                    segment_seconds=next_config.recording_segment_seconds,
+                )
+            finally:
+                for camera in cameras:
+                    self.recorder.set_camera_enabled(
+                        camera.id,
+                        desired_enabled[camera.id],
+                    )
+            if not self._started:
+                return
+            for camera in cameras:
+                if desired_enabled[camera.id]:
+                    self._start_configured_recorders(camera)
 
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([
