@@ -66,6 +66,18 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertNotIn("privileged: true", compose)
         self.assertIn("apparmor=unconfined", lxc_override)
 
+    def test_intel_image_uses_modern_pinned_ubuntu_gpu_userspace(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("FROM ubuntu:24.04 AS runtime-base", dockerfile)
+        self.assertIn("INTEL_COMPUTE_VERSION=26.22.38646.6-1~24.04~ppa1", dockerfile)
+        self.assertIn("INTEL_IGC_VERSION=2.36.3-2~24.04", dockerfile)
+        self.assertIn("INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1", dockerfile)
+        self.assertIn("ppa:kobuk-team/intel-graphics", dockerfile)
+        self.assertIn('"libze-intel-gpu1=${INTEL_COMPUTE_VERSION}"', dockerfile)
+        self.assertIn('"intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}"', dockerfile)
+        self.assertNotIn("intel-media-va-driver \\", dockerfile)
+
     def test_lxc_builder_is_persistent_and_scope_limited(self) -> None:
         script = (ROOT / "scripts" / "docker-build-lxc.sh").read_text(
             encoding="utf-8"

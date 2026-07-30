@@ -5,7 +5,7 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.12-slim-bookworm AS runtime-base
+FROM ubuntu:24.04 AS runtime-base
 
 ARG SURVNG_UID=1000
 ARG SURVNG_GID=1000
@@ -18,6 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        ca-certificates \
         ffmpeg \
         gosu \
         libgl1 \
@@ -25,11 +26,15 @@ RUN apt-get update \
         libgomp1 \
         libusb-1.0-0 \
         procps \
+        python3 \
+        python3-venv \
         tini \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid "$SURVNG_GID" survng \
-    && useradd --uid "$SURVNG_UID" --gid "$SURVNG_GID" --create-home survng \
-    && python -m venv /opt/survng-venv
+    && existing_group="$(getent group "$SURVNG_GID" | cut -d: -f1)" \
+    && if [ -n "$existing_group" ]; then groupmod --new-name survng "$existing_group"; else groupadd --gid "$SURVNG_GID" survng; fi \
+    && existing_user="$(getent passwd "$SURVNG_UID" | cut -d: -f1)" \
+    && if [ -n "$existing_user" ]; then usermod --login survng --home /home/survng --move-home --gid survng "$existing_user"; else useradd --uid "$SURVNG_UID" --gid survng --create-home survng; fi \
+    && python3 -m venv /opt/survng-venv
 
 WORKDIR /app
 COPY requirements.txt ./
@@ -57,11 +62,39 @@ CMD ["uvicorn", "survng.app.main:app", "--host", "0.0.0.0", "--port", "8088", "-
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.
 FROM runtime-base AS runtime-intel
 USER root
+ARG INTEL_COMPUTE_VERSION=26.22.38646.6-1~24.04~ppa1
+ARG INTEL_IGC_VERSION=2.36.3-2~24.04
+ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
+ARG INTEL_LEVEL_ZERO_VERSION=1.28.6-1~24.04~ppa1
+ARG INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1
+ARG INTEL_VPL_VERSION=1:2.16.0-1~24.04~ppa1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        intel-media-va-driver \
-        intel-opencl-icd \
+        software-properties-common \
+    && add-apt-repository -y ppa:kobuk-team/intel-graphics \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        "intel-media-va-driver-non-free=${INTEL_MEDIA_VERSION}" \
+        "intel-opencl-icd=${INTEL_COMPUTE_VERSION}" \
+        "libigc2=${INTEL_IGC_VERSION}" \
+        "libigdfcl2=${INTEL_IGC_VERSION}" \
+        "libigdgmm12=${INTEL_GMMLIB_VERSION}" \
+        "libmfx-gen1.2=${INTEL_MEDIA_VERSION}" \
+        "libvpl2=${INTEL_VPL_VERSION}" \
+        "libze-intel-gpu1=${INTEL_COMPUTE_VERSION}" \
+        "libze1=${INTEL_LEVEL_ZERO_VERSION}" \
         ocl-icd-libopencl1 \
+    && apt-mark hold \
+        intel-media-va-driver-non-free \
+        intel-opencl-icd \
+        libigc2 \
+        libigdfcl2 \
+        libigdgmm12 \
+        libmfx-gen1.2 \
+        libvpl2 \
+        libze-intel-gpu1 \
+        libze1 \
+    && apt-get purge -y --auto-remove software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
 FROM runtime-base AS runtime

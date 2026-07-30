@@ -58,6 +58,26 @@ the `survng-buildkit-state` volume. Later builds reuse that worker and cache.
 Only run it against trusted source. The resulting SurvNG application container
 is not privileged.
 
+### Intel GPU userspace
+
+The Intel target uses Ubuntu 24.04 and pins the GPU userspace versions verified
+by this deployment: Intel compute runtime 26.22, IGC 2.36.3, Level Zero 1.28.6,
+media driver 26.2.2, and oneVPL 2.16. The kernel driver still comes from the
+Docker host through `/dev/dri`; it is never installed in the image. Update the
+version build arguments together and rebuild when intentionally qualifying a
+new Intel stack.
+
+After rebuilding, verify the installed packages and OpenVINO device discovery:
+
+```bash
+docker exec survng dpkg-query -W \
+  intel-opencl-icd libigc2 libze-intel-gpu1 libze1 \
+  intel-media-va-driver-non-free libmfx-gen1.2 libvpl2
+
+docker exec survng /opt/survng-venv/bin/python -c \
+  'from openvino import Core; core = Core(); print(core.available_devices)'
+```
+
 To build the CPU image in this LXC:
 
 ```bash
