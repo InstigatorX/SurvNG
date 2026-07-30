@@ -1,0 +1,24 @@
+name: survng
+
+services:
+  survng:
+    build:
+      context: .
+      target: runtime
+    image: survng:local
+    container_name: survng
+    restart: unless-stopped
+    network_mode: host
+    stop_grace_period: 60s
+    environment:
+      TZ: ${TZ:-UTC}
+      SURVNG_CONFIG_PATH: /config/config.json
+      SURVNG_UID: ${SURVNG_UID:-1000}
+      SURVNG_GID: ${SURVNG_GID:-1000}
+    volumes:
+      - ${SURVNG_CONFIG_DIR:-./docker-data/config}:/config
+      - ${SURVNG_DATA_DIR:-./docker-data/data}:/data
+      - ${SURVNG_MEDIA_DIR:-/srv/survng/media}:/media
+      - ${SURVNG_MODELS_DIR:-./docker-data/models}:/models:ro
+    security_opt:
+      - no-new-privileges:true

@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
+CONFIG_PATH_ENV = "SURVNG_CONFIG_PATH"
+
 
 class OnvifConfig(BaseModel):
     enabled: bool = False
@@ -512,17 +514,32 @@ def normalize_config(config: AppConfig, assign_ids: bool = False) -> AppConfig:
     return config
 
 
-def load_config(path: str = "config.json") -> AppConfig:
-    config_path = Path(path)
+def _config_path(path: str | Path | None = None) -> Path:
+    if path is not None:
+        return Path(path)
+    configured_path = os.environ.get(CONFIG_PATH_ENV, "").strip()
+    return Path(configured_path or "config.json")
+
+
+def load_config(path: str | Path | None = None) -> AppConfig:
+    config_path = _config_path(path)
     if not config_path.exists():
+        if path is None and os.environ.get(CONFIG_PATH_ENV, "").strip():
+            raise FileNotFoundError(
+                f"configured SurvNG config does not exist: {config_path}"
+            )
         config_path = Path("config.example.json")
     with config_path.open("r", encoding="utf-8") as handle:
         return normalize_config(AppConfig.model_validate(json.load(handle)), assign_ids=False)
 
 
-def save_config(config: AppConfig, path: str = "config.json", assign_ids: bool = True) -> None:
+def save_config(
+    config: AppConfig,
+    path: str | Path | None = None,
+    assign_ids: bool = True,
+) -> None:
     config = normalize_config(config.model_copy(deep=True), assign_ids=assign_ids)
-    config_path = Path(path)
+    config_path = _config_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     existing_mode = 0o600
     try:

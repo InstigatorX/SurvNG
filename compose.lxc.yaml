@@ -1,0 +1,7 @@
+# Explicit compatibility override for running an already-built image inside an
+# LXC guest whose outer host does not allow nested Docker AppArmor profiles.
+# This weakens container isolation and is intentionally never loaded by default.
+services:
+  survng:
+    security_opt:
+      - apparmor=unconfined

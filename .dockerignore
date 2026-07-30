@@ -1,0 +1,54 @@
+.git
+.gitignore
+.dockerignore
+.venv*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Runtime configuration, credentials, state, media, and logs must never enter
+# an image layer. Docker receives these through explicit bind mounts.
+config.json
+*.local.json
+.env
+.env.*
+!.env.example
+runtime/
+docker-data/
+survng/storage/
+recordings/
+media/
+logs/
+*.log
+*.sqlite3*
+*.pem
+*.key
+*.crt
+
+# Models are runtime data and can be very large.
+*.onnx
+*.pt
+*.pth
+*.engine
+*.tflite
+*.blob
+*.xml
+*.bin
+*.mlmodel
+*.mlpackage/
+*openvino_model/
+face_model/
+vehicle_reid_model/
+
+# The frontend is rebuilt in its own image stage.
+frontend/node_modules/
+survng/static/
+
+# Development-only material.
+tests/
+docs/**/*.png
+docs/**/*.jpg
+core*

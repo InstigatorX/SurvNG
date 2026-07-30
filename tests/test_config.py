@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -210,6 +211,23 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertEqual(config.cameras[0].id, "old")
         self.assertEqual(saved.cameras[0].id, "front-door")
+
+    def test_environment_config_path_is_used_for_load_and_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "private" / "config.json"
+            with patch.dict(os.environ, {"SURVNG_CONFIG_PATH": str(path)}):
+                save_config(AppConfig(base_path="/docker"), assign_ids=False)
+                saved = load_config()
+
+            self.assertEqual(saved.base_path, "/docker")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_missing_environment_config_path_does_not_fall_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "missing.json"
+            with patch.dict(os.environ, {"SURVNG_CONFIG_PATH": str(path)}):
+                with self.assertRaisesRegex(FileNotFoundError, "configured SurvNG config"):
+                    load_config()
 
     def test_assigned_camera_ids_remain_ascii_path_safe_and_bounded(self) -> None:
         long_name = "A" * 128

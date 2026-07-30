@@ -29,6 +29,7 @@ config.json
 !config.*.example.json
 
 # Runtime media, recordings, databases, and generated artifacts
+docker-data/
 survng/storage/
 recordings/
 recording*/

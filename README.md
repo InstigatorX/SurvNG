@@ -6,6 +6,9 @@ Continuous-recording quotas, age limits, free-space watermarks, and protected
 incident media are described in [Storage retention](docs/storage-retention.md).
 Configuration saves and their runtime restart boundaries are described in
 [Configuration application boundaries](docs/configuration-application.md).
+For the optional container installation, persistent-volume layout, migration,
+and Intel GPU/QSV support, see the [Docker README](docker/README.md). Generic
+deployment and upgrade guidance is in [Docker installation](docs/docker.md).
 
 For the end-to-end ingest, motion qualification, inference, incident, recording,
 and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that
@@ -27,7 +30,7 @@ If ONVIF motion events are missing or unreliable, select **Visual-triggered** so
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.12+
 - Node.js 20+ for building the React UI
 - FFmpeg available on `PATH`
 - A camera with RTSP/RTMP URL, or an ONVIF-capable camera
@@ -155,6 +158,26 @@ uvicorn survng.app.main:app --reload --host 0.0.0.0 --port 8088
 ```
 
 Open http://127.0.0.1:8088/survng/ on this machine, or use the server's LAN address from another device, for example `http://192.168.82.12:8088/survng/`.
+
+### Optional Docker installation
+
+Docker is an alternative deployment path; the native virtualenv/systemd path
+remains supported. The production image builds the React UI, installs FFmpeg,
+runs SurvNG as a configurable non-root UID/GID, and keeps configuration,
+databases, models, and recordings outside the image.
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+On first start, a private camera-free config is created under
+`docker-data/config/config.json`. Open `http://SERVER:8088/survng/` and configure
+SurvNG normally. Do not start the container alongside the systemd service: both
+would record the same cameras and consume duplicate ONVIF connections. See
+[docs/docker.md](docs/docker.md) before migrating an existing installation.
 
 SurvNG's HTTP API is an administrative interface and does not provide its own
 user authentication. Keep port `8088` limited to trusted LAN/VPN clients with a

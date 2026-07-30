@@ -1,0 +1,9 @@
+services:
+  survng:
+    build:
+      target: runtime-intel
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      SURVNG_VIDEO_GID: ${SURVNG_VIDEO_GID:-44}
+      SURVNG_RENDER_GID: ${SURVNG_RENDER_GID:-993}

@@ -812,6 +812,12 @@ app.add_middleware(SecurityBoundaryMiddleware)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
 
 
+@app.get("/api/health", include_in_schema=False)
+def health() -> dict[str, str]:
+    """Cheap liveness check that never probes cameras, media, or network storage."""
+    return {"status": "ok"}
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon() -> FileResponse:
     return FileResponse("survng/static/favicon.ico", media_type="image/x-icon")
