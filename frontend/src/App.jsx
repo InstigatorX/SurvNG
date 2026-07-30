@@ -993,6 +993,7 @@ function defaultCamera(cameras, seed = {}) {
 }
 
 function Shell({ page, theme, recordingContext, children }) {
+  const isLive = page === "live";
   const isRecordings = page === "recordings";
   const isConfig = page === "config";
   const isIncidents = page === "incidents";
@@ -1005,18 +1006,20 @@ function Shell({ page, theme, recordingContext, children }) {
             <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />
           </div>
           <div>
-            <h1>{isConfig ? "Config" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : isFaces ? "Faces" : "SurvNG"}</h1>
+            <h1>{isConfig ? "Admin" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : isFaces ? "Faces" : "SurvNG"}</h1>
             <p>{isConfig ? "Camera inventory, cloning, and capability detection" : isRecordings ? "Continuous review of saved camera history" : isIncidents ? "Motion and object incident review" : isFaces ? "Face enrollment and observation review" : "Streams, events, recordings, and object detections"}</p>
           </div>
           {!isConfig && !isRecordings && !isIncidents && !isFaces ? <LiveHeaderStats /> : null}
         </div>
         <div className="top-actions">
-          <nav className="topnav" aria-label="Primary">
-            <a className="nav-button" href={appUrl("/")}><Video size={16} /> Live</a>
-            <a className="nav-button incidents-nav" href={appUrl("/incidents")}><Siren size={16} /> Incidents</a>
-            <a className="nav-button" href={appUrl("/faces")}><ScanFace size={16} /> Faces</a>
-            <a className="nav-button" href={recordingsHref(recordingContext)}><Film size={16} /> Recordings</a>
-            <a className="nav-button" href={appUrl("/config")}><Cog size={16} /> Config</a>
+          <nav className="topnav primary-nav" aria-label="Primary">
+            <a className={`nav-button ${isLive ? "active" : ""}`} aria-current={isLive ? "page" : undefined} href={appUrl("/")}><Video size={16} /> Live</a>
+            <a className={`nav-button incidents-nav ${isIncidents ? "active" : ""}`} aria-current={isIncidents ? "page" : undefined} href={appUrl("/incidents")}><Siren size={16} /> Incidents</a>
+            <a className={`nav-button ${isRecordings ? "active" : ""}`} aria-current={isRecordings ? "page" : undefined} href={recordingsHref(recordingContext)}><Film size={16} /> Recordings</a>
+          </nav>
+          <nav className="topnav utility-nav" aria-label="Additional">
+            <a className={`nav-button ${isFaces ? "active" : ""}`} aria-current={isFaces ? "page" : undefined} href={appUrl("/faces")} aria-label="Faces"><ScanFace size={16} /><span>Faces</span></a>
+            <a className={`nav-button ${isConfig ? "active" : ""}`} aria-current={isConfig ? "page" : undefined} href={appUrl("/config")} aria-label="Admin"><Cog size={16} /><span>Admin</span></a>
           </nav>
         </div>
       </header>
