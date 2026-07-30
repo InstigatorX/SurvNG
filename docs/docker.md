@@ -233,9 +233,11 @@ Docker workloads are already an accepted policy.
 
 ### Build locally in the LXC
 
-The helper starts a temporary privileged, AppArmor-unconfined BuildKit worker,
-binds its unauthenticated API to loopback only, loads the completed image into
-the local Docker image store, and removes the worker even when the build fails:
+The helper creates a dedicated privileged, AppArmor-unconfined BuildKit worker
+named `survng-buildkit`, connects to its Unix socket through Docker's
+`docker-container://` transport, and loads the completed image into the local
+Docker image store. The worker uses the `survng-buildkit-state` volume and an
+`unless-stopped` restart policy so later builds retain their cache:
 
 ```bash
 # Intel OpenVINO GPU/QSV image (default)
@@ -245,9 +247,10 @@ scripts/docker-build-lxc.sh
 scripts/docker-build-lxc.sh runtime
 ```
 
-Only run this against trusted source: build instructions execute with elevated
-access while this worker exists. The resulting SurvNG application container is
-not privileged. Start it with the explicit LXC runtime override:
+Only run this builder against trusted source: build instructions execute with
+elevated access and anyone able to submit builds to it effectively has root
+authority within the LXC. The resulting SurvNG application container is not
+privileged. Start it with the explicit LXC runtime override:
 
 ```bash
 docker compose \

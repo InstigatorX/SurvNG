@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # Docker's embedded BuildKit may be unable to apply docker-default when Docker
-# runs inside an AppArmor-confined LXC. Use a short-lived, explicitly
-# unconfined BuildKit worker instead; remove it regardless of build outcome.
-readonly BUILDER_NAME="survng-lxc-builder"
+# runs inside an AppArmor-confined LXC. Reuse a dedicated, explicitly
+# unconfined BuildKit worker with persistent cache instead.
+readonly BUILDER_NAME="survng-lxc"
 readonly BUILDER_CONTAINER="survng-buildkit"
-readonly BUILDER_ENDPOINT="tcp://127.0.0.1:12345"
+readonly BUILDER_ENDPOINT="docker-container://${BUILDER_CONTAINER}"
+readonly BUILDER_VOLUME="survng-buildkit-state"
 readonly IMAGE_NAME="${SURVNG_IMAGE:-survng:local}"
 readonly TARGET="${1:-runtime-intel}"
 readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,33 +20,31 @@ case "$TARGET" in
     ;;
 esac
 
-cleanup() {
-  docker buildx rm "$BUILDER_NAME" >/dev/null 2>&1 || true
-  docker stop "$BUILDER_CONTAINER" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT INT TERM
-
 if docker container inspect "$BUILDER_CONTAINER" >/dev/null 2>&1; then
-  echo "refusing to replace existing container: $BUILDER_CONTAINER" >&2
-  exit 1
-fi
-if docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
-  echo "refusing to replace existing builder: $BUILDER_NAME" >&2
-  exit 1
+  privileged="$(docker container inspect --format '{{.HostConfig.Privileged}}' "$BUILDER_CONTAINER")"
+  apparmor="$(docker container inspect --format '{{.AppArmorProfile}}' "$BUILDER_CONTAINER")"
+  if [[ "$privileged" != "true" || "$apparmor" != "unconfined" ]]; then
+    echo "$BUILDER_CONTAINER exists without the required privileged/AppArmor-unconfined settings" >&2
+    exit 1
+  fi
+  docker start "$BUILDER_CONTAINER" >/dev/null
+else
+  docker run --detach \
+    --name "$BUILDER_CONTAINER" \
+    --restart unless-stopped \
+    --privileged \
+    --security-opt apparmor=unconfined \
+    --volume "$BUILDER_VOLUME:/var/lib/buildkit" \
+    moby/buildkit:buildx-stable-1 \
+    --oci-worker-gc-keepstorage 4096,8192,24576 >/dev/null
 fi
 
-docker run --detach --rm \
-  --name "$BUILDER_CONTAINER" \
-  --privileged \
-  --security-opt apparmor=unconfined \
-  --network host \
-  moby/buildkit:buildx-stable-1 \
-  --addr "$BUILDER_ENDPOINT" >/dev/null
-
-docker buildx create \
-  --name "$BUILDER_NAME" \
-  --driver remote \
-  "$BUILDER_ENDPOINT" >/dev/null
+if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
+  docker buildx create \
+    --name "$BUILDER_NAME" \
+    --driver remote \
+    "$BUILDER_ENDPOINT" >/dev/null
+fi
 
 for attempt in {1..30}; do
   if docker buildx inspect "$BUILDER_NAME" --bootstrap >/dev/null 2>&1; then
@@ -66,4 +65,4 @@ docker buildx build \
   --tag "$IMAGE_NAME" \
   "$REPO_DIR"
 
-echo "Built $IMAGE_NAME ($TARGET); temporary builder removed."
+echo "Built $IMAGE_NAME ($TARGET) with persistent builder $BUILDER_NAME."

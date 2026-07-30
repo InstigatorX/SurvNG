@@ -16,7 +16,7 @@ opens duplicate video streams, recorders, MQTT clients, and ONVIF subscriptions.
 | `compose.intel-gpu.yaml` | Intel OpenVINO GPU and `/dev/dri` override |
 | `compose.lxc.yaml` | Explicit AppArmor compatibility override for nested Docker |
 | `.env.example` | Non-secret host path, identity, timezone, and GPU group settings |
-| `scripts/docker-build-lxc.sh` | Temporary BuildKit workaround for this LXC host |
+| `scripts/docker-build-lxc.sh` | Persistent, cached BuildKit workflow for this LXC host |
 | `docker/config.example.json` | Camera-free initial configuration |
 
 ## Persistent storage
@@ -51,11 +51,12 @@ cd /root/SurvNG
 scripts/docker-build-lxc.sh
 ```
 
-The helper builds the `runtime-intel` target as `survng:local`. It starts a
-temporary privileged, AppArmor-unconfined BuildKit worker whose API is bound to
-loopback, then removes that worker whether the build succeeds or fails. Only run
-it against trusted source. The resulting SurvNG application container is not
-privileged.
+The helper builds the `runtime-intel` target as `survng:local`. On first use it
+creates a persistent privileged, AppArmor-unconfined BuildKit worker named
+`survng-buildkit`, registers the `survng-lxc` builder, and retains build cache in
+the `survng-buildkit-state` volume. Later builds reuse that worker and cache.
+Only run it against trusted source. The resulting SurvNG application container
+is not privileged.
 
 To build the CPU image in this LXC:
 
