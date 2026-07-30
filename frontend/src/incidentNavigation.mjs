@@ -65,6 +65,17 @@ export function createIncidentPageCache(loader) {
   };
 }
 
+export function incidentDetailQuery(incident) {
+  const eventIds = (incident?.events || [])
+    .map((event) => Number(event?.id))
+    .filter((eventId) => Number.isInteger(eventId) && eventId > 0);
+  if (!eventIds.length) return "";
+  return new URLSearchParams({
+    event_ids: [...new Set(eventIds)].join(","),
+    gap_seconds: "45",
+  }).toString();
+}
+
 export function incidentIndexForEvent(incidents, event) {
   if (!Array.isArray(incidents) || !event) return -1;
   return incidents.findIndex((incident) => (

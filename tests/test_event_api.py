@@ -717,6 +717,83 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(second[0]["labels"], ["person"])
         self.assertFalse(second_has_more)
 
+    def test_incident_list_payload_omits_investigation_only_data(self) -> None:
+        event = main._event_row({
+            "id": 7,
+            "camera_id": "gate",
+            "kind": "object",
+            "objects_json": json.dumps([
+                {
+                    "label": "person",
+                    "confidence": 0.91,
+                    "box": [1, 2, 30, 40],
+                    "temporal_samples": [{"offset": 0.1}] * 20,
+                },
+                {
+                    "status": "object_tracking",
+                    "object_tracking": {"tracks": [{"id": 1}], "samples": [{}] * 20},
+                },
+            ]),
+            "created_at": "2026-07-30T14:00:00+00:00",
+        })
+        incident = main._incident_row("gate", [event])
+        incident["faces"] = [{"name": "Someone"}]
+        incident["motion_observations"] = [{"id": 1}]
+
+        payload = main._incident_list_payload(incident)
+
+        self.assertNotIn("object_tracking", payload)
+        self.assertNotIn("faces", payload)
+        self.assertNotIn("motion_observations", payload)
+        self.assertEqual(payload["objects"], [{
+            "label": "person",
+            "confidence": 0.91,
+            "box": [1, 2, 30, 40],
+        }])
+        self.assertEqual(payload["events"][0]["id"], 7)
+        self.assertNotIn("temporal_samples", payload["events"][0]["objects"][0])
+
+    def test_incident_detail_hydrates_only_requested_incident(self) -> None:
+        rows = [{
+            "id": 7,
+            "camera_id": "gate",
+            "kind": "object",
+            "topic": "camera/gate",
+            "message": "motion",
+            "snapshot_path": "snapshots/gate/7.jpg",
+            "recording_path": "",
+            "objects_json": json.dumps([{"label": "person", "confidence": 0.91}]),
+            "created_at": "2026-07-30T14:00:00+00:00",
+        }]
+        fake_manager = SimpleNamespace(
+            storage_dir=Path("/tmp"),
+            events=SimpleNamespace(
+                get_many=lambda event_ids: [row for row in rows if row["id"] in event_ids],
+                motion_audits_for_related_events=lambda _event_ids: [],
+            ),
+            faces=SimpleNamespace(for_event_ids=lambda _event_ids: []),
+        )
+
+        with patch.object(main, "manager", fake_manager):
+            detail = main.incident_detail("7")
+
+        self.assertEqual(detail["camera_id"], "gate")
+        self.assertEqual(detail["representative_event_id"], 7)
+        self.assertEqual(detail["objects"][0]["label"], "person")
+        self.assertIn("faces", detail)
+
+    def test_incident_detail_rejects_events_from_multiple_incidents(self) -> None:
+        rows = [
+            {"id": 1, "camera_id": "gate", "kind": "motion", "objects_json": "[]", "created_at": "2026-07-30T14:00:00+00:00"},
+            {"id": 2, "camera_id": "foyer", "kind": "motion", "objects_json": "[]", "created_at": "2026-07-30T14:00:01+00:00"},
+        ]
+        fake_manager = SimpleNamespace(events=SimpleNamespace(get_many=lambda _event_ids: rows))
+
+        with patch.object(main, "manager", fake_manager), self.assertRaises(HTTPException) as invalid:
+            main.incident_detail("1,2")
+
+        self.assertEqual(invalid.exception.status_code, 422)
+
     def test_event_row_tolerates_malformed_legacy_object_entries(self) -> None:
         row = main._event_row({
             "id": 1,

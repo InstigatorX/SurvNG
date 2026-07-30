@@ -71,7 +71,7 @@ import {
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -3395,7 +3395,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 function refreshedIncidentSelection(selected, incidents) {
   if (!selected) return null;
   for (const incident of incidents) {
-    if (incident.id === selected.id) return incident;
+    if (incident.id === selected.id) return selected;
     const child = (incident.events || []).find((candidate) => candidate.id === selected.id);
     if (child) {
       return {
@@ -3430,6 +3430,16 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
+  const incidentDetailCacheRef = useRef(null);
+  if (!incidentDetailCacheRef.current) {
+    incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
+      const response = await fetch(`/api/incidents/detail?${query}`);
+      if (!response.ok) throw new Error("Unable to load incident details");
+      return response.json();
+    });
+  }
+  const [incidentDetails, setIncidentDetails] = useState({});
+  const incidentSelectionRequestRef = useRef(0);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [focusedFaceEventId, setFocusedFaceEventId] = useState(null);
   const [selectedFace, setSelectedFace] = useState(null);
@@ -3451,8 +3461,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const visibleIncidents = incidents;
-  const explicitlyFocusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
-  const focusedIncident = mobileView ? explicitlyFocusedIncident : explicitlyFocusedIncident || visibleIncidents[0] || null;
+  const explicitlyFocusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  const focusedSummary = mobileView ? explicitlyFocusedSummary : explicitlyFocusedSummary || visibleIncidents[0] || null;
+  const focusedDetailQuery = incidentDetailQuery(focusedSummary);
+  const focusedIncident = focusedSummary ? incidentDetails[focusedDetailQuery] || focusedSummary : null;
   const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
     || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
     || focusedIncident;
@@ -3484,7 +3496,35 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
 
   function refresh() {
     refreshBase();
+    incidentDetailCacheRef.current.clear();
+    setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
+  }
+
+  async function loadIncidentDetail(incident) {
+    const query = incidentDetailQuery(incident);
+    if (!query) return incident;
+    const cached = incidentDetails[query];
+    if (cached) return cached;
+    try {
+      const detail = await incidentDetailCacheRef.current.load(query);
+      setIncidentDetails((current) => ({ ...current, [query]: detail }));
+      return detail;
+    } catch {
+      return incident;
+    }
+  }
+
+  async function openIncidentOverlay(incident) {
+    const request = ++incidentSelectionRequestRef.current;
+    setSelectedEvent(incident);
+    const detail = await loadIncidentDetail(incident);
+    if (request === incidentSelectionRequestRef.current) setSelectedEvent(detail);
+  }
+
+  function closeIncidentOverlay() {
+    incidentSelectionRequestRef.current += 1;
+    setSelectedEvent(null);
   }
 
   useAppEvents(({ type }) => {
@@ -3594,6 +3634,17 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   }, [focusedIncident?.id]);
 
   useEffect(() => {
+    if (!focusedSummary || !focusedDetailQuery || incidentDetails[focusedDetailQuery]) return;
+    let cancelled = false;
+    incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
+      if (!cancelled) setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
+    }).catch(() => {
+      // The compact incident remains usable if investigation details fail.
+    });
+    return () => { cancelled = true; };
+  }, [focusedSummary?.id, focusedDetailQuery, incidentDetails]);
+
+  useEffect(() => {
     if (desktopAnalysisMode !== "tracks") return;
     const trackingEvent = incidentTrackingSource(focusedEvent, focusedIncident);
     if (!storedObjectTracks(trackingEvent).length) setDesktopAnalysisMode("clean");
@@ -3625,7 +3676,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   function toggleIncident(incidentId) {
     if (mobileView) {
       const incident = visibleIncidents.find((candidate) => candidate.id === incidentId);
-      if (incident) setSelectedEvent(incident);
+      if (incident) openIncidentOverlay(incident);
       return;
     }
     setExpandedIncidentId(incidentId);
@@ -3782,7 +3833,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
                 expanded={false}
                 thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
-                onSelect={setSelectedEvent}
+                onSelect={openIncidentOverlay}
               />
             ))
             : null}
@@ -3796,7 +3847,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
           </div>
         ) : null}
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
     </main>
   );
 }
@@ -3822,6 +3873,16 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const [incidentLoadError, setIncidentLoadError] = useState("");
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
   const incidentEventRefreshTimer = useRef(null);
+  const incidentDetailCacheRef = useRef(null);
+  if (!incidentDetailCacheRef.current) {
+    incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
+      const response = await fetch(`/api/incidents/detail?${query}`);
+      if (!response.ok) throw new Error("Unable to load incident details");
+      return response.json();
+    });
+  }
+  const [incidentDetails, setIncidentDetails] = useState({});
+  const incidentSelectionRequestRef = useRef(0);
   const incidentFeedCacheRef = useRef(null);
   if (!incidentFeedCacheRef.current) {
     incidentFeedCacheRef.current = createIncidentPageCache(async (query) => {
@@ -3853,7 +3914,9 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const visibleIncidents = incidents;
-  const focusedIncident = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  const focusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  const focusedDetailQuery = incidentDetailQuery(focusedSummary);
+  const focusedIncident = focusedSummary ? incidentDetails[focusedDetailQuery] || focusedSummary : null;
   const galleryIncidents = visibleIncidents;
   const incidentPageCount = incidentPage + (incidentHasMore ? 2 : 1);
   const clampedIncidentPage = incidentPage;
@@ -3899,7 +3962,35 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   function refresh() {
     refreshBase();
     incidentFeedCacheRef.current.clear();
+    incidentDetailCacheRef.current.clear();
+    setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
+  }
+
+  async function loadIncidentDetail(incident) {
+    const query = incidentDetailQuery(incident);
+    if (!query) return incident;
+    const cached = incidentDetails[query];
+    if (cached) return cached;
+    try {
+      const detail = await incidentDetailCacheRef.current.load(query);
+      setIncidentDetails((current) => ({ ...current, [query]: detail }));
+      return detail;
+    } catch {
+      return incident;
+    }
+  }
+
+  async function openIncidentOverlay(incident) {
+    const request = ++incidentSelectionRequestRef.current;
+    setSelectedEvent(incident);
+    const detail = await loadIncidentDetail(incident);
+    if (request === incidentSelectionRequestRef.current) setSelectedEvent(detail);
+  }
+
+  function closeIncidentOverlay() {
+    incidentSelectionRequestRef.current += 1;
+    setSelectedEvent(null);
   }
 
   useAppEvents(({ type }) => {
@@ -3962,6 +4053,17 @@ function LivePage({ timeZone, onRecordingContextChange }) {
       cancelled = true;
     };
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken, liveIncidentGalleryReady]);
+
+  useEffect(() => {
+    if (!focusedSummary || !focusedDetailQuery || incidentDetails[focusedDetailQuery]) return;
+    let cancelled = false;
+    incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
+      if (!cancelled) setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
+    }).catch(() => {
+      // The compact incident remains usable if investigation details fail.
+    });
+    return () => { cancelled = true; };
+  }, [focusedSummary?.id, focusedDetailQuery, incidentDetails]);
 
   useEffect(() => {
     const context = incidentRecordingContext(selectedEvent || focusedIncident);
@@ -4082,7 +4184,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
               expanded
               thumbnailAnnotations={thumbnailAnnotations}
               onToggle={toggleIncident}
-              onSelect={setSelectedEvent}
+              onSelect={openIncidentOverlay}
             />
           </div>
         ) : null}
@@ -4099,7 +4201,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
                 selected={incident.id === focusedIncident?.id}
                 thumbnailAnnotations={thumbnailAnnotations}
                 onToggle={toggleIncident}
-                onSelect={setSelectedEvent}
+                onSelect={openIncidentOverlay}
               />
             ))
             : null}
@@ -4111,7 +4213,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
           <button type="button" onClick={() => setIncidentPage((page) => page + 1)} disabled={!incidentHasMore}>Next</button>
         </div>
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
       {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} timeZone={timeZone} onClose={() => setExpandedCamera(null)} /> : null}
     </main>
   );

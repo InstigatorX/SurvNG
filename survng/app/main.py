@@ -2867,12 +2867,38 @@ def incident_feed(
         "zones": sorted({str(item_zone) for item in scanned for item_zone in item.get("zones", []) if item_zone}),
     }
     return {
-        "items": _incidents_with_faces(_hydrate_incidents(page)),
+        "items": [_incident_list_payload(item) for item in page],
         "limit": bounded_limit,
         "offset": bounded_offset,
         "has_more": has_more,
         "facets": facets,
     }
+
+
+@app.get("/api/incidents/detail")
+def incident_detail(event_ids: str, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> dict:
+    try:
+        requested_ids = list(dict.fromkeys(
+            int(value.strip())
+            for value in event_ids.split(",")
+            if value.strip()
+        ))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="event_ids must be comma-separated integers") from exc
+    if not requested_ids or len(requested_ids) > 200 or any(event_id <= 0 for event_id in requested_ids):
+        raise HTTPException(status_code=422, detail="event_ids must contain 1 to 200 positive integers")
+
+    rows = manager.events.get_many(requested_ids)
+    if {int(row["id"]) for row in rows} != set(requested_ids):
+        raise HTTPException(status_code=404, detail="incident events were not found")
+    bounded_gap = max(5, min(gap_seconds, 300))
+    summaries = _incident_rows([_event_row(row) for row in rows], bounded_gap)
+    if len(summaries) != 1:
+        raise HTTPException(status_code=422, detail="event_ids do not identify one incident")
+    hydrated = _incidents_with_faces(_hydrate_incidents(summaries))
+    if not hydrated:
+        raise HTTPException(status_code=404, detail="incident was not found")
+    return hydrated[0]
 
 
 def _filter_incidents_by_event_type(incidents: list[dict], event_type: str) -> list[dict]:
@@ -2955,9 +2981,8 @@ def incident_search(
     bounded_limit = max(1, min(limit, 100))
     bounded_offset = max(0, offset)
     page_summaries = filtered[bounded_offset:bounded_offset + bounded_limit]
-    page_items = _hydrate_incidents(page_summaries)
     return {
-        "items": _incidents_with_faces(page_items),
+        "items": [_incident_list_payload(item) for item in page_summaries],
         "total": len(filtered),
         "limit": bounded_limit,
         "offset": bounded_offset,
@@ -4778,6 +4803,61 @@ def _incident_event_payload(event: dict) -> dict:
         if isinstance(item, dict) and item.get("label")
     ]
     payload["object_tracking"] = event.get("object_tracking")
+    return payload
+
+
+def _incident_list_payload(incident: dict) -> dict:
+    """Return the media-card data without expensive investigation details."""
+    payload = dict(incident)
+    representative_id = int(payload.get("representative_event_id") or 0)
+    payload.pop("object_tracking", None)
+    payload.pop("motion_observations", None)
+    payload.pop("faces", None)
+
+    def compact_objects(objects: object) -> list[dict]:
+        if not isinstance(objects, list):
+            return []
+        return [
+            {
+                key: item[key]
+                for key in (
+                    "label",
+                    "confidence",
+                    "box",
+                    "zones",
+                    "mask_polygon",
+                    "incident_eligible",
+                    "track_id",
+                    "track_state",
+                )
+                if key in item
+            }
+            for item in objects
+            if isinstance(item, dict) and item.get("label")
+        ]
+
+    payload["objects"] = compact_objects(payload.get("objects"))
+    compact_events: list[dict] = []
+    for event in payload.get("events", []):
+        event_id = int(event.get("id") or 0)
+        compact_event = {
+            key: event[key]
+            for key in (
+                "id",
+                "camera_id",
+                "kind",
+                "created_at",
+                "has_objects",
+                "labels",
+                "zones",
+            )
+            if key in event
+        }
+        compact_event["objects"] = (
+            compact_objects(event.get("objects")) if event_id == representative_id else []
+        )
+        compact_events.append(compact_event)
+    payload["events"] = compact_events
     return payload
 
 

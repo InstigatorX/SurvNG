@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentIndexForEvent, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentIndexForEvent, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -15,6 +15,9 @@ assert.equal(adjacentIncident(incidents, { id: 101 }, 1), incidents[1]);
 assert.equal(adjacentIncident(incidents, { id: 201 }, -1), incidents[0]);
 assert.equal(adjacentIncident(incidents, { id: 301 }, 1), incidents[0]);
 assert.equal(adjacentIncident([incidents[0]], incidents[0], 1), null);
+assert.equal(incidentDetailQuery(incidents[0]), "event_ids=101%2C102&gap_seconds=45");
+assert.equal(incidentDetailQuery({ events: [{ id: 101 }, { id: 101 }, { id: "bad" }] }), "event_ids=101&gap_seconds=45");
+assert.equal(incidentDetailQuery({ events: [] }), "");
 
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);
