@@ -23,14 +23,14 @@ export function showIncidentCardAnnotations(expanded, thumbnailAnnotations) {
   return !expanded && Boolean(thumbnailAnnotations);
 }
 
-export function incidentThumbnailPageSize({ width, height, density }) {
+export function incidentThumbnailPageSize({ width, height, density, columns: requestedColumns, gap: requestedGap, horizontalPadding: requestedPadding }) {
   const safeWidth = Math.max(0, Number(width) || 0);
   const safeHeight = Math.max(0, Number(height) || 0);
   if (!safeWidth || !safeHeight) return density === "comfortable" ? 10 : 16;
   const compact = density !== "comfortable";
-  const columns = compact ? 2 : 1;
-  const gap = compact ? 7 : 9;
-  const horizontalPadding = 16;
+  const columns = Math.max(1, Math.floor(Number(requestedColumns) || (compact ? 2 : 1)));
+  const gap = Math.max(0, Number.isFinite(Number(requestedGap)) ? Number(requestedGap) : compact ? 7 : 9);
+  const horizontalPadding = Math.max(0, Number.isFinite(Number(requestedPadding)) ? Number(requestedPadding) : 16);
   const usableWidth = Math.max(1, safeWidth - horizontalPadding);
   const cardWidth = Math.max(1, (usableWidth - gap * (columns - 1)) / columns);
   const cardHeight = cardWidth * 10 / 16 + 2;

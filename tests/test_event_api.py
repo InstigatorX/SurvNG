@@ -634,6 +634,15 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(invalid.exception.status_code, 422)
 
+    def test_incident_event_type_filters_are_mutually_exclusive(self) -> None:
+        motion = {"id": 1, "has_objects": False}
+        object_incident = {"id": 2, "has_objects": True}
+        incidents = [motion, object_incident]
+
+        self.assertEqual(main._filter_incidents_by_event_type(incidents, "motion"), [motion])
+        self.assertEqual(main._filter_incidents_by_event_type(incidents, "object"), [object_incident])
+        self.assertEqual(main._filter_incidents_by_event_type(incidents, "all"), incidents)
+
     def test_event_row_tolerates_malformed_legacy_object_entries(self) -> None:
         row = main._event_row({
             "id": 1,

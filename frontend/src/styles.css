@@ -598,7 +598,8 @@ p {
   background: transparent;
 }
 
-.incident-rail .incident-pager.placeholder {
+.incident-rail .incident-pager.placeholder,
+.events-zone > .incident-pager.placeholder {
   visibility: hidden;
   pointer-events: none;
 }

@@ -67,13 +67,20 @@ import {
   rememberWebRtcFailure,
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
-import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
+import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { adjacentIncident, incidentThumbnailPageSize, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
+const LEGACY_INCIDENT_FILTER_KEYS = [
+  "survng.liveEventFilter.v2",
+  "survng.incidentDay.v1",
+  "survng.incidentCameraFilter.v1",
+  "survng.incidentObjectFilter.v1",
+  "survng.incidentZoneFilter.v1",
+];
 const US_TIME_ZONES = [
   ["America/New_York", "Eastern"],
   ["America/Chicago", "Central"],
@@ -696,6 +703,11 @@ function useStoredState(key, initialValue) {
     writeStoredValue(browserStorage(window), key, value);
   }, [key, value]);
   return [value, setValue];
+}
+
+function clearLegacyIncidentFilterStorage() {
+  const storage = browserStorage(window);
+  LEGACY_INCIDENT_FILTER_KEYS.forEach((key) => removeStoredValue(storage, key));
 }
 
 function formatDateTime(value, timeZone) {
@@ -3257,13 +3269,13 @@ function refreshedIncidentSelection(selected, incidents) {
 function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData(false);
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
-  const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
-  const [incidentCameraFilter, setIncidentCameraFilter] = useStoredState("survng.incidentCameraFilter.v1", "all");
-  const [incidentObjectFilter, setIncidentObjectFilter] = useStoredState("survng.incidentObjectFilter.v1", "all");
-  const [incidentZoneFilter, setIncidentZoneFilter] = useStoredState("survng.incidentZoneFilter.v1", "all");
+  const [eventFilter, setEventFilter] = useState("object");
+  const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
+  const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
+  const [incidentZoneFilter, setIncidentZoneFilter] = useState("all");
   const [incidentDensity, setIncidentDensity] = useStoredState("survng.incidentDensity.v1", "compact");
   const today = dateKeyForTimeZone(Date.now(), timeZone);
-  const [incidentDay, setIncidentDay] = useStoredState("survng.incidentDay.v1", today);
+  const [incidentDay, setIncidentDay] = useState(today);
   const [incidents, setIncidents] = useState([]);
   const [incidentTotal, setIncidentTotal] = useState(0);
   const [incidentFacets, setIncidentFacets] = useState({ camera_ids: [], labels: [], zones: [] });
@@ -3301,6 +3313,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const incidentPageCount = Math.max(1, Math.ceil(incidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+
+  useEffect(() => {
+    clearLegacyIncidentFilterStorage();
+  }, []);
 
   useEffect(() => {
     if (mobileView) return undefined;
@@ -3638,10 +3654,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
 function LivePage({ timeZone, onRecordingContextChange }) {
   const { cameras, incidents, appConfig, refresh } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
-  const [eventFilter, setEventFilter] = useStoredState("survng.liveEventFilter.v2", "object");
-  const [incidentCameraFilter, setIncidentCameraFilter] = useStoredState("survng.incidentCameraFilter.v1", "all");
-  const [incidentObjectFilter, setIncidentObjectFilter] = useStoredState("survng.incidentObjectFilter.v1", "all");
-  const [incidentZoneFilter, setIncidentZoneFilter] = useStoredState("survng.incidentZoneFilter.v1", "all");
+  const [eventFilter, setEventFilter] = useState("object");
+  const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
+  const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
+  const [incidentZoneFilter, setIncidentZoneFilter] = useState("all");
   const [cameraOrder, setCameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [dragCameraId, setDragCameraId] = useState("");
   const [dragOverCameraId, setDragOverCameraId] = useState("");
@@ -3649,7 +3665,13 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
-  const incidentsPerPage = 12;
+  const liveIncidentGalleryRef = useRef(null);
+  const [liveIncidentGallerySize, setLiveIncidentGallerySize] = useState({ width: 0, height: 0 });
+  const liveIncidentGalleryReady = liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0;
+  const incidentsPerPage = liveIncidentGalleryReady
+    ? incidentThumbnailPageSize({ ...liveIncidentGallerySize, density: "compact", columns: 2, gap: 10, horizontalPadding: 24 })
+    : 12;
+  const previousLiveIncidentsPerPageRef = useRef(incidentsPerPage);
   const orderedCameras = useMemo(() => {
     let order = [];
     try {
@@ -3679,6 +3701,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   }, [incidents]);
   const visibleIncidents = useMemo(() => incidents.filter((incident) => {
     if (eventFilter === "object" && !hasDetectedObjects(incident)) return false;
+    if (eventFilter === "motion" && hasDetectedObjects(incident)) return false;
     if (incidentCameraFilter !== "all" && incident.camera_id !== incidentCameraFilter) return false;
     if (incidentObjectFilter !== "all" && !incidentLabels(incident).includes(incidentObjectFilter)) return false;
     if (incidentZoneFilter !== "all" && !incidentZones(incident).includes(incidentZoneFilter)) return false;
@@ -3689,6 +3712,23 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const incidentPageCount = Math.max(1, Math.ceil(galleryIncidents.length / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents.slice(clampedIncidentPage * incidentsPerPage, (clampedIncidentPage + 1) * incidentsPerPage);
+
+  useEffect(() => {
+    clearLegacyIncidentFilterStorage();
+  }, []);
+
+  useEffect(() => {
+    const gallery = liveIncidentGalleryRef.current;
+    if (!gallery) return undefined;
+    function updateGallerySize() {
+      const rect = gallery.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) setLiveIncidentGallerySize({ width: rect.width, height: rect.height });
+    }
+    updateGallerySize();
+    const observer = new ResizeObserver(updateGallerySize);
+    observer.observe(gallery);
+    return () => observer.disconnect();
+  }, []);
 
   function moveCameraBefore(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) return;
@@ -3703,6 +3743,14 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   useEffect(() => {
     setIncidentPage(0);
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
+
+  useEffect(() => {
+    const previousPageSize = previousLiveIncidentsPerPageRef.current;
+    if (previousPageSize !== incidentsPerPage) {
+      setIncidentPage((page) => Math.floor(page * previousPageSize / incidentsPerPage));
+      previousLiveIncidentsPerPageRef.current = incidentsPerPage;
+    }
+  }, [incidentsPerPage]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -3831,7 +3879,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
             />
           </div>
         ) : null}
-        <div className="incident-gallery">
+        <div className="incident-gallery" ref={liveIncidentGalleryRef}>
           {visibleIncidents.length
             ? pagedIncidents.map((incident) => (
               <IncidentCard
@@ -3847,13 +3895,11 @@ function LivePage({ timeZone, onRecordingContextChange }) {
             ))
             : <div className="empty-state">No incidents match the current filters.</div>}
         </div>
-        {galleryIncidents.length > incidentsPerPage ? (
-          <div className="incident-pager" aria-label="Incident pages">
-            <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
-            <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-            <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
-          </div>
-        ) : null}
+        <div className={`incident-pager ${galleryIncidents.length > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={galleryIncidents.length <= incidentsPerPage}>
+          <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
+          <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
+          <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
+        </div>
       </section>
       {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
       {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} timeZone={timeZone} onClose={() => setExpandedCamera(null)} /> : null}

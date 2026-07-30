@@ -22,6 +22,7 @@ assert.equal(showIncidentCardAnnotations(true, true), false);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 8);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 12);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 2);
+assert.equal(incidentThumbnailPageSize({ width: 400, height: 500, density: "compact", columns: 2, gap: 10, horizontalPadding: 24 }), 8);
 assert.equal(incidentThumbnailPageSize({ width: 0, height: 0, density: "compact" }), 16);
 
 console.log("incident navigation tests passed");

@@ -22,3 +22,12 @@ export function writeStoredValue(storage, key, value) {
     return false;
   }
 }
+
+export function removeStoredValue(storage, key) {
+  try {
+    storage?.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}

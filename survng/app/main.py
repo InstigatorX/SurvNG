@@ -2628,6 +2628,14 @@ def incidents(limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS)
     return _incidents_with_faces(_hydrate_incidents(summaries))
 
 
+def _filter_incidents_by_event_type(incidents: list[dict], event_type: str) -> list[dict]:
+    if event_type == "object":
+        return [item for item in incidents if item.get("has_objects")]
+    if event_type == "motion":
+        return [item for item in incidents if not item.get("has_objects")]
+    return incidents
+
+
 @app.get("/api/incidents/search")
 def incident_search(
     day: str = "",
@@ -2673,9 +2681,7 @@ def incident_search(
         "labels": sorted({str(label) for item in day_incidents for label in item.get("labels", []) if label}),
         "zones": sorted({str(item_zone) for item in day_incidents for item_zone in item.get("zones", []) if item_zone}),
     }
-    filtered = day_incidents
-    if event_type == "object":
-        filtered = [item for item in filtered if item.get("has_objects")]
+    filtered = _filter_incidents_by_event_type(day_incidents, event_type)
     if camera_id:
         filtered = [item for item in filtered if item.get("camera_id") == camera_id]
     if object_label:
