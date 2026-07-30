@@ -1983,6 +1983,22 @@ button.status-pill.hud-toggle:disabled {
   object-fit: contain;
 }
 
+.snapshot-progressive-stack {
+  position: absolute;
+  inset: 0;
+}
+
+.snapshot-progressive-image {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 100ms ease-out;
+}
+
+.snapshot-progressive-image.ready {
+  opacity: 1;
+}
+
 .object-box-layer {
   position: absolute;
   inset: 0;

@@ -693,9 +693,9 @@ function eventSnapshotUrl(event) {
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
 }
 
-function eventThumbnailUrl(event) {
+function eventThumbnailUrl(event, width = 720, quality = 82) {
   const eventId = Number(event?.representative_event_id || event?.id);
-  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=720&quality=82`) : "";
+  return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=${width}&quality=${quality}`) : "";
 }
 
 function useStoredState(key, initialValue) {
@@ -1677,13 +1677,14 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, onImageSize, children }) {
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(null);
   const [frameSize, setFrameSize] = useState(null);
   const [objectFocused, setObjectFocused] = useState(false);
+  const [progressiveReady, setProgressiveReady] = useState(false);
   const renderedImage = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
     const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
@@ -1703,6 +1704,10 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     setObjectFocused(false);
     setImageSize(null);
   }, [event?.id, event?.snapshot_path]);
+
+  useEffect(() => {
+    setProgressiveReady(false);
+  }, [event?.id, fullResolution]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -1791,7 +1796,24 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   return (
     <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
-        {event?.snapshot_path && eventSnapshotUrl(event) ? <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} /> : <div className="empty-thumb"><Camera size={iconSize} /></div>}
+        {event?.snapshot_path && eventSnapshotUrl(event) ? (
+          progressive ? (
+            <div className="snapshot-progressive-stack">
+              <img src={eventThumbnailUrl(event)} alt={alt} decoding="async" onLoad={onImageLoad} />
+              <img
+                className={`snapshot-progressive-image ${progressiveReady ? "ready" : ""}`}
+                src={fullResolution ? eventSnapshotUrl(event) : eventThumbnailUrl(event, 1280, 86)}
+                alt=""
+                aria-hidden="true"
+                decoding="async"
+                onLoad={(loadEvent) => {
+                  onImageLoad(loadEvent);
+                  setProgressiveReady(true);
+                }}
+              />
+            </div>
+          ) : <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} />
+        ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
@@ -1838,6 +1860,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
           className={`snapshot-focus-button ${objectFocused ? "active" : ""}`}
           onClick={(event) => {
             event.stopPropagation();
+            if (!objectFocused) onRequestFullResolution?.();
             setObjectFocused((focused) => !focused);
           }}
           title={objectFocused ? "Show full snapshot" : "Focus detected objects"}
@@ -2500,6 +2523,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [analysisToolsOpen, setAnalysisToolsOpen] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   const [mediaSize, setMediaSize] = useState(null);
+  const [fullSnapshotRequested, setFullSnapshotRequested] = useState(false);
   const zoomRef = useRef(zoom);
   const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
   const [manualDetection, setManualDetection] = useState(null);
@@ -2640,6 +2664,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     const box = mediaRef.current?.getBoundingClientRect();
     if (!box) return;
     setVideoActive(false);
+    setFullSnapshotRequested(true);
     updateZoom((current) => {
       const nextScale = Math.max(1, Math.min(6, current.scale * factor));
       if (nextScale === 1) return { scale: 1, x: 0, y: 0 };
@@ -2679,6 +2704,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     if (videoActive) return;
     if (touchEvent.touches.length === 2) {
       touchEvent.preventDefault();
+      setFullSnapshotRequested(true);
       const center = touchCenter(touchEvent.touches);
       const current = zoomRef.current;
       gestureRef.current = { mode: "pinch", pointerId: null, pinchDistance: touchDistance(touchEvent.touches), scale: current.scale, startX: center.x, startY: center.y, panX: current.x, panY: current.y, moved: true };
@@ -2774,6 +2800,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   useEffect(() => {
     resetZoom();
     setMediaSize(null);
+    setFullSnapshotRequested(false);
     setDetectionDebug(false);
     setDetectionDebugStats(null);
     setTrackingVisible(false);
@@ -3019,6 +3046,9 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             className="event-snapshot-frame"
             layerStyle={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }}
             allowObjectFocus={zoom.scale === 1 && !videoActive}
+            progressive
+            fullResolution={fullSnapshotRequested}
+            onRequestFullResolution={() => setFullSnapshotRequested(true)}
             showAnnotations
             showTracking={trackingVisible && !manualDetection}
             onImageSize={setMediaSize}
