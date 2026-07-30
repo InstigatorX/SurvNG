@@ -6681,7 +6681,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   return (
     <div className="sub-panel motion-ai-review-panel">
       <h3>AI Motion Review</h3>
-      <p className="settings-help">Manually review up to the latest 100 Motion Audit entries for one camera. SurvNG analyzes each retained image with the configured AI Advisor, then combines repeated findings into camera-specific suggestions. Nothing is applied automatically.</p>
+      <p className="settings-help">Manually review up to the latest 100 motion decisions for one camera. SurvNG analyzes each retained image with the configured AI Advisor, then combines repeated findings into camera-specific suggestions. Continuous active/cooldown updates are excluded, and nothing is applied automatically.</p>
       <div className="field-row motion-ai-review-controls">
         <label>Camera<select value={cameraId} onChange={(event) => setCameraId(event.target.value)} disabled={running}>
           {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
@@ -6695,7 +6695,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
       {!advisorEnabled ? <div className="save-status motion-audit-error">Enable and save the AI Audit Advisor under Object Detection before running a review.</div> : null}
       <div className="probe-result">
         <strong>What this uses</strong>
-        <span>The latest 100 audit records for {selectedCamera?.name || cameraId || "the selected camera"}; records whose retained image has expired are skipped.</span>
+        <span>The latest 100 discrete decision records for {selectedCamera?.name || cameraId || "the selected camera"}; records whose retained image has expired are skipped.</span>
         <span>Each available image is a separate provider request. A camera with 100 retained images can therefore make up to 100 billable AI requests.</span>
       </div>
       {error ? <div className="save-status motion-audit-error">{error}</div> : null}
@@ -6715,6 +6715,12 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
           {review.status === "completed" ? (
             <>
               <p>{report.summary}</p>
+              {report.review_context?.motion_paradigm ? (
+                <div className="probe-result">
+                  <strong>Configuration analyzed</strong>
+                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "Adaptive visual-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} visual analysis</span>
+                </div>
+              ) : null}
               <div className="motion-ai-review-stats">
                 <span><strong>{report.verdict_counts?.real_motion || 0}</strong> likely real motion</span>
                 <span><strong>{report.verdict_counts?.noise || 0}</strong> likely nuisance</span>

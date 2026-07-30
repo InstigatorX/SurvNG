@@ -17,6 +17,7 @@ from survng.app.audit_ai import (
     AuditAiChange,
     AuditAiError,
     SYSTEM_PROMPT,
+    audit_analysis_prompt,
     motion_audit_interpretation,
     motion_paradigm_context,
     validate_tuning_value,
@@ -45,8 +46,17 @@ class AuditAiTest(unittest.TestCase):
     def test_prompt_describes_current_trigger_validator_paradigm(self) -> None:
         self.assertIn("camera_triggered", SYSTEM_PROMPT)
         self.assertIn("visual_triggered", SYSTEM_PROMPT)
-        self.assertIn("null object_detected value means detection did not run", SYSTEM_PROMPT)
+        self.assertIn("usually means detection did not run", SYSTEM_PROMPT)
+        self.assertIn("detection was attempted but did not complete", SYSTEM_PROMPT)
         self.assertIn("operator-owned safety settings", SYSTEM_PROMPT)
+        self.assertIn("starts only after the initial detector decision", SYSTEM_PROMPT)
+
+    def test_audit_prompt_is_neutral_about_decision_outcome(self) -> None:
+        prompt = audit_analysis_prompt('{"decision_outcome":{"object_detection_ran":true}}')
+
+        self.assertIn("accepted, filtered, rescued", prompt)
+        self.assertIn("incident-eligibility", prompt)
+        self.assertNotIn("rejected motion audit", prompt)
 
     def test_camera_triggered_paradigm_identifies_optional_validators(self) -> None:
         context = motion_paradigm_context(
@@ -68,6 +78,8 @@ class AuditAiTest(unittest.TestCase):
         self.assertEqual(context["mog2"]["role"], "validator")
         self.assertEqual(context["onvif"]["role"], "automatic_trigger")
         self.assertTrue(context["validator_decision"]["fail_open"])
+        self.assertEqual(context["schema_version"], 3)
+        self.assertEqual(context["incident_eligibility"]["policy"], "zones_only")
 
     def test_visual_triggered_paradigm_makes_onvif_diagnostic_only(self) -> None:
         context = motion_paradigm_context(

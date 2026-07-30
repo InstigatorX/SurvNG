@@ -14,6 +14,7 @@ def aggregate_motion_ai_review(
     images_available: int,
     failed: int,
     current_settings: dict[str, Any] | None = None,
+    review_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic camera report from independently validated AI responses."""
     rows = list(analyses)
@@ -92,4 +93,5 @@ def aggregate_motion_ai_review(
         "audit_reason_counts": dict(audit_reasons.most_common()),
         "recommendations": recommendations[:8],
         "samples": samples,
+        "review_context": review_context or {},
     }

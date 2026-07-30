@@ -2029,6 +2029,7 @@ def _audit_ai_context(
     event = active_manager.events.get(int(audit["event_id"])) if audit.get("event_id") else None
     detected_objects: list[dict] = []
     qualification: dict = {}
+    object_tracking: dict[str, Any] = {}
     if event:
         try:
             entries = json.loads(str(event.get("objects_json") or "[]"))
@@ -2063,10 +2064,16 @@ def _audit_ai_context(
                         "temporal_peak_confidence"
                     ),
                     "temporal_label_votes": entry.get("temporal_label_votes"),
+                    "track_id": entry.get("track_id"),
+                    "track_state": entry.get("track_state"),
+                    "track_observations": entry.get("track_observations"),
                 })
             if entry.get("status") == "motion_qualification":
                 candidate = entry.get("motion_qualification")
                 qualification = candidate if isinstance(candidate, dict) else {}
+            if entry.get("status") == "object_tracking":
+                candidate = entry.get("object_tracking")
+                object_tracking = candidate if isinstance(candidate, dict) else {}
     override = camera.motion_qualification
     graphs = resolve_motion_pipeline_graphs(active_config.motion_qualification, override)
     effective_mode = (
@@ -2079,6 +2086,16 @@ def _audit_ai_context(
         stage.implementation == "opencv_mog2_evidence"
         and bool(stage.options.get("enabled", True))
         for stage in graphs.observation
+    )
+    require_incident_zone = (
+        active_config.detector.require_incident_zone
+        if camera.require_incident_zone is None
+        else camera.require_incident_zone
+    )
+    suppression_verification_rate = (
+        active_config.motion_qualification.suppression_verification_rate
+        if override.suppression_verification_rate is None
+        else override.suppression_verification_rate
     )
     effective = {
         "mode": effective_mode,
@@ -2101,6 +2118,9 @@ def _audit_ai_context(
         "window_seconds": active_config.motion_qualification.window_seconds,
         "post_trigger_seconds": active_config.motion_qualification.post_trigger_seconds,
         "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
+        "camera_mode_background_fps": active_config.motion_qualification.camera_mode_background_fps,
+        "rejected_sample_rate": active_config.motion_qualification.rejected_sample_rate,
+        "suppression_verification_rate": suppression_verification_rate,
         "analysis_preset": identify_analysis_preset(graphs.qualification),
         "object_confirmation_frames": (
             active_config.detector.event_confirmation_frames
@@ -2108,6 +2128,16 @@ def _audit_ai_context(
         "object_class_confirmation_frames": dict(
             active_config.detector.event_class_confirmation_frames
         ),
+        "incident_eligibility_policy": (
+            "zones_only" if require_incident_zone else "zones_plus_full_frame"
+        ),
+        "object_tracking": {
+            "enabled": active_config.detector.tracking.enabled,
+            "implementation": active_config.detector.tracking.implementation,
+            "sample_fps": active_config.detector.tracking.sample_fps,
+            "reid_enabled": active_config.detector.tracking.reid_enabled,
+            "vehicle_reid_enabled": active_config.detector.tracking.vehicle_reid_enabled,
+        },
         "fusion": fusion,
         "pipeline_origins": graphs.origins,
     }
@@ -2174,6 +2204,7 @@ def _audit_ai_context(
             has_live_substream=bool(camera.live_stream_url),
             fusion=fusion,
             mog2_available=mog2_available,
+            require_incident_zone=require_incident_zone,
         ),
         "audit": {
             "id": audit.get("id"),
@@ -2182,6 +2213,11 @@ def _audit_ai_context(
             "score": audit.get("score"),
             "threshold": audit.get("threshold"),
             "reason": audit.get("reason"),
+            "mode": audit.get("mode"),
+            "sensitivity": audit.get("sensitivity"),
+            "decision_id": audit.get("decision_id"),
+            "event_id": audit.get("event_id"),
+            "related_event_id": audit.get("related_event_id"),
             "features": features,
             "trigger_count": audit.get("trigger_count"),
             "object_detected": None if audit.get("object_detected") is None else bool(audit.get("object_detected")),
@@ -2206,6 +2242,7 @@ def _audit_ai_context(
         },
         "related_prior_event": related_prior_event,
         "detected_objects": detected_objects,
+        "object_tracking": object_tracking,
         "effective_settings": effective,
         "recent_camera_audits": {
             "sample_size": len(recent),
@@ -2384,6 +2421,7 @@ def _run_motion_ai_review(
     consecutive_failures = 0
     first_error = ""
     current_settings: dict[str, Any] = {}
+    review_context: dict[str, Any] = {}
     try:
         active_manager.events.update_motion_ai_review(review_id, status="running")
         advisor = AuditAiAdvisor(active_config.audit_ai)
@@ -2407,6 +2445,10 @@ def _run_motion_ai_review(
                 context = _audit_ai_context(audit, active_config, active_manager)
                 if not current_settings:
                     current_settings = dict(context.get("effective_settings") or {})
+                    review_context = {
+                        "motion_paradigm": context.get("motion_paradigm") or {},
+                        "effective_settings": current_settings,
+                    }
                 context["camera_review"] = {
                     "purpose": "aggregate camera tuning review",
                     "instruction": "Recommend only camera-scoped changes supported by this image.",
@@ -2457,6 +2499,7 @@ def _run_motion_ai_review(
             images_available=images_available,
             failed=failures,
             current_settings=current_settings,
+            review_context=review_context,
         )
         active_manager.events.update_motion_ai_review(
             review_id,

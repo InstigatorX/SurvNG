@@ -54,6 +54,7 @@ class MotionAiReviewTest(unittest.TestCase):
             images_available=5,
             failed=0,
             current_settings={"frame_width": 320},
+            review_context={"motion_paradigm": {"paradigm": "camera_triggered"}},
         )
 
         self.assertEqual(report["analyzed"], 5)
@@ -66,6 +67,10 @@ class MotionAiReviewTest(unittest.TestCase):
         self.assertEqual(recommendation["current_value"], 320)
         self.assertEqual(recommendation["support_count"], 2)
         self.assertEqual(recommendation["evidence_audit_ids"], [0, 1])
+        self.assertEqual(
+            report["review_context"]["motion_paradigm"]["paradigm"],
+            "camera_triggered",
+        )
 
     def test_aggregation_ignores_global_changes_for_per_camera_report(self) -> None:
         report = aggregate_motion_ai_review(

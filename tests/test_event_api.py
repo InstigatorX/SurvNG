@@ -443,6 +443,7 @@ class EventApiSerializationTest(unittest.TestCase):
             "detector": {
                 "event_confirmation_frames": 2,
                 "event_class_confirmation_frames": {"robot_lawnmower": 3},
+                "require_incident_zone": False,
             },
             "cameras": [{
                 "id": "back-middle",
@@ -464,6 +465,15 @@ class EventApiSerializationTest(unittest.TestCase):
                 "temporal_samples": 3,
                 "temporal_peak_confidence": 0.91,
                 "temporal_label_votes": {"robot_lawnmower": 2, "car": 1},
+                "track_id": 7,
+                "track_state": "confirmed",
+                "track_observations": 5,
+            }, {
+                "status": "object_tracking",
+                "object_tracking": {
+                    "state": "complete",
+                    "tracks": [{"track_id": 7, "label": "robot_lawnmower", "observations": 5}],
+                },
             }]),
         }
         events = SimpleNamespace(
@@ -491,10 +501,20 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(detected["temporal_incident_observations"], 1)
         self.assertEqual(detected["temporal_required_observations"], 3)
         self.assertEqual(detected["temporal_label_votes"]["car"], 1)
+        self.assertEqual(detected["track_id"], 7)
+        self.assertEqual(context["object_tracking"]["state"], "complete")
         self.assertEqual(context["effective_settings"]["object_confirmation_frames"], 2)
         self.assertEqual(
             context["effective_settings"]["object_class_confirmation_frames"],
             {"robot_lawnmower": 3},
+        )
+        self.assertEqual(
+            context["effective_settings"]["incident_eligibility_policy"],
+            "zones_plus_full_frame",
+        )
+        self.assertEqual(
+            context["motion_paradigm"]["incident_eligibility"]["policy"],
+            "zones_plus_full_frame",
         )
 
     def test_manual_camera_review_starts_a_background_job(self) -> None:
