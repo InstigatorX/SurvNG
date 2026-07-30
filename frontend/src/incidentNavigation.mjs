@@ -18,3 +18,7 @@ export function adjacentIncident(incidents, event, direction) {
   const step = direction < 0 ? -1 : 1;
   return incidents[(currentIndex + step + incidents.length) % incidents.length] || null;
 }
+
+export function showIncidentCardAnnotations(expanded, thumbnailAnnotations) {
+  return !expanded && Boolean(thumbnailAnnotations);
+}

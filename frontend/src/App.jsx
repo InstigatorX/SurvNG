@@ -70,7 +70,7 @@ import {
 import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
 import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident } from "./incidentNavigation.mjs";
+import { adjacentIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -2108,7 +2108,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
         <SnapshotImage
           event={preview}
           alt="incident snapshot"
-          showAnnotations={expanded || thumbnailAnnotations}
+          showAnnotations={showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
           showTracking={false}
           incidentEligibleOnly={!expanded}
           thumbnail
