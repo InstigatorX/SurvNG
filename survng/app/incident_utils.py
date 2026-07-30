@@ -6,6 +6,7 @@ from typing import Any
 
 
 SNAPSHOT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+MEDIA_DIRECTORIES = ("snapshots", "motion_samples", "recordings")
 DEFAULT_INCIDENT_GAP_SECONDS = 45
 
 
@@ -54,20 +55,69 @@ def incident_event_groups(
     return groups
 
 
+def portable_media_path(storage_dir: Path, path_value: object) -> str:
+    """Return a storage-root-relative database value when it can be verified safely."""
+    raw_path = str(path_value or "").strip()
+    if not raw_path:
+        return ""
+    path = Path(raw_path)
+    if not path.is_absolute():
+        return path.as_posix()
+
+    storage_root = storage_dir.resolve()
+    resolved = path.resolve(strict=False)
+    try:
+        return resolved.relative_to(storage_root).as_posix()
+    except ValueError:
+        pass
+
+    # Migrate media written under a different deployment mount (for example,
+    # systemd's /mnt/... versus Docker's /media). Only accept a known SurvNG
+    # media subtree whose equivalent file is present beneath the current root.
+    for directory in MEDIA_DIRECTORIES:
+        if directory not in path.parts:
+            continue
+        relative = Path(*path.parts[path.parts.index(directory) :])
+        candidate = (storage_root / relative).resolve(strict=False)
+        try:
+            candidate.relative_to(storage_root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return relative.as_posix()
+    return raw_path
+
+
+def stored_media_path(storage_dir: Path, path_value: object) -> Path:
+    """Resolve a stored media reference without allowing escape from storage."""
+    raw_path = str(path_value or "").strip()
+    if not raw_path:
+        raise FileNotFoundError("stored media is unavailable")
+
+    storage_root = storage_dir.resolve()
+    path = Path(raw_path)
+    resolved = (path if path.is_absolute() else storage_root / path).resolve()
+    try:
+        resolved.relative_to(storage_root)
+    except ValueError as exc:
+        raise PermissionError("stored media is outside storage directory") from exc
+    if not resolved.is_file():
+        raise FileNotFoundError("stored media is unavailable")
+    return resolved
+
+
 def event_snapshot_path(storage_dir: Path, event: dict[str, Any]) -> Path:
     raw_path = str(event.get("snapshot_path") or "")
     if not raw_path:
         raise FileNotFoundError("event snapshot is unavailable")
 
-    storage_root = storage_dir.resolve()
-    snapshot = Path(raw_path).resolve()
     try:
-        snapshot.relative_to(storage_root)
-    except ValueError as exc:
+        snapshot = stored_media_path(storage_dir, raw_path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("event snapshot is unavailable") from exc
+    except PermissionError as exc:
         raise PermissionError("event snapshot is outside storage directory") from exc
 
     if snapshot.suffix.lower() not in SNAPSHOT_SUFFIXES:
         raise PermissionError("event snapshot is not an image")
-    if not snapshot.is_file():
-        raise FileNotFoundError("event snapshot is unavailable")
     return snapshot

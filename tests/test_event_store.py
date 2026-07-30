@@ -157,7 +157,61 @@ class EventStoreTest(unittest.TestCase):
             persisted_snapshot = reloaded.get(int(event["id"]))["snapshot_path"]
 
             self.assertEqual(store.db_path, Path(database) / "survng.sqlite3")
-            self.assertEqual(persisted_snapshot, str(snapshot))
+            self.assertEqual(persisted_snapshot, "snapshots/gate/event.jpg")
+
+    def test_migrates_events_and_motion_audits_to_portable_media_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            database = root / "database"
+            snapshot = storage / "snapshots" / "gate" / "event.jpg"
+            audit = storage / "motion_samples" / "gate" / "audit.jpg"
+            recording = storage / "recordings" / "gate" / "segment.mp4"
+            for path in (snapshot, audit, recording):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"media")
+            store = EventStore(storage, database_dir=database)
+            event = store.add_event("gate", "motion")
+            motion = store.add_motion_audit(
+                camera_id="gate",
+                snapshot_path="",
+                created_at="2026-07-30T12:00:00+00:00",
+                mode="adaptive",
+                sensitivity="balanced",
+                score=0.7,
+                threshold=0.5,
+                reason="accepted",
+                object_detected=True,
+                trigger_count=1,
+                features={},
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update events set snapshot_path = ?, recording_path = ? where id = ?",
+                    (
+                        "/mnt/frigate/SurvNG/snapshots/gate/event.jpg",
+                        "/mnt/frigate/SurvNG/recordings/gate/segment.mp4",
+                        int(event["id"]),
+                    ),
+                )
+                connection.execute(
+                    "update motion_audits set snapshot_path = ? where id = ?",
+                    (
+                        "/mnt/frigate/SurvNG/motion_samples/gate/audit.jpg",
+                        int(motion["id"]),
+                    ),
+                )
+                connection.execute(
+                    "delete from survng_metadata where key = 'portable_media_paths'"
+                )
+
+            migrated = EventStore(storage, database_dir=database)
+            migrated_event = migrated.get(int(event["id"]))
+            migrated_audit = migrated.get_motion_audit(int(motion["id"]))
+
+            self.assertEqual(migrated_event["snapshot_path"], "snapshots/gate/event.jpg")
+            self.assertEqual(migrated_event["recording_path"], "recordings/gate/segment.mp4")
+            self.assertEqual(migrated_audit["snapshot_path"], "motion_samples/gate/audit.jpg")
 
     def test_recent_and_camera_range_queries_reject_unbounded_negative_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

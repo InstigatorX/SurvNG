@@ -15,7 +15,7 @@ import numpy as np
 
 from .face_recognition import OpenVinoFaceRecognizer
 from .inference import INFERENCE_REQUEST_TIMEOUT_SECONDS, InferenceUnavailable
-from .incident_utils import event_snapshot_path
+from .incident_utils import event_snapshot_path, portable_media_path
 
 
 LOGGER = logging.getLogger(__name__)
@@ -185,7 +185,7 @@ class FaceStore:
                 where person_id is null and review_status = 'confirmed'
                 """
             )
-            storage_root = str(self.storage_dir)
+            storage_root = str(self.storage_dir.resolve())
             metadata = connection.execute(
                 "select value from survng_metadata where key = 'face_storage_root'"
             ).fetchone()
@@ -194,12 +194,9 @@ class FaceStore:
                 updates = []
                 for row in rows:
                     raw_path = str(row["snapshot_path"] or "")
-                    parts = Path(raw_path).parts
-                    if "snapshots" not in parts:
-                        continue
-                    candidate = self.storage_dir.joinpath(*parts[parts.index("snapshots"):])
-                    if str(candidate) != raw_path and candidate.is_file():
-                        updates.append((str(candidate), int(row["id"])))
+                    portable_path = portable_media_path(self.storage_dir, raw_path)
+                    if portable_path != raw_path:
+                        updates.append((portable_path, int(row["id"])))
                 if updates:
                     connection.executemany(
                         "update face_observations set snapshot_path = ? where id = ?",
@@ -227,7 +224,10 @@ class FaceStore:
                 if event_id <= 0:
                     continue
                 try:
-                    snapshot_path = str(event_snapshot_path(self.storage_dir, event))
+                    snapshot_path = portable_media_path(
+                        self.storage_dir,
+                        event_snapshot_path(self.storage_dir, event),
+                    )
                 except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                     continue
                 try:

@@ -3170,12 +3170,11 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         event = active_manager.events.get(event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
-    snapshot_path = Path(str(event.get("snapshot_path") or ""))
-    if not snapshot_path.exists() or not snapshot_path.is_file():
-        raise HTTPException(status_code=404, detail="snapshot not found")
     try:
-        snapshot_path.resolve().relative_to(active_manager.storage_dir)
-    except ValueError:
+        snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    except PermissionError:
         raise HTTPException(status_code=403, detail="snapshot outside storage directory") from None
 
     if not math.isfinite(confidence):
@@ -3500,16 +3499,12 @@ def zone_snapshot(camera_id: str, source: str = "live") -> Response:
     if image is not None:
         return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
-    storage_root = active_manager.storage_dir.resolve()
     for event in active_manager.events.recent(1000):
         if event.get("camera_id") != camera_id:
             continue
-        snapshot_path = Path(str(event.get("snapshot_path") or ""))
-        if not snapshot_path.is_file():
-            continue
         try:
-            snapshot_path.resolve().relative_to(storage_root)
-        except ValueError:
+            snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
+        except (FileNotFoundError, PermissionError, OSError):
             continue
         return FileResponse(snapshot_path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
     raise HTTPException(status_code=503, detail="no camera or event snapshot available")

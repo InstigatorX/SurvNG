@@ -42,6 +42,7 @@ exports/
 frames/
 *.sqlite3
 *.sqlite3-*
+*.sqlite3.*.bak
 *.mp4
 *.mov
 *.avi

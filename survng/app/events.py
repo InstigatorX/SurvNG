@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .incident_utils import portable_media_path
+
 
 class EventStore:
     COMPACT_COLUMNS = "id, camera_id, kind, objects_json, created_at"
@@ -171,8 +173,10 @@ class EventStore:
                 """
             )
             storage_root = str(self.storage_dir.resolve())
-            if self._metadata_value(conn, "event_storage_root") != storage_root:
+            if self._metadata_value(conn, "portable_media_paths") != "1":
                 self._rebase_media_paths(conn)
+                self._set_metadata_value(conn, "portable_media_paths", "1")
+            if self._metadata_value(conn, "event_storage_root") != storage_root:
                 self._set_metadata_value(conn, "event_storage_root", storage_root)
             try:
                 backfill_after_id = int(
@@ -450,14 +454,13 @@ class EventStore:
             )
 
     def _rebase_media_paths(self, conn: sqlite3.Connection) -> None:
-        storage_root = self.storage_dir.resolve()
         rows = conn.execute(
             "select id, snapshot_path, recording_path from events where snapshot_path != '' or recording_path != ''"
         ).fetchall()
         updates: list[tuple[str, str, int]] = []
         for row in rows:
-            snapshot_path = self._rebased_path(str(row["snapshot_path"] or ""), storage_root)
-            recording_path = self._rebased_path(str(row["recording_path"] or ""), storage_root)
+            snapshot_path = portable_media_path(self.storage_dir, row["snapshot_path"])
+            recording_path = portable_media_path(self.storage_dir, row["recording_path"])
             if snapshot_path != str(row["snapshot_path"] or "") or recording_path != str(row["recording_path"] or ""):
                 updates.append((snapshot_path, recording_path, int(row["id"])))
         if updates:
@@ -466,24 +469,39 @@ class EventStore:
                 updates,
             )
 
-    @staticmethod
-    def _rebased_path(raw_path: str, storage_root: Path) -> str:
-        if not raw_path:
-            return raw_path
-        path = Path(raw_path)
-        try:
-            path.resolve().relative_to(storage_root)
-            return raw_path
-        except ValueError:
-            pass
-        parts = path.parts
-        for directory in ("snapshots", "recordings"):
-            if directory not in parts:
-                continue
-            candidate = storage_root.joinpath(*parts[parts.index(directory):])
-            if candidate.is_file():
-                return str(candidate)
-        return raw_path
+        audit_rows = conn.execute(
+            "select id, snapshot_path from motion_audits where snapshot_path != ''"
+        ).fetchall()
+        audit_updates: list[tuple[str, int]] = []
+        for row in audit_rows:
+            raw_path = str(row["snapshot_path"] or "")
+            portable_path = portable_media_path(self.storage_dir, raw_path)
+            if portable_path != raw_path:
+                audit_updates.append((portable_path, int(row["id"])))
+        if audit_updates:
+            conn.executemany(
+                "update motion_audits set snapshot_path = ? where id = ?",
+                audit_updates,
+            )
+
+        face_table = conn.execute(
+            "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
+        ).fetchone()
+        if face_table:
+            face_rows = conn.execute(
+                "select id, snapshot_path from face_observations where snapshot_path != ''"
+            ).fetchall()
+            face_updates: list[tuple[str, int]] = []
+            for row in face_rows:
+                raw_path = str(row["snapshot_path"] or "")
+                portable_path = portable_media_path(self.storage_dir, raw_path)
+                if portable_path != raw_path:
+                    face_updates.append((portable_path, int(row["id"])))
+            if face_updates:
+                conn.executemany(
+                    "update face_observations set snapshot_path = ? where id = ?",
+                    face_updates,
+                )
 
     def add_event(
         self,
@@ -498,6 +516,8 @@ class EventStore:
     ) -> dict[str, Any]:
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
+        snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
+        recording_path = portable_media_path(self.storage_dir, recording_path)
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -650,6 +670,7 @@ class EventStore:
             None if object_detected is None else int(object_detected)
         )
         normalized_trigger_count = max(1, int(trigger_count))
+        snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
         normalized_decision_id = str(decision_id or "").strip()
         normalized_related_event_id = (
             int(related_event_id) if related_event_id is not None else None

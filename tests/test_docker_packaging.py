@@ -66,15 +66,17 @@ class DockerPackagingTest(unittest.TestCase):
         self.assertNotIn("privileged: true", compose)
         self.assertIn("apparmor=unconfined", lxc_override)
 
-    def test_lxc_builder_is_temporary_and_scope_limited(self) -> None:
+    def test_lxc_builder_is_persistent_and_scope_limited(self) -> None:
         script = (ROOT / "scripts" / "docker-build-lxc.sh").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("--security-opt apparmor=unconfined", script)
         self.assertIn("--privileged", script)
-        self.assertIn("tcp://127.0.0.1:", script)
-        self.assertIn("trap cleanup EXIT INT TERM", script)
+        self.assertIn('docker-container://${BUILDER_CONTAINER}', script)
+        self.assertIn("--restart unless-stopped", script)
+        self.assertIn('survng-buildkit-state', script)
+        self.assertNotIn("trap cleanup EXIT INT TERM", script)
         self.assertIn('runtime|runtime-intel', script)
 
     def test_docker_readme_covers_safe_migration_and_rollback(self) -> None:

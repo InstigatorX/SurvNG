@@ -8,8 +8,10 @@ from survng.app.incident_utils import (
     event_epoch,
     event_snapshot_path,
     incident_event_groups,
+    portable_media_path,
     stable_incident_id,
     stable_incident_key,
+    stored_media_path,
 )
 
 
@@ -75,6 +77,55 @@ class EventSnapshotPathTest(unittest.TestCase):
                 event_snapshot_path(storage, {"snapshot_path": str(snapshot)}),
                 snapshot.resolve(),
             )
+
+    def test_resolves_portable_snapshot_under_active_storage_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            systemd_storage = root / "systemd-media"
+            docker_storage = root / "docker-media"
+            relative = Path("motion_samples/gate/audit.jpg")
+            for storage in (systemd_storage, docker_storage):
+                snapshot = storage / relative
+                snapshot.parent.mkdir(parents=True)
+                snapshot.write_bytes(b"jpeg")
+
+            self.assertEqual(
+                stored_media_path(systemd_storage, relative.as_posix()),
+                (systemd_storage / relative).resolve(),
+            )
+            self.assertEqual(
+                stored_media_path(docker_storage, relative.as_posix()),
+                (docker_storage / relative).resolve(),
+            )
+
+    def test_converts_verified_legacy_mount_to_portable_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = Path(tmpdir) / "media"
+            snapshot = storage / "motion_samples" / "gate" / "audit.jpg"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"jpeg")
+
+            self.assertEqual(
+                portable_media_path(
+                    storage,
+                    "/mnt/frigate/SurvNG/motion_samples/gate/audit.jpg",
+                ),
+                "motion_samples/gate/audit.jpg",
+            )
+
+    def test_does_not_convert_unverified_external_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            external = "/untrusted/snapshots/gate/missing.jpg"
+            self.assertEqual(portable_media_path(Path(tmpdir), external), external)
+
+    def test_rejects_relative_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as storage_dir, tempfile.TemporaryDirectory() as other_dir:
+            outside = Path(other_dir) / "event.jpg"
+            outside.write_bytes(b"jpeg")
+            traversal = Path("..") / Path(other_dir).name / outside.name
+
+            with self.assertRaises(PermissionError):
+                stored_media_path(Path(storage_dir), traversal)
 
     def test_rejects_file_outside_storage_directory(self) -> None:
         with tempfile.TemporaryDirectory() as storage_dir, tempfile.TemporaryDirectory() as other_dir:
