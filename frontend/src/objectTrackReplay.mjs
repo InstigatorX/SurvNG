@@ -9,6 +9,24 @@ function eventEpoch(event) {
   return finiteNumber(event?.start_epoch);
 }
 
+export function containedFrameTransform(containerSize, sourceSize) {
+  const containerWidth = finiteNumber(containerSize?.width);
+  const containerHeight = finiteNumber(containerSize?.height);
+  const sourceWidth = finiteNumber(sourceSize?.width);
+  const sourceHeight = finiteNumber(sourceSize?.height);
+  if ([containerWidth, containerHeight, sourceWidth, sourceHeight].some((value) => value === null || value <= 0)) return null;
+  const scale = Math.min(containerWidth / sourceWidth, containerHeight / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  return {
+    x: (containerWidth - width) / 2,
+    y: (containerHeight - height) / 2,
+    width,
+    height,
+    scale,
+  };
+}
+
 export function incidentTrackingSource(event, incident = null) {
   if (event?.object_tracking?.tracks?.length) return event;
   const incidentEvents = event?.events?.length ? event.events : incident?.events || [];

@@ -598,6 +598,11 @@ p {
   background: transparent;
 }
 
+.incident-rail .incident-pager.placeholder {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .incident-rail.compact .incident-snapshot-hud {
   padding: 22px 6px 5px;
 }
@@ -728,6 +733,45 @@ p {
   margin: 0;
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.incident-replay-analysis {
+  gap: 8px !important;
+}
+
+.incident-analysis-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.incident-analysis-modes button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px;
+  font-size: 10px;
+}
+
+.incident-analysis-modes button.active {
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--control));
+  color: var(--accent);
+}
+
+.incident-replay-analysis > small {
+  border-radius: 5px;
+  background: var(--control);
+  color: var(--muted);
+  font-size: 10px;
+  padding: 6px 7px;
+}
+
+.incident-replay-analysis > small.analysis-error {
+  color: var(--danger);
 }
 
 .inspector-detection {

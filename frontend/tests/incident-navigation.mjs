@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, incidentIndexForEvent, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, incidentIndexForEvent, incidentThumbnailPageSize, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -19,5 +19,9 @@ assert.equal(adjacentIncident([incidents[0]], incidents[0], 1), null);
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);
 assert.equal(showIncidentCardAnnotations(true, true), false);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 8);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 12);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 2);
+assert.equal(incidentThumbnailPageSize({ width: 0, height: 0, density: "compact" }), 16);
 
 console.log("incident navigation tests passed");

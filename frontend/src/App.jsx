@@ -68,9 +68,9 @@ import {
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
 import { browserStorage, readStoredValue, writeStoredValue } from "./storage.mjs";
-import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
+import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, incidentThumbnailPageSize, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -1732,15 +1732,20 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
 
   const renderedBoxes = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
+    const sourceWidth = Number(event?.object_tracking?.frame_width) || imageSize?.width;
+    const sourceHeight = Number(event?.object_tracking?.frame_height) || imageSize?.height;
+    if (!sourceWidth || !sourceHeight) return [];
+    const scaleX = renderedImage.width / sourceWidth;
+    const scaleY = renderedImage.height / sourceHeight;
     return boxes.map((box) => ({
       ...box,
-      left: renderedImage.x + box.x1 * renderedImage.scale,
-      top: renderedImage.y + box.y1 * renderedImage.scale,
-      width: (box.x2 - box.x1) * renderedImage.scale,
-      height: (box.y2 - box.y1) * renderedImage.scale,
-      maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * renderedImage.scale},${renderedImage.y + y * renderedImage.scale}`).join(" "),
+      left: renderedImage.x + box.x1 * scaleX,
+      top: renderedImage.y + box.y1 * scaleY,
+      width: (box.x2 - box.x1) * scaleX,
+      height: (box.y2 - box.y1) * scaleY,
+      maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
     })).filter((box) => box.width > 0 && box.height > 0);
-  }, [boxes, frameSize, renderedImage]);
+  }, [boxes, event?.object_tracking?.frame_height, event?.object_tracking?.frame_width, frameSize, imageSize, renderedImage]);
 
   const renderedTracks = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
@@ -1851,7 +1856,22 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
 }
 
 function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStartEpoch, mediaStartTime, mediaKey, sampleFps, lostTimeoutSeconds }) {
+  const layerRef = useRef(null);
   const [playbackEpoch, setPlaybackEpoch] = useState(null);
+  const [layerSize, setLayerSize] = useState(null);
+
+  useEffect(() => {
+    const layer = layerRef.current;
+    if (!layer) return undefined;
+    function updateLayerSize() {
+      const rect = layer.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) setLayerSize({ width: rect.width, height: rect.height });
+    }
+    updateLayerSize();
+    const observer = new ResizeObserver(updateLayerSize);
+    observer.observe(layer);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1910,22 +1930,41 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
     return Number.isFinite(nextEpoch) ? Math.max(1, Math.ceil(nextEpoch - playbackEpoch)) : null;
   }, [playbackEpoch, tracks, visibleTracks.length]);
 
+  const coordinateTransform = useMemo(
+    () => containedFrameTransform(layerSize, coordinateSize),
+    [coordinateSize?.height, coordinateSize?.width, layerSize],
+  );
+  const renderedTracks = useMemo(() => {
+    if (!coordinateTransform) return [];
+    const { x, y, scale } = coordinateTransform;
+    return visibleTracks.map((track) => ({
+      ...track,
+      renderedBox: [
+        x + track.box[0] * scale,
+        y + track.box[1] * scale,
+        x + track.box[2] * scale,
+        y + track.box[3] * scale,
+      ],
+      renderedPath: track.path.map(([pathX, pathY]) => [x + pathX * scale, y + pathY * scale]),
+    }));
+  }, [coordinateTransform, visibleTracks]);
+
   if (!coordinateSize?.width || !coordinateSize?.height || !tracks.some((track) => track.boxHistory.length)) return null;
   return (
-    <div className="object-track-video-layer" aria-hidden="true">
-      <svg viewBox={`0 0 ${coordinateSize.width} ${coordinateSize.height}`} preserveAspectRatio="none" aria-hidden="true">
-        {visibleTracks.map((track) => (
+    <div ref={layerRef} className="object-track-video-layer" aria-hidden="true">
+      {layerSize ? <svg viewBox={`0 0 ${layerSize.width} ${layerSize.height}`} preserveAspectRatio="none" aria-hidden="true">
+        {renderedTracks.map((track) => (
           <g className={`object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`} key={`video-path-${track.trackId}`}>
-            {track.path.length > 1 ? <polyline className="object-track-trail" points={track.path.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
-            <rect className="object-track-video-box" x={track.box[0]} y={track.box[1]} width={track.box[2] - track.box[0]} height={track.box[3] - track.box[1]} vectorEffect="non-scaling-stroke" />
+            {track.renderedPath.length > 1 ? <polyline className="object-track-trail" points={track.renderedPath.map(([x, y]) => `${x},${y}`).join(" ")} vectorEffect="non-scaling-stroke" /> : null}
+            <rect className="object-track-video-box" x={track.renderedBox[0]} y={track.renderedBox[1]} width={track.renderedBox[2] - track.renderedBox[0]} height={track.renderedBox[3] - track.renderedBox[1]} vectorEffect="non-scaling-stroke" />
           </g>
         ))}
-      </svg>
-      {visibleTracks.map((track) => (
+      </svg> : null}
+      {renderedTracks.map((track) => (
         <span
           className={`object-track-video-label object-track-color-${Math.abs(track.trackId) % 6} ${track.recovery ? "reid-recovered" : ""} ${track.estimated ? "track-estimated" : ""}`}
           key={`video-label-${track.trackId}`}
-          style={{ left: `${track.box[0] / coordinateSize.width * 100}%`, top: `${track.box[1] / coordinateSize.height * 100}%` }}
+          style={{ left: `${track.renderedBox[0]}px`, top: `${track.renderedBox[1]}px` }}
         >
           #{track.trackId} {track.label}{track.estimated ? " · estimated" : ""}{track.recovery ? ` · ReID ${Math.round(track.recovery.similarity * 100)}%` : ""}
         </span>
@@ -1936,12 +1975,14 @@ function StoredTrackVideoOverlay({ videoRef, tracks, coordinateSize, windowStart
 }
 
 
-function IncidentClipLayer({ event, active, onEnded }) {
+function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean", onAnalysisStats, onEnded }) {
   const videoRef = useRef(null);
   const [clipInfo, setClipInfo] = useState(null);
   const [clipLoading, setClipLoading] = useState(false);
   const [clipError, setClipError] = useState("");
   const [playback, setPlayback] = useState(null);
+  const [playbackOriginTime, setPlaybackOriginTime] = useState(null);
+  const storedTracks = storedObjectTracks(trackingEvent || event);
 
   useEffect(() => {
     let cancelled = false;
@@ -1950,12 +1991,14 @@ function IncidentClipLayer({ event, active, onEnded }) {
       if (!active || !Number.isFinite(eventId)) {
         setClipInfo(null);
         setPlayback(null);
+        setPlaybackOriginTime(null);
         setClipLoading(false);
         setClipError(active ? "No event video available" : "");
         return;
       }
       setClipInfo(null);
       setPlayback(null);
+      setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
       let before = 5;
@@ -1974,9 +2017,12 @@ function IncidentClipLayer({ event, active, onEnded }) {
       const safeBefore = Number.isFinite(before) ? before : 5;
       const safeAfter = Number.isFinite(after) ? after : 5;
       const window = incidentClipWindow(event, safeBefore, safeAfter);
+      const anchorEpoch = eventEpoch(event);
       const info = {
         streamUrl: eventStreamUrl(eventId, window.before, window.after),
         downloadUrl: eventClipUrl(eventId, window.before, window.after),
+        windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null,
+        initialPlaybackOffset: Math.max(0, window.before - safeBefore),
       };
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
@@ -1998,7 +2044,22 @@ function IncidentClipLayer({ event, active, onEnded }) {
             controls
             playsInline
             preload="metadata"
-            onReady={() => { setClipLoading(false); setClipError(""); }}
+            onReady={(_player, video) => {
+              const originTime = Number.isFinite(video?.currentTime) ? video.currentTime : 0;
+              setPlaybackOriginTime(originTime);
+              if (clipInfo.initialPlaybackOffset > 0 && video) {
+                const seekToIncident = () => {
+                  const targetTime = originTime + clipInfo.initialPlaybackOffset;
+                  video.currentTime = Number.isFinite(video.duration)
+                    ? Math.min(targetTime, Math.max(originTime, video.duration - 0.25))
+                    : targetTime;
+                };
+                if (video.paused) video.addEventListener("playing", seekToIncident, { once: true });
+                else seekToIncident();
+              }
+              setClipLoading(false);
+              setClipError("");
+            }}
             onError={() => {
               if (playback.url !== clipInfo.downloadUrl) {
                 setClipLoading(true);
@@ -2010,6 +2071,22 @@ function IncidentClipLayer({ event, active, onEnded }) {
             }}
             onEnded={onEnded}
           />
+          {analysisMode === "tracks" && storedTracks.length ? (
+            <StoredTrackVideoOverlay
+              videoRef={videoRef}
+              tracks={storedTracks}
+              coordinateSize={{
+                width: Number(trackingEvent?.object_tracking?.frame_width),
+                height: Number(trackingEvent?.object_tracking?.frame_height),
+              }}
+              windowStartEpoch={clipInfo.windowStartEpoch}
+              mediaStartTime={playbackOriginTime}
+              mediaKey={playback.url}
+              sampleFps={trackingEvent?.object_tracking?.sample_fps}
+              lostTimeoutSeconds={trackingEvent?.object_tracking?.lost_timeout_seconds}
+            />
+          ) : null}
+          <DebugDetectionOverlay videoRef={videoRef} active={analysisMode === "ai"} confidence={0.35} onStats={onAnalysisStats} />
           {clipLoading ? <div className="incident-video-status preparing">Preparing incident video...</div> : null}
         </>
       ) : (
@@ -2019,7 +2096,7 @@ function IncidentClipLayer({ event, active, onEnded }) {
   );
 }
 
-function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, onToggle, onSelect, onPreviewChange }) {
+function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
@@ -2027,6 +2104,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const preview = selectedPreview || incident;
+  const trackingPreview = incidentTrackingSource(preview, incident) || preview;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
   const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
@@ -2059,6 +2137,10 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   }, [preview.id, preview.created_at]);
 
   useEffect(() => {
+    if (expanded && replayRequest > 0) setInlineVideoActive(true);
+  }, [expanded, replayRequest]);
+
+  useEffect(() => {
     if (!expanded || !onPreviewChange) return;
     const representative = rawEvents.find((event) => Number(event.id) === Number(incident.representative_event_id));
     onPreviewChange(Number((selectedPreview || representative || incident).id));
@@ -2083,6 +2165,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   function openOverlay(pointerEvent) {
     pointerEvent.stopPropagation();
+    if (!onSelect) return;
     onSelect({
       ...preview,
       start_epoch: incident.start_epoch,
@@ -2106,9 +2189,9 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
     >
       <div className="incident-preview" onClick={openPreview} aria-label={expanded ? "Play selected event video" : "Expand incident"}>
         <SnapshotImage
-          event={preview}
+          event={expanded ? trackingPreview : preview}
           alt="incident snapshot"
-          showAnnotations={showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
+          showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
           showTracking={false}
           incidentEligibleOnly={!expanded}
           thumbnail
@@ -2122,8 +2205,17 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
               {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
             </div>
           </div>
-          <IncidentClipLayer event={incident} active={expanded && inlineVideoActive} onEnded={() => setInlineVideoActive(false)} />
-          <button type="button" className="event-count" onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label="Open event overlay" title="Open event overlay">{countText}</button>
+          <IncidentClipLayer
+            event={incident}
+            trackingEvent={trackingPreview}
+            active={expanded && inlineVideoActive}
+            analysisMode={analysisMode}
+            onAnalysisStats={onAnalysisStats}
+            onEnded={() => setInlineVideoActive(false)}
+          />
+          {desktopWorkspace
+            ? <span className="event-count" aria-label={countText}>{countText}</span>
+            : <button type="button" className="event-count" onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label="Open event overlay" title="Open event overlay">{countText}</button>}
         </SnapshotImage>
       </div>
       {expanded && showSubEvents ? (
@@ -2170,7 +2262,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   );
 }
 
-function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, onFaceOpen }) {
+function IncidentInspector({ incident, faceEvent, appConfig, timeZone, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen }) {
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
@@ -2188,8 +2280,18 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
     <aside className="incident-inspector">
       <div className="incident-inspector-head">
         <div><strong>{incident.camera_id}</strong><time>{formatDateTime(incident.created_at, timeZone)}</time></div>
-        <button type="button" onClick={() => onOpen(incident)}>Open viewer</button>
       </div>
+      <section className="incident-replay-analysis">
+        <h3>Replay analysis</h3>
+        <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
+          <button type="button" className={analysisMode === "clean" ? "active" : ""} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
+          <button type="button" className={analysisMode === "tracks" ? "active" : ""} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
+          <button type="button" className={analysisMode === "ai" ? "active" : ""} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
+        </div>
+        <p>Click the incident image to replay using the selected analysis mode.</p>
+        {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
+        {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
+      </section>
       <section>
         <h3>Objects</h3>
         {objects.length ? objects.map((object, index) => {
@@ -2205,7 +2307,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
       </section>
       <section>
         <h3>Tracked objects</h3>
-        {objectTracks.length ? <p>{String(incidentTracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(incidentTracking?.sample_fps || 0) || "?"} FPS. Open the viewer to see paths.</p> : <p>No stored tracks for this incident. Open the viewer to compare trackers offline.</p>}
+        {objectTracks.length ? <p>{String(incidentTracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(incidentTracking?.sample_fps || 0) || "?"} FPS.</p> : <p>No stored tracks for this incident.</p>}
         {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
           <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
@@ -2240,7 +2342,6 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, onOpen, o
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
         {incident.snapshot_path && eventSnapshotUrl(incident) ? <a href={eventSnapshotUrl(incident)} download><Download size={15} /> Snapshot</a> : null}
-        <button type="button" onClick={() => onOpen(incident)}><Cpu size={15} /> Manual detect</button>
       </div>
     </aside>
   );
@@ -3177,8 +3278,15 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const [facePeople, setFacePeople] = useState([]);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [incidentPage, setIncidentPage] = useState(0);
+  const incidentRailListRef = useRef(null);
+  const [incidentRailSize, setIncidentRailSize] = useState({ width: 0, height: 0 });
+  const [desktopAnalysisMode, setDesktopAnalysisMode] = useStoredState("survng.incidentDesktopAnalysis.v1", "clean");
+  const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
+  const [desktopReplayRequest, setDesktopReplayRequest] = useState(0);
   const mobileView = isMobileViewport();
-  const incidentsPerPage = mobileView ? 12 : incidentDensity === "comfortable" ? 10 : 16;
+  const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
+  const incidentsPerPage = mobileView ? 12 : incidentThumbnailPageSize({ ...incidentRailSize, density: incidentDensity });
+  const previousIncidentsPerPageRef = useRef(incidentsPerPage);
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
@@ -3193,6 +3301,20 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const incidentPageCount = Math.max(1, Math.ceil(incidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+
+  useEffect(() => {
+    if (mobileView) return undefined;
+    const rail = incidentRailListRef.current;
+    if (!rail) return undefined;
+    function updateRailSize() {
+      const rect = rail.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) setIncidentRailSize({ width: rect.width, height: rect.height });
+    }
+    updateRailSize();
+    const observer = new ResizeObserver(updateRailSize);
+    observer.observe(rail);
+    return () => observer.disconnect();
+  }, [mobileView]);
 
   function refresh() {
     refreshBase();
@@ -3234,6 +3356,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   }, [incidentDay, setIncidentDay, today]);
 
   useEffect(() => {
+    if (!incidentRailReady) return undefined;
     let cancelled = false;
     async function loadIncidentPage() {
       const query = new URLSearchParams({
@@ -3281,11 +3404,19 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
     return () => {
       cancelled = true;
     };
-  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken]);
+  }, [incidentDay, today, timeZone, eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentPage, incidentsPerPage, incidentRefreshToken, incidentRailReady]);
 
   useEffect(() => {
     setIncidentPage(0);
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, incidentDay, incidentDensity]);
+
+  useEffect(() => {
+    const previousPageSize = previousIncidentsPerPageRef.current;
+    if (previousPageSize !== incidentsPerPage) {
+      setIncidentPage((page) => Math.floor(page * previousPageSize / incidentsPerPage));
+      previousIncidentsPerPageRef.current = incidentsPerPage;
+    }
+  }, [incidentsPerPage]);
 
   useEffect(() => {
     if (incidentPage >= incidentPageCount) setIncidentPage(Math.max(0, incidentPageCount - 1));
@@ -3293,7 +3424,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
 
   useEffect(() => {
     setFocusedFaceEventId(null);
+    setDesktopAnalysisStats(null);
   }, [focusedIncident?.id]);
+
+  useEffect(() => {
+    if (desktopAnalysisMode !== "tracks") return;
+    const trackingEvent = incidentTrackingSource(focusedEvent, focusedIncident);
+    if (!storedObjectTracks(trackingEvent).length) setDesktopAnalysisMode("clean");
+  }, [desktopAnalysisMode, focusedEvent, focusedIncident, setDesktopAnalysisMode]);
 
   useEffect(() => {
     const context = incidentRecordingContext(selectedEvent || focusedEvent);
@@ -3333,6 +3471,12 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
     if (!visibleIncidents.length) return;
     const nextIndex = Math.max(0, Math.min(visibleIncidents.length - 1, focusedIndex + direction));
     setExpandedIncidentId(visibleIncidents[nextIndex].id);
+  }
+
+  function selectDesktopAnalysisMode(mode) {
+    setDesktopAnalysisMode(mode);
+    setDesktopAnalysisStats(null);
+    setDesktopReplayRequest((request) => request + 1);
   }
 
   useEffect(() => {
@@ -3380,21 +3524,19 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
                   <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} onClick={() => setIncidentDensity("comfortable")} title="Comfortable thumbnails" aria-label="Comfortable thumbnails"><Rows3 size={15} /></button>
                 </div>
               </div>
-              <div className="incident-rail-list">
-                {incidentLoading ? <div className="empty-state">Loading incidents...</div> : null}
-                {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
-                {!incidentLoading && !incidentLoadError && galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} />
+              <div className="incident-rail-list" ref={incidentRailListRef}>
+                {incidentLoading && !galleryIncidents.length ? <div className="empty-state">Loading incidents...</div> : null}
+                {!galleryIncidents.length && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+                {galleryIncidents.length ? pagedIncidents.map((incident) => (
+                  <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace onToggle={toggleIncident} />
                 )) : null}
                 {!incidentLoading && !incidentLoadError && !galleryIncidents.length ? <div className="empty-state">No other incidents.</div> : null}
               </div>
-              {incidentTotal > incidentsPerPage ? (
-                <div className="incident-pager" aria-label="Incident pages">
-                  <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
-                  <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-                  <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
-                </div>
-              ) : null}
+              <div className={`incident-pager ${incidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={incidentTotal <= incidentsPerPage}>
+                <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
+                <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
+                <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
+              </div>
             </aside>
 
             <section className="incident-investigation">
@@ -3408,14 +3550,13 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} onToggle={toggleIncident} onSelect={setSelectedEvent} onPreviewChange={setFocusedFaceEventId} /> : <div className="empty-state">No incidents match the current filters.</div>}
+                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} /> : <div className="empty-state">No incidents match the current filters.</div>}
               </div>
             </section>
 
-            <IncidentInspector incident={focusedIncident} faceEvent={focusedEvent} appConfig={appConfig} timeZone={timeZone} onOpen={setSelectedEvent} onFaceOpen={openFaceReview} />
+            <IncidentInspector incident={focusedIncident} faceEvent={focusedEvent} appConfig={appConfig} timeZone={timeZone} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} />
           </div>
         </section>
-        {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={() => setSelectedEvent(null)} onSelect={setSelectedEvent} onRefresh={refresh} /> : null}
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
       </main>
     );

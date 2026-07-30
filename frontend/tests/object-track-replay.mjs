@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../src/objectTrackReplay.mjs";
+import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../src/objectTrackReplay.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
   track_id: 7,
@@ -71,5 +71,21 @@ assert.equal(playbackEpochAt(1000, 8, 8), 1000);
 assert.equal(playbackEpochAt(1000, 29, 8), 1021);
 assert.equal(playbackEpochAt(1000, 0, 0), 1000);
 assert.equal(playbackEpochAt(1000, "bad", 0), null);
+
+assert.deepEqual(containedFrameTransform({ width: 1600, height: 900 }, { width: 1920, height: 1080 }), {
+  x: 0,
+  y: 0,
+  width: 1600,
+  height: 900,
+  scale: 5 / 6,
+});
+assert.deepEqual(containedFrameTransform({ width: 1600, height: 900 }, { width: 1920, height: 2560 }), {
+  x: 462.5,
+  y: 0,
+  width: 675,
+  height: 900,
+  scale: 0.3515625,
+});
+assert.equal(containedFrameTransform({ width: 0, height: 900 }, { width: 1920, height: 1080 }), null);
 
 console.log("object track replay tests passed");
