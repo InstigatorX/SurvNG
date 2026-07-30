@@ -22,9 +22,10 @@ from .baichuan_native import (
     is_native_baichuan,
     start_ffmpeg_pipe,
 )
-from .config import CameraConfig
+from .config import CameraConfig, RecordingRetentionConfig
 from .go2rtc import Go2RtcAdapter, Go2RtcError
 from .recording_media import mp4_stream_fingerprint
+from .recording_retention import RecordingRetentionService
 
 
 ProcessItem = tuple[subprocess.Popen, BaichuanFfmpegPipe | None, threading.Event, threading.Thread]
@@ -52,11 +53,14 @@ class Recorder:
         hardware_acceleration: str = "auto",
         index_dir: Path | None = None,
         go2rtc: Go2RtcAdapter | None = None,
+        retention_config: RecordingRetentionConfig | None = None,
+        protected_recording_paths: Callable[[], set[str]] | None = None,
     ) -> None:
         self.ffmpeg_path = ffmpeg_path
         self.hardware_acceleration = hardware_acceleration
         self.go2rtc = go2rtc or Go2RtcAdapter(timeout=1.5, cache_seconds=120.0)
         self.segment_seconds = max(2.0, min(300.0, float(segment_seconds or 10.0)))
+        self.storage_dir = storage_dir
         self.recordings_dir = storage_dir / "recordings"
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
         resolved_index_dir = index_dir or storage_dir
@@ -86,6 +90,13 @@ class Recorder:
         self._validation_pending_set: set[str] = set()
         self._validation_lock = threading.Lock()
         self._init_recording_index()
+        self.retention = RecordingRetentionService(
+            self.storage_dir,
+            self.recordings_dir,
+            self._index_connection,
+            retention_config or RecordingRetentionConfig(),
+            protected_recording_paths,
+        )
 
     def _index_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.index_path, timeout=10)
@@ -443,6 +454,7 @@ class Recorder:
         return tracked
 
     def stop_all(self) -> None:
+        self.retention.stop()
         self._index_stop.set()
         self._index_wake.set()
         for thread_name in ("_index_thread", "_index_maintenance_thread"):
@@ -946,6 +958,7 @@ class Recorder:
         camera_map = {camera.id: camera for camera in cameras if camera.record or camera.record_sub}
         self._index_stop.clear()
         self._index_wake.clear()
+        self.retention.start(cameras)
         if self._index_thread is None or not self._index_thread.is_alive():
             self._index_thread = threading.Thread(
                 target=self._recording_index_loop,
@@ -965,6 +978,12 @@ class Recorder:
                 daemon=True,
             )
             self._index_maintenance_thread.start()
+
+    def retention_status(self) -> dict[str, object]:
+        return self.retention.status()
+
+    def request_retention_run(self, *, apply: bool = False) -> dict[str, object]:
+        return self.retention.request_run(apply=apply)
 
     def _recording_index_loop(self, camera_map: dict[str, CameraConfig]) -> None:
         try:

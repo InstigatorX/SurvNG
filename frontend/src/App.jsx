@@ -32,6 +32,7 @@ import {
   RotateCcw,
   Save,
   ScanFace,
+  ShieldCheck,
   Sparkles,
   Siren,
   SkipBack,
@@ -962,6 +963,10 @@ function defaultCamera(cameras, seed = {}) {
     live_stream_url: clearMaskedUrlPassword(seed.live_stream_url),
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
+    retention: {
+      main_days: seed.retention?.main_days ?? null,
+      live_days: seed.retention?.live_days ?? null,
+    },
     require_incident_zone: seed.require_incident_zone ?? null,
     motion_qualification: {
       mode: seed.motion_qualification?.mode || "inherit",
@@ -5219,6 +5224,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [accelerator, setAccelerator] = useState(null);
   const [detectorModels, setDetectorModels] = useState([]);
   const [recordingCache, setRecordingCache] = useState(null);
+  const [retentionStatus, setRetentionStatus] = useState(null);
+  const [retentionError, setRetentionError] = useState("");
   const [mqttStatus, setMqttStatus] = useState(null);
   const [detectorStatus, setDetectorStatus] = useState(null);
   const [trackingCatalog, setTrackingCatalog] = useState(null);
@@ -5271,6 +5278,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         fetch("/api/system/status"),
         fetch("/api/motion/pipeline/catalog"),
         fetch("/api/object-tracking/catalog"),
+        fetch("/api/retention/status"),
       ]);
       const response = results[0].status === "fulfilled" ? results[0].value : null;
       if (!response?.ok) throw new Error(`Configuration failed to load${response ? ` (${response.status})` : ""}`);
@@ -5280,8 +5288,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         if (result.status !== "fulfilled" || !result.value.ok) return null;
         try { return await result.value.json(); } catch { return null; }
       };
-      const [status, acceleratorPayload, models, cache, system, catalog, trackerCatalog] = await Promise.all([
-        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6), optionalPayload(7),
+      const [status, acceleratorPayload, models, cache, system, catalog, trackerCatalog, retention] = await Promise.all([
+        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6), optionalPayload(7), optionalPayload(8),
       ]);
       if (sequence !== configLoadSequence.current) return false;
       setConfig(nextConfig);
@@ -5295,6 +5303,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       }
       if (catalog) setMotionCatalog(catalog);
       if (trackerCatalog) setTrackingCatalog(trackerCatalog);
+      if (retention) setRetentionStatus(retention);
       setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
       return true;
     } catch (error) {
@@ -5307,6 +5316,40 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     void load();
     return () => { configLoadSequence.current += 1; };
   }, []);
+
+  async function loadRetention() {
+    try {
+      const response = await fetch("/api/retention/status");
+      if (!response.ok) throw new Error(`Retention status failed (${response.status})`);
+      setRetentionStatus(await response.json());
+      setRetentionError("");
+    } catch (error) {
+      setRetentionError(error.message || "Unable to load retention status.");
+    }
+  }
+
+  async function runRetention(apply = false) {
+    if (apply && !window.confirm("Delete the oldest continuous recordings identified by the current retention plan? Incident clips, snapshots, databases, and the newest five minutes are protected.")) return;
+    setRetentionError("");
+    try {
+      const response = await fetch("/api/retention/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apply }),
+      });
+      if (!response.ok) throw new Error(`Retention run failed (${response.status})`);
+      setRetentionStatus(await response.json());
+    } catch (error) {
+      setRetentionError(error.message || "Unable to start retention.");
+    }
+  }
+
+  useEffect(() => {
+    if (settingsTab !== "general" || generalSection !== "storage") return undefined;
+    void loadRetention();
+    const timer = window.setInterval(() => void loadRetention(), 5000);
+    return () => window.clearInterval(timer);
+  }, [settingsTab, generalSection]);
 
   useEffect(() => {
     if (settingsTab !== "cameras") return undefined;
@@ -5760,6 +5803,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
             accelerator={accelerator}
             detectorModels={detectorModels}
             recordingCache={recordingCache}
+            retentionStatus={retentionStatus}
+            retentionError={retentionError}
+            runRetention={runRetention}
             mqttStatus={mqttStatus}
             detectorStatus={detectorStatus}
             trackingCatalog={trackingCatalog}
@@ -5976,6 +6022,13 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
                   <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
                 </div>
               </div>
+              <details className="camera-retention-details">
+                <summary>Camera recording retention</summary>
+                <div className="field-row">
+                  <label>Main stream history<input type="number" min="1" max="3650" step="1" placeholder={`Global: ${config.retention?.main_days ?? 7} days`} value={selectedCamera.retention?.main_days ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["retention", "main_days"], event.target.value === "" ? null : Number(event.target.value))} /><small>Leave blank to inherit the global policy.</small></label>
+                  <label>Substream history<input type="number" min="1" max="3650" step="1" placeholder={`Global: ${config.retention?.live_days ?? 21} days`} value={selectedCamera.retention?.live_days ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["retention", "live_days"], event.target.value === "" ? null : Number(event.target.value))} /><small>Leave blank to inherit the global policy.</small></label>
+                </div>
+              </details>
 
               <div className="config-panels">
                 <div className="sub-panel">
@@ -6750,7 +6803,39 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, mqttStatus, detectorStatus, trackingCatalog, motionCatalog, section }) {
+function RetentionSummary({ status }) {
+  const plan = status.plan || {};
+  const storage = plan.storage || {};
+  const indexed = plan.indexed || {};
+  const reclaim = plan.reclaim || {};
+  const lastRun = status.last_run || null;
+  const cameraRows = plan.per_camera || [];
+  const headroom = indexed.days_to_minimum_free;
+  return (
+    <div className="retention-summary">
+      <div className={`retention-alert ${storage.emergency ? "critical" : Number(reclaim.planned_bytes || 0) > 0 ? "warning" : "healthy"}`}>
+        {storage.emergency || Number(reclaim.planned_bytes || 0) > 0 ? <CircleAlert size={20} /> : <CircleDot size={20} />}
+        <div>
+          <strong>{storage.emergency ? "Storage is critically low" : Number(reclaim.planned_bytes || 0) > 0 ? `${formatBytes(reclaim.planned_bytes)} eligible for cleanup` : "Storage is within the configured policy"}</strong>
+          <span>{Number(storage.free_percent || 0).toFixed(1)}% free · {formatBytes(storage.free_bytes)} available{headroom == null ? "" : ` · approximately ${headroom} days to the cleanup threshold`}</span>
+        </div>
+      </div>
+      <div className="retention-metrics">
+        <article><span>Continuous recordings</span><strong>{formatBytes(indexed.bytes)}</strong><small>{Number(indexed.file_count || 0).toLocaleString()} indexed segments</small></article>
+        <article><span>Current growth</span><strong>{formatBytes(indexed.bytes_per_day)}/day</strong><small>Estimated from indexed history</small></article>
+        <article><span>Age-expired</span><strong>{formatBytes(reclaim.expired_bytes)}</strong><small>{Number(reclaim.expired_files || 0).toLocaleString()} segments</small></article>
+        <article><span>Capacity pressure</span><strong>{formatBytes(Math.max(Number(reclaim.quota_bytes || 0), Number(reclaim.free_space_bytes || 0)))}</strong><small>{(reclaim.reasons || []).length ? reclaim.reasons.join(" + ").replaceAll("_", " ") : "None"}</small></article>
+      </div>
+      {lastRun ? <div className="retention-last-run"><strong>Last cleanup</strong><span>{Number(lastRun.deleted_files || 0).toLocaleString()} files · {formatBytes(lastRun.deleted_bytes)} reclaimed{lastRun.failed_files ? ` · ${lastRun.failed_files} failed` : ""}</span></div> : null}
+      {cameraRows.length ? <details className="retention-camera-details"><summary>Per-camera storage and projected retention</summary><div className="retention-camera-table">
+        <div className="heading"><span>Camera / stream</span><span>Used</span><span>Daily</span><span>Keep</span><span>Projected</span></div>
+        {cameraRows.map((row) => <div key={`${row.camera_id}-${row.source}`}><strong>{row.camera_id} · {row.source === "main" ? "Main" : "Sub"}</strong><span>{formatBytes(row.bytes)}</span><span>{formatBytes(row.bytes_per_day)}</span><span>{row.retention_days}d</span><span>{formatBytes(row.projected_bytes)}</span></div>)}
+      </div></details> : null}
+    </div>
+  );
+}
+
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, trackingCatalog, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const reidStatus = detectorStatus?.reid || null;
   const openvinoDevices = accelerator?.openvino_devices || [];
@@ -6852,8 +6937,34 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
           <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
           <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
+          <div className="prewarm-setting">
+            <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
+            <p>Prepares each completed recording in the background so it opens faster on iPhone and in browsers. It trades additional remux work and playback-cache space for a shorter initial loading delay.</p>
+          </div>
           {recordingCache ? <div className="probe-result"><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span><span>{recordingCache.metrics?.playback_hits || 0} hits / {recordingCache.metrics?.playback_misses || 0} misses, {recordingCache.metrics?.playback_avg_remux_ms || 0} ms average remux</span></div> : null}
+          <div className="retention-settings">
+            <div className="retention-heading">
+              <div><h4>Recording retention</h4><p>Keep recent high-quality video and longer substream history without filling the shared disk.</p></div>
+              <span className={`retention-state ${retentionStatus?.state || "starting"}`}>{String(retentionStatus?.state || "calculating").replaceAll("_", " ")}</span>
+            </div>
+            <div className="retention-fields">
+              <label className="check-field"><input type="checkbox" checked={config.retention?.enabled ?? true} onChange={(event) => updateConfig(["retention", "enabled"], event.target.checked)} /> Monitor storage retention</label>
+              <label className="check-field"><input type="checkbox" checked={config.retention?.automatic_cleanup ?? false} onChange={(event) => updateConfig(["retention", "automatic_cleanup"], event.target.checked)} /> Automatically remove expired continuous recordings</label>
+              <label>SurvNG storage limit<input type="number" min="0.1" max="1000" step="0.5" value={config.retention?.storage_limit_tb ?? 13} onChange={(event) => updateConfig(["retention", "storage_limit_tb"], Number(event.target.value))} /><small>TiB allocated to indexed continuous recordings.</small></label>
+              <label>Main stream history<input type="number" min="1" max="3650" step="1" value={config.retention?.main_days ?? 7} onChange={(event) => updateConfig(["retention", "main_days"], Number(event.target.value))} /><small>Days of high-resolution continuous video.</small></label>
+              <label>Substream history<input type="number" min="1" max="3650" step="1" value={config.retention?.live_days ?? 21} onChange={(event) => updateConfig(["retention", "live_days"], Number(event.target.value))} /><small>Days of lower-bandwidth continuous video.</small></label>
+              <label>Start cleanup below<input type="number" min="1" max="95" step="1" value={config.retention?.minimum_free_percent ?? 15} onChange={(event) => updateConfig(["retention", "minimum_free_percent"], Number(event.target.value))} /><small>Percent free on the entire storage filesystem.</small></label>
+              <label>Clean back to<input type="number" min="2" max="99" step="1" value={config.retention?.target_free_percent ?? 20} onChange={(event) => updateConfig(["retention", "target_free_percent"], Number(event.target.value))} /><small>Higher than the start threshold to prevent repeated cycling.</small></label>
+              <label>Emergency threshold<input type="number" min="0.5" max="50" step="0.5" value={config.retention?.emergency_free_percent ?? 5} onChange={(event) => updateConfig(["retention", "emergency_free_percent"], Number(event.target.value))} /><small>Raises a critical storage state.</small></label>
+            </div>
+            {retentionStatus?.plan ? <RetentionSummary status={retentionStatus} /> : <div className="probe-result"><strong>Calculating retention projection</strong><span>The first index-only plan normally appears within a few seconds.</span></div>}
+            {retentionError ? <div className="error-banner">{retentionError}</div> : null}
+            <div className="retention-actions">
+              <button type="button" onClick={() => runRetention(false)}><RefreshCcw size={15} /> Recalculate</button>
+              <button type="button" className="danger" onClick={() => runRetention(true)} disabled={["queued", "running", "cleaning"].includes(retentionStatus?.state)}><Trash2 size={15} /> Clean Up Now</button>
+            </div>
+            <p className="retention-protection"><ShieldCheck size={15} /> Incident clips, snapshots, metadata databases, and the newest five minutes of recording are never removed by this cleanup.</p>
+          </div>
         </div>
         ) : null}
 

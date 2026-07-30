@@ -175,6 +175,31 @@ class CameraMotionQualificationConfig(BaseModel):
     pipeline: CameraMotionPipelineConfig = Field(default_factory=CameraMotionPipelineConfig)
 
 
+class CameraRetentionConfig(BaseModel):
+    main_days: int | None = Field(default=None, ge=1, le=3650)
+    live_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class RecordingRetentionConfig(BaseModel):
+    enabled: bool = True
+    automatic_cleanup: bool = False
+    storage_limit_tb: float = Field(default=13.0, ge=0.1, le=1000.0)
+    minimum_free_percent: float = Field(default=15.0, ge=1.0, le=95.0)
+    target_free_percent: float = Field(default=20.0, ge=2.0, le=99.0)
+    emergency_free_percent: float = Field(default=5.0, ge=0.5, le=50.0)
+    main_days: int = Field(default=7, ge=1, le=3650)
+    live_days: int = Field(default=21, ge=1, le=3650)
+    cleanup_batch_files: int = Field(default=2000, ge=100, le=10000)
+
+    @model_validator(mode="after")
+    def validate_watermarks(self) -> "RecordingRetentionConfig":
+        if self.target_free_percent <= self.minimum_free_percent:
+            raise ValueError("retention target free percent must exceed the minimum")
+        if self.emergency_free_percent >= self.minimum_free_percent:
+            raise ValueError("retention emergency free percent must be below the minimum")
+        return self
+
+
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -183,6 +208,7 @@ class CameraConfig(BaseModel):
     live_stream_url: str | None = Field(default=None, max_length=4096)
     record: bool = True
     record_sub: bool = False
+    retention: CameraRetentionConfig = Field(default_factory=CameraRetentionConfig)
     require_incident_zone: bool | None = None
     motion_qualification: CameraMotionQualificationConfig = Field(default_factory=CameraMotionQualificationConfig)
     onvif: OnvifConfig = Field(default_factory=OnvifConfig)
@@ -373,6 +399,7 @@ class AppConfig(BaseModel):
     recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
+    retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)

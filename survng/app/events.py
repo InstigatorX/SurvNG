@@ -98,6 +98,7 @@ class EventStore:
             conn.execute(
                 "create index if not exists idx_motion_audits_related_event on motion_audits(related_event_id, created_at) where related_event_id is not null"
             )
+
             conn.execute(
                 "create unique index if not exists idx_motion_audits_event on motion_audits(event_id) where event_id is not null"
             )
@@ -189,6 +190,29 @@ class EventStore:
                     "motion_audit_backfill_event_id",
                     str(latest_event_id),
                 )
+
+    def protected_recording_paths(self) -> set[str]:
+        """Return continuous segments still referenced by incident history."""
+        recordings_root = (self.storage_dir / "recordings").resolve()
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT recording_path FROM events WHERE recording_path != ''"
+            ).fetchall()
+        protected: set[str] = set()
+        for row in rows:
+            raw_path = str(row["recording_path"] or "")
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = self.storage_dir / path
+            resolved = path.resolve(strict=False)
+            try:
+                resolved.relative_to(recordings_root)
+            except ValueError:
+                continue
+            protected.add(str(resolved))
+        return protected
 
     @staticmethod
     def _tracking_comparison_row(row: sqlite3.Row | None) -> dict[str, Any] | None:

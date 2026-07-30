@@ -6,6 +6,17 @@
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
   "recording_segment_seconds": 10.0,
+  "retention": {
+    "enabled": true,
+    "automatic_cleanup": false,
+    "storage_limit_tb": 13.0,
+    "minimum_free_percent": 15.0,
+    "target_free_percent": 20.0,
+    "emergency_free_percent": 5.0,
+    "main_days": 7,
+    "live_days": 21,
+    "cleanup_batch_files": 2000
+  },
   "motion_qualification": {
     "mode": "camera",
     "sensitivity": "balanced",

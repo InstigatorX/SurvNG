@@ -820,6 +820,20 @@ class StorageMaintenanceRequest(BaseModel):
     full: bool = False
 
 
+class RecordingRetentionRequest(BaseModel):
+    apply: bool = False
+
+
+@app.get("/api/retention/status")
+def recording_retention_status() -> dict:
+    return manager.recorder.retention_status()
+
+
+@app.post("/api/retention/run", status_code=202)
+def run_recording_retention(request: RecordingRetentionRequest) -> dict:
+    return manager.recorder.request_retention_run(apply=request.apply)
+
+
 @app.get("/api/maintenance/storage")
 def storage_maintenance_status() -> dict:
     return STORAGE_MAINTENANCE.status()

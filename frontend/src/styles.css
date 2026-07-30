@@ -3534,6 +3534,29 @@ section.detection-settings-card {
   min-height: auto;
 }
 
+.prewarm-setting {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-muted);
+  padding: 9px 10px;
+}
+
+.prewarm-setting .check-field {
+  min-height: 24px;
+  color: var(--ink);
+}
+
+.prewarm-setting p {
+  margin: 0;
+  padding-left: 23px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
 .config-panels {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4525,6 +4548,214 @@ section.detection-settings-card {
 .probe-result strong,
 .save-status {
   color: var(--ink);
+}
+
+.retention-settings {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.retention-heading,
+.retention-alert,
+.retention-last-run,
+.retention-protection,
+.retention-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.retention-heading {
+  justify-content: space-between;
+}
+
+.retention-heading h4,
+.retention-heading p {
+  margin: 0;
+}
+
+.retention-heading h4 {
+  font-size: 15px;
+}
+
+.retention-heading p,
+.retention-protection {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.retention-state {
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+  text-transform: capitalize;
+}
+
+.retention-state.cleaning,
+.retention-state.running,
+.retention-state.queued {
+  background: color-mix(in srgb, var(--accent) 15%, var(--control-muted));
+  color: var(--accent);
+}
+
+.retention-state.error {
+  color: var(--danger);
+}
+
+.retention-fields,
+.retention-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.retention-fields > .check-field {
+  grid-column: span 2;
+}
+
+.retention-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.retention-alert {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.retention-alert > div,
+.retention-last-run {
+  display: grid;
+  gap: 3px;
+}
+
+.retention-alert span,
+.retention-last-run span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.retention-alert.warning {
+  border-color: color-mix(in srgb, #f59e0b 55%, var(--line));
+  background: color-mix(in srgb, #f59e0b 8%, var(--control-muted));
+}
+
+.retention-alert.critical {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--line));
+  background: color-mix(in srgb, var(--danger) 8%, var(--control-muted));
+}
+
+.retention-alert.healthy {
+  border-color: color-mix(in srgb, var(--ok) 50%, var(--line));
+}
+
+.retention-metrics article {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-muted);
+  padding: 10px;
+}
+
+.retention-metrics article > span,
+.retention-metrics small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.retention-metrics strong {
+  font-size: 17px;
+}
+
+.retention-camera-details,
+.camera-retention-details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-muted);
+  padding: 9px 10px;
+}
+
+.retention-camera-details summary,
+.camera-retention-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.retention-camera-table {
+  display: grid;
+  gap: 1px;
+  margin-top: 10px;
+  overflow-x: auto;
+}
+
+.retention-camera-table > div {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.5fr) repeat(4, minmax(78px, 1fr));
+  gap: 8px;
+  min-width: 560px;
+  border-top: 1px solid var(--line);
+  padding: 7px 4px;
+  font-size: 12px;
+}
+
+.retention-camera-table > .heading {
+  border-top: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.retention-actions {
+  justify-content: flex-end;
+}
+
+.retention-protection {
+  margin: 0;
+}
+
+.camera-retention-details {
+  margin-top: 2px;
+}
+
+.camera-retention-details .field-row {
+  margin-top: 10px;
+}
+
+@media (max-width: 900px) {
+  .retention-fields,
+  .retention-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .retention-fields,
+  .retention-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .retention-fields > .check-field {
+    grid-column: auto;
+  }
+
+  .retention-heading,
+  .retention-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .retention-actions button {
+    width: 100%;
+  }
 }
 
 .motion-runtime-status {

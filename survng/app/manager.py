@@ -116,6 +116,8 @@ class AppManager:
             config.recording_segment_seconds,
             config.hardware_acceleration,
             index_dir=recording_index_dir,
+            retention_config=config.retention,
+            protected_recording_paths=self.events.protected_recording_paths,
         )
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()

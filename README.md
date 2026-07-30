@@ -2,6 +2,9 @@
 
 Local-first surveillance app for RTSP/RTMP/ONVIF cameras with recording, camera motion-event ingestion, OpenVINO object detection, and a browser GUI.
 
+Continuous-recording quotas, age limits, free-space watermarks, and protected
+incident media are described in [Storage retention](docs/storage-retention.md).
+
 For the end-to-end ingest, motion qualification, inference, incident, recording,
 and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that
 document synchronized with changes to any video-processing stage.
