@@ -722,6 +722,8 @@ class EventApiSerializationTest(unittest.TestCase):
             "id": 7,
             "camera_id": "gate",
             "kind": "object",
+            "snapshot_path": "snapshots/gate/7.jpg",
+            "recording_path": "recordings/gate/7.mp4",
             "objects_json": json.dumps([
                 {
                     "label": "person",
@@ -745,6 +747,8 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertNotIn("object_tracking", payload)
         self.assertNotIn("faces", payload)
         self.assertNotIn("motion_observations", payload)
+        self.assertEqual(payload["snapshot_path"], "available")
+        self.assertEqual(payload["recording_path"], "available")
         self.assertEqual(payload["objects"], [{
             "label": "person",
             "confidence": 0.91,

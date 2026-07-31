@@ -12,7 +12,9 @@ from .incident_utils import portable_media_path
 
 
 class EventStore:
-    COMPACT_COLUMNS = "id, camera_id, kind, objects_json, created_at"
+    COMPACT_COLUMNS = (
+        "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at"
+    )
     TRACKING_COMPARISON_HISTORY_PER_CAMERA = 100
     TRACKING_COMPARISON_VERDICTS = {
         "survng_hybrid",

@@ -381,7 +381,7 @@ class EventStoreTest(unittest.TestCase):
             backfill.assert_not_called()
             rebase.assert_not_called()
 
-    def test_compact_queries_omit_media_fields_and_support_keyset_paging(self) -> None:
+    def test_compact_queries_keep_media_availability_and_support_keyset_paging(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
             events = [
@@ -404,10 +404,12 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual([row["id"] for row in second_page], [events[3]["id"], events[2]["id"], events[1]["id"]])
             self.assertEqual(
                 set(first_page[0]),
-                {"id", "camera_id", "kind", "objects_json", "created_at"},
+                {"id", "camera_id", "kind", "snapshot_path", "recording_path", "objects_json", "created_at"},
             )
+            self.assertTrue(first_page[0]["snapshot_path"])
+            self.assertTrue(first_page[0]["recording_path"])
 
-    def test_between_compact_returns_complete_range_without_media_payloads(self) -> None:
+    def test_between_compact_returns_complete_range_without_large_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
             for index in range(25):
@@ -426,7 +428,7 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual(len(rows), 25)
             self.assertNotIn("message", rows[0])
-            self.assertNotIn("snapshot_path", rows[0])
+            self.assertTrue(rows[0]["snapshot_path"])
 
     def test_get_many_hydrates_only_requested_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
