@@ -71,7 +71,7 @@ import {
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -3392,26 +3392,6 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   );
 }
 
-function refreshedIncidentSelection(selected, incidents) {
-  if (!selected) return null;
-  for (const incident of incidents) {
-    if (incident.id === selected.id) return selected;
-    const child = (incident.events || []).find((candidate) => candidate.id === selected.id);
-    if (child) {
-      return {
-        ...child,
-        start_epoch: incident.start_epoch,
-        last_epoch: incident.last_epoch,
-        start_at: incident.start_at,
-        end_at: incident.end_at,
-        event_count: incident.event_count,
-        events: incident.events || [],
-      };
-    }
-  }
-  return null;
-}
-
 function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
@@ -3656,7 +3636,6 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   }, [selectedEvent?.id, focusedEvent?.id, focusedEvent?.created_at, focusedEvent?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
-    setSelectedEvent((current) => refreshedIncidentSelection(current, visibleIncidents));
     if (expandedIncidentId && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
       setExpandedIncidentId(null);
     }
@@ -3872,7 +3851,10 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const [incidentLoading, setIncidentLoading] = useState(true);
   const [incidentLoadError, setIncidentLoadError] = useState("");
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
+  const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
+  const incidentRefreshPendingRef = useRef(false);
+  const incidentInteractionActiveRef = useRef(false);
   const incidentDetailCacheRef = useRef(null);
   if (!incidentDetailCacheRef.current) {
     incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
@@ -3892,6 +3874,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
     });
   }
   const liveIncidentGalleryRef = useRef(null);
+  const liveIncidentZoneRef = useRef(null);
   const [liveIncidentGallerySize, setLiveIncidentGallerySize] = useState({ width: 0, height: 0 });
   const liveIncidentGalleryReady = liveIncidentGallerySize.width > 0 && liveIncidentGallerySize.height > 0;
   const incidentsPerPage = liveIncidentGalleryReady
@@ -3914,27 +3897,45 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const visibleIncidents = incidents;
-  const focusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  const [retainedFocusedIncident, setRetainedFocusedIncident] = useState(null);
+  const listedFocusedIncident = retainFocusedIncident(visibleIncidents, expandedIncidentId);
+  const focusedSummary = listedFocusedIncident
+    || retainFocusedIncident([], expandedIncidentId, retainedFocusedIncident);
   const focusedDetailQuery = incidentDetailQuery(focusedSummary);
   const focusedIncident = focusedSummary ? incidentDetails[focusedDetailQuery] || focusedSummary : null;
   const galleryIncidents = visibleIncidents;
   const incidentPageCount = incidentPage + (incidentHasMore ? 2 : 1);
   const clampedIncidentPage = incidentPage;
   const pagedIncidents = galleryIncidents;
+  incidentInteractionActiveRef.current = Boolean(expandedIncidentId != null || selectedEvent);
 
   useEffect(() => {
     clearLegacyIncidentFilterStorage();
   }, []);
 
   useEffect(() => {
+    const zone = liveIncidentZoneRef.current;
     const gallery = liveIncidentGalleryRef.current;
-    if (!gallery) return undefined;
+    if (!zone || !gallery) return undefined;
     function updateGallerySize() {
+      const zoneRect = zone.getBoundingClientRect();
       const rect = gallery.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) setLiveIncidentGallerySize({ width: rect.width, height: rect.height });
+      const fixedHeight = [...zone.children]
+        .filter((child) => child !== gallery && !child.classList.contains("incident-focus"))
+        .reduce((total, child) => total + child.getBoundingClientRect().height, 0);
+      const availableHeight = Math.max(0, zoneRect.height - fixedHeight);
+      if (rect.width <= 0 || availableHeight <= 0) return;
+      const next = {
+        width: Math.round(rect.width),
+        height: Math.round(availableHeight),
+      };
+      setLiveIncidentGallerySize((current) => (
+        current.width === next.width && current.height === next.height ? current : next
+      ));
     }
     updateGallerySize();
     const observer = new ResizeObserver(updateGallerySize);
+    observer.observe(zone);
     observer.observe(gallery);
     return () => observer.disconnect();
   }, []);
@@ -3952,6 +3953,8 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   useEffect(() => {
     incidentFeedCacheRef.current.clear();
     setIncidentPage(0);
+    setExpandedIncidentId(null);
+    setRetainedFocusedIncident(null);
   }, [eventFilter, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter]);
 
   useEffect(() => {
@@ -3959,8 +3962,8 @@ function LivePage({ timeZone, onRecordingContextChange }) {
     setIncidentPage(0);
   }, [incidentsPerPage]);
 
-  function refresh() {
-    refreshBase();
+  function refreshIncidents() {
+    incidentSelectionRequestRef.current += 1;
     incidentFeedCacheRef.current.clear();
     incidentDetailCacheRef.current.clear();
     setIncidentDetails({});
@@ -3995,15 +3998,30 @@ function LivePage({ timeZone, onRecordingContextChange }) {
 
   useAppEvents(({ type }) => {
     if (type !== "incident" || incidentPage !== 0 || document.hidden) return;
-    if (incidentEventRefreshTimer.current) return;
+    incidentRefreshPendingRef.current = true;
+    window.clearTimeout(incidentEventRefreshTimer.current);
     incidentEventRefreshTimer.current = window.setTimeout(() => {
       incidentEventRefreshTimer.current = null;
+      if (incidentInteractionActiveRef.current || !incidentRefreshPendingRef.current) return;
+      incidentRefreshPendingRef.current = false;
       incidentFeedCacheRef.current.clear();
       setIncidentRefreshToken((value) => value + 1);
     }, 1000);
   });
 
-  useEffect(() => () => window.clearTimeout(incidentEventRefreshTimer.current), []);
+  useEffect(() => {
+    if (incidentInteractionActiveRef.current || !incidentRefreshPendingRef.current) return;
+    window.clearTimeout(incidentEventRefreshTimer.current);
+    incidentEventRefreshTimer.current = null;
+    incidentRefreshPendingRef.current = false;
+    incidentFeedCacheRef.current.clear();
+    setIncidentRefreshToken((value) => value + 1);
+  }, [expandedIncidentId, selectedEvent]);
+
+  useEffect(() => () => {
+    incidentSelectionRequestRef.current += 1;
+    window.clearTimeout(incidentEventRefreshTimer.current);
+  }, []);
 
   useEffect(() => {
     if (!liveIncidentGalleryReady) return undefined;
@@ -4023,11 +4041,13 @@ function LivePage({ timeZone, onRecordingContextChange }) {
     async function loadIncidentFeed() {
       const query = feedQuery(incidentPage);
       const cachedPayload = incidentFeedCacheRef.current.peek(query);
-      setIncidentLoading(!cachedPayload);
+      const foregroundLoad = incidentLoadedQueryRef.current !== query;
+      if (foregroundLoad && !cachedPayload) setIncidentLoading(true);
       setIncidentLoadError("");
       try {
         const payload = cachedPayload || await incidentFeedCacheRef.current.load(query);
         if (cancelled) return;
+        incidentLoadedQueryRef.current = query;
         setIncidents(incidentsNewestFirst(payload.items || []));
         setIncidentFacets(payload.facets || { camera_ids: [], labels: [], zones: [] });
         setIncidentHasMore(Boolean(payload.has_more));
@@ -4041,11 +4061,9 @@ function LivePage({ timeZone, onRecordingContextChange }) {
         incidentFeedCacheRef.current.retain([previousQuery, query, nextQuery]);
       } catch (error) {
         if (cancelled) return;
-        setIncidents([]);
-        setIncidentHasMore(false);
         setIncidentLoadError(error.message || "Unable to load recent incidents");
       } finally {
-        if (!cancelled) setIncidentLoading(false);
+        if (!cancelled && foregroundLoad) setIncidentLoading(false);
       }
     }
     loadIncidentFeed();
@@ -4071,17 +4089,15 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   }, [selectedEvent?.id, focusedIncident?.id, focusedIncident?.created_at, focusedIncident?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
-    setSelectedEvent((current) => refreshedIncidentSelection(current, visibleIncidents));
-    if (expandedIncidentId && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
-      setExpandedIncidentId(null);
-    }
-  }, [expandedIncidentId, visibleIncidents]);
+    if (listedFocusedIncident) setRetainedFocusedIncident(listedFocusedIncident);
+  }, [listedFocusedIncident]);
 
   useEffect(() => {
     function onKey(keyEvent) {
       if (keyEvent.key === "Escape" && expandedIncidentId && !selectedEvent) {
         keyEvent.preventDefault();
         setExpandedIncidentId(null);
+        setRetainedFocusedIncident(null);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -4089,7 +4105,21 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   }, [expandedIncidentId, selectedEvent]);
 
   function toggleIncident(incidentId) {
-    setExpandedIncidentId((current) => current === incidentId ? null : incidentId);
+    const closing = String(expandedIncidentId) === String(incidentId);
+    if (closing) {
+      setExpandedIncidentId(null);
+      setRetainedFocusedIncident(null);
+      return;
+    }
+    const incident = visibleIncidents.find((candidate) => String(candidate.id) === String(incidentId));
+    setRetainedFocusedIncident(incident || null);
+    setExpandedIncidentId(incidentId);
+  }
+
+  function changeIncidentPage(nextPage) {
+    setExpandedIncidentId(null);
+    setRetainedFocusedIncident(null);
+    setIncidentPage(Math.max(0, nextPage));
   }
 
   return (
@@ -4101,7 +4131,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
               key={camera.id}
               camera={camera}
               timeZone={timeZone}
-              refresh={refresh}
+              refresh={refreshBase}
               onOpen={setExpandedCamera}
               startDelayMs={index * 450}
               dragging={dragCameraId === camera.id}
@@ -4140,7 +4170,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
           ))}
         </div>
       </section>
-      <section className="bento-card events-zone">
+      <section className="bento-card events-zone" ref={liveIncidentZoneRef}>
         <div className="section-head compact incident-head">
           <div><h2>Recent Incidents</h2></div>
           <div className="incident-head-actions">
@@ -4189,9 +4219,9 @@ function LivePage({ timeZone, onRecordingContextChange }) {
           </div>
         ) : null}
         <div className="incident-gallery" ref={liveIncidentGalleryRef}>
-          {incidentLoading ? <div className="empty-state">Loading recent incidents...</div> : null}
-          {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
-          {!incidentLoading && !incidentLoadError && visibleIncidents.length
+          {incidentLoading && !visibleIncidents.length ? <div className="empty-state">Loading recent incidents...</div> : null}
+          {!visibleIncidents.length && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+          {visibleIncidents.length
             ? pagedIncidents.map((incident) => (
               <IncidentCard
                 key={incident.id}
@@ -4208,12 +4238,12 @@ function LivePage({ timeZone, onRecordingContextChange }) {
           {!incidentLoading && !incidentLoadError && !visibleIncidents.length ? <div className="empty-state">No incidents match the current filters.</div> : null}
         </div>
         <div className={`incident-pager ${incidentPage > 0 || incidentHasMore ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={incidentPage === 0 && !incidentHasMore}>
-          <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
+          <button type="button" onClick={() => changeIncidentPage(incidentPage - 1)} disabled={clampedIncidentPage === 0}>Prev</button>
           <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
-          <button type="button" onClick={() => setIncidentPage((page) => page + 1)} disabled={!incidentHasMore}>Next</button>
+          <button type="button" onClick={() => changeIncidentPage(incidentPage + 1)} disabled={!incidentHasMore}>Next</button>
         </div>
       </section>
-      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refresh} /> : null}
+      {selectedEvent ? <EventOverlay event={selectedEvent} events={visibleIncidents} timeZone={timeZone} onClose={closeIncidentOverlay} onSelect={openIncidentOverlay} onRefresh={refreshIncidents} /> : null}
       {expandedCamera ? <LiveCameraOverlay camera={expandedCamera} timeZone={timeZone} onClose={() => setExpandedCamera(null)} /> : null}
     </main>
   );

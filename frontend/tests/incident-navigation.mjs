@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentIndexForEvent, incidentThumbnailPageSize, incidentsNewestFirst, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentIndexForEvent, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -39,6 +39,11 @@ const orderedIncidents = incidentsNewestFirst(unorderedIncidents);
 assert.deepEqual(orderedIncidents.map((incident) => incident.id), ["new", "middle", "same-a", "same-b", "old"]);
 assert.notEqual(orderedIncidents, unorderedIncidents);
 assert.deepEqual(incidentsNewestFirst(null), []);
+const retainedIncident = { id: 42, camera_id: "gate", detail: true };
+assert.equal(retainFocusedIncident([{ id: "42", detail: false }], 42, retainedIncident)?.detail, false);
+assert.equal(retainFocusedIncident([], "42", retainedIncident), retainedIncident);
+assert.equal(retainFocusedIncident([], "99", retainedIncident), null);
+assert.equal(retainFocusedIncident([], null, retainedIncident), null);
 
 const loadedPages = [];
 const pageCache = createIncidentPageCache(async (key) => {

@@ -27,6 +27,15 @@ export function incidentsNewestFirst(incidents) {
     .map(({ incident }) => incident);
 }
 
+export function retainFocusedIncident(incidents, incidentId, retained = null) {
+  if (incidentId == null) return null;
+  const selected = Array.isArray(incidents)
+    ? incidents.find((incident) => sameEventId(incident?.id, incidentId))
+    : null;
+  if (selected) return selected;
+  return sameEventId(retained?.id, incidentId) ? retained : null;
+}
+
 export function createIncidentPageCache(loader) {
   let entries = new Map();
   return {
