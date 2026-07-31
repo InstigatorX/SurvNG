@@ -159,6 +159,10 @@ class CameraWorker:
         self._camera_motion_times: deque[float] = deque(maxlen=32)
         self._visual_backup_last_matched_camera_at = 0.0
         self._visual_backup_analysis_started_at = 0.0
+        self._visual_backup_scene_ready = False
+        self._visual_backup_stable_since = 0.0
+        self._visual_backup_stable_samples = 0
+        self._visual_backup_readiness_audited = False
         self._visual_backup_candidate_since = 0.0
         self._visual_backup_last_candidate_at = 0.0
         self._visual_backup_consecutive = 0
@@ -182,6 +186,8 @@ class CameraWorker:
             "visual_backup_triggers": 0,
             "visual_backup_onvif_matches": 0,
             "visual_backup_rate_limited": 0,
+            "visual_backup_not_ready": 0,
+            "visual_backup_uncorrelated_objects": 0,
             "analysis_worker_errors": 0,
             "event_worker_errors": 0,
             "event_callback_errors": 0,
@@ -350,6 +356,10 @@ class CameraWorker:
             self._camera_motion_times.clear()
             self._visual_backup_last_matched_camera_at = 0.0
             self._visual_backup_analysis_started_at = 0.0
+            self._visual_backup_scene_ready = False
+            self._visual_backup_stable_since = 0.0
+            self._visual_backup_stable_samples = 0
+            self._visual_backup_readiness_audited = False
             self._visual_backup_candidate_since = 0.0
             self._visual_backup_last_candidate_at = 0.0
             self._visual_backup_consecutive = 0
@@ -494,6 +504,8 @@ class CameraWorker:
                     "minimum_consecutive": self.motion_config.visual_backup_min_consecutive,
                     "cooldown_seconds": self.motion_config.visual_backup_cooldown_seconds,
                     "maximum_triggers_5m": self.motion_config.visual_backup_max_triggers_5m,
+                    "scene_ready": self._visual_backup_scene_ready,
+                    "stable_samples": self._visual_backup_stable_samples,
                 },
                 "suppression_verification_rate": self._suppression_verification_rate(),
                 "borderline_rescue_enabled": rescue_enabled,
@@ -814,6 +826,55 @@ class CameraWorker:
         self._visual_backup_last_candidate_at = 0.0
         self._visual_backup_consecutive = 0
 
+    def _visual_backup_readiness(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+    ) -> bool:
+        """Require a quiet post-warmup baseline before EMA may rescue events."""
+        if (
+            self._visual_backup_analysis_started_at <= 0.0
+            or captured_at < self._visual_backup_analysis_started_at
+        ):
+            self._visual_backup_analysis_started_at = captured_at
+            self._visual_backup_scene_ready = False
+            self._visual_backup_stable_since = 0.0
+            self._visual_backup_stable_samples = 0
+        if self._visual_backup_scene_ready:
+            return True
+        if (
+            captured_at - self._visual_backup_analysis_started_at
+            < self.motion_config.visual_backup_warmup_seconds
+        ):
+            self._visual_backup_stable_since = 0.0
+            self._visual_backup_stable_samples = 0
+            return False
+
+        stable_result = bool(
+            not result.accepted
+            and result.reason not in {
+                "global_illumination_change",
+                "insufficient_frames",
+                "validation_unavailable_fail_open",
+            }
+        )
+        if not stable_result:
+            self._visual_backup_stable_since = 0.0
+            self._visual_backup_stable_samples = 0
+            return False
+        if self._visual_backup_stable_since <= 0.0:
+            self._visual_backup_stable_since = captured_at
+        self._visual_backup_stable_samples += 1
+        required_samples = max(3, int(self.motion_config.visual_backup_min_consecutive))
+        required_seconds = max(1.5, float(self.motion_config.visual_backup_grace_seconds))
+        if (
+            self._visual_backup_stable_samples >= required_samples
+            and captured_at - self._visual_backup_stable_since >= required_seconds
+        ):
+            self._visual_backup_scene_ready = True
+            self._reset_visual_backup_candidate()
+        return self._visual_backup_scene_ready
+
     def _consider_visual_backup(
         self,
         result: MotionQualificationResult,
@@ -823,17 +884,7 @@ class CameraWorker:
         if not self._detection_enabled:
             self._reset_visual_backup_candidate()
             return
-        if (
-            self._visual_backup_analysis_started_at <= 0.0
-            or captured_at < self._visual_backup_analysis_started_at
-        ):
-            self._visual_backup_analysis_started_at = captured_at
-        if (
-            captured_at - self._visual_backup_analysis_started_at
-            < self.motion_config.visual_backup_warmup_seconds
-        ):
-            self._reset_visual_backup_candidate()
-            return
+        scene_ready = self._visual_backup_readiness(result, captured_at)
         required_score = max(
             float(self.motion_config.visual_backup_min_score),
             float(result.threshold) + float(self.motion_config.visual_backup_score_margin),
@@ -849,6 +900,12 @@ class CameraWorker:
             }
         )
         if not strong_candidate:
+            self._reset_visual_backup_candidate()
+            return
+        if not scene_ready:
+            with self._motion_stats_lock:
+                self._motion_stats["visual_backup_not_ready"] += 1
+            self._record_visual_backup_readiness_audit(result, captured_at)
             self._reset_visual_backup_candidate()
             return
 
@@ -950,6 +1007,39 @@ class CameraWorker:
             "source": "visual_backup",
         })
         self._reset_visual_backup_candidate()
+
+    def _record_visual_backup_readiness_audit(
+        self,
+        result: MotionQualificationResult,
+        captured_at: float,
+    ) -> None:
+        if self._visual_backup_readiness_audited:
+            return
+        self._visual_backup_readiness_audited = True
+        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+        try:
+            self.motion_decision_handler.record_audit(
+                snapshot_path=self._sample_rejected_motion(event_at, result),
+                event_at=event_at,
+                mode="camera_rescue",
+                sensitivity=self._motion_settings()[1],
+                score=result.score,
+                threshold=result.threshold,
+                reason="startup_not_ready",
+                object_detected=None,
+                trigger_count=0,
+                features={
+                    **self._audit_features(result),
+                    "visual_backup_scene_ready": False,
+                    "visual_backup_warmup_seconds": self.motion_config.visual_backup_warmup_seconds,
+                },
+                category="visual_backup",
+            )
+        except Exception:
+            LOGGER.exception(
+                "failed to record visual backup readiness audit for %s",
+                self.camera.id,
+            )
 
     def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
         cutoff = captured_at - 300.0
@@ -1554,10 +1644,21 @@ class CameraWorker:
         if capture_debug:
             self.motion_debug.capture(processed)
         result = processed.scoring
-        result.features.setdefault(
+        features = dict(result.features)
+        features.setdefault(
             "primary_motion_source",
             self.motion_pipeline.primary_motion_source,
         )
+        dominant = processed.dominant_track
+        if dominant is not None and dominant.observations:
+            features.setdefault(
+                "motion_regions",
+                [
+                    [round(float(value), 5) for value in blob.box]
+                    for blob in dominant.observations[-12:]
+                ],
+            )
+            features.setdefault("motion_region_track_id", dominant.track_id)
         telemetry: dict[str, Any] = {}
         if include_telemetry:
             telemetry = {
@@ -1573,7 +1674,7 @@ class CameraWorker:
             threshold=result.threshold,
             reason=result.reason,
             frame_count=result.frame_count,
-            features=dict(result.features),
+            features=features,
             telemetry=telemetry,
         )
 
@@ -1900,6 +2001,7 @@ class CameraWorker:
                         or borderline_candidate
                         or suppression_verification_candidate
                     ),
+                    require_motion_correlation=visual_backup,
                 )
                 event_id = outcome.get("event_id")
                 if event_id is not None:
@@ -1926,6 +2028,15 @@ class CameraWorker:
                     with self._motion_stats_lock:
                         self._motion_stats["audit_object_matches"] += 1
                 if visual_backup:
+                    correlation = outcome.get("motion_correlation")
+                    if (
+                        outcome.get("rejection_reason") == "object_not_motion_correlated"
+                        and isinstance(correlation, dict)
+                    ):
+                        with self._motion_stats_lock:
+                            self._motion_stats["visual_backup_uncorrelated_objects"] += int(
+                                correlation.get("eligible_object_count") or 0
+                            )
                     if not found_object:
                         # A backup with no eligible object must not leave the
                         # fusion event state ACTIVE. A real camera notice that
@@ -1941,12 +2052,13 @@ class CameraWorker:
                         sensitivity=sensitivity,
                         score=result.score,
                         threshold=result.threshold,
-                        reason="visual_backup_trigger",
+                        reason=str(outcome.get("rejection_reason") or "visual_backup_trigger"),
                         object_detected=object_outcome,
                         trigger_count=len(triggers),
                         features={
                             **self._audit_features(result),
                             "visual_backup_original_reason": result.reason,
+                            "motion_correlation": correlation,
                         },
                         category="visual_backup",
                     )
@@ -2003,6 +2115,7 @@ class CameraWorker:
         qualification: dict[str, Any],
         *,
         require_eligible_object: bool = False,
+        require_motion_correlation: bool = False,
     ) -> dict[str, Any]:
         if self.object_tracking.config.enabled:
             # Main-stream capture opens concurrently with recorded validation,
@@ -2014,6 +2127,7 @@ class CameraWorker:
             event_at,
             qualification,
             require_eligible_object=require_eligible_object,
+            require_motion_correlation=require_motion_correlation,
         )
         if outcome.event_id is not None and outcome.object_detected:
             initial_tracking_frame = None

@@ -43,6 +43,26 @@ class AuditAiTest(unittest.TestCase):
         self.assertFalse(active["object_detection_miss"])
         self.assertFalse(cooldown["object_detection_miss"])
 
+    def test_uncorrelated_backup_object_is_not_treated_as_detector_miss(self) -> None:
+        interpretation = motion_audit_interpretation(
+            reason="object_not_motion_correlated",
+            event_id=None,
+            object_detected=False,
+        )
+
+        self.assertEqual(interpretation["category"], "object_not_motion_correlated")
+        self.assertFalse(interpretation["object_detection_miss"])
+
+    def test_startup_readiness_hold_is_not_treated_as_detector_miss(self) -> None:
+        interpretation = motion_audit_interpretation(
+            reason="startup_not_ready",
+            event_id=None,
+            object_detected=None,
+        )
+
+        self.assertEqual(interpretation["category"], "visual_backup_scene_learning")
+        self.assertFalse(interpretation["object_detection_miss"])
+
     def test_prompt_describes_current_trigger_validator_paradigm(self) -> None:
         self.assertIn("camera_triggered", SYSTEM_PROMPT)
         self.assertIn("visual_triggered", SYSTEM_PROMPT)

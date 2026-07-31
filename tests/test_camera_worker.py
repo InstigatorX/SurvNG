@@ -55,7 +55,8 @@ class DummyDetector:
 
 
 class DummyEvents:
-    pass
+    def add_motion_audit(self, **payload):
+        return {"id": 1, **payload}
 
 
 class DummyRecorder:
@@ -131,6 +132,21 @@ def make_worker(
         ),
         motion_analysis_limiter=threading.BoundedSemaphore(2),
     )
+
+
+def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
+    stable = MotionQualificationResult(
+        False,
+        0.0,
+        0.48,
+        "no_motion_blobs",
+        4,
+        {},
+    )
+    warmup_end = started_at + worker.motion_config.visual_backup_warmup_seconds
+    for captured_at in (started_at, warmup_end, warmup_end + 0.75, warmup_end + 1.5):
+        worker._visual_backup_readiness(stable, captured_at)
+    assert worker._visual_backup_scene_ready
 
 
 class CameraWorkerTest(unittest.TestCase):
@@ -535,6 +551,7 @@ class CameraWorkerTest(unittest.TestCase):
         samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            prime_visual_backup_scene(worker, 90.0)
             with patch.object(worker, "_with_source_evidence", return_value=accepted):
                 worker._consider_visual_backup(accepted, samples, 100.0)
                 worker._consider_visual_backup(accepted, samples, 100.5)
@@ -560,6 +577,7 @@ class CameraWorkerTest(unittest.TestCase):
         samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            prime_visual_backup_scene(worker, 90.0)
             worker._camera_motion_times.append(100.75)
             for captured_at in (100.0, 100.5, 101.0):
                 worker._consider_visual_backup(accepted, samples, captured_at)
@@ -586,12 +604,35 @@ class CameraWorkerTest(unittest.TestCase):
                 for captured_at in (100.0, 100.5, 109.5):
                     worker._consider_visual_backup(accepted, samples, captured_at)
                 self.assertTrue(worker._motion_queue.empty())
-                worker._consider_visual_backup(accepted, samples, 110.0)
-                worker._consider_visual_backup(accepted, samples, 110.5)
+                stable = MotionQualificationResult(False, 0.0, 0.48, "no_motion_blobs", 4, {})
+                for captured_at in (110.0, 110.75, 111.5):
+                    worker._consider_visual_backup(stable, samples, captured_at)
+                worker._consider_visual_backup(accepted, samples, 112.0)
+                worker._consider_visual_backup(accepted, samples, 112.5)
 
             trigger = worker._motion_queue.get_nowait()
 
         self.assertEqual(trigger["topic"], "adaptive/visual_backup")
+
+    def test_visual_backup_readiness_resets_until_post_warmup_scene_is_quiet(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            visual_backup_warmup_seconds=10,
+            visual_backup_grace_seconds=1.5,
+            visual_backup_min_consecutive=3,
+        )
+        stable = MotionQualificationResult(False, 0.0, 0.48, "no_motion_blobs", 4, {})
+        active = MotionQualificationResult(True, 0.82, 0.48, "qualified", 4, {})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            self.assertFalse(worker._visual_backup_readiness(stable, 100.0))
+            self.assertFalse(worker._visual_backup_readiness(stable, 109.5))
+            self.assertFalse(worker._visual_backup_readiness(stable, 110.0))
+            self.assertFalse(worker._visual_backup_readiness(active, 110.75))
+            self.assertFalse(worker._visual_backup_readiness(stable, 111.0))
+            self.assertFalse(worker._visual_backup_readiness(stable, 111.75))
+            self.assertTrue(worker._visual_backup_readiness(stable, 112.5))
 
     def test_visual_trigger_modes_run_replaceable_non_adaptive_qualifiers_continuously(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -699,6 +740,7 @@ class CameraWorkerTest(unittest.TestCase):
 
         process_event.assert_called_once()
         self.assertTrue(process_event.call_args.kwargs["require_eligible_object"])
+        self.assertTrue(process_event.call_args.kwargs["require_motion_correlation"])
         self.assertEqual(record_audit.call_args.kwargs["category"], "visual_backup")
         self.assertEqual(record_audit.call_args.kwargs["reason"], "visual_backup_trigger")
         self.assertEqual(worker.motion_fusion_pipeline.runtime.generation, 2)
@@ -750,8 +792,62 @@ class CameraWorkerTest(unittest.TestCase):
 
         process_event.assert_called_once()
         self.assertFalse(process_event.call_args.kwargs["require_eligible_object"])
+        self.assertFalse(process_event.call_args.kwargs["require_motion_correlation"])
         record_audit.assert_not_called()
         self.assertEqual(worker._motion_stats["visual_backup_onvif_matches"], 1)
+
+    def test_visual_backup_audits_uncorrelated_object_rejection(self) -> None:
+        camera = CameraConfig(id="front-door", name="Front Door", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            visual_backup_warmup_seconds=0,
+            burst_quiet_seconds=0.1,
+        )
+        accepted = MotionQualificationResult(True, 0.82, 0.5, "qualified", 4, {
+            "visual_backup": True,
+            "motion_regions": [[0.1, 0.1, 0.3, 0.3]],
+        })
+        correlation = {
+            "eligible_object_count": 1,
+            "correlated_object_count": 0,
+        }
+        event_at = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            with (
+                patch.object(
+                    worker,
+                    "_process_motion_event",
+                    return_value={
+                        "event_id": None,
+                        "snapshot_path": "checked.jpg",
+                        "object_detected": False,
+                        "rejection_reason": "object_not_motion_correlated",
+                        "motion_correlation": correlation,
+                    },
+                ),
+                patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
+            ):
+                worker._enqueue_motion_trigger({
+                    "topic": "adaptive/visual_backup",
+                    "message": "backup",
+                    "event_at": event_at,
+                    "received_at": event_at.timestamp(),
+                    "prequalified": accepted,
+                })
+                thread = threading.Thread(target=worker._run_motion_events)
+                thread.start()
+                deadline = time.monotonic() + 2
+                while record_audit.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                worker._stop.set()
+                worker._motion_queue.put_nowait(None)
+                thread.join(timeout=2)
+
+        self.assertEqual(record_audit.call_args.kwargs["reason"], "object_not_motion_correlated")
+        self.assertEqual(record_audit.call_args.kwargs["features"]["motion_correlation"], correlation)
+        self.assertEqual(worker._motion_stats["visual_backup_uncorrelated_objects"], 1)
 
     def test_audit_mode_learns_continuously_without_creating_events(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

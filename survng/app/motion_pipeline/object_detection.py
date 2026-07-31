@@ -173,6 +173,28 @@ def _candidate_detection(detected: dict[str, Any]) -> bool:
     return bool(detected.get("label") and _box(detected) is not None)
 
 
+def _temporal_motion_metrics(
+    track: _TemporalDetectionEvidence,
+    samples: list[_RecordedDetectionSample],
+) -> tuple[float, float]:
+    """Measure detector-box movement in resolution-independent frame units."""
+    centers: list[tuple[float, float]] = []
+    for sample_index, detected in sorted(track.observations.items()):
+        box = _box(detected)
+        if box is None or sample_index >= len(samples):
+            continue
+        height, width = samples[sample_index].frame.shape[:2]
+        if width <= 0 or height <= 0:
+            continue
+        x1, y1, x2, y2 = box
+        centers.append(((x1 + x2) / (2.0 * width), (y1 + y2) / (2.0 * height)))
+    if len(centers) < 2:
+        return 0.0, 0.0
+    displacement = math.dist(centers[0], centers[-1])
+    path = sum(math.dist(previous, current) for previous, current in zip(centers, centers[1:]))
+    return displacement, path
+
+
 def _temporal_consensus(
     samples: list[_RecordedDetectionSample],
     minimum_confirmations: int,
@@ -270,6 +292,9 @@ def _temporal_consensus(
             "temporal_peak_confidence": round(track.peak_confidence, 4),
             "temporal_label_votes": track.label_votes,
         }
+        displacement, path = _temporal_motion_metrics(track, samples)
+        enriched["temporal_center_displacement_ratio"] = round(displacement, 5)
+        enriched["temporal_center_path_ratio"] = round(path, 5)
         if confirmed:
             enriched["confidence"] = round(track.aggregate_confidence, 4)
         annotated.append(enriched)

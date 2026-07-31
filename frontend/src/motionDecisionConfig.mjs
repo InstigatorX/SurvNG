@@ -23,7 +23,7 @@ export const MOTION_MODE_OPTIONS = Object.freeze([
     value: "camera_rescue",
     label: "Camera + visual backup",
     status: "Camera primary · SurvNG visual backup",
-    description: "Camera ONVIF notices remain primary. Exceptionally strong, persistent visual motion can start object detection when the camera stays silent; an eligible object is still required for an incident.",
+    description: "Camera ONVIF notices remain primary. Exceptionally strong, persistent visual motion can start object detection when the camera stays silent; an eligible object must overlap that motion or move across detector samples.",
   }),
   Object.freeze({
     value: "adaptive",

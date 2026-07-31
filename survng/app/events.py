@@ -1022,6 +1022,7 @@ class EventStore:
                 "visual_backup_objects": 0,
                 "visual_backup_no_object": 0,
                 "visual_backup_incomplete": 0,
+                "visual_backup_not_ready": 0,
             })
 
         for row in event_rows:
@@ -1064,6 +1065,9 @@ class EventStore:
                 continue
             summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
             if str(row["category"] or "qualification") == "visual_backup":
+                if str(row["reason"] or "") == "startup_not_ready":
+                    summary["visual_backup_not_ready"] += 1
+                    continue
                 summary["visual_backup_attempts"] += 1
                 if row["object_detected"] is None:
                     summary["visual_backup_incomplete"] += 1

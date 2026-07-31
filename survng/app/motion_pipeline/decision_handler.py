@@ -17,6 +17,100 @@ MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
 
 
 LOGGER = logging.getLogger(__name__)
+MOTION_REGION_MARGIN_RATIO = 0.035
+TEMPORAL_OBJECT_MOVEMENT_RATIO = 0.02
+
+
+def _detection_box_ratio(
+    detected: dict[str, Any],
+    frame: Frame,
+) -> tuple[float, float, float, float] | None:
+    box = detected.get("box")
+    if not isinstance(box, dict):
+        return None
+    try:
+        height, width = frame.shape[:2]
+        x1 = float(box["x1"]) / width
+        y1 = float(box["y1"]) / height
+        x2 = float(box["x2"]) / width
+        y2 = float(box["y2"]) / height
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _intersects_motion_region(
+    box: tuple[float, float, float, float],
+    regions: list[object],
+) -> bool:
+    x1, y1, x2, y2 = box
+    for region in regions:
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            continue
+        try:
+            rx1, ry1, rx2, ry2 = (float(value) for value in region)
+        except (TypeError, ValueError):
+            continue
+        rx1 -= MOTION_REGION_MARGIN_RATIO
+        ry1 -= MOTION_REGION_MARGIN_RATIO
+        rx2 += MOTION_REGION_MARGIN_RATIO
+        ry2 += MOTION_REGION_MARGIN_RATIO
+        if min(x2, rx2) > max(x1, rx1) and min(y2, ry2) > max(y1, ry1):
+            return True
+    return False
+
+
+def motion_correlated_objects(
+    frame: Frame,
+    objects: list[dict[str, Any]],
+    qualification: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep objects that spatially or temporally explain an EMA trigger."""
+    features = qualification.get("features")
+    regions = features.get("motion_regions", []) if isinstance(features, dict) else []
+    if not isinstance(regions, list):
+        regions = []
+    correlated: list[dict[str, Any]] = []
+    spatial_matches = 0
+    temporal_matches = 0
+    for detected in objects:
+        spatial = bool(
+            (box := _detection_box_ratio(detected, frame)) is not None
+            and _intersects_motion_region(box, regions)
+        )
+        try:
+            displacement = float(detected.get("temporal_center_displacement_ratio") or 0.0)
+            path = float(detected.get("temporal_center_path_ratio") or 0.0)
+        except (TypeError, ValueError):
+            displacement = 0.0
+            path = 0.0
+        # Net displacement is deliberately authoritative. Detector-box jitter
+        # can accumulate a long path around an otherwise stationary object.
+        temporal = displacement >= TEMPORAL_OBJECT_MOVEMENT_RATIO
+        detected["motion_correlated"] = bool(spatial or temporal)
+        detected["motion_correlation"] = (
+            "spatial" if spatial else "temporal" if temporal else "none"
+        )
+        if spatial or temporal:
+            correlated.append(detected)
+            spatial_matches += int(spatial)
+            temporal_matches += int(temporal)
+        else:
+            # Preserve the detection as diagnostic evidence without allowing
+            # an unrelated stationary object to become an incident label.
+            detected["incident_eligible"] = False
+    return correlated, {
+        "required": True,
+        "motion_region_count": len(regions),
+        "eligible_object_count": len(objects),
+        "correlated_object_count": len(correlated),
+        "spatial_match_count": spatial_matches,
+        "temporal_match_count": temporal_matches,
+        "minimum_temporal_movement_ratio": TEMPORAL_OBJECT_MOVEMENT_RATIO,
+        "region_margin_ratio": MOTION_REGION_MARGIN_RATIO,
+    }
 
 
 class MotionEventStore(Protocol):
@@ -60,12 +154,16 @@ class MotionDecisionOutcome:
     snapshot_path: str
     object_detected: bool | None
     detected_objects: tuple[dict[str, Any], ...] = ()
+    rejection_reason: str = ""
+    motion_correlation: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "snapshot_path": self.snapshot_path,
             "object_detected": self.object_detected,
+            "rejection_reason": self.rejection_reason,
+            "motion_correlation": self.motion_correlation,
         }
 
 
@@ -96,6 +194,7 @@ class MotionDecisionHandler:
         qualification: dict[str, Any],
         *,
         require_eligible_object: bool = False,
+        require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
         frame, objects, recording_path = self.detection_provider(event_at)
@@ -124,6 +223,17 @@ class MotionDecisionHandler:
             for detected in objects
             if detected.get("label") and detected.get("incident_eligible") is not False
         ]
+        correlation: dict[str, Any] | None = None
+        uncorrelated_eligible_objects = 0
+        if require_motion_correlation and frame is not None:
+            uncorrelated_eligible_objects = len(eligible_objects)
+            eligible_objects, correlation = motion_correlated_objects(
+                frame,
+                eligible_objects,
+                qualification,
+            )
+            uncorrelated_eligible_objects -= len(eligible_objects)
+            qualification["motion_correlation"] = correlation
         verification_candidate = bool(qualification.get("suppression_verification_candidate"))
         if qualification.get("borderline_candidate"):
             qualification["rescued_by_object"] = bool(eligible_objects)
@@ -139,11 +249,18 @@ class MotionDecisionHandler:
             snapshot_path = self.snapshot_writer(frame, event_at)
 
         if require_eligible_object and not eligible_objects:
+            rejection_reason = (
+                "object_not_motion_correlated"
+                if require_motion_correlation and uncorrelated_eligible_objects > 0
+                else "no_eligible_object"
+            )
             return MotionDecisionOutcome(
                 event_id=None,
                 snapshot_path=snapshot_path,
                 object_detected=False if detection_completed else None,
                 detected_objects=tuple(eligible_objects),
+                rejection_reason=rejection_reason,
+                motion_correlation=correlation,
             )
 
         stored_objects = [
@@ -191,6 +308,7 @@ class MotionDecisionHandler:
             snapshot_path=snapshot_path,
             object_detected=bool(eligible_objects) if detection_completed else None,
             detected_objects=tuple(eligible_objects),
+            motion_correlation=correlation,
         )
 
     def record_audit(

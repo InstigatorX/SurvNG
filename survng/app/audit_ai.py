@@ -192,7 +192,8 @@ SurvNG has three current trigger models:
    and MOG2 are optional validators. Manual and semantic ONVIF notices bypass ordinary validation.
 2. camera_triggered_with_visual_backup: ONVIF remains primary, but exceptionally strong,
    persistent adaptive motion may start object detection when no recent camera notice arrived.
-   Backup triggers still require an incident-eligible object before creating an incident.
+   A backup object must overlap credible EMA motion or move across detector samples before creating
+   an incident; a stationary object elsewhere in the frame is diagnostic evidence only.
 3. visual_triggered: adaptive scene analysis is the only automatic trigger. MOG2 may validate it.
    ONVIF notices are diagnostic only and cannot start object detection.
 Selected validators fail open while unavailable or warming so real events are not silently lost.
@@ -239,7 +240,21 @@ def motion_audit_interpretation(
     object_detected: object,
 ) -> dict[str, Any]:
     normalized_reason = str(reason or "unknown").strip().lower()
-    detection_ran = bool(event_id)
+    detection_ran = bool(event_id) or object_detected is not None
+    if normalized_reason == "startup_not_ready":
+        return {
+            "category": "visual_backup_scene_learning",
+            "label": "EMA scene still learning",
+            "object_detection_miss": False,
+            "explanation": "A strong EMA candidate was held until a quiet post-startup scene baseline could be established; camera notices remained active.",
+        }
+    if normalized_reason == "object_not_motion_correlated":
+        return {
+            "category": "object_not_motion_correlated",
+            "label": "Object unrelated to EMA motion",
+            "object_detection_miss": False,
+            "explanation": "Object detection found an eligible object, but it neither overlapped the credible EMA motion nor moved across detector samples.",
+        }
     if normalized_reason == "event_state_active" and not detection_ran:
         return {
             "category": "duplicate_active_event",

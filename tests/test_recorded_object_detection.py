@@ -84,6 +84,11 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(objects[0]["temporal_peak_confidence"], 0.99)
         self.assertEqual(objects[0]["temporal_observations"], 3)
         self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 0.0)
+        self.assertGreater(objects[0]["temporal_center_displacement_ratio"], 0)
+        self.assertGreaterEqual(
+            objects[0]["temporal_center_path_ratio"],
+            objects[0]["temporal_center_displacement_ratio"],
+        )
 
     def test_spatial_track_votes_prevent_high_confidence_label_outliers(self) -> None:
         samples = [

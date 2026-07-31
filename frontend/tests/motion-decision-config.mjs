@@ -9,7 +9,7 @@ import {
 
 assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["camera", "camera_rescue", "adaptive"]);
 assert.match(motionModeInfo("camera").description, /Only camera ONVIF notices/);
-assert.match(motionModeInfo("camera_rescue").description, /eligible object is still required/);
+assert.match(motionModeInfo("camera_rescue").description, /must overlap that motion or move/);
 assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
 assert.equal(motionModeInfo("unknown").value, "camera");
 assert.equal(motionModeInfo("audit").value, "audit");
