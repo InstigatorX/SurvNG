@@ -46,6 +46,7 @@ class MotionEventStore(Protocol):
         object_detected: bool | None,
         trigger_count: int,
         features: dict[str, Any],
+        category: str = "qualification",
         event_id: int | None = None,
         related_event_id: int | None = None,
         decision_id: str = "",
@@ -205,6 +206,7 @@ class MotionDecisionHandler:
         object_detected: bool | None,
         trigger_count: int,
         features: dict[str, Any],
+        category: str = "qualification",
         event_id: int | None = None,
         related_event_id: int | None = None,
         decision_id: str = "",
@@ -224,6 +226,7 @@ class MotionDecisionHandler:
             object_detected=object_detected,
             trigger_count=trigger_count,
             features=features,
+            category=category,
         )
         if self.event_callback:
             self._publish("motion_audit", audit)

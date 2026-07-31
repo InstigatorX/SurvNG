@@ -7,8 +7,9 @@ import {
   readMotionDecisionFusion,
 } from "../src/motionDecisionConfig.mjs";
 
-assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["camera", "adaptive"]);
+assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["camera", "camera_rescue", "adaptive"]);
 assert.match(motionModeInfo("camera").description, /Only camera ONVIF notices/);
+assert.match(motionModeInfo("camera_rescue").description, /eligible object is still required/);
 assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
 assert.equal(motionModeInfo("unknown").value, "camera");
 assert.equal(motionModeInfo("audit").value, "audit");
@@ -63,6 +64,14 @@ const cameraUnvalidated = motionValidatorSettings(defaults.settings, {
 });
 assert.equal(cameraUnvalidated.policy, "bypass");
 assert.equal(cameraUnvalidated.includePrimary, false);
+
+const rescue = motionValidatorSettings(cameraUnvalidated, {
+  mode: "camera_rescue",
+  adaptiveEnabled: false,
+  mog2Enabled: false,
+});
+assert.equal(rescue.policy, "audit");
+assert.equal(rescue.includePrimary, true);
 
 const scalarGraph = buildMotionDecisionFusion({
   ...defaults.settings,

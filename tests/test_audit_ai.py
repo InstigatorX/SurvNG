@@ -78,8 +78,22 @@ class AuditAiTest(unittest.TestCase):
         self.assertEqual(context["mog2"]["role"], "validator")
         self.assertEqual(context["onvif"]["role"], "automatic_trigger")
         self.assertTrue(context["validator_decision"]["fail_open"])
-        self.assertEqual(context["schema_version"], 3)
+        self.assertEqual(context["schema_version"], 4)
         self.assertEqual(context["incident_eligibility"]["policy"], "zones_only")
+
+    def test_camera_visual_backup_paradigm_explains_conservative_rescue(self) -> None:
+        context = motion_paradigm_context(
+            mode="camera_rescue",
+            onvif_enabled=True,
+            has_live_substream=True,
+            fusion={"policy": "audit", "sources": [], "include_primary": True},
+            mog2_available=False,
+        )
+
+        self.assertEqual(context["paradigm"], "camera_triggered_with_visual_backup")
+        self.assertEqual(context["onvif"]["role"], "primary_automatic_trigger")
+        self.assertEqual(context["adaptive_visual"]["role"], "validator_and_backup_trigger")
+        self.assertTrue(context["adaptive_visual"]["backup_trigger_enabled"])
 
     def test_visual_triggered_paradigm_makes_onvif_diagnostic_only(self) -> None:
         context = motion_paradigm_context(

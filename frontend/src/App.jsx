@@ -5229,7 +5229,7 @@ function MotionDecisionEditor({
   const policy = MOTION_DECISION_POLICIES[settings.policy] || MOTION_DECISION_POLICIES.audit;
   const effectiveMode = mode === "inherit" ? globalMode : mode;
   const legacyMode = ["audit", "off", "enforce"].includes(effectiveMode);
-  const adaptiveValidator = effectiveMode === "adaptive"
+  const adaptiveValidator = ["adaptive", "camera_rescue"].includes(effectiveMode)
     || (settings.policy !== "bypass" && settings.includePrimary);
   const mog2Validator = settings.sources.includes("mog2");
   const modeInfo = motionModeInfo(effectiveMode);
@@ -5368,13 +5368,13 @@ function MotionDecisionEditor({
 
       <div className="motion-decision-options-body">
       <fieldset className="motion-decision-sources">
-        <legend>{effectiveMode === "camera" ? "Validate camera motion before detection" : "Visual trigger confirmation"}</legend>
+        <legend>{effectiveMode !== "adaptive" ? "Validate camera motion before detection" : "Visual trigger confirmation"}</legend>
         <label className="check-field"><input
           type="checkbox"
           checked={adaptiveValidator}
-          disabled={effectiveMode === "adaptive"}
+          disabled={["adaptive", "camera_rescue"].includes(effectiveMode)}
           onChange={(event) => setValidators(event.target.checked, mog2Validator)}
-        /> Adaptive scene analysis{effectiveMode === "adaptive" ? " (required trigger)" : ""}</label>
+        /> Adaptive scene analysis{effectiveMode === "adaptive" ? " (required trigger)" : effectiveMode === "camera_rescue" ? " (required backup)" : ""}</label>
         <label className="check-field"><input
           type="checkbox"
           checked={mog2Validator}
@@ -5382,7 +5382,7 @@ function MotionDecisionEditor({
         /> Require MOG2 background confirmation <small>(higher CPU)</small></label>
         <small>If a selected validator is unavailable or still learning, SurvNG fails open and runs object detection.</small>
       </fieldset>
-      {effectiveMode === "camera" && adaptiveValidator && mog2Validator ? <label>When validators disagree<select value={settings.policy === "any" ? "any" : "all"} onChange={(event) => updateSettings({ policy: event.target.value })}>
+      {["camera", "camera_rescue"].includes(effectiveMode) && adaptiveValidator && mog2Validator ? <label>When validators disagree<select value={settings.policy === "any" ? "any" : "all"} onChange={(event) => updateSettings({ policy: event.target.value })}>
         <option value="all">Require both (fewer false triggers)</option>
         <option value="any">Allow either (more sensitive)</option>
       </select></label> : null}
@@ -5671,6 +5671,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(0);
   const [auditCamera, setAuditCamera] = useStoredState("survng.motionAuditCamera.v1", "");
+  const [auditCategory, setAuditCategory] = useStoredState("survng.motionAuditCategory.v1", "all");
   const [auditOutcome, setAuditOutcome] = useStoredState("survng.motionAuditOutcome.v1", "all");
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
@@ -5818,6 +5819,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         limit: String(auditPageSize),
         offset: String(page * auditPageSize),
         outcome: auditOutcome,
+        category: auditCategory,
       });
       if (auditCamera) params.set("camera_id", auditCamera);
       const response = await fetch(`/api/motion-audit?${params.toString()}`);
@@ -5838,7 +5840,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
     if (auditPage !== 0) return undefined;
     const timer = window.setInterval(() => loadMotionAudit(0), 10000);
     return () => window.clearInterval(timer);
-  }, [settingsTab, auditPage, auditCamera, auditOutcome]);
+  }, [settingsTab, auditPage, auditCamera, auditCategory, auditOutcome]);
 
   async function loadTelemetry() {
     setTelemetryLoading(true);
@@ -6253,11 +6255,16 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
       ) : settingsTab === "audit" ? (
         <>
         <section className="bento-card camera-tree config-tree settings-section-tree motion-audit-filters">
-          <div className="section-head compact"><div><h2>Motion Audit</h2><p>{auditTotal.toLocaleString()} rejected bursts</p></div></div>
+          <div className="section-head compact"><div><h2>Motion Audit</h2><p>{auditTotal.toLocaleString()} matching decisions</p></div></div>
           <div className="motion-audit-filter-fields">
             <label>Camera<select value={auditCamera} onChange={(event) => { setAuditCamera(event.target.value); setAuditPage(0); }}>
               <option value="">All cameras</option>
               {cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}
+            </select></label>
+            <label>Category<select value={auditCategory} onChange={(event) => { setAuditCategory(event.target.value); setAuditPage(0); }}>
+              <option value="all">All categories</option>
+              <option value="visual_backup">Visual backup</option>
+              <option value="qualification">Filtered motion</option>
             </select></label>
           </div>
           <div className="tree-list">
@@ -6273,7 +6280,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
         </section>
         <section className="bento-card config-editor settings-panel motion-audit-panel">
           <div className="section-head">
-            <div><h2>Rejected Motion</h2><p>Qualifier decisions and detector outcomes</p></div>
+            <div><h2>{auditCategory === "visual_backup" ? "Visual Backup" : auditCategory === "qualification" ? "Filtered Motion" : "Motion Decisions"}</h2><p>Qualifier decisions, backup triggers, and detector outcomes</p></div>
             <button onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>
           </div>
           <MotionAuditViewer
@@ -6799,12 +6806,13 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
 }
 
 function motionAuditOutcome(item) {
+  const visualBackup = item.category === "visual_backup";
   if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
   if (item.interpretation?.category === "duplicate_event_cooldown") return { label: "Duplicate · cooldown", className: "not-run" };
   if (item.interpretation?.category === "filtered_before_object_detection") return { label: "Filtered before detection", className: "not-run" };
-  if (item.object_detected === true) return { label: "Object found", className: "object" };
-  if (item.object_detected === false) return { label: "No object", className: "clear" };
-  return { label: "Not run", className: "not-run" };
+  if (item.object_detected === true) return { label: visualBackup ? "Visual backup · object found" : "Object found", className: "object" };
+  if (item.object_detected === false) return { label: visualBackup ? "Visual backup · no object" : "No object", className: "clear" };
+  return { label: visualBackup ? "Visual backup · incomplete" : "Not run", className: "not-run" };
 }
 
 function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, error, timeZone, onOpen }) {
@@ -6842,7 +6850,7 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
             </article>
           );
         })}
-        {!items.length && !loading ? <div className="empty-state">No rejected motion matches these filters.</div> : null}
+        {!items.length && !loading ? <div className="empty-state">No motion decisions match these filters.</div> : null}
       </div>
       <div className="motion-audit-pagination">
         <button type="button" aria-label="Previous audit page" onClick={() => setPage(Math.max(0, page - 1))} disabled={page <= 0 || loading}><ChevronLeft size={16} /></button>
@@ -7210,7 +7218,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
               {report.review_context?.motion_paradigm ? (
                 <div className="probe-result">
                   <strong>Configuration analyzed</strong>
-                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "Adaptive visual-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} visual analysis</span>
+                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "camera_triggered_with_visual_backup" ? "ONVIF + visual backup" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "Adaptive visual-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} visual analysis</span>
                 </div>
               ) : null}
               <div className="motion-ai-review-stats">
@@ -7602,6 +7610,15 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
           <label>ONVIF background upkeep<select value={String(config.motion_qualification?.camera_mode_background_fps ?? 2)} onChange={(event) => updateConfig(["motion_qualification", "camera_mode_background_fps"], Number(event.target.value))}><option value="1">Low CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Faster adaptation (3 frames/sec)</option><option value="5">Maximum adaptation (5 frames/sec)</option></select><small>When camera alerts trigger motion, SurvNG maintains the visual background at this lower rate. Trigger validation still analyzes the full buffered window.</small></label>
+          {config.motion_qualification?.mode === "camera_rescue" ? <>
+            <div className="detection-settings-subhead"><strong>Visual backup safeguards</strong><small>These conservative limits control when SurvNG may compensate for a missing camera notice.</small></div>
+            <label>Wait for camera notice<input type="number" min="0" max="5" step="0.25" value={config.motion_qualification?.visual_backup_grace_seconds ?? 1.5} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_grace_seconds"], Number(event.target.value))} /><small>Seconds strong visual motion must persist while SurvNG waits for ONVIF.</small></label>
+            <label>Minimum visual confidence<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.visual_backup_min_score ?? 0.7} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_min_score"], Number(event.target.value))} /><small>Absolute adaptive score required before visual backup is considered.</small></label>
+            <label>Confidence above normal<input type="number" min="0" max="0.5" step="0.01" value={config.motion_qualification?.visual_backup_score_margin ?? 0.15} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_score_margin"], Number(event.target.value))} /><small>Additional margin above the camera&apos;s adaptive threshold.</small></label>
+            <label>Consecutive strong samples<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.visual_backup_min_consecutive ?? 3} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_min_consecutive"], Number(event.target.value))} /><small>Prevents a single noisy frame from invoking object detection.</small></label>
+            <label>Backup cooldown<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.visual_backup_cooldown_seconds ?? 20} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_cooldown_seconds"], Number(event.target.value))} /><small>Minimum seconds between visual backup attempts and after a camera notice.</small></label>
+            <label>Maximum backups per 5 minutes<input type="number" min="1" max="30" step="1" value={config.motion_qualification?.visual_backup_max_triggers_5m ?? 3} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_max_triggers_5m"], Number(event.target.value))} /><small>Hard per-camera safety limit for object-detector work.</small></label>
+          </> : null}
           <label>Window Seconds<input type="number" min="0.8" max="4" step="0.1" value={config.motion_qualification?.window_seconds ?? 1.6} onChange={(event) => updateConfig(["motion_qualification", "window_seconds"], Number(event.target.value))} /></label>
           <label>Post-trigger Seconds<input type="number" min="0.5" max="6" step="0.1" value={config.motion_qualification?.post_trigger_seconds ?? 2.5} onChange={(event) => updateConfig(["motion_qualification", "post_trigger_seconds"], Number(event.target.value))} /></label>
           <label>Burst Quiet Seconds<input type="number" min="0.1" max="2" step="0.1" value={config.motion_qualification?.burst_quiet_seconds ?? 0.5} onChange={(event) => updateConfig(["motion_qualification", "burst_quiet_seconds"], Number(event.target.value))} /></label>
@@ -7934,8 +7951,9 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
   if (!status) {
     return <div className="probe-result"><strong>Runtime</strong><span>Save this camera to start workers.</span></div>;
   }
-  const cameraAlertsOnly = status.motion_qualification?.mode !== "adaptive"
-    && status.motion_qualification?.mode !== "enforce";
+  const motionMode = status.motion_qualification?.mode;
+  const cameraAlertsOnly = !["adaptive", "enforce"].includes(motionMode);
+  const visualBackupEnabled = motionMode === "camera_rescue";
   const missingMotionNotices = cameraAlertsOnly
     && status.onvif_enabled
     && Number(status.onvif_motion_events_received || 0) === 0;
@@ -7956,8 +7974,9 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
             <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} legacy preview rejects · {status.motion_qualification.suppressed || 0} filtered</span>
             <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
             <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
-            {missingCameraTrigger ? <span className="motion-runtime-warning">ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection.</span> : null}
-            {missingMotionNotices ? <span className="motion-runtime-warning">No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident.</span> : null}
+            {missingCameraTrigger ? <span className="motion-runtime-warning">{visualBackupEnabled ? "ONVIF is disabled, so the conservative visual backup is the only automatic trigger. Restore ONVIF for primary coverage." : "ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection."}</span> : null}
+            {missingMotionNotices ? <span className="motion-runtime-warning">{visualBackupEnabled ? "No recognized ONVIF motion notices since this worker started. Strong persistent visual motion can still invoke the backup detector path." : "No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident."}</span> : null}
+            {visualBackupEnabled ? <span>{status.motion_qualification.visual_backup_triggers || 0} visual backups · {status.motion_qualification.visual_backup_onvif_matches || 0} strong candidates matched to camera notices · {status.motion_qualification.visual_backup_rate_limited || 0} limited</span> : null}
             <MotionEffectiveness cameraId={status.id} mode={status.motion_qualification.mode} />
           </div>
           <div className="motion-pipeline-runtime-grid">

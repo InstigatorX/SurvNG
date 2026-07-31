@@ -19,6 +19,23 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_motion_audit_endpoint_filters_visual_backup_category(self) -> None:
+        events = SimpleNamespace(motion_audits=Mock(return_value=([], 0)))
+        active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"))
+        with patch.object(main, "manager", active_manager):
+            response = main.motion_audit(category="visual_backup")
+
+        self.assertEqual(response["total"], 0)
+        events.motion_audits.assert_called_once_with(
+            limit=24,
+            offset=0,
+            camera_id="",
+            outcome="all",
+            category="visual_backup",
+        )
+        with self.assertRaises(HTTPException):
+            main.motion_audit(category="unexpected")
+
     def test_cgroup_memory_separates_application_and_file_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

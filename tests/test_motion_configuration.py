@@ -14,6 +14,7 @@ from survng.app.motion_pipeline import (
     guided_fusion_settings,
     identify_analysis_preset,
     resolve_motion_pipeline_graphs,
+    resolved_trigger_mode,
     update_guided_fusion,
 )
 
@@ -80,6 +81,15 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(graphs.fusion[0].options["sources"], [])
         self.assertTrue(graphs.fusion[0].options["include_primary"])
         self.assertTrue(graphs.fusion[0].options["fail_open"])
+
+    def test_camera_visual_backup_mode_is_preserved_through_resolution(self) -> None:
+        graphs = resolve_motion_pipeline_graphs(
+            MotionQualificationConfig(mode="camera_rescue"),
+            CameraMotionQualificationConfig(),
+        )
+
+        self.assertEqual(resolved_trigger_mode("camera_rescue"), "camera_rescue")
+        self.assertTrue(graphs.fusion[0].options["include_primary"])
 
     def test_global_graph_is_selected_and_camera_graph_takes_precedence(self) -> None:
         global_config = MotionQualificationConfig.model_validate({

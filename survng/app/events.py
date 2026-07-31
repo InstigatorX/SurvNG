@@ -81,7 +81,8 @@ class EventStore:
                     reason text not null,
                     object_detected integer,
                     trigger_count integer not null default 1,
-                    features_json text not null default '{}'
+                    features_json text not null default '{}',
+                    category text not null default 'qualification'
                 )
                 """
             )
@@ -93,11 +94,18 @@ class EventStore:
                 conn.execute("alter table motion_audits add column decision_id text")
             if "related_event_id" not in columns:
                 conn.execute("alter table motion_audits add column related_event_id integer")
+            if "category" not in columns:
+                conn.execute(
+                    "alter table motion_audits add column category text not null default 'qualification'"
+                )
             conn.execute(
                 "create index if not exists idx_motion_audits_created_at on motion_audits(created_at desc, id desc)"
             )
             conn.execute(
                 "create index if not exists idx_motion_audits_camera_created_at on motion_audits(camera_id, created_at desc)"
+            )
+            conn.execute(
+                "create index if not exists idx_motion_audits_category_created_at on motion_audits(category, created_at desc, id desc)"
             )
             conn.execute(
                 "create index if not exists idx_motion_audits_related_event on motion_audits(related_event_id, created_at) where related_event_id is not null"
@@ -664,6 +672,7 @@ class EventStore:
         object_detected: bool | None,
         trigger_count: int,
         features: dict[str, Any],
+        category: str = "qualification",
         event_id: int | None = None,
         related_event_id: int | None = None,
         decision_id: str = "",
@@ -674,6 +683,9 @@ class EventStore:
         normalized_trigger_count = max(1, int(trigger_count))
         snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
         normalized_decision_id = str(decision_id or "").strip()
+        normalized_category = str(category or "qualification").strip().lower()
+        if normalized_category not in {"qualification", "visual_backup"}:
+            raise ValueError("invalid motion audit category")
         normalized_related_event_id = (
             int(related_event_id) if related_event_id is not None else None
         )
@@ -706,7 +718,8 @@ class EventStore:
                             related_event_id = coalesce(?, related_event_id), camera_id = ?,
                             snapshot_path = ?, created_at = ?, mode = ?,
                             sensitivity = ?, score = ?, threshold = ?, reason = ?,
-                            object_detected = ?, trigger_count = ?, features_json = ?
+                            object_detected = ?, trigger_count = ?, features_json = ?,
+                            category = ?
                         where id = ?
                         """,
                         (
@@ -723,6 +736,7 @@ class EventStore:
                             normalized_object_detected,
                             normalized_trigger_count,
                             features_json,
+                            normalized_category,
                             audit_id,
                         ),
                     )
@@ -735,7 +749,7 @@ class EventStore:
                       and snapshot_path = ? and score = ? and threshold = ?
                       and object_detected is ? and trigger_count = ?
                       and related_event_id is ?
-                      and features_json = ?
+                      and features_json = ? and category = ?
                     order by id asc limit 1
                     """,
                     (
@@ -751,6 +765,7 @@ class EventStore:
                         normalized_trigger_count,
                         normalized_related_event_id,
                         features_json,
+                        normalized_category,
                     ),
                 ).fetchone()
                 if existing is not None:
@@ -761,8 +776,8 @@ class EventStore:
                     insert or ignore into motion_audits (
                         event_id, related_event_id, decision_id, camera_id, snapshot_path, created_at, mode,
                         sensitivity, score, threshold, reason, object_detected,
-                        trigger_count, features_json
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        trigger_count, features_json, category
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
@@ -779,6 +794,7 @@ class EventStore:
                         normalized_object_detected,
                         normalized_trigger_count,
                         features_json,
+                        normalized_category,
                     ),
                 )
                 if cursor.rowcount:
@@ -808,6 +824,7 @@ class EventStore:
         offset: int = 0,
         camera_id: str = "",
         outcome: str = "all",
+        category: str = "all",
         include_incident_activity: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         clauses: list[str] = []
@@ -817,6 +834,9 @@ class EventStore:
         if camera_id:
             clauses.append("camera_id = ?")
             values.append(camera_id)
+        if category != "all":
+            clauses.append("category = ?")
+            values.append(category)
         if outcome == "object":
             clauses.append("object_detected = 1")
         elif outcome == "clear":

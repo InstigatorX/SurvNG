@@ -151,12 +151,18 @@ class CameraMotionPipelineConfig(BaseModel):
 
 class MotionQualificationConfig(BaseModel):
     # Legacy off/audit/enforce values remain loadable for backward
-    # compatibility; the GUI emits only camera/adaptive for new saves.
-    mode: Literal["camera", "adaptive", "off", "audit", "enforce"] = "camera"
+    # compatibility; the GUI emits camera/camera_rescue/adaptive for new saves.
+    mode: Literal["camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "camera"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
     camera_mode_background_fps: float = Field(default=2.0, ge=0.5, le=5.0)
+    visual_backup_grace_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
+    visual_backup_min_score: float = Field(default=0.70, ge=0.0, le=1.0)
+    visual_backup_score_margin: float = Field(default=0.15, ge=0.0, le=0.5)
+    visual_backup_min_consecutive: int = Field(default=3, ge=2, le=10)
+    visual_backup_cooldown_seconds: float = Field(default=20.0, ge=5.0, le=300.0)
+    visual_backup_max_triggers_5m: int = Field(default=3, ge=1, le=30)
     window_seconds: float = Field(default=1.6, ge=0.8, le=4.0)
     post_trigger_seconds: float = Field(default=2.5, ge=0.5, le=6.0)
     burst_quiet_seconds: float = Field(default=0.5, ge=0.1, le=2.0)
@@ -170,7 +176,7 @@ class MotionQualificationConfig(BaseModel):
 
 
 class CameraMotionQualificationConfig(BaseModel):
-    mode: Literal["inherit", "camera", "adaptive", "off", "audit", "enforce"] = "inherit"
+    mode: Literal["inherit", "camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "inherit"
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
     frame_width: int | None = Field(default=None, ge=240, le=960)
     borderline_rescue_enabled: bool | None = None

@@ -166,10 +166,13 @@ Analyze the supplied motion-decision audit frame together with deterministic mot
 versioned motion_paradigm summary, and any object-detection result. Motion processing only decides
 whether the expensive object detector should run; it does not classify subjects.
 
-SurvNG has two current trigger models:
+SurvNG has three current trigger models:
 1. camera_triggered: ONVIF camera notices are the only automatic trigger. Adaptive scene analysis
    and MOG2 are optional validators. Manual and semantic ONVIF notices bypass ordinary validation.
-2. visual_triggered: adaptive scene analysis is the only automatic trigger. MOG2 may validate it.
+2. camera_triggered_with_visual_backup: ONVIF remains primary, but exceptionally strong,
+   persistent adaptive motion may start object detection when no recent camera notice arrived.
+   Backup triggers still require an incident-eligible object before creating an incident.
+3. visual_triggered: adaptive scene analysis is the only automatic trigger. MOG2 may validate it.
    ONVIF notices are diagnostic only and cannot start object detection.
 Selected validators fail open while unavailable or warming so real events are not silently lost.
 
@@ -278,15 +281,26 @@ def motion_paradigm_context(
     mog2_selected = "mog2" in sources
     fail_open = bool(fusion.get("fail_open", True))
 
-    if mode == "camera":
-        paradigm = "camera_triggered"
-        automatic_trigger = "onvif_camera_notice"
+    if mode in {"camera", "camera_rescue"}:
+        rescue_enabled = mode == "camera_rescue"
+        paradigm = (
+            "camera_triggered_with_visual_backup"
+            if rescue_enabled
+            else "camera_triggered"
+        )
+        automatic_trigger = (
+            "onvif_camera_notice_with_adaptive_visual_backup"
+            if rescue_enabled
+            else "onvif_camera_notice"
+        )
         adaptive_role = (
             "custom_decision_pipeline"
             if not guided
+            else "validator_and_backup_trigger"
+            if rescue_enabled
             else "validator" if include_primary and policy != "bypass" else "disabled"
         )
-        onvif_role = "automatic_trigger"
+        onvif_role = "primary_automatic_trigger" if rescue_enabled else "automatic_trigger"
     elif mode == "adaptive":
         paradigm = "visual_triggered"
         automatic_trigger = "adaptive_visual_analysis"
@@ -299,7 +313,7 @@ def motion_paradigm_context(
         onvif_role = "legacy_trigger"
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "paradigm": paradigm,
         "configured_mode": mode,
         "automatic_trigger": {
@@ -310,10 +324,11 @@ def motion_paradigm_context(
         "onvif": {
             "enabled": onvif_enabled,
             "role": onvif_role,
-            "semantic_notice_bypass": mode == "camera",
+            "semantic_notice_bypass": mode in {"camera", "camera_rescue"},
         },
         "adaptive_visual": {
             "role": adaptive_role,
+            "backup_trigger_enabled": mode == "camera_rescue",
             "analysis_feed": "live_substream" if has_live_substream else "main_stream_fallback",
         },
         "mog2": {

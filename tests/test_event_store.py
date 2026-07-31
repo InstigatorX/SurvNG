@@ -563,6 +563,35 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(tracks[0]["id"], 3)
             self.assertEqual(tracks[0]["path"][-1], [0.2, 0.3])
 
+    def test_motion_audits_filter_visual_backup_category(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            base = {
+                "camera_id": "gate",
+                "snapshot_path": "",
+                "created_at": "2026-07-31T16:02:07+00:00",
+                "mode": "camera_rescue",
+                "sensitivity": "balanced",
+                "score": 0.82,
+                "threshold": 0.48,
+                "object_detected": False,
+                "trigger_count": 1,
+                "features": {},
+            }
+            store.add_motion_audit(**base, reason="visual_backup_trigger", category="visual_backup")
+            store.add_motion_audit(
+                **{**base, "created_at": "2026-07-31T16:03:00+00:00"},
+                reason="low_persistence",
+            )
+
+            backups, backup_total = store.motion_audits(category="visual_backup")
+            qualification, qualification_total = store.motion_audits(category="qualification")
+
+            self.assertEqual(backup_total, 1)
+            self.assertEqual(backups[0]["reason"], "visual_backup_trigger")
+            self.assertEqual(qualification_total, 1)
+            self.assertEqual(qualification[0]["reason"], "low_persistence")
+
     def test_suppressed_motion_audit_retry_is_idempotent_after_read_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

@@ -295,14 +295,15 @@ The detector is optional. If OpenVINO or the model is missing, the app records a
 
 SurvNG learns each scene from a bounded, latest-frame analysis worker that is isolated from the live capture loop. Trigger selection and visual validation are separate decisions.
 
-The GUI exposes two trigger modes:
+The GUI exposes three trigger modes:
 
 | GUI option | Configuration | What starts object detection? | Filtering behavior |
 | --- | --- | --- | --- |
 | **Camera-triggered (Recommended)** | `camera` | Camera ONVIF or manual notices only | Adaptive and MOG2 validation are optional; priority semantic notices bypass validation |
+| **Camera + visual backup** | `camera_rescue` | Camera ONVIF notices, or exceptionally strong persistent adaptive motion after ONVIF remains silent | ONVIF stays primary; cooldown and rate limits bound backup work; an eligible object is required |
 | **Visual-triggered** | `adaptive` | Accepted adaptive visual motion or manual tests | MOG2 may corroborate adaptive motion; ordinary ONVIF notices are diagnostics only |
 
-Camera-triggered mode never allows adaptive analysis or MOG2 to create an event. Visual-triggered mode never allows ordinary ONVIF notices or MOG2 to create an event. If a selected validator is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
+Camera-triggered mode never allows adaptive analysis or MOG2 to create an event. Camera + visual backup preserves the camera as primary but permits a tightly bounded adaptive backup attempt, which must find an eligible object before an incident is created. Visual-triggered mode never allows ordinary ONVIF notices or MOG2 to create an event. If a selected validator is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
 Adaptive analysis uses the camera's live feed: `live_stream_url` when a substream is configured, otherwise `stream_url`. Frames are downscaled to `frame_width` (320 px by default), converted to grayscale, and sampled at `sample_fps` (5 FPS by default). Object detection after a trigger uses high-resolution frames from the main recording.
 

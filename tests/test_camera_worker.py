@@ -519,6 +519,113 @@ class CameraWorkerTest(unittest.TestCase):
             worker._signal_motion_analysis_stop()
             thread.join(timeout=1)
 
+    def test_visual_backup_requires_persistent_strong_motion_without_onvif(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            camera_mode_background_fps=2,
+            visual_backup_grace_seconds=1.0,
+            visual_backup_min_score=0.7,
+            visual_backup_score_margin=0.1,
+            visual_backup_min_consecutive=3,
+            visual_backup_cooldown_seconds=5,
+        )
+        accepted = MotionQualificationResult(True, 0.82, 0.5, "qualified", 4, {})
+        samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            with patch.object(worker, "_with_source_evidence", return_value=accepted):
+                worker._consider_visual_backup(accepted, samples, 100.0)
+                worker._consider_visual_backup(accepted, samples, 100.5)
+                self.assertTrue(worker._motion_queue.empty())
+                worker._consider_visual_backup(accepted, samples, 101.0)
+
+            trigger = worker._motion_queue.get_nowait()
+
+        self.assertEqual(trigger["topic"], "adaptive/visual_backup")
+        self.assertTrue(trigger["prequalified"].features["visual_backup"])
+
+    def test_visual_backup_yields_to_recent_onvif_notice(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            camera_mode_background_fps=2,
+            visual_backup_grace_seconds=1.0,
+            visual_backup_min_consecutive=3,
+            visual_backup_cooldown_seconds=5,
+        )
+        accepted = MotionQualificationResult(True, 0.82, 0.5, "qualified", 4, {})
+        samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._camera_motion_times.append(100.75)
+            for captured_at in (100.0, 100.5, 101.0):
+                worker._consider_visual_backup(accepted, samples, captured_at)
+
+        self.assertTrue(worker._motion_queue.empty())
+        self.assertEqual(worker._motion_stats["visual_backup_onvif_matches"], 1)
+
+    def test_visual_backup_never_promotes_weak_or_known_noise_motion(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            visual_backup_grace_seconds=0,
+            visual_backup_min_consecutive=2,
+        )
+        weak = MotionQualificationResult(True, 0.60, 0.5, "qualified", 4, {})
+        noisy = MotionQualificationResult(True, 0.95, 0.5, "global_illumination_change", 4, {})
+        samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._consider_visual_backup(weak, samples, 100.0)
+            worker._consider_visual_backup(weak, samples, 100.5)
+            worker._consider_visual_backup(noisy, samples, 101.0)
+            worker._consider_visual_backup(noisy, samples, 101.5)
+
+        self.assertTrue(worker._motion_queue.empty())
+        self.assertEqual(worker._motion_stats["visual_backup_triggers"], 0)
+
+    def test_visual_backup_detection_requires_eligible_object_and_is_audited(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            burst_quiet_seconds=0.1,
+        )
+        accepted = MotionQualificationResult(True, 0.82, 0.5, "qualified", 4, {
+            "visual_backup": True,
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            with (
+                patch.object(
+                    worker,
+                    "_process_motion_event",
+                    return_value={"event_id": None, "snapshot_path": "checked.jpg", "object_detected": False},
+                ) as process_event,
+                patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
+            ):
+                thread = threading.Thread(target=worker._run_motion_events)
+                thread.start()
+                worker._enqueue_motion_trigger({
+                    "topic": "adaptive/visual_backup",
+                    "message": "backup",
+                    "event_at": datetime.now(timezone.utc),
+                    "received_at": time.time(),
+                    "prequalified": accepted,
+                })
+                deadline = time.monotonic() + 2
+                while record_audit.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                worker._stop.set()
+                worker._motion_queue.put_nowait(None)
+                thread.join(timeout=2)
+
+        process_event.assert_called_once()
+        self.assertTrue(process_event.call_args.kwargs["require_eligible_object"])
+        self.assertEqual(record_audit.call_args.kwargs["category"], "visual_backup")
+        self.assertEqual(record_audit.call_args.kwargs["reason"], "visual_backup_trigger")
+
     def test_audit_mode_learns_continuously_without_creating_events(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         accepted = MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {})

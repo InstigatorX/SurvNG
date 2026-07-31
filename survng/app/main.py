@@ -2317,6 +2317,12 @@ def _audit_ai_context(
         "post_trigger_seconds": active_config.motion_qualification.post_trigger_seconds,
         "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
         "camera_mode_background_fps": active_config.motion_qualification.camera_mode_background_fps,
+        "visual_backup_grace_seconds": active_config.motion_qualification.visual_backup_grace_seconds,
+        "visual_backup_min_score": active_config.motion_qualification.visual_backup_min_score,
+        "visual_backup_score_margin": active_config.motion_qualification.visual_backup_score_margin,
+        "visual_backup_min_consecutive": active_config.motion_qualification.visual_backup_min_consecutive,
+        "visual_backup_cooldown_seconds": active_config.motion_qualification.visual_backup_cooldown_seconds,
+        "visual_backup_max_triggers_5m": active_config.motion_qualification.visual_backup_max_triggers_5m,
         "rejected_sample_rate": active_config.motion_qualification.rejected_sample_rate,
         "suppression_verification_rate": suppression_verification_rate,
         "analysis_preset": identify_analysis_preset(graphs.qualification),
@@ -2484,9 +2490,12 @@ def motion_audit(
     offset: int = 0,
     camera_id: str = "",
     outcome: str = "all",
+    category: str = "all",
 ) -> dict:
     if outcome not in {"all", "object", "clear", "not_run"}:
         raise HTTPException(status_code=400, detail="invalid motion audit outcome")
+    if category not in {"all", "qualification", "visual_backup"}:
+        raise HTTPException(status_code=400, detail="invalid motion audit category")
     with MANAGER_RELOAD_LOCK:
         active_manager = manager
         rows, total = active_manager.events.motion_audits(
@@ -2494,6 +2503,7 @@ def motion_audit(
             offset=offset,
             camera_id=camera_id,
             outcome=outcome,
+            category=category,
         )
         storage_dir = active_manager.storage_dir
     return {

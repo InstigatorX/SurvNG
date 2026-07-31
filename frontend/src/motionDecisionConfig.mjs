@@ -20,6 +20,12 @@ export const MOTION_MODE_OPTIONS = Object.freeze([
     description: "Only camera ONVIF notices and manual tests can start object detection. Optional visual validators can confirm ordinary camera motion before detection runs.",
   }),
   Object.freeze({
+    value: "camera_rescue",
+    label: "Camera + visual backup",
+    status: "Camera primary · SurvNG visual backup",
+    description: "Camera ONVIF notices remain primary. Exceptionally strong, persistent visual motion can start object detection when the camera stays silent; an eligible object is still required for an incident.",
+  }),
+  Object.freeze({
     value: "adaptive",
     label: "Visual-triggered",
     status: "SurvNG adaptive triggers",
@@ -113,7 +119,9 @@ export function motionValidatorSettings(
   current,
   { mode, adaptiveEnabled = true, mog2Enabled = false, agreement = "all" },
 ) {
-  const includePrimary = mode === "adaptive" ? true : Boolean(adaptiveEnabled);
+  const includePrimary = ["adaptive", "camera_rescue"].includes(mode)
+    ? true
+    : Boolean(adaptiveEnabled);
   const sources = mog2Enabled ? ["mog2"] : [];
   let policy = "bypass";
   if (includePrimary && !mog2Enabled) policy = "audit";
