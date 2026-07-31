@@ -105,6 +105,13 @@ export function showIncidentCardAnnotations(expanded, thumbnailAnnotations) {
   return !expanded && Boolean(thumbnailAnnotations);
 }
 
+export function incidentTriggerLabel(incident) {
+  const source = String(incident?.trigger_source || "camera").toLowerCase();
+  return ["ema", "adaptive", "visual_backup", "adaptive/visual_backup"].includes(source)
+    ? "EMA"
+    : "Camera";
+}
+
 export function incidentThumbnailPageSize({ width, height, density, columns: requestedColumns, gap: requestedGap, horizontalPadding: requestedPadding }) {
   const safeWidth = Math.max(0, Number(width) || 0);
   const safeHeight = Math.max(0, Number(height) || 0);

@@ -4636,6 +4636,25 @@ def _event_row(row: dict) -> dict:
     if not isinstance(objects, list):
         objects = []
     objects = [item for item in objects if isinstance(item, dict)]
+    qualification_entry = next(
+        (
+            item.get("motion_qualification")
+            for item in reversed(objects)
+            if item.get("status") == "motion_qualification"
+            and isinstance(item.get("motion_qualification"), dict)
+        ),
+        None,
+    )
+    raw_trigger_source = str(
+        (qualification_entry or {}).get("trigger_source")
+        or event.get("topic")
+        or "camera"
+    ).lower()
+    event["trigger_source"] = (
+        "ema"
+        if raw_trigger_source in {"adaptive", "visual_backup", "adaptive/visual_backup"}
+        else "camera"
+    )
     tracking_entry = next(
         (
             item.get("object_tracking")
@@ -4952,6 +4971,7 @@ def _incident_list_payload(incident: dict) -> dict:
                 "has_objects",
                 "labels",
                 "zones",
+                "trigger_source",
             )
             if key in event
         }
@@ -5007,6 +5027,9 @@ def _incident_row(camera_id: str, events: list[dict]) -> dict:
         "event_count": len(ordered),
         "motion_observation_count": len(motion_observations),
         "object_event_count": object_count,
+        # An incident's trigger is the source that opened it, even when later
+        # events from another source are grouped into the same incident.
+        "trigger_source": first.get("trigger_source", "camera"),
         "has_objects": bool(labels),
         "labels": labels,
         "zones": zones,

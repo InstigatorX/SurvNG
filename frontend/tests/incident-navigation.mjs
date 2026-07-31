@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentIndexForEvent, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentIndexForEvent, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -22,6 +22,10 @@ assert.equal(incidentDetailQuery({ events: [] }), "");
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);
 assert.equal(showIncidentCardAnnotations(true, true), false);
+assert.equal(incidentTriggerLabel({ trigger_source: "camera" }), "Camera");
+assert.equal(incidentTriggerLabel({ trigger_source: "ema" }), "EMA");
+assert.equal(incidentTriggerLabel({ trigger_source: "visual_backup" }), "EMA");
+assert.equal(incidentTriggerLabel({}), "Camera");
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 8);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 12);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 2);

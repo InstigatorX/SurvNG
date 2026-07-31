@@ -2578,6 +2578,16 @@ button.status-pill.hud-toggle:disabled {
   outline: 0;
 }
 
+.incident-trigger-source.trigger-camera {
+  border-color: rgba(125, 211, 199, 0.62);
+  background: rgba(8, 55, 52, 0.82);
+}
+
+.incident-trigger-source.trigger-ema {
+  border-color: rgba(251, 191, 36, 0.72);
+  background: rgba(92, 58, 6, 0.86);
+}
+
 .incident-video-layer {
   position: absolute;
   inset: 0;

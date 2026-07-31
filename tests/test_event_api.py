@@ -787,6 +787,38 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(payload["events"][0]["id"], 7)
         self.assertNotIn("temporal_samples", payload["events"][0]["objects"][0])
 
+    def test_incident_exposes_source_that_opened_incident(self) -> None:
+        ema_event = main._event_row({
+            "id": 7,
+            "camera_id": "gate",
+            "kind": "object",
+            "objects_json": json.dumps([{
+                "status": "motion_qualification",
+                "motion_qualification": {"trigger_source": "visual_backup"},
+            }, {"label": "car", "confidence": 0.8}]),
+            "created_at": "2026-07-30T14:00:00+00:00",
+        })
+        camera_event = main._event_row({
+            "id": 8,
+            "camera_id": "gate",
+            "kind": "object",
+            "objects_json": json.dumps([{
+                "status": "motion_qualification",
+                "motion_qualification": {"trigger_source": "camera"},
+            }, {"label": "car", "confidence": 0.95}]),
+            "created_at": "2026-07-30T14:00:10+00:00",
+        })
+
+        incident = main._incident_row("gate", [camera_event, ema_event])
+        payload = main._incident_list_payload(incident)
+
+        self.assertEqual(ema_event["trigger_source"], "ema")
+        self.assertEqual(camera_event["trigger_source"], "camera")
+        self.assertEqual(incident["representative_event_id"], 8)
+        self.assertEqual(incident["trigger_source"], "ema")
+        self.assertEqual(payload["trigger_source"], "ema")
+        self.assertEqual(payload["events"][0]["trigger_source"], "camera")
+
     def test_incident_detail_hydrates_only_requested_incident(self) -> None:
         rows = [{
             "id": 7,

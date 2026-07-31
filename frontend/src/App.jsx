@@ -71,7 +71,7 @@ import {
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -2205,6 +2205,8 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const eventCount = incident.event_count || rawEvents.length || 1;
   const observationCount = Number(incident.motion_observation_count || motionObservations.length || 0);
   const countText = `${eventCount} ${eventCount === 1 ? "event" : "events"}${observationCount ? ` · ${observationCount} additional motion update${observationCount === 1 ? "" : "s"}` : ""}`;
+  const triggerLabel = incidentTriggerLabel(incident);
+  const triggerTitle = triggerLabel === "EMA" ? "EMA visual backup trigger" : "Camera motion trigger";
   const incidentTimeline = [
     ...rawEvents.map((event) => ({ kind: "event", item: event })),
     ...motionObservations.map((observation) => ({ kind: "activity", item: observation })),
@@ -2414,7 +2416,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
           />
           {desktopWorkspace
             ? (!expanded ? <span className="event-count" aria-label={countText}>{countText}</span> : null)
-            : <button type="button" className="event-count" onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label="Open event overlay" title="Open event overlay">{countText}</button>}
+            : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
         </SnapshotImage>
       </div>
       {expanded && showSubEvents ? (
@@ -2533,6 +2535,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, imageSize
         <h3>Incident</h3>
         <dl>
           <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
+          <div><dt>Trigger</dt><dd>{incidentTriggerLabel(incident)}</dd></div>
           <div><dt>Additional motion</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
           <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
           <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
