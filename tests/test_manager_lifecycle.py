@@ -34,6 +34,47 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_mqtt_server_health_accepts_loaded_isolated_detector(self) -> None:
+        manager = manager_with_mocks()
+        manager.config = AppConfig(
+            cameras=manager.config.cameras,
+            detector={"enabled": True, "device": "GPU"},
+        )
+        manager._started = True
+        manager._process_started_monotonic = 0.0
+        manager._process_started_at = "2026-07-31T12:00:00+00:00"
+        manager.statuses = Mock(return_value=[{
+            "id": "gate",
+            "running": True,
+            "recording": True,
+            "sub_recording": False,
+        }])
+        manager.detector_status = Mock(return_value={
+            "enabled": True,
+            "loaded_backend": "openvino",
+            "configured_device": "GPU",
+            "openvino_loaded": True,
+            "runtime": {"queue_depth": 0},
+            "isolation": {"enabled": True, "worker_alive": True},
+        })
+        manager.recorder.retention_status.return_value = {"state": "idle"}
+
+        server = manager._mqtt_server_status()
+
+        self.assertEqual(server["state"]["health"], "ok")
+        self.assertEqual(server["metrics"]["detector_state"], "ready")
+        self.assertEqual(server["metrics"]["detector_device"], "GPU")
+
+    def test_mqtt_server_health_faults_when_isolated_detector_worker_is_dead(self) -> None:
+        status = {
+            "enabled": True,
+            "loaded_backend": "openvino",
+            "openvino_loaded": True,
+            "isolation": {"enabled": True, "worker_alive": False},
+        }
+
+        self.assertFalse(AppManager._detector_runtime_ready(status))
+
     def test_mqtt_reconfiguration_does_not_touch_camera_workers_or_recorders(self) -> None:
         manager = manager_with_mocks()
         previous = manager.mqtt

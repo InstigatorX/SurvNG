@@ -563,7 +563,7 @@ class MqttService:
         }
         entities: list[tuple[str, str, dict[str, Any]]] = [
             ("sensor", "lifecycle", {
-                "name": "Lifecycle",
+                "name": "System Status",
                 "unique_id": "survng_server_lifecycle",
                 "state_topic": state_topic,
                 "value_template": "{{ value_json.lifecycle }}",
@@ -969,6 +969,8 @@ class MqttService:
     def status(self) -> dict[str, Any]:
         with self._incident_lock:
             pending_incidents = len(self._pending_incidents)
+        with self._lock:
+            server_state = dict(self._server_state_payload)
         return {
             "enabled": self.config.enabled,
             "configured": bool(self.config.host.strip()),
@@ -1002,6 +1004,7 @@ class MqttService:
                 and self._server_monitor_thread.is_alive()
             ),
             "server_status_error": self.server_status_error,
+            "server_state": server_state,
         }
 
     def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any) -> None:

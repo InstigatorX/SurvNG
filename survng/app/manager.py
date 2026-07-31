@@ -741,6 +741,25 @@ class AppManager:
             pass
         return 0
 
+    @staticmethod
+    def _detector_runtime_ready(status: dict[str, object]) -> bool:
+        """Normalize readiness across legacy and isolated detector payloads."""
+        explicit_ready = status.get("ready")
+        if explicit_ready is not None:
+            return bool(explicit_ready)
+        if status.get("enabled") is False:
+            return False
+        backend_loaded = bool(
+            status.get("loaded_backend")
+            or status.get("openvino_loaded")
+            or status.get("opencv_loaded")
+            or status.get("coreml_loaded")
+        )
+        isolation = status.get("isolation")
+        if isinstance(isolation, dict) and isolation.get("enabled"):
+            return backend_loaded and bool(isolation.get("worker_alive"))
+        return backend_loaded
+
     def _mqtt_server_status(self) -> dict[str, dict[str, object]]:
         """Build a bounded MQTT snapshot without scanning recording storage."""
         statuses = self.statuses()
@@ -774,7 +793,7 @@ class AppManager:
             try:
                 detector = self.detector_status()
                 runtime = dict(detector.get("runtime") or {})
-                detector_ready = bool(detector.get("ready"))
+                detector_ready = self._detector_runtime_ready(detector)
                 detector_state = "ready" if detector_ready else "unavailable"
                 detector_device = str(detector.get("configured_device") or detector_device)
                 object_queue_depth = int(runtime.get("queue_depth") or 0)

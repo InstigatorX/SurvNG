@@ -63,6 +63,7 @@ class MqttServiceTest(unittest.TestCase):
         self.assertIn("homeassistant/binary_sensor/survng_server/problem/config", published)
         self.assertIn("homeassistant/sensor/survng_server/storage/config", published)
         lifecycle = published["homeassistant/sensor/survng_server/lifecycle/config"]
+        self.assertEqual(lifecycle["name"], "System Status")
         self.assertEqual(lifecycle["device"]["identifiers"], ["survng_server"])
         self.assertEqual(lifecycle["availability_topic"], "survng/status")
 
@@ -122,6 +123,7 @@ class MqttServiceTest(unittest.TestCase):
         self.assertTrue(metrics[2])
         self.assertEqual(metrics[1]["cameras_running"], 2)
         self.assertFalse(event[2])
+        self.assertEqual(service.status()["server_state"]["health"], "ok")
 
     def test_server_lifecycle_rejects_unknown_state(self) -> None:
         service = self.service()
