@@ -5,7 +5,7 @@ import copy
 import json
 import mimetypes
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -18,6 +18,7 @@ from .config import AuditAiConfig
 MAX_AUDIT_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_AUDIT_CONTEXT_BYTES = 2 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
+StructuredResponse = TypeVar("StructuredResponse", bound=BaseModel)
 
 
 ALLOWED_GLOBAL_SETTINGS = {
@@ -426,6 +427,46 @@ class AuditAiAdvisor:
         if not self.config.api_key.strip():
             raise AuditAiError("AI audit API key is not configured")
         try:
+            context_json = json.dumps(
+                context,
+                separators=(",", ":"),
+                default=str,
+                allow_nan=False,
+            )
+        except ValueError as exc:
+            raise AuditAiError("audit telemetry contains invalid numeric values") from exc
+        if len(context_json.encode("utf-8")) > MAX_AUDIT_CONTEXT_BYTES:
+            raise AuditAiError("audit telemetry is too large for AI analysis")
+        return self.analyze_structured(
+            image_path,
+            audit_analysis_prompt(context_json),
+            response_model=AuditAiAdvice,
+            system_prompt=SYSTEM_PROMPT,
+            schema=ADVICE_SCHEMA,
+            schema_name="survng_motion_audit_advice",
+            invalid_response_message="AI provider returned invalid recommendation JSON",
+        )
+
+    def analyze_structured(
+        self,
+        image_path: Path,
+        prompt: str,
+        *,
+        response_model: type[StructuredResponse],
+        system_prompt: str,
+        schema: dict[str, Any],
+        schema_name: str,
+        model_override: str = "",
+        invalid_response_message: str = "AI provider returned invalid structured JSON",
+    ) -> StructuredResponse:
+        """Run a bounded multimodal request through the configured Audit AI transport."""
+        if not self.config.enabled:
+            raise AuditAiError("AI audit advisor is disabled")
+        if not self.config.api_key.strip() and not (
+            self.config.provider == "openai_compatible" and self.config.base_url.strip()
+        ):
+            raise AuditAiError("AI audit API key is not configured")
+        try:
             if not image_path.is_file():
                 raise AuditAiError("audit image is unavailable")
             if image_path.stat().st_size > MAX_AUDIT_IMAGE_BYTES:
@@ -437,34 +478,34 @@ class AuditAiAdvisor:
             raise
         except OSError as exc:
             raise AuditAiError("audit image could not be read") from exc
-        model = self.config.model.strip() or self._default_model()
-        mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
-        try:
-            context_json = json.dumps(
-                context,
-                separators=(",", ":"),
-                default=str,
-                allow_nan=False,
-            )
-        except ValueError as exc:
-            raise AuditAiError("audit telemetry contains invalid numeric values") from exc
-        if len(context_json.encode("utf-8")) > MAX_AUDIT_CONTEXT_BYTES:
+        if len(prompt.encode("utf-8")) > MAX_AUDIT_CONTEXT_BYTES:
             raise AuditAiError("audit telemetry is too large for AI analysis")
-        prompt = audit_analysis_prompt(context_json)
+        model = model_override.strip() or self.config.model.strip() or self._default_model()
+        mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
         provider = self.config.provider
         if provider == "openai":
-            payload = self._openai_responses(model, prompt, image_bytes, mime_type)
+            payload = self._openai_responses(
+                model, prompt, image_bytes, mime_type,
+                system_prompt=system_prompt, schema=schema, schema_name=schema_name,
+            )
         elif provider == "gemini":
-            payload = self._gemini(model, prompt, image_bytes, mime_type)
+            payload = self._gemini(
+                model, prompt, image_bytes, mime_type,
+                system_prompt=system_prompt, schema=schema,
+            )
         else:
-            payload = self._openai_compatible(model, prompt, image_bytes, mime_type)
+            payload = self._openai_compatible(
+                model, prompt, image_bytes, mime_type,
+                system_prompt=system_prompt, schema=schema, schema_name=schema_name,
+            )
         try:
-            return AuditAiAdvice.model_validate_json(payload)
+            return response_model.model_validate_json(payload)
         except Exception as exc:
             # Validation errors may contain provider-controlled field values.
             # Keep the client-facing failure bounded and free of echoed model
             # output; the exception chain remains available to local logging.
-            raise AuditAiError("AI provider returned invalid recommendation JSON") from exc
+            raise AuditAiError(invalid_response_message) from exc
+
     def _default_model(self) -> str:
         if self.config.provider == "gemini":
             return "gemini-2.5-flash"
@@ -497,13 +538,23 @@ class AuditAiAdvisor:
     def _data_url(image_bytes: bytes, mime_type: str) -> str:
         return f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-    def _openai_responses(self, model: str, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+    def _openai_responses(
+        self,
+        model: str,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str,
+        *,
+        system_prompt: str = SYSTEM_PROMPT,
+        schema: dict[str, Any] = ADVICE_SCHEMA,
+        schema_name: str = "survng_motion_audit_advice",
+    ) -> str:
         base_url = self.config.base_url.strip().rstrip("/") or "https://api.openai.com/v1"
         response = self._request(
             f"{base_url}/responses",
             {
                 "model": model,
-                "instructions": SYSTEM_PROMPT,
+                "instructions": system_prompt,
                 "input": [{
                     "role": "user",
                     "content": [
@@ -514,9 +565,9 @@ class AuditAiAdvisor:
                 "text": {
                     "format": {
                         "type": "json_schema",
-                        "name": "survng_motion_audit_advice",
+                        "name": schema_name,
                         "strict": True,
-                        "schema": ADVICE_SCHEMA,
+                        "schema": schema,
                     },
                 },
             },
@@ -533,7 +584,17 @@ class AuditAiAdvisor:
             raise AuditAiError("OpenAI response contained no output text")
         return "".join(chunks)
 
-    def _openai_compatible(self, model: str, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+    def _openai_compatible(
+        self,
+        model: str,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str,
+        *,
+        system_prompt: str = SYSTEM_PROMPT,
+        schema: dict[str, Any] = ADVICE_SCHEMA,
+        schema_name: str = "survng_motion_audit_advice",
+    ) -> str:
         base_url = self.config.base_url.strip().rstrip("/")
         if not base_url:
             raise AuditAiError("OpenAI-compatible base URL is required")
@@ -542,7 +603,7 @@ class AuditAiAdvisor:
             {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": [
@@ -554,9 +615,9 @@ class AuditAiAdvisor:
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "survng_motion_audit_advice",
+                        "name": schema_name,
                         "strict": True,
-                        "schema": ADVICE_SCHEMA,
+                        "schema": schema,
                     },
                 },
             },
@@ -577,12 +638,21 @@ class AuditAiAdvisor:
             return text
         return str(content)
 
-    def _gemini(self, model: str, prompt: str, image_bytes: bytes, mime_type: str) -> str:
+    def _gemini(
+        self,
+        model: str,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str,
+        *,
+        system_prompt: str = SYSTEM_PROMPT,
+        schema: dict[str, Any] = ADVICE_SCHEMA,
+    ) -> str:
         base_url = self.config.base_url.strip().rstrip("/") or "https://generativelanguage.googleapis.com/v1beta"
         response = self._request(
             f"{base_url}/models/{quote(model, safe='')}:generateContent",
             {
-                "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                "system_instruction": {"parts": [{"text": system_prompt}]},
                 "contents": [{
                     "role": "user",
                     "parts": [
@@ -597,7 +667,7 @@ class AuditAiAdvisor:
                 }],
                 "generationConfig": {
                     "responseMimeType": "application/json",
-                    "responseJsonSchema": gemini_advice_schema(),
+                    "responseJsonSchema": copy.deepcopy(schema),
                 },
             },
             {"x-goog-api-key": self.config.api_key.strip()},

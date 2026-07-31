@@ -50,6 +50,7 @@ from .assistant import (
     AssistantEvidence,
     AssistantProvider,
     AssistantToolCall,
+    IncidentVisualReviewer,
 )
 from .detector import detection_failure, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
@@ -2231,6 +2232,12 @@ class AuditAiApplyRequest(BaseModel):
     changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
 
 
+class IncidentAiApplyRequest(BaseModel):
+    changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
+    confirmed: bool = False
+    configuration_fingerprint: str = Field(default="", max_length=64)
+
+
 class MotionAiReviewRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=128)
 
@@ -3365,8 +3372,11 @@ def _assistant_incident_payload(incident: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _assistant_incident_for_event(event_id: int) -> dict[str, Any] | None:
-    row = manager.events.get(event_id)
+def _assistant_incident_for_event(
+    event_id: int,
+    active_manager: AppManager,
+) -> dict[str, Any] | None:
+    row = active_manager.events.get(event_id)
     if row is None:
         return None
     try:
@@ -3381,12 +3391,19 @@ def _assistant_incident_for_event(event_id: int) -> dict[str, Any] | None:
     end = (anchor + timedelta(minutes=15)).isoformat()
     rows = [
         _event_row(candidate)
-        for candidate in manager.events.between(start, end, limit=2000)
-        if str(candidate.get("camera_id") or "") == str(row.get("camera_id") or "")
+        for candidate in active_manager.events.for_camera_range(
+            str(row.get("camera_id") or ""),
+            start,
+            end,
+            limit=2000,
+        )
     ]
     for summary in _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS):
         if any(int(event.get("id") or 0) == event_id for event in summary.get("events") or []):
-            hydrated = _incidents_with_faces(_hydrate_incidents([summary]))
+            hydrated = _incidents_with_faces(
+                _hydrate_incidents([summary], active_manager),
+                active_manager,
+            )
             return hydrated[0] if hydrated else summary
     return None
 
@@ -3398,7 +3415,10 @@ def _assistant_incident_evidence(
     payload = _assistant_incident_payload(incident)
     event_ids = [str(event.get("id")) for event in incident.get("events") or [] if event.get("id")]
     query = quote(",".join(event_ids), safe=",")
-    event_id = evidence_event_id or int(incident.get("representative_event_id") or event_ids[0])
+    event_id = evidence_event_id or int(
+        incident.get("representative_event_id")
+        or (event_ids[0] if event_ids else 0)
+    )
     return AssistantEvidence(
         evidence_id=f"E-incident-{event_id}",
         kind="incident",
@@ -3412,11 +3432,180 @@ def _assistant_incident_evidence(
     )
 
 
-def _assistant_inspect_incident(event_id: int) -> AssistantEvidence | None:
-    incident = _assistant_incident_for_event(event_id)
+def _assistant_inspect_incident(
+    event_id: int,
+    active_manager: AppManager,
+) -> AssistantEvidence | None:
+    incident = _assistant_incident_for_event(event_id, active_manager)
     if incident is None:
         return None
     return _assistant_incident_evidence(incident, event_id)
+
+
+def _assistant_motion_change_current_value(
+    active_config: AppConfig,
+    camera: CameraConfig,
+    change: AuditAiChange,
+) -> object:
+    if change.setting == "analysis_preset":
+        if change.scope == "global":
+            return identify_analysis_preset(
+                active_config.motion_qualification.pipeline.qualification
+            )
+        graphs = resolve_motion_pipeline_graphs(
+            active_config.motion_qualification,
+            camera.motion_qualification,
+        )
+        return identify_analysis_preset(graphs.qualification)
+    if change.scope == "global":
+        return getattr(active_config.motion_qualification, change.setting)
+    override = getattr(camera.motion_qualification, change.setting)
+    if override is None or override == "inherit":
+        return getattr(active_config.motion_qualification, change.setting)
+    return override
+
+
+def _assistant_motion_change_previews(
+    active_config: AppConfig,
+    camera: CameraConfig,
+    changes: list[AuditAiChange],
+) -> tuple[list[AuditAiChange], list[dict[str, Any]]]:
+    unique: list[AuditAiChange] = []
+    previews: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for change in changes:
+        key = (change.scope, change.setting)
+        if key in seen:
+            continue
+        seen.add(key)
+        proposed = validate_tuning_value(change.setting, change.value)
+        current = _assistant_motion_change_current_value(
+            active_config, camera, change
+        )
+        if current == proposed:
+            continue
+        normalized = change.model_copy(update={"value": proposed})
+        unique.append(normalized)
+        previews.append({
+            "scope": change.scope,
+            "setting": change.setting,
+            "current": current,
+            "proposed": proposed,
+            "reason": change.reason,
+        })
+    return unique, previews
+
+
+def _assistant_motion_config_fingerprint(
+    active_config: AppConfig,
+    camera: CameraConfig,
+) -> str:
+    payload = {
+        "global": active_config.motion_qualification.model_dump(mode="json"),
+        "camera": camera.motion_qualification.model_dump(mode="json"),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _assistant_visual_incident_evidence(
+    event_id: int,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> AssistantEvidence | None:
+    incident = _assistant_incident_for_event(event_id, active_manager)
+    if incident is None:
+        return None
+    camera = camera_by_id(active_config, str(incident.get("camera_id") or ""))
+    if camera is None:
+        return None
+    candidate_ids = list(dict.fromkeys([
+        int(incident.get("representative_event_id") or 0),
+        *[
+            int(event.get("id") or 0)
+            for event in incident.get("events") or []
+        ],
+    ]))
+    snapshot_path = None
+    source_event_id = 0
+    for candidate_id in candidate_ids:
+        if candidate_id <= 0:
+            continue
+        raw_event = active_manager.events.get(candidate_id)
+        if raw_event is None:
+            continue
+        try:
+            snapshot_path = event_snapshot_path(active_manager.storage_dir, raw_event)
+            source_event_id = candidate_id
+            break
+        except (FileNotFoundError, PermissionError):
+            continue
+    if snapshot_path is None:
+        raise AuditAiError("incident has no retained image available for visual review")
+
+    config_evidence = _assistant_configuration_evidence(active_config).data
+    camera_configuration = next(
+        (
+            item for item in config_evidence.get("cameras", [])
+            if item.get("id") == camera.id
+        ),
+        {},
+    )
+    camera_evidence = _assistant_camera_evidence(active_manager, camera.id)
+    context = {
+        "incident": _assistant_incident_payload(incident),
+        "camera_health": camera_evidence[0].data if camera_evidence else {},
+        "active_configuration": {
+            "global_motion": config_evidence.get("motion") or {},
+            "detector": config_evidence.get("detector") or {},
+            "camera": camera_configuration,
+        },
+        "image_source_event_id": source_event_id,
+        "limitations": [
+            "The image is one representative moment, not the full recording.",
+            "Tracking begins after the initial object decision.",
+            "Only bounded motion settings may be proposed from this review.",
+        ],
+    }
+    advice = IncidentVisualReviewer(active_config.audit_ai).review(
+        snapshot_path,
+        context,
+    )
+    changes, previews = _assistant_motion_change_previews(
+        active_config,
+        camera,
+        [change for change in advice.changes if change.scope == "camera"],
+    )
+    advice_payload = advice.model_dump(mode="json")
+    advice_payload["changes"] = [change.model_dump(mode="json") for change in changes]
+    details = {
+        "event_id": event_id,
+        "source_event_id": source_event_id,
+        "camera_id": camera.id,
+        "advice": advice_payload,
+        "proposals": previews,
+        "can_apply": bool(
+            previews and active_config.audit_ai.allow_apply_recommendations
+        ),
+        "apply_requires_confirmation": True,
+        "configuration_fingerprint": _assistant_motion_config_fingerprint(
+            active_config, camera
+        ),
+    }
+    incident_evidence = _assistant_incident_evidence(incident, event_id)
+    return AssistantEvidence(
+        evidence_id=f"E-visual-{event_id}",
+        kind="incident_visual_review",
+        title=f"Visual review · {camera.name}",
+        summary=(
+            f"{advice.verdict.replace('_', ' ')} "
+            f"({round(advice.confidence * 100)}% confidence); "
+            f"{len(previews)} bounded setting proposal(s)."
+        ),
+        data={**details, "incident_evidence": incident_evidence.data},
+        href=incident_evidence.href,
+        client_data=details,
+    )
 
 
 def _assistant_parse_datetime(value: str, selected_zone: ZoneInfo) -> datetime | None:
@@ -3434,6 +3623,7 @@ def _assistant_parse_datetime(value: str, selected_zone: ZoneInfo) -> datetime |
 def _assistant_search_incidents(
     call: AssistantToolCall,
     time_zone: str,
+    active_manager: AppManager,
 ) -> list[AssistantEvidence]:
     try:
         selected_zone = ZoneInfo(time_zone)
@@ -3447,7 +3637,7 @@ def _assistant_search_incidents(
     start = max(start, end - timedelta(days=31))
     rows = [
         _event_row(row)
-        for row in manager.events.between_compact(start.isoformat(), end.isoformat())
+        for row in active_manager.events.between_compact(start.isoformat(), end.isoformat())
     ]
     summaries = _filter_incident_summaries(
         _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS),
@@ -3457,7 +3647,10 @@ def _assistant_search_incidents(
         call.zone,
     )
     candidate_summaries = summaries[: min(250, max(call.limit * 8, call.limit))]
-    hydrated = _incidents_with_faces(_hydrate_incidents(candidate_summaries))
+    hydrated = _incidents_with_faces(
+        _hydrate_incidents(candidate_summaries, active_manager),
+        active_manager,
+    )
     filtered: list[dict[str, Any]] = []
     wanted_face = call.face_name.strip().lower()
     for incident in hydrated:
@@ -3529,10 +3722,27 @@ def _assistant_execute_tool(
         return [_assistant_configuration_evidence(active_config)]
     if call.name == "inspect_incident":
         event_id = call.event_id or request.context.incident_event_id
-        item = _assistant_inspect_incident(int(event_id)) if event_id else None
+        item = _assistant_inspect_incident(int(event_id), active_manager) if event_id else None
+        return [item] if item is not None else []
+    if call.name == "analyze_incident_visual":
+        event_id = call.event_id or request.context.incident_event_id
+        if not event_id:
+            return []
+        if not AUDIT_AI_LIMITER.acquire(blocking=False):
+            raise AuditAiError("another visual AI review is already running")
+        try:
+            item = _assistant_visual_incident_evidence(
+                int(event_id), active_config, active_manager
+            )
+        finally:
+            AUDIT_AI_LIMITER.release()
         return [item] if item is not None else []
     if call.name == "search_incidents":
-        return _assistant_search_incidents(call, request.context.time_zone)
+        return _assistant_search_incidents(
+            call,
+            request.context.time_zone,
+            active_manager,
+        )
     return []
 
 
@@ -3617,6 +3827,73 @@ async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="SurvNG Assistant could not complete the request") from exc
     finally:
         ASSISTANT_LIMITER.release()
+
+
+@app.post("/api/incidents/{event_id}/ai-apply")
+def incident_ai_apply(event_id: int, request: IncidentAiApplyRequest) -> dict:
+    if not request.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="explicit confirmation is required",
+        )
+    if not request.changes:
+        raise HTTPException(status_code=400, detail="no recommendation changes supplied")
+    if any(change.scope != "camera" for change in request.changes):
+        raise HTTPException(
+            status_code=400,
+            detail="incident reviews may only change camera-scoped motion settings",
+        )
+    with MANAGER_RELOAD_LOCK:
+        if not config.audit_ai.allow_apply_recommendations:
+            raise HTTPException(
+                status_code=403,
+                detail="applying AI recommendations is disabled",
+            )
+        event = manager.events.get(event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="incident event not found")
+        next_config = config.model_copy(deep=True)
+        camera = camera_by_id(next_config, str(event.get("camera_id") or ""))
+        if camera is None:
+            raise HTTPException(status_code=404, detail="incident camera not found")
+        current_fingerprint = _assistant_motion_config_fingerprint(
+            next_config, camera
+        )
+        if request.configuration_fingerprint != current_fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="motion settings changed after this review; run visual analysis again",
+            )
+        try:
+            changes, previews = _assistant_motion_change_previews(
+                next_config,
+                camera,
+                request.changes,
+            )
+            if not changes:
+                raise ValueError("recommendations do not change active settings")
+            for change in changes:
+                _apply_pipeline_ai_change(
+                    next_config,
+                    camera,
+                    change,
+                    validate_tuning_value(change.setting, change.value),
+                )
+            validate_motion_pipeline_configuration(next_config)
+            next_config = AppConfig.model_validate(
+                next_config.model_dump(mode="json")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _effective_config, apply_result = apply_config_update(next_config)
+    return {
+        "ok": True,
+        "event_id": event_id,
+        "camera_id": camera.id,
+        "applied": previews,
+        "workers_restarted": bool(apply_result["camera_workers_restarted"]),
+        "apply_mode": apply_result["apply_mode"],
+    }
 
 
 class FacePersonCreate(BaseModel):
@@ -5345,7 +5622,11 @@ def _recent_filtered_incident_summaries(
         before_id = int(oldest["id"])
 
 
-def _hydrate_incidents(summaries: list[dict]) -> list[dict]:
+def _hydrate_incidents(
+    summaries: list[dict],
+    active_manager: AppManager | None = None,
+) -> list[dict]:
+    selected_manager = active_manager or manager
     event_ids = [
         int(event["id"])
         for summary in summaries
@@ -5354,13 +5635,13 @@ def _hydrate_incidents(summaries: list[dict]) -> list[dict]:
     ]
     full_events = {
         int(event["id"]): _event_row(event)
-        for event in manager.events.get_many(event_ids)
+        for event in selected_manager.events.get_many(event_ids)
     }
     observations_by_event: dict[int, list[dict]] = {}
-    for audit in manager.events.motion_audits_for_related_events(event_ids):
+    for audit in selected_manager.events.motion_audits_for_related_events(event_ids):
         related_event_id = int(audit.get("related_event_id") or 0)
         observations_by_event.setdefault(related_event_id, []).append(
-            _motion_audit_row(audit, manager.storage_dir)
+            _motion_audit_row(audit, selected_manager.storage_dir)
         )
     for event_id, event in full_events.items():
         event["motion_observations"] = observations_by_event.get(event_id, [])
@@ -5376,7 +5657,11 @@ def _hydrate_incidents(summaries: list[dict]) -> list[dict]:
     return hydrated
 
 
-def _incidents_with_faces(incidents: list[dict]) -> list[dict]:
+def _incidents_with_faces(
+    incidents: list[dict],
+    active_manager: AppManager | None = None,
+) -> list[dict]:
+    selected_manager = active_manager or manager
     event_ids = [
         int(event["id"])
         for incident in incidents
@@ -5384,7 +5669,7 @@ def _incidents_with_faces(incidents: list[dict]) -> list[dict]:
         if str(event.get("id", "")).isdigit()
     ]
     observations_by_event: dict[int, list[dict]] = {}
-    for observation in manager.faces.for_event_ids(event_ids):
+    for observation in selected_manager.faces.for_event_ids(event_ids):
         observations_by_event.setdefault(int(observation["event_id"]), []).append(observation)
 
     status_rank = {"confirmed": 0, "possible": 1, "unknown": 2}

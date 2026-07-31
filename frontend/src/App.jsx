@@ -3,12 +3,14 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   ArrowLeft,
+  ArrowRight,
   Bike,
   Bot,
   BusFront,
   Camera,
   CarFront,
   Cat,
+  Check,
   CircleAlert,
   ChevronLeft,
   ChevronRight,
@@ -1036,6 +1038,7 @@ function AssistantPanel({ pageContext, timeZone }) {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
   const [error, setError] = useState("");
   const bodyRef = useRef(null);
 
@@ -1117,6 +1120,40 @@ function AssistantPanel({ pageContext, timeZone }) {
     }
   }
 
+  async function applyVisualProposals(messageId, evidence) {
+    const details = evidence?.details || {};
+    const changes = details.advice?.changes || [];
+    if (!changes.length || applyingEvidenceId) return;
+    const cameraLabel = details.camera_id || "this camera";
+    if (!window.confirm(`Apply ${changes.length} reviewed motion setting${changes.length === 1 ? "" : "s"} for ${cameraLabel}? Camera workers will restart.`)) return;
+    setApplyingEvidenceId(evidence.id);
+    setError("");
+    try {
+      const response = await fetch(`/api/incidents/${details.event_id}/ai-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          changes,
+          confirmed: true,
+          configuration_fingerprint: details.configuration_fingerprint || "",
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to apply the reviewed settings");
+      setMessages((current) => current.map((message) => message.id !== messageId ? message : {
+        ...message,
+        evidence: (message.evidence || []).map((item) => item.id !== evidence.id ? item : {
+          ...item,
+          details: { ...item.details, can_apply: false, applied: payload.applied || [] },
+        }),
+      }));
+    } catch (applyError) {
+      setError(applyError.message || "Unable to apply the reviewed settings");
+    } finally {
+      setApplyingEvidenceId("");
+    }
+  }
+
   return (
     <>
       <button type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => setOpenValue(open ? "false" : "true")} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} title="SurvNG Assistant">
@@ -1124,7 +1161,7 @@ function AssistantPanel({ pageContext, timeZone }) {
       </button>
       {open ? <aside className="assistant-drawer" role="dialog" aria-label="SurvNG Assistant">
         <header className="assistant-head">
-          <div><strong><Sparkles size={17} /> SurvNG Assistant</strong><small>Grounded, read-only system help</small></div>
+          <div><strong><Sparkles size={17} /> SurvNG Assistant</strong><small>Grounded analysis · changes require confirmation</small></div>
           <div>
             <button type="button" onClick={clearConversation} aria-label="Clear assistant conversation" title="Clear conversation"><Trash2 size={16} /></button>
             <button type="button" onClick={() => setOpenValue("false")} aria-label="Close SurvNG Assistant"><X size={17} /></button>
@@ -1140,18 +1177,41 @@ function AssistantPanel({ pageContext, timeZone }) {
           {!messages.length ? <div className="assistant-welcome">
             <Sparkles size={26} />
             <strong>What would you like to know?</strong>
-            <p>I can search incidents, explain the selected event, inspect camera health, and explain active settings.</p>
+            <p>I can search incidents, visually review a selected incident, inspect camera health, and explain active settings.</p>
             <div>
-              {["Is everything healthy?", "Explain this incident", "Find person incidents from the last 24 hours"].map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
+              {[
+                "Is everything healthy?",
+                ...(pageContext?.incident_event_id ? ["Visually analyze this incident"] : []),
+                "Find person incidents from the last 24 hours",
+              ].map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
             </div>
           </div> : null}
           {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
             <div className="assistant-message-text">{message.content}</div>
             {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Deep reasoning" : "Fast"}{message.model ? ` · ${message.model}` : ""}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">
-              {message.evidence.map((item) => <a key={item.id} href={item.href ? appUrl(item.href) : undefined} className="assistant-evidence-card">
-                <span>{item.id}</span><strong>{item.title}</strong><small>{item.summary}</small>
-              </a>)}
+              {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`}>
+                <a href={item.href ? appUrl(item.href) : undefined}><span>{item.id}</span><strong>{item.title}</strong><small>{item.summary}</small></a>
+                {item.details?.advice ? <div className="assistant-visual-review">
+                  <div><strong>{String(item.details.advice.verdict || "uncertain").replaceAll("_", " ")}</strong><span>{Math.round(Number(item.details.advice.confidence || 0) * 100)}%</span></div>
+                  <p>{item.details.advice.summary}</p>
+                  {item.details.advice.visible_subjects?.length ? <small>Visible: {item.details.advice.visible_subjects.join(", ")}</small> : null}
+                  <dl>
+                    <div><dt>Detector</dt><dd>{String(item.details.advice.detector_assessment || "uncertain").replaceAll("_", " ")}</dd></div>
+                    <div><dt>Tracking</dt><dd>{String(item.details.advice.tracking_assessment || "uncertain").replaceAll("_", " ")}</dd></div>
+                  </dl>
+                  {item.details.proposals?.length ? <div className="assistant-proposals">
+                    {item.details.proposals.map((proposal) => <div key={`${proposal.scope}-${proposal.setting}`}>
+                      <strong>{proposal.scope} · {String(proposal.setting).replaceAll("_", " ")}</strong>
+                      <span><code>{String(proposal.current)}</code><ArrowRight size={13} /><code>{String(proposal.proposed)}</code></span>
+                      <small>{proposal.reason}</small>
+                    </div>)}
+                  </div> : <small>No bounded setting changes recommended from this image.</small>}
+                  {item.details.applied?.length ? <div className="assistant-applied"><Check size={14} /> Applied after confirmation</div> : null}
+                  {item.details.can_apply && !item.details.applied?.length ? <button type="button" className="assistant-apply" disabled={Boolean(applyingEvidenceId)} onClick={() => applyVisualProposals(message.id, item)}>{applyingEvidenceId === item.id ? "Applying…" : "Review and apply"}</button> : null}
+                  {item.details.proposals?.length && !item.details.can_apply && !item.details.applied?.length ? <small>Enable “Allow confirmed changes” in Admin to apply these proposals.</small> : null}
+                </div> : null}
+              </div>)}
             </div> : null}
             {message.suggestions?.length ? <div className="assistant-suggestions">
               {message.suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}

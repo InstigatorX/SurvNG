@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -15,10 +17,13 @@ from survng.app.assistant import (
     AssistantPlan,
     AssistantProvider,
     AssistantToolCall,
+    IncidentVisualAdvice,
+    IncidentVisualReviewer,
+    INCIDENT_VISUAL_SCHEMA,
     sanitize_assistant_data,
 )
-from survng.app.audit_ai import AuditAiError
-from survng.app.config import AppConfig, AuditAiConfig
+from survng.app.audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError
+from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 
 
 class AssistantModelsTest(unittest.TestCase):
@@ -55,6 +60,8 @@ class AssistantModelsTest(unittest.TestCase):
                 "healthy": True,
             },
             "loose_path": "/mnt/recordings/file.mp4",
+            "file_count": 12,
+            "temporal_center_path_ratio": 0.42,
             "score": float("nan"),
         })
 
@@ -64,7 +71,23 @@ class AssistantModelsTest(unittest.TestCase):
         self.assertNotIn("user:pass", encoded)
         self.assertNotIn("internal.example", encoded)
         self.assertTrue(sanitized["nested"]["healthy"])
+        self.assertEqual(sanitized["file_count"], 12)
+        self.assertEqual(sanitized["temporal_center_path_ratio"], 0.42)
         self.assertIsNone(sanitized["score"])
+
+    def test_client_visual_details_receive_the_same_redaction(self) -> None:
+        evidence = AssistantEvidence(
+            "E1",
+            "incident_visual_review",
+            "Visual review",
+            "Review complete",
+            {},
+            client_data={"api_key": "secret", "image_path": "/private/image.jpg", "ok": True},
+        )
+
+        details = evidence.client_payload()["details"]
+
+        self.assertEqual(details, {"ok": True})
 
 
 class AssistantProviderTest(unittest.TestCase):
@@ -130,7 +153,210 @@ class AssistantProviderTest(unittest.TestCase):
                 self.provider.plan(self.request, {"cameras": []}, "2026-07-31T10:00:00-04:00")
 
 
+class IncidentVisualReviewerTest(unittest.TestCase):
+    def test_visual_schema_allows_only_camera_scoped_changes(self) -> None:
+        change_schema = INCIDENT_VISUAL_SCHEMA["properties"]["changes"]["items"]
+        self.assertEqual(change_schema["properties"]["scope"]["enum"], ["camera"])
+
+    def test_visual_review_reuses_transport_with_deep_model(self) -> None:
+        config = AuditAiConfig(
+            enabled=True,
+            provider="gemini",
+            api_key="test-key",
+            model="fast-model",
+            assistant_reasoning_model="deep-model",
+        )
+        expected = IncidentVisualAdvice(
+            verdict="detection_consistent",
+            confidence=0.9,
+            visible_subjects=["person"],
+            summary="The person label agrees with the image.",
+            observations=["One person is visible."],
+            detector_assessment="consistent",
+            tracking_assessment="consistent",
+            changes=[],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image = Path(tmpdir) / "incident.jpg"
+            image.write_bytes(b"jpeg")
+            with patch.object(AuditAiAdvisor, "analyze_structured", return_value=expected) as analyze:
+                result = IncidentVisualReviewer(config).review(
+                    image,
+                    {"stream_url": "rtsp://secret/live", "incident": {"id": 7}},
+                )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(analyze.call_args.kwargs["model_override"], "deep-model")
+        self.assertNotIn("rtsp://secret", analyze.call_args.args[1])
+
+
 class AssistantApiTest(unittest.TestCase):
+    def test_visual_incident_evidence_builds_server_owned_change_preview(self) -> None:
+        from survng.app import main
+
+        active_config = AppConfig(
+            audit_ai=AuditAiConfig(
+                enabled=True,
+                allow_apply_recommendations=True,
+            ),
+            cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
+        )
+        incident = {
+            "id": "gate-incident",
+            "representative_event_id": 42,
+            "camera_id": "gate",
+            "start_at": "2026-07-31T20:00:00+00:00",
+            "events": [{"id": 42, "kind": "motion", "objects": []}],
+            "labels": ["person"],
+            "zones": [],
+            "motion_observations": [],
+        }
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(get=lambda _event_id: {"id": 42, "camera_id": "gate"}),
+            storage_dir=Path("/tmp"),
+        )
+        advice = IncidentVisualAdvice(
+            verdict="probable_missed_detection",
+            confidence=0.8,
+            visible_subjects=["person"],
+            summary="A person is visible but was not labeled.",
+            observations=["One person is visible."],
+            detector_assessment="missed",
+            tracking_assessment="unavailable",
+            changes=[AuditAiChange(
+                scope="camera",
+                setting="sensitivity",
+                value="high",
+                reason="Repeated motion-trigger misses would justify this adjustment.",
+            )],
+        )
+        with (
+            patch.object(main, "_assistant_incident_for_event", return_value=incident),
+            patch.object(main, "event_snapshot_path", return_value=Path("/tmp/incident.jpg")),
+            patch.object(main, "_assistant_camera_evidence", return_value=[]),
+            patch.object(IncidentVisualReviewer, "review", return_value=advice),
+        ):
+            evidence = main._assistant_visual_incident_evidence(
+                42, active_config, active_manager
+            )
+
+        self.assertIsNotNone(evidence)
+        details = evidence.client_payload()["details"]
+        self.assertTrue(details["can_apply"])
+        self.assertEqual(details["proposals"][0]["current"], "balanced")
+        self.assertEqual(details["proposals"][0]["proposed"], "high")
+        self.assertEqual(len(details["configuration_fingerprint"]), 64)
+
+    def test_motion_change_preview_resolves_camera_inheritance_and_deduplicates(self) -> None:
+        from survng.app import main
+
+        active_config = AppConfig(
+            cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
+        )
+        camera = active_config.cameras[0]
+        changes = [
+            AuditAiChange(
+                scope="camera",
+                setting="sensitivity",
+                value="high",
+                reason="Repeated misses need more sensitivity.",
+            ),
+            AuditAiChange(
+                scope="camera",
+                setting="sensitivity",
+                value="low",
+                reason="Conflicting duplicate should be discarded.",
+            ),
+        ]
+
+        normalized, previews = main._assistant_motion_change_previews(
+            active_config, camera, changes
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(previews[0]["current"], "balanced")
+        self.assertEqual(previews[0]["proposed"], "high")
+
+    def test_incident_apply_requires_explicit_confirmation_before_state_access(self) -> None:
+        from fastapi import HTTPException
+        from survng.app import main
+
+        with self.assertRaises(HTTPException) as raised:
+            main.incident_ai_apply(
+                42,
+                main.IncidentAiApplyRequest(changes=[], confirmed=False),
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+
+    def test_incident_apply_rejects_global_changes_before_state_access(self) -> None:
+        from fastapi import HTTPException
+        from survng.app import main
+
+        request = main.IncidentAiApplyRequest(
+            confirmed=True,
+            changes=[AuditAiChange(
+                scope="global",
+                setting="sensitivity",
+                value="high",
+                reason="A single incident must not tune every camera.",
+            )],
+        )
+        with self.assertRaises(HTTPException) as raised:
+            main.incident_ai_apply(42, request)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("camera-scoped", raised.exception.detail)
+
+    def test_incident_apply_rejects_stale_configuration_fingerprint(self) -> None:
+        from fastapi import HTTPException
+        from survng.app import main
+
+        active_config = AppConfig(
+            audit_ai=AuditAiConfig(allow_apply_recommendations=True),
+            cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
+        )
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(get=lambda _event_id: {"camera_id": "gate"}),
+        )
+        request = main.IncidentAiApplyRequest(
+            confirmed=True,
+            configuration_fingerprint="stale",
+            changes=[AuditAiChange(
+                scope="camera",
+                setting="sensitivity",
+                value="high",
+                reason="Repeated misses need more sensitivity.",
+            )],
+        )
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            main.incident_ai_apply(42, request)
+
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_visual_tool_uses_current_incident_context(self) -> None:
+        from survng.app import main
+
+        request = AssistantChatRequest.model_validate({
+            "message": "Look at this incident",
+            "context": {"incident_event_id": 42},
+        })
+        expected = AssistantEvidence("E-visual-42", "incident_visual_review", "Review", "Done", {})
+        with patch.object(main, "_assistant_visual_incident_evidence", return_value=expected) as review:
+            evidence = main._assistant_execute_tool(
+                AssistantToolCall(name="analyze_incident_visual"),
+                request,
+                AppConfig(),
+                SimpleNamespace(),
+            )
+
+        self.assertEqual(evidence, [expected])
+        self.assertEqual(review.call_args.args[0], 42)
+
     def test_configuration_evidence_includes_model_roles_without_provider_secrets(self) -> None:
         from survng.app import main
 

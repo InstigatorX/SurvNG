@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from survng.app.audit_ai import (
     MAX_AUDIT_IMAGE_BYTES,
@@ -26,6 +26,53 @@ from survng.app.config import AuditAiConfig
 
 
 class AuditAiTest(unittest.TestCase):
+    def test_structured_multimodal_transport_accepts_custom_prompt_schema_and_model(self) -> None:
+        class Result(BaseModel):
+            value: str
+
+        advisor = AuditAiAdvisor(AuditAiConfig(
+            enabled=True,
+            provider="openai",
+            api_key="secret",
+            model="default-model",
+        ))
+        request_payload: dict = {}
+
+        def request(_url, payload, _headers):
+            request_payload.update(payload)
+            return {
+                "output": [{
+                    "content": [{"type": "output_text", "text": '{"value":"ok"}'}],
+                }],
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image = Path(tmpdir) / "incident.jpg"
+            image.write_bytes(b"jpeg")
+            with patch.object(advisor, "_request", side_effect=request):
+                result = advisor.analyze_structured(
+                    image,
+                    '{"incident":7}',
+                    response_model=Result,
+                    system_prompt="custom visual prompt",
+                    schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                    schema_name="custom_incident_review",
+                    model_override="deep-model",
+                )
+
+        self.assertEqual(result.value, "ok")
+        self.assertEqual(request_payload["model"], "deep-model")
+        self.assertEqual(request_payload["instructions"], "custom visual prompt")
+        self.assertEqual(
+            request_payload["text"]["format"]["name"],
+            "custom_incident_review",
+        )
+
     def test_active_and_cooldown_audits_are_duplicate_control_not_detector_misses(self) -> None:
         active = motion_audit_interpretation(
             reason="event_state_active",

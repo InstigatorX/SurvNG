@@ -44,6 +44,21 @@ and filesystem paths. Responses link back to the camera or incident used as
 evidence. Configuration saves for these model fields use the existing hot AI
 configuration path and do not restart camera workers.
 
+When an incident is selected, asking the assistant to **visually analyze this
+incident** sends its representative retained image and bounded incident
+telemetry through the same configured multimodal AI transport. The deeper model
+is used when configured. The review distinguishes likely misses,
+misclassifications, false positives, and uncertain single-frame evidence while
+keeping detector and tracking assessments separate.
+
+Visual reviews may propose only the existing allowlisted, bounded,
+camera-scoped motion settings. SurvNG calculates the displayed before/after
+values itself; the model does not. Applying requires **Allow confirmed changes**
+to be enabled plus an explicit confirmation in the drawer. A configuration
+fingerprint rejects stale proposals if motion settings changed after analysis.
+No object thresholds, zones, tracking settings, models, trigger topology, or
+global settings can be changed through this incident-review path.
+
 ## Reolink / ONVIF Notes
 
 ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.
