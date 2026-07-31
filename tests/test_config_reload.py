@@ -16,6 +16,50 @@ class ConfigReloadTest(unittest.TestCase):
         main.config = self.previous_config
         main.manager = self.previous_manager
 
+    def test_manager_reload_is_refused_without_stopping_active_storage_work(self) -> None:
+        active = Mock()
+        active.recorder.retention_status.return_value = {"state": "idle"}
+        main.config = AppConfig(base_path="/old")
+        main.manager = active
+
+        with (
+            patch.object(
+                main.STORAGE_MAINTENANCE,
+                "status",
+                return_value={"status": "running", "mode": "repair"},
+            ),
+            patch.object(main.STORAGE_MAINTENANCE, "stop") as stop,
+            patch("survng.app.main.AppManager") as manager_factory,
+        ):
+            with self.assertRaisesRegex(main.StorageTasksActiveError, "storage repair"):
+                main.reload_manager(AppConfig(base_path="/new"))
+
+        stop.assert_not_called()
+        manager_factory.assert_not_called()
+        active.stop_all_with_runtime_preferences.assert_not_called()
+        self.assertIs(main.manager, active)
+        self.assertEqual(main.config.base_path, "/old")
+
+    def test_manager_reload_is_refused_during_retention_cleanup(self) -> None:
+        active = Mock()
+        active.recorder.retention_status.return_value = {"state": "cleaning"}
+        main.config = AppConfig(base_path="/old")
+        main.manager = active
+
+        with (
+            patch.object(
+                main.STORAGE_MAINTENANCE,
+                "status",
+                return_value={"status": "idle"},
+            ),
+            patch("survng.app.main.AppManager") as manager_factory,
+        ):
+            with self.assertRaisesRegex(main.StorageTasksActiveError, "recording retention"):
+                main.reload_manager(AppConfig(base_path="/new"))
+
+        manager_factory.assert_not_called()
+        active.stop_all_with_runtime_preferences.assert_not_called()
+
     def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {

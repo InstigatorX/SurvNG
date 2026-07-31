@@ -513,6 +513,32 @@ def _validate_recording_range(
         raise HTTPException(status_code=400, detail=detail)
 
 
+class StorageTasksActiveError(RuntimeError):
+    def __init__(self, tasks: list[str]) -> None:
+        self.tasks = tasks
+        super().__init__(
+            "configuration change was not applied because storage work is active: "
+            f"{', '.join(tasks)}. Wait for it to finish or cancel it from Maintenance."
+        )
+
+
+def _active_storage_tasks(active_manager: AppManager) -> list[str]:
+    tasks: list[str] = []
+    maintenance = STORAGE_MAINTENANCE.status()
+    if maintenance.get("status") in {"running", "cancelling"}:
+        mode = str(maintenance.get("mode") or "maintenance").replace("_", " ")
+        tasks.append(f"storage {mode}")
+    try:
+        retention = active_manager.recorder.retention_status()
+    except Exception:
+        retention = {}
+    if isinstance(retention, dict) and retention.get("state") in {
+        "queued", "running", "cleaning"
+    }:
+        tasks.append("recording retention")
+    return tasks
+
+
 def reload_manager(
     next_config: AppConfig,
     *,
@@ -527,6 +553,9 @@ def reload_manager(
     with MANAGER_RELOAD_LOCK:
         previous_config = config
         previous_manager = manager
+        active_storage_tasks = _active_storage_tasks(previous_manager)
+        if active_storage_tasks:
+            raise StorageTasksActiveError(active_storage_tasks)
         prewarmer_was_running = bool(
             RECORDING_PREWARM_THREAD is not None
             and RECORDING_PREWARM_THREAD.is_alive()
@@ -535,10 +564,6 @@ def reload_manager(
         previous_stop_attempted = False
         runtime_preferences = previous_manager.runtime_preferences()
         try:
-            if not STORAGE_MAINTENANCE.stop(timeout=5.0):
-                raise RuntimeError(
-                    "configuration reload cannot continue while storage maintenance is stopping"
-                )
             _stop_recording_prewarmer()
             previous_stop_attempted = True
             previous_manager.stop_all_with_runtime_preferences()
@@ -807,6 +832,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
+
+
+@app.exception_handler(StorageTasksActiveError)
+async def storage_tasks_active_handler(
+    _request: Request,
+    error: StorageTasksActiveError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(error), "active_storage_tasks": error.tasks},
+    )
+
+
 app.add_middleware(ConfiguredBasePathMiddleware)
 app.add_middleware(SecurityBoundaryMiddleware)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
