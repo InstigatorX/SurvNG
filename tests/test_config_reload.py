@@ -40,25 +40,18 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(main.manager, active)
         self.assertEqual(main.config.base_path, "/old")
 
-    def test_manager_reload_is_refused_during_retention_cleanup(self) -> None:
+    def test_bounded_retention_cleanup_does_not_block_manager_reload(self) -> None:
         active = Mock()
         active.recorder.retention_status.return_value = {"state": "cleaning"}
-        main.config = AppConfig(base_path="/old")
-        main.manager = active
 
-        with (
-            patch.object(
-                main.STORAGE_MAINTENANCE,
-                "status",
-                return_value={"status": "idle"},
-            ),
-            patch("survng.app.main.AppManager") as manager_factory,
+        with patch.object(
+            main.STORAGE_MAINTENANCE,
+            "status",
+            return_value={"status": "idle"},
         ):
-            with self.assertRaisesRegex(main.StorageTasksActiveError, "recording retention"):
-                main.reload_manager(AppConfig(base_path="/new"))
+            tasks = main._active_storage_tasks(active)
 
-        manager_factory.assert_not_called()
-        active.stop_all_with_runtime_preferences.assert_not_called()
+        self.assertEqual(tasks, [])
 
     def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()

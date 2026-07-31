@@ -785,10 +785,10 @@ class AppManager:
 
         retention = self.recorder.retention_status()
         retention_state = str(retention.get("state") or "idle")
-        if retention_state == "cleaning":
-            activity = "retention_cleanup"
-        elif retention_state in {"queued", "running"}:
-            activity = "retention"
+        if retention_state == "planning":
+            activity = "planning"
+        elif retention_state in {"queued", "cleaning", "waiting"}:
+            activity = "cleaning"
         else:
             activity = "idle"
         plan = dict(retention.get("plan") or {})

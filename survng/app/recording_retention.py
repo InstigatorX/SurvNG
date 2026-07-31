@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import shutil
 import sqlite3
@@ -19,8 +20,10 @@ GIB = 1024**3
 TIB = 1024**4
 SECONDS_PER_DAY = 24 * 60 * 60
 RECENT_RECORDING_PROTECTION_SECONDS = 5 * 60
-RETENTION_INTERVAL_SECONDS = 5 * 60
+RETENTION_PLAN_INTERVAL_SECONDS = SECONDS_PER_DAY
+RETENTION_CLEANUP_INTERVAL_SECONDS = 15 * 60
 RETENTION_RETRY_SECONDS = 10
+RETENTION_INITIAL_DELAY_SECONDS = 5
 
 
 class RecordingRetentionService:
@@ -47,19 +50,28 @@ class RecordingRetentionService:
         self._run_lock = threading.Lock()
         self._requested_apply = False
         self._cleanup_active = False
+        self._force_plan = True
+        self._last_plan_monotonic = 0.0
+        self._capacity_reclaim_remaining = 0
+        self._planned_reclaim_remaining = 0
         self._status: dict[str, Any] = {
             "state": "starting",
             "enabled": config.enabled,
             "automatic_cleanup": config.automatic_cleanup,
             "last_plan_at": None,
             "last_run_at": None,
+            "plan_interval_seconds": RETENTION_PLAN_INTERVAL_SECONDS,
+            "cleanup_interval_seconds": RETENTION_CLEANUP_INTERVAL_SECONDS,
+            "cleanup_retry_seconds": RETENTION_RETRY_SECONDS,
             "error": "",
             "plan": None,
             "last_run": None,
         }
 
     def start(self, cameras: Sequence[CameraConfig]) -> None:
-        self._cameras = {camera.id: camera for camera in cameras}
+        with self._state_lock:
+            self._cameras = {camera.id: camera for camera in cameras}
+            self._force_plan = True
         self._stop.clear()
         if self._thread is not None and self._thread.is_alive():
             self._wake.set()
@@ -87,6 +99,7 @@ class RecordingRetentionService:
                 "automatic_cleanup": config.automatic_cleanup,
                 "error": "",
             }
+            self._force_plan = True
         self._wake.set()
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -103,6 +116,7 @@ class RecordingRetentionService:
 
     def request_run(self, *, apply: bool = False) -> dict[str, Any]:
         with self._state_lock:
+            self._force_plan = True
             if apply:
                 self._requested_apply = True
                 self._cleanup_active = True
@@ -245,58 +259,90 @@ class RecordingRetentionService:
         started = time.time()
         try:
             before = self.plan(now_epoch=started)
-            result: dict[str, Any] = {
-                "started_at": _iso_time(started),
-                "finished_at": None,
-                "apply": apply,
-                "deleted_files": 0,
-                "missing_files": 0,
-                "deleted_bytes": 0,
-                "failed_files": 0,
-                "remaining_planned_bytes": int(before["reclaim"]["planned_bytes"]),
-            }
-            if apply and before["reclaim"]["planned_bytes"]:
-                candidates = self._candidates(before, now_epoch=started)
-                removed_paths: list[str] = []
-                empty_directory_candidates: set[Path] = set()
-                for row in candidates:
-                    raw_path = str(row["path"])
-                    try:
-                        path = self._safe_recording_path(raw_path)
-                    except ValueError:
-                        result["failed_files"] += 1
-                        LOGGER.error("Retention rejected recording path outside storage: %s", raw_path)
-                        continue
-                    try:
-                        path.unlink()
-                        result["deleted_files"] += 1
-                        result["deleted_bytes"] += int(row["size_bytes"] or 0)
-                        empty_directory_candidates.add(path.parent)
-                        removed_paths.append(raw_path)
-                    except FileNotFoundError:
-                        result["missing_files"] += 1
-                        removed_paths.append(raw_path)
-                    except OSError as error:
-                        result["failed_files"] += 1
-                        LOGGER.warning("Retention could not delete %s: %s", path, error)
-                if removed_paths:
-                    with self.connection_factory() as connection:
-                        connection.executemany(
-                            "DELETE FROM recordings WHERE path = ?",
-                            ((path,) for path in removed_paths),
-                        )
-                self._remove_empty_directories(empty_directory_candidates)
-                result["remaining_planned_bytes"] = max(
-                    0,
-                    int(before["reclaim"]["planned_bytes"]) - int(result["deleted_bytes"]),
-                )
-            result["finished_at"] = _iso_time(time.time())
+            capacity_reclaim = max(
+                int(before["reclaim"]["quota_bytes"]),
+                int(before["reclaim"]["free_space_bytes"]),
+            )
+            result = self._apply_plan(
+                before,
+                apply=apply,
+                now_epoch=started,
+                capacity_reclaim_bytes=capacity_reclaim,
+                planned_reclaim_bytes=int(before["reclaim"]["planned_bytes"]),
+            )
             return {"plan": before, "result": result}
         finally:
             self._run_lock.release()
 
+    def _apply_plan(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        apply: bool,
+        now_epoch: float,
+        capacity_reclaim_bytes: int,
+        planned_reclaim_bytes: int,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "started_at": _iso_time(now_epoch),
+            "finished_at": None,
+            "apply": apply,
+            "selected_files": 0,
+            "deleted_files": 0,
+            "missing_files": 0,
+            "deleted_bytes": 0,
+            "failed_files": 0,
+            "cancelled": False,
+            "remaining_planned_bytes": max(0, int(planned_reclaim_bytes)),
+        }
+        if apply:
+            candidates = self._candidates(
+                plan,
+                now_epoch=now_epoch,
+                capacity_reclaim_bytes=max(0, int(capacity_reclaim_bytes)),
+            )
+            result["selected_files"] = len(candidates)
+            removed_paths: list[str] = []
+            empty_directory_candidates: set[Path] = set()
+            for row in candidates:
+                if self._stop.is_set():
+                    result["cancelled"] = True
+                    break
+                raw_path = str(row["path"])
+                try:
+                    path = self._safe_recording_path(raw_path)
+                except ValueError:
+                    result["failed_files"] += 1
+                    LOGGER.error("Retention rejected recording path outside storage: %s", raw_path)
+                    continue
+                try:
+                    path.unlink()
+                    result["deleted_files"] += 1
+                    result["deleted_bytes"] += int(row["size_bytes"] or 0)
+                    empty_directory_candidates.add(path.parent)
+                    removed_paths.append(raw_path)
+                except FileNotFoundError:
+                    result["missing_files"] += 1
+                    removed_paths.append(raw_path)
+                except OSError as error:
+                    result["failed_files"] += 1
+                    LOGGER.warning("Retention could not delete %s: %s", path, error)
+            if removed_paths:
+                with self.connection_factory() as connection:
+                    connection.executemany(
+                        "DELETE FROM recordings WHERE path = ?",
+                        ((path,) for path in removed_paths),
+                    )
+            self._remove_empty_directories(empty_directory_candidates)
+            result["remaining_planned_bytes"] = max(
+                0,
+                int(planned_reclaim_bytes) - int(result["deleted_bytes"]),
+            )
+        result["finished_at"] = _iso_time(time.time())
+        return result
+
     def _loop(self) -> None:
-        wait_seconds = 5.0
+        wait_seconds = float(RETENTION_INITIAL_DELAY_SECONDS)
         while not self._stop.is_set():
             self._wake.wait(wait_seconds)
             self._wake.clear()
@@ -306,39 +352,135 @@ class RecordingRetentionService:
                 requested_apply = self._requested_apply
                 self._requested_apply = False
                 cleanup_active = self._cleanup_active
-                self._status = {**self._status, "state": "running", "error": ""}
+                force_plan = self._force_plan
+                self._force_plan = False
+                cached_plan = copy.deepcopy(self._status.get("plan"))
             apply = requested_apply or cleanup_active or (
                 self.config.enabled and self.config.automatic_cleanup
             )
+            sampled_monotonic = time.monotonic()
+            plan_due = bool(
+                force_plan
+                or not isinstance(cached_plan, dict)
+                or sampled_monotonic - self._last_plan_monotonic
+                >= RETENTION_PLAN_INTERVAL_SECONDS
+            )
+            if not plan_due and self._storage_below_minimum():
+                plan_due = True
+            if not plan_due and not apply:
+                with self._state_lock:
+                    self._status = {**self._status, "state": "idle", "error": ""}
+                wait_seconds = RETENTION_CLEANUP_INTERVAL_SECONDS
+                continue
+            with self._state_lock:
+                self._status = {
+                    **self._status,
+                    "state": "planning" if plan_due else "cleaning",
+                    "error": "",
+                }
             try:
-                outcome = self.run_once(apply=apply)
-                plan = outcome["plan"]
-                result = outcome["result"]
+                if plan_due:
+                    plan = self.plan()
+                    self._last_plan_monotonic = sampled_monotonic
+                    self._capacity_reclaim_remaining = max(
+                        int(plan["reclaim"]["quota_bytes"]),
+                        int(plan["reclaim"]["free_space_bytes"]),
+                    )
+                    self._planned_reclaim_remaining = int(
+                        plan["reclaim"]["planned_bytes"]
+                    )
+                else:
+                    plan = cached_plan
+                with self._state_lock:
+                    self._status = {
+                        **self._status,
+                        "state": "cleaning" if apply else "idle",
+                        "plan": plan,
+                        "last_plan_at": (
+                            plan["generated_at"]
+                            if plan_due
+                            else self._status.get("last_plan_at")
+                        ),
+                    }
+                result = self._run_cached_plan(plan, apply=apply)
                 should_continue = bool(
                     apply
-                    and result["remaining_planned_bytes"] > 0
+                    and int(result["selected_files"]) >= self.config.cleanup_batch_files
                     and (result["deleted_files"] or result["missing_files"])
                 )
                 with self._state_lock:
                     self._cleanup_active = should_continue
                     self._status = {
                         **self._status,
-                        "state": "cleaning" if should_continue else "idle",
+                        "state": "waiting" if should_continue else "idle",
                         "enabled": self.config.enabled,
                         "automatic_cleanup": self.config.automatic_cleanup,
-                        "last_plan_at": plan["generated_at"],
                         "last_run_at": result["finished_at"] if apply else self._status.get("last_run_at"),
                         "error": "",
                         "plan": plan,
                         "last_run": result if apply else self._status.get("last_run"),
                     }
-                wait_seconds = RETENTION_RETRY_SECONDS if should_continue else RETENTION_INTERVAL_SECONDS
+                wait_seconds = (
+                    RETENTION_RETRY_SECONDS
+                    if should_continue
+                    else RETENTION_CLEANUP_INTERVAL_SECONDS
+                )
             except Exception as error:
                 LOGGER.exception("Recording retention cycle failed")
                 with self._state_lock:
                     self._cleanup_active = False
+                    self._force_plan = True
                     self._status = {**self._status, "state": "error", "error": str(error)}
-                wait_seconds = RETENTION_INTERVAL_SECONDS
+                wait_seconds = RETENTION_CLEANUP_INTERVAL_SECONDS
+
+    def _run_cached_plan(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        apply: bool,
+    ) -> dict[str, Any]:
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("recording retention is already running")
+        try:
+            result = self._apply_plan(
+                plan,
+                apply=apply,
+                now_epoch=time.time(),
+                capacity_reclaim_bytes=self._capacity_reclaim_remaining,
+                planned_reclaim_bytes=self._planned_reclaim_remaining,
+            )
+            self._capacity_reclaim_remaining = max(
+                0,
+                self._capacity_reclaim_remaining - int(result["deleted_bytes"]),
+            )
+            self._planned_reclaim_remaining = int(
+                result["remaining_planned_bytes"]
+            )
+            if isinstance(plan, dict):
+                reclaim = dict(plan.get("reclaim") or {})
+                reclaim["planned_bytes"] = self._planned_reclaim_remaining
+                reclaim["quota_bytes"] = max(
+                    0,
+                    int(reclaim.get("quota_bytes") or 0)
+                    - int(result["deleted_bytes"]),
+                )
+                reclaim["free_space_bytes"] = max(
+                    0,
+                    int(reclaim.get("free_space_bytes") or 0)
+                    - int(result["deleted_bytes"]),
+                )
+                plan["reclaim"] = reclaim
+            return result
+        finally:
+            self._run_lock.release()
+
+    def _storage_below_minimum(self) -> bool:
+        try:
+            usage = shutil.disk_usage(self.storage_dir)
+        except OSError:
+            return False
+        free_percent = usage.free / usage.total * 100 if usage.total else 0.0
+        return free_percent < self.config.minimum_free_percent
 
     def _retention_days(self, camera_id: str, source: str) -> int:
         camera = self._cameras.get(camera_id)
@@ -347,7 +489,13 @@ class RecordingRetentionService:
             override = camera.retention.main_days if source == "main" else camera.retention.live_days
         return int(override or (self.config.main_days if source == "main" else self.config.live_days))
 
-    def _candidates(self, plan: Mapping[str, Any], *, now_epoch: float) -> list[sqlite3.Row]:
+    def _candidates(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        now_epoch: float,
+        capacity_reclaim_bytes: int | None = None,
+    ) -> list[sqlite3.Row]:
         limit = self.config.cleanup_batch_files
         protected_cutoff = now_epoch - RECENT_RECORDING_PROTECTION_SECONDS
         protected_paths = self.protected_paths_provider()
@@ -355,7 +503,7 @@ class RecordingRetentionService:
         groups = plan.get("per_camera", [])
         candidates: dict[str, sqlite3.Row] = {}
         with self.connection_factory() as connection:
-            expiring_groups = [group for group in groups if int(group.get("expired_files", 0))]
+            expiring_groups = list(groups)
             if expiring_groups:
                 predicates: list[str] = []
                 parameters: list[object] = [protected_cutoff]
@@ -380,9 +528,13 @@ class RecordingRetentionService:
                     for row in rows
                     if str(Path(str(row["path"])).resolve(strict=False)) not in protected_paths
                 )
-            capacity_reclaim = max(
-                int(plan["reclaim"]["quota_bytes"]),
-                int(plan["reclaim"]["free_space_bytes"]),
+            capacity_reclaim = (
+                max(
+                    int(plan["reclaim"]["quota_bytes"]),
+                    int(plan["reclaim"]["free_space_bytes"]),
+                )
+                if capacity_reclaim_bytes is None
+                else max(0, int(capacity_reclaim_bytes))
             )
             selected_bytes = sum(int(row["size_bytes"] or 0) for row in candidates.values())
             if capacity_reclaim > selected_bytes and len(candidates) < limit:
@@ -396,8 +548,11 @@ class RecordingRetentionService:
                 for row in rows:
                     if str(Path(str(row["path"])).resolve(strict=False)) in protected_paths:
                         continue
-                    candidates.setdefault(str(row["path"]), row)
-                    if len(candidates) >= limit:
+                    path_key = str(row["path"])
+                    if path_key not in candidates:
+                        candidates[path_key] = row
+                        selected_bytes += int(row["size_bytes"] or 0)
+                    if len(candidates) >= limit or selected_bytes >= capacity_reclaim:
                         break
         return sorted(candidates.values(), key=lambda row: float(row["start_epoch"] or 0))[:limit]
 

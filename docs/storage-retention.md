@@ -31,7 +31,16 @@ oldest-first cleanup. Enabling automatic cleanup applies the same guarded plan
 in the background.
 
 The worker uses the local SQLite recording index and does not walk NFS during
-normal operation. It deletes a bounded batch, removes successfully deleted or
-already-missing paths from the index, cleans empty date directories, and then
-recalculates before continuing. Storage or database errors stop the cycle and
-are reported in the Admin status rather than causing an unbounded retry loop.
+normal operation. It performs the complete storage projection once per day,
+when retention settings change, when an operator requests recalculation, or
+when the free-space watermark is crossed. Lightweight index-driven expiration
+runs every 15 minutes between those projections.
+
+Cleanup deletes a bounded batch, removes successfully deleted or already-missing
+paths from the index, cleans empty date directories, and waits 10 seconds before
+the next batch when a backlog remains. These bounded batches do not block a
+SurvNG restart; shutdown stops between individual files and commits the index
+updates for files already handled. Admin reports the states as `planning`,
+`cleaning`, `waiting`, and `idle`. Storage or database
+errors stop the cycle and are reported in Admin rather than causing an unbounded
+retry loop.

@@ -9,7 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from survng.app.config import CameraConfig, RecordingRetentionConfig
-from survng.app.recording_retention import GIB, RecordingRetentionService
+from survng.app.recording_retention import (
+    GIB,
+    RETENTION_CLEANUP_INTERVAL_SECONDS,
+    RETENTION_PLAN_INTERVAL_SECONDS,
+    RecordingRetentionService,
+)
 
 
 DiskUsage = namedtuple("DiskUsage", "total used free")
@@ -182,6 +187,75 @@ class RecordingRetentionServiceTest(unittest.TestCase):
 
         self.assertEqual(outcome["result"]["deleted_files"], 0)
         self.assertTrue(old.exists())
+
+    @patch(
+        "survng.app.recording_retention.shutil.disk_usage",
+        return_value=DiskUsage(10 * 1024**4, 5 * 1024**4, 5 * 1024**4),
+    )
+    def test_cached_daily_plan_expires_newly_aged_files(self, _usage) -> None:
+        recording = self.insert_recording(age_days=6)
+        service = self.service()
+        plan = service.plan()
+        self.assertEqual(plan["reclaim"]["expired_files"], 0)
+
+        result = service._apply_plan(
+            plan,
+            apply=True,
+            now_epoch=time.time() + 2 * 86400,
+            capacity_reclaim_bytes=0,
+            planned_reclaim_bytes=0,
+        )
+
+        self.assertEqual(result["deleted_files"], 1)
+        self.assertFalse(recording.exists())
+
+    @patch(
+        "survng.app.recording_retention.shutil.disk_usage",
+        return_value=DiskUsage(10 * 1024**4, 5 * 1024**4, 5 * 1024**4),
+    )
+    def test_capacity_cleanup_stops_after_reaching_batch_byte_budget(self, _usage) -> None:
+        oldest = self.insert_recording(age_days=3)
+        newer = self.insert_recording(age_days=2)
+        service = self.service()
+        plan = service.plan()
+
+        result = service._apply_plan(
+            plan,
+            apply=True,
+            now_epoch=time.time(),
+            capacity_reclaim_bytes=1,
+            planned_reclaim_bytes=1,
+        )
+
+        self.assertEqual(result["selected_files"], 1)
+        self.assertFalse(oldest.exists())
+        self.assertTrue(newer.exists())
+
+    def test_retention_uses_daily_plans_and_quarter_hour_cleanup(self) -> None:
+        self.assertEqual(RETENTION_PLAN_INTERVAL_SECONDS, 24 * 60 * 60)
+        self.assertEqual(RETENTION_CLEANUP_INTERVAL_SECONDS, 15 * 60)
+
+    @patch(
+        "survng.app.recording_retention.shutil.disk_usage",
+        return_value=DiskUsage(10 * 1024**4, 5 * 1024**4, 5 * 1024**4),
+    )
+    def test_shutdown_cancels_remaining_cleanup_batch_without_deleting(self, _usage) -> None:
+        recording = self.insert_recording(age_days=30)
+        service = self.service()
+        plan = service.plan()
+        service._stop.set()
+
+        result = service._apply_plan(
+            plan,
+            apply=True,
+            now_epoch=time.time(),
+            capacity_reclaim_bytes=0,
+            planned_reclaim_bytes=int(plan["reclaim"]["planned_bytes"]),
+        )
+
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["deleted_files"], 0)
+        self.assertTrue(recording.exists())
 
 
 class RecordingRetentionConfigTest(unittest.TestCase):

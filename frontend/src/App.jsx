@@ -7385,7 +7385,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           {recordingCache ? <div className="probe-result"><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span><span>{recordingCache.metrics?.playback_hits || 0} hits / {recordingCache.metrics?.playback_misses || 0} misses, {recordingCache.metrics?.playback_avg_remux_ms || 0} ms average remux</span></div> : null}
           <div className="retention-settings">
             <div className="retention-heading">
-              <div><h4>Recording retention</h4><p>Keep recent high-quality video and longer substream history without filling the shared disk.</p></div>
+              <div><h4>Recording retention</h4><p>Daily storage planning with lightweight cleanup checks every 15 minutes.</p></div>
               <span className={`retention-state ${retentionStatus?.state || "starting"}`}>{String(retentionStatus?.state || "calculating").replaceAll("_", " ")}</span>
             </div>
             <div className="retention-fields">
@@ -7402,7 +7402,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {retentionError ? <div className="error-banner">{retentionError}</div> : null}
             <div className="retention-actions">
               <button type="button" onClick={() => runRetention(false)}><RefreshCcw size={15} /> Recalculate</button>
-              <button type="button" className="danger" onClick={() => runRetention(true)} disabled={["queued", "running", "cleaning"].includes(retentionStatus?.state)}><Trash2 size={15} /> Clean Up Now</button>
+              <button type="button" className="danger" onClick={() => runRetention(true)} disabled={["queued", "planning", "cleaning", "waiting"].includes(retentionStatus?.state)}><Trash2 size={15} /> Clean Up Now</button>
             </div>
             <p className="retention-protection"><ShieldCheck size={15} /> Incident clips, snapshots, metadata databases, and the newest five minutes of recording are never removed by this cleanup.</p>
           </div>

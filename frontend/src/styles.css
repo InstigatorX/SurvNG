@@ -4677,7 +4677,8 @@ section.detection-settings-card {
 }
 
 .retention-state.cleaning,
-.retention-state.running,
+.retention-state.planning,
+.retention-state.waiting,
 .retention-state.queued {
   background: color-mix(in srgb, var(--accent) 15%, var(--control-muted));
   color: var(--accent);

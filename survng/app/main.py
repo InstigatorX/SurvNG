@@ -528,14 +528,6 @@ def _active_storage_tasks(active_manager: AppManager) -> list[str]:
     if maintenance.get("status") in {"running", "cancelling"}:
         mode = str(maintenance.get("mode") or "maintenance").replace("_", " ")
         tasks.append(f"storage {mode}")
-    try:
-        retention = active_manager.recorder.retention_status()
-    except Exception:
-        retention = {}
-    if isinstance(retention, dict) and retention.get("state") in {
-        "queued", "running", "cleaning"
-    }:
-        tasks.append("recording retention")
     return tasks
 
 
