@@ -2507,6 +2507,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, imageSize
       <section>
         <h3>Tracked objects</h3>
         {objectTracks.length ? <p>{String(incidentTracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(incidentTracking?.sample_fps || 0) || "?"} FPS.</p> : <p>No stored tracks for this incident.</p>}
+        {incidentTracking?.coverage_incomplete ? <small className="analysis-error">Tracking was interrupted by a {Number(incidentTracking.maximum_coverage_gap_seconds || 0).toFixed(1)}s frame coverage gap. Later movement may be incomplete.</small> : null}
         {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
           <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
           <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>

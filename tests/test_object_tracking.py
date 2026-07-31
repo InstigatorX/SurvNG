@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1009,6 +1010,142 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         )
         self.assertGreaterEqual(final_tracks[0]["observations"], 7)
         self.assertGreaterEqual(updates[-1]["catchup_frames_processed"], 6)
+
+    def test_retries_catchup_when_next_recording_segment_is_still_open(self) -> None:
+        backfill_ready = threading.Event()
+        updates: list[dict] = []
+        provider_calls = 0
+        event_epoch = time.time() - 6.0
+        event_at = datetime.fromtimestamp(event_epoch, timezone.utc)
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("car", 0.9, (10, 10, 60, 70))]
+
+        def catchup_provider(start_epoch, end_epoch, sample_fps, frame_width):
+            nonlocal provider_calls
+            provider_calls += 1
+            self.assertEqual(sample_fps, 2.0)
+            self.assertEqual(frame_width, 100)
+            # The first query sees only the preceding finalized segment. The
+            # second emulates the next segment still being open. A subsequent
+            # retry can read it after recorder finalization.
+            available_until = event_epoch + 1.5 if provider_calls < 3 else end_epoch
+            captured_at = start_epoch
+            while captured_at <= min(end_epoch, available_until) + 1e-6:
+                yield captured_at, np.zeros((100, 100, 3), dtype=np.uint8)
+                captured_at += 0.5
+
+        live_epoch = event_epoch + 6.0
+        live_token = time.monotonic()
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if int(tracking.get("catchup_frames_processed") or 0) >= 10:
+                backfill_ready.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                live_epoch,
+                live_token,
+            ),
+            catchup_frame_provider=catchup_provider,
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        with patch(
+            "survng.app.object_tracking.TRACKING_CATCHUP_RETRY_SECONDS",
+            0.01,
+        ):
+            self.assertTrue(session.start(
+                43,
+                event_at,
+                [detection("car", 0.95, (10, 10, 60, 70))],
+                np.zeros((100, 100, 3), dtype=np.uint8),
+            ))
+            self.assertTrue(backfill_ready.wait(2.0))
+            session.stop()
+
+        self.assertGreaterEqual(provider_calls, 3)
+        self.assertEqual(updates[-1]["state"], "complete")
+        self.assertFalse(updates[-1]["coverage_incomplete"])
+        self.assertEqual(updates[-1]["coverage_gap_count"], 0)
+        self.assertEqual(len(updates[-1]["tracks"]), 1)
+        self.assertGreaterEqual(updates[-1]["tracks"][0]["observations"], 11)
+
+    def test_unresolved_catchup_gap_is_reported_as_interrupted(self) -> None:
+        frame_processed = threading.Event()
+        updates: list[dict] = []
+        event_at = datetime.fromtimestamp(time.time() - 6.0, timezone.utc)
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detection("car", 0.9, (10, 10, 60, 70))]
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if int(tracking.get("frames_processed") or 0) >= 1:
+                frame_processed.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(sample_fps=2.0, max_session_seconds=3.0),
+            detector=Detector(),
+            frame_provider=lambda: (
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            ),
+            catchup_frame_provider=lambda *_args: (),
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        with (
+            patch(
+                "survng.app.object_tracking.TRACKING_CATCHUP_SETTLE_SECONDS",
+                0.05,
+            ),
+            patch(
+                "survng.app.object_tracking.TRACKING_CATCHUP_RETRY_SECONDS",
+                0.01,
+            ),
+            self.assertLogs("survng.app.object_tracking", level="WARNING"),
+        ):
+            self.assertTrue(session.start(
+                44,
+                event_at,
+                [detection("car", 0.95, (10, 10, 60, 70))],
+                np.zeros((100, 100, 3), dtype=np.uint8),
+            ))
+            self.assertTrue(frame_processed.wait(2.0))
+            session.stop()
+
+        self.assertEqual(updates[-1]["state"], "interrupted")
+        self.assertTrue(updates[-1]["coverage_incomplete"])
+        self.assertEqual(updates[-1]["coverage_gap_count"], 1)
+        self.assertGreater(updates[-1]["maximum_coverage_gap_seconds"], 3.0)
 
     def test_detector_failures_persist_terminal_failure_state(self) -> None:
         terminal = threading.Event()

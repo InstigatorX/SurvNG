@@ -19,6 +19,8 @@ from .zones import apply_detection_zones
 
 LOGGER = logging.getLogger(__name__)
 TRACKING_STOP_TIMEOUT_SECONDS = 18.0
+TRACKING_CATCHUP_SETTLE_SECONDS = 5.0
+TRACKING_CATCHUP_RETRY_SECONDS = 0.25
 Box = tuple[float, float, float, float]
 FrameSample = tuple[np.ndarray, float, float]
 FrameProvider = Callable[[], FrameSample | None]
@@ -877,6 +879,8 @@ class ObjectTrackingSession:
         self._frame_width = 0
         self._frame_height = 0
         self._catchup_frames_processed = 0
+        self._coverage_gap_count = 0
+        self._maximum_coverage_gap_seconds = 0.0
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -888,6 +892,9 @@ class ObjectTrackingSession:
             "confirmed_tracks": 0,
             "frames_processed": 0,
             "catchup_frames_processed": 0,
+            "coverage_gap_count": 0,
+            "maximum_coverage_gap_seconds": 0.0,
+            "coverage_incomplete": False,
             "last_error": "",
             "reid_failures": 0,
             "reid_attempts": 0,
@@ -1067,6 +1074,8 @@ class ObjectTrackingSession:
             self._frame_width = 0
             self._frame_height = 0
             self._catchup_frames_processed = 0
+            self._coverage_gap_count = 0
+            self._maximum_coverage_gap_seconds = 0.0
             tracker = self.tracker_registry.create(
                 self.config.implementation,
                 self.config,
@@ -1157,6 +1166,44 @@ class ObjectTrackingSession:
                 self._persist(event_id, tracker, sample_epoch, tracked, frames_processed, "active")
                 return True
 
+            def process_catchup_until(target_epoch: float) -> bool:
+                """Consume newly finalized recording frames up to ``target_epoch``.
+
+                The recorder index intentionally exposes only finalized segments. A
+                delayed tracking session can therefore catch up to the end of the
+                previous segment while the next segment is still being written. This
+                helper is safe to call repeatedly as segments become available.
+                """
+                nonlocal captured_at
+                if self.catchup_frame_provider is None or initial_frame is None:
+                    return False
+                catchup_start = captured_at + interval
+                if target_epoch <= catchup_start:
+                    return False
+                advanced = False
+                catchup_frames = iter(
+                    self.catchup_frame_provider(
+                        catchup_start,
+                        target_epoch,
+                        self.config.sample_fps,
+                        min(1280, int(initial_frame.shape[1])),
+                    )
+                )
+                try:
+                    for sample_epoch, frame in catchup_frames:
+                        if stop.is_set() or time.monotonic() >= self._deadline:
+                            break
+                        if sample_epoch <= captured_at or sample_epoch > target_epoch:
+                            continue
+                        process_frame(frame, sample_epoch, catchup=True)
+                        captured_at = sample_epoch
+                        advanced = True
+                finally:
+                    close_catchup = getattr(catchup_frames, "close", None)
+                    if callable(close_catchup):
+                        close_catchup()
+                return advanced
+
             catchup_until = time.time()
             if (
                 self.catchup_frame_provider is not None
@@ -1165,28 +1212,8 @@ class ObjectTrackingSession:
             ):
                 # Start immediately after the actual selected sample. The
                 # provider and loop still reject non-increasing timestamps.
-                catchup_start = captured_at + interval
                 try:
-                    catchup_frames = iter(
-                        self.catchup_frame_provider(
-                            catchup_start,
-                            catchup_until,
-                            self.config.sample_fps,
-                            min(1280, int(initial_frame.shape[1])),
-                        )
-                    )
-                    try:
-                        for sample_epoch, frame in catchup_frames:
-                            if stop.is_set() or time.monotonic() >= self._deadline:
-                                break
-                            if sample_epoch <= captured_at or sample_epoch > catchup_until:
-                                continue
-                            process_frame(frame, sample_epoch, catchup=True)
-                            captured_at = sample_epoch
-                    finally:
-                        close_catchup = getattr(catchup_frames, "close", None)
-                        if callable(close_catchup):
-                            close_catchup()
+                    process_catchup_until(catchup_until)
                 except Exception:
                     LOGGER.exception(
                         "recorded tracking catch-up failed for %s event %d; continuing live",
@@ -1219,6 +1246,63 @@ class ObjectTrackingSession:
                 if self._catchup_frames_processed and sample_epoch <= captured_at:
                     next_sample = time.monotonic() + interval
                     continue
+                coverage_gap = sample_epoch - captured_at
+                gap_backfilled = False
+                if (
+                    self.catchup_frame_provider is not None
+                    and initial_frame is not None
+                    and coverage_gap > self.config.lost_timeout_seconds
+                ):
+                    # A live frame far ahead of the last recorded sample would age
+                    # every track out immediately. Give the recorder's currently-open
+                    # segment a bounded opportunity to finalize, then replay the gap
+                    # in timestamp order before returning to live frames.
+                    settle_deadline = min(
+                        deadline,
+                        time.monotonic() + TRACKING_CATCHUP_SETTLE_SECONDS,
+                    )
+                    while (
+                        not stop.is_set()
+                        and sample_epoch - captured_at > interval * 1.5
+                        and time.monotonic() < settle_deadline
+                    ):
+                        try:
+                            gap_backfilled = bool(
+                                process_catchup_until(sample_epoch)
+                                or gap_backfilled
+                            )
+                        except Exception:
+                            LOGGER.exception(
+                                "recorded tracking gap backfill failed for %s event %d",
+                                self.camera.id,
+                                event_id,
+                            )
+                            break
+                        if sample_epoch - captured_at <= interval * 1.5:
+                            break
+                        wait_for = min(
+                            TRACKING_CATCHUP_RETRY_SECONDS,
+                            max(0.0, settle_deadline - time.monotonic()),
+                        )
+                        if wait_for <= 0.0 or stop.wait(wait_for):
+                            break
+                    coverage_gap = sample_epoch - captured_at
+                    if coverage_gap > self.config.lost_timeout_seconds:
+                        self._coverage_gap_count += 1
+                        self._maximum_coverage_gap_seconds = max(
+                            self._maximum_coverage_gap_seconds,
+                            coverage_gap,
+                        )
+                        LOGGER.warning(
+                            "object tracking coverage gap for %s event %d: %.3fs",
+                            self.camera.id,
+                            event_id,
+                            coverage_gap,
+                        )
+                if gap_backfilled and sample_epoch <= captured_at + interval * 0.5:
+                    last_frame_token = frame_token
+                    next_sample = time.monotonic() + interval
+                    continue
                 if last_frame_token is not None and frame_token <= last_frame_token:
                     if not tracker.has_live_tracks(now_epoch):
                         break
@@ -1233,7 +1317,8 @@ class ObjectTrackingSession:
                     break
                 next_sample = max(next_sample + interval, time.monotonic())
             final_epoch = time.time()
-            self._persist(event_id, tracker, final_epoch, None, frames_processed, "complete")
+            final_state = "interrupted" if self._coverage_gap_count else "complete"
+            self._persist(event_id, tracker, final_epoch, None, frames_processed, final_state)
             self._set_status(
                 enabled=True,
                 active=False,
@@ -1288,6 +1373,12 @@ class ObjectTrackingSession:
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,
+            "coverage_gap_count": self._coverage_gap_count,
+            "maximum_coverage_gap_seconds": round(
+                self._maximum_coverage_gap_seconds,
+                3,
+            ),
+            "coverage_incomplete": self._coverage_gap_count > 0,
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "tracks": tracks,
             "reid_diagnostics": {
@@ -1325,6 +1416,12 @@ class ObjectTrackingSession:
             confirmed_tracks=len(tracks),
             frames_processed=frames_processed,
             catchup_frames_processed=self._catchup_frames_processed,
+            coverage_gap_count=self._coverage_gap_count,
+            maximum_coverage_gap_seconds=round(
+                self._maximum_coverage_gap_seconds,
+                3,
+            ),
+            coverage_incomplete=self._coverage_gap_count > 0,
             reid_recoveries=(
                 self._reid_recovery_base + sum(recoveries_by_label.values())
             ),
@@ -1346,7 +1443,7 @@ class ObjectTrackingSession:
                 )
             },
         )
-        if state == "complete":
+        if state in {"complete", "interrupted"}:
             self._publish_safely(event_id, payload)
 
     def _persist_failure(
