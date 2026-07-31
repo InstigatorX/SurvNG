@@ -658,9 +658,11 @@ p {
 
 .incident-desktop-focus {
   position: relative;
+  display: grid;
+  align-items: stretch;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 10px;
 }
 
@@ -695,12 +697,18 @@ p {
 
 .incident-desktop-focus .incident-card {
   width: 100%;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
   margin: 0 auto;
 }
 
 .incident-desktop-focus .incident-preview,
 .incident-desktop-focus .incident-preview .snapshot-frame {
-  aspect-ratio: 16 / 9;
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
+  aspect-ratio: auto;
 }
 
 .incident-inspector {
@@ -2321,6 +2329,22 @@ button.status-pill.hud-toggle:disabled {
 
 .incident-labels .pill {
   max-width: 92px;
+}
+
+.incident-labels .object-icon-pill {
+  display: inline-flex;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+  padding: 0;
+  pointer-events: auto;
+}
+
+.incident-labels .object-icon-pill svg {
+  display: block;
 }
 
 .incident-meta strong,

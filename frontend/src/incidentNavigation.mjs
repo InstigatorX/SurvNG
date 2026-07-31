@@ -112,6 +112,20 @@ export function incidentTriggerLabel(incident) {
     : "Camera";
 }
 
+export function incidentObjectIconName(label) {
+  const normalized = String(label || "").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+  if (["person", "human"].includes(normalized)) return "person";
+  if (normalized === "face") return "face";
+  if (["car", "vehicle"].includes(normalized)) return "car";
+  if (normalized === "truck") return "truck";
+  if (normalized === "bus") return "bus";
+  if (["motorcycle", "motorbike", "bicycle", "bike"].includes(normalized)) return "bike";
+  if (normalized === "cat") return "cat";
+  if (normalized === "dog") return "dog";
+  if (["robot_lawnmower", "robot_mower", "lawnmower", "mower"].includes(normalized)) return "mower";
+  return "object";
+}
+
 export function incidentThumbnailPageSize({ width, height, density, columns: requestedColumns, gap: requestedGap, horizontalPadding: requestedPadding }) {
   const safeWidth = Math.max(0, Number(width) || 0);
   const safeHeight = Math.max(0, Number(height) || 0);

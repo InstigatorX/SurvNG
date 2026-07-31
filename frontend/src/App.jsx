@@ -3,7 +3,12 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   ArrowLeft,
+  Bike,
+  Bot,
+  BusFront,
   Camera,
+  CarFront,
+  Cat,
   CircleAlert,
   ChevronLeft,
   ChevronRight,
@@ -13,6 +18,7 @@ import {
   Crop,
   Cog,
   Download,
+  Dog,
   Cpu,
   Film,
   Gauge,
@@ -39,7 +45,9 @@ import {
   SkipForward,
   Sun,
   Trash2,
+  Truck,
   Undo2,
+  UserRound,
   UserPlus,
   Users,
   Rows3,
@@ -71,7 +79,7 @@ import {
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -1681,6 +1689,34 @@ function incidentLabels(incident) {
   return Array.from(new Set(labels.filter(Boolean)));
 }
 
+function IncidentObjectIcon({ label, size = 14 }) {
+  const icons = {
+    person: UserRound,
+    face: ScanFace,
+    car: CarFront,
+    truck: Truck,
+    bus: BusFront,
+    bike: Bike,
+    cat: Cat,
+    dog: Dog,
+    mower: Bot,
+    object: CircleDot,
+  };
+  const Icon = icons[incidentObjectIconName(label)] || CircleDot;
+  return <Icon size={size} strokeWidth={2.2} aria-hidden="true" />;
+}
+
+function IncidentObjectBadges({ labels }) {
+  if (!labels.length) {
+    return <span className="pill quiet object-icon-pill" aria-label="Motion only" title="Motion only"><Radar size={14} strokeWidth={2.2} aria-hidden="true" /></span>;
+  }
+  return labels.slice(0, 3).map((label) => (
+    <span className="pill object-icon-pill" key={label} aria-label={label} title={label}>
+      <IncidentObjectIcon label={label} />
+    </span>
+  ));
+}
+
 function hasDetectedObjects(event) {
   if (typeof event.has_objects === "boolean") return event.has_objects;
   return eventObjects(event).some((object) => object.label && object.incident_eligible !== false) || incidentLabels(event).length > 0;
@@ -2402,7 +2438,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
                 <time>{expanded ? previewTimeText : timeText}</time>
               </div>
               <div className="pill-row compact incident-labels">
-                {labels.length ? labels.slice(0, 3).map((item) => <span className="pill" key={item}>{item}</span>) : <span className="pill quiet">motion</span>}
+                <IncidentObjectBadges labels={labels} />
               </div>
             </div>
           ) : null}
@@ -2415,7 +2451,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
             onEnded={() => setInlineVideoActive(false)}
           />
           {desktopWorkspace
-            ? (!expanded ? <span className="event-count" aria-label={countText}>{countText}</span> : null)
+            ? (!expanded ? <span className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} aria-label={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`}>{triggerLabel}</span> : null)
             : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
         </SnapshotImage>
       </div>
