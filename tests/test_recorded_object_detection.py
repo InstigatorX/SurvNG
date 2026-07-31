@@ -226,6 +226,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 "survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS",
                 0.001,
             ),
+            patch(
+                "survng.app.motion_pipeline.object_detection.time.time",
+                return_value=event_epoch + 20.0,
+            ),
             patch.object(
                 backend,
                 "_read_recorded_frame",
@@ -282,6 +286,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_SETTLE_SECONDS", 0.0),
             patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_SECONDS", 0.1),
             patch("survng.app.motion_pipeline.object_detection.RECORDED_EVENT_RETRY_INTERVAL_SECONDS", 0.001),
+            patch(
+                "survng.app.motion_pipeline.object_detection.time.time",
+                return_value=event_epoch + 20.0,
+            ),
             patch.object(backend, "_read_recorded_frame", side_effect=read_frame),
         ):
             _frame, objects, _path = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
@@ -289,6 +297,56 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertGreaterEqual(calls_by_offset[0.0], 2)
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
+
+    def test_detector_uses_sparse_late_stage_when_object_appears_after_trigger(self) -> None:
+        event_epoch = 1_800_000_000.0
+        requested_offsets: list[float] = []
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                offset = round(epoch - event_epoch, 1)
+                requested_offsets.append(offset)
+                return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                if int(frame[0, 0, 0]) < 8:
+                    return []
+                return [detected("car", 0.86, (2, 2, 12, 12))]
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+
+        def read_frame(path, _offset, **_kwargs):
+            offset = float(str(path).removeprefix("sample-").removesuffix(".mp4"))
+            return np.full((20, 20, 3), max(0, int(offset)), dtype=np.uint8)
+
+        with (
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(backend, "_read_recorded_frame", side_effect=read_frame),
+        ):
+            _frame, objects, _path = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertIn(8.0, requested_offsets)
+        self.assertIn(8.5, requested_offsets)
+        self.assertNotIn(12.0, requested_offsets)
+        self.assertTrue(objects[0]["incident_eligible"])
+        self.assertEqual(objects[0]["temporal_observations"], 2)
+        self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 8.0)
 
 
 if __name__ == "__main__":

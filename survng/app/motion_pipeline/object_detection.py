@@ -20,9 +20,19 @@ from .context import Frame
 
 
 LOGGER = logging.getLogger(__name__)
-RECORDED_EVENT_FRAME_OFFSETS = (-1.0, -0.5, 0.0, 0.5, 1.0)
+RECORDED_EVENT_FRAME_STAGES = (
+    (-1.0, -0.5, 0.0, 0.5, 1.0),
+    (4.0, 4.5),
+    (8.0, 8.5),
+    (12.0, 12.5),
+)
+RECORDED_EVENT_FRAME_OFFSETS = tuple(
+    offset
+    for stage in RECORDED_EVENT_FRAME_STAGES
+    for offset in stage
+)
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
-RECORDED_EVENT_RETRY_SECONDS = 12.0
+RECORDED_EVENT_RETRY_SECONDS = 24.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 TEMPORAL_ASSOCIATION_MIN_IOU = 0.05
 TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO = 2.5
@@ -313,7 +323,8 @@ class RecordedMotionObjectDetector:
 
     def detect(self, event_at: datetime) -> tuple[Frame | None, list[dict[str, Any]], str]:
         event_epoch = event_at.timestamp()
-        newest_needed = event_epoch + max(RECORDED_EVENT_FRAME_OFFSETS) + RECORDED_EVENT_SETTLE_SECONDS
+        initial_offsets = RECORDED_EVENT_FRAME_STAGES[0]
+        newest_needed = event_epoch + max(initial_offsets) + RECORDED_EVENT_SETTLE_SECONDS
         wait_seconds = max(0.0, newest_needed - time.time())
         if wait_seconds > 0:
             time.sleep(min(wait_seconds, 3.0))
@@ -337,54 +348,65 @@ class RecordedMotionObjectDetector:
             ).items()
         }
 
-        while True:
-            for sample_offset in RECORDED_EVENT_FRAME_OFFSETS:
-                if sample_offset in samples_by_offset:
-                    continue
-                if time.monotonic() >= deadline:
-                    break
-                target_epoch = event_epoch + sample_offset
-                row = self.recorder.recording_at(self.camera.id, target_epoch)
-                if row is None:
-                    continue
-                start_epoch = row.get("start_epoch")
-                if start_epoch is None:
-                    continue
-                frame_offset = max(0.0, target_epoch - float(start_epoch))
-                frame = self._read_recorded_frame(
-                    Path(str(row["path"])),
-                    frame_offset,
-                    deadline=deadline,
-                )
-                if frame is None:
-                    continue
-                objects = self._detect_objects(frame)
-                samples_by_offset[sample_offset] = _RecordedDetectionSample(
-                    offset=sample_offset,
-                    frame=frame,
-                    objects=objects,
-                    recording_path=str(row["path"]),
-                )
+        for stage_index, stage_offsets in enumerate(RECORDED_EVENT_FRAME_STAGES):
+            while True:
+                for sample_offset in stage_offsets:
+                    if sample_offset in samples_by_offset:
+                        continue
+                    if time.monotonic() >= deadline:
+                        break
+                    target_epoch = event_epoch + sample_offset
+                    if target_epoch + RECORDED_EVENT_SETTLE_SECONDS > time.time():
+                        continue
+                    row = self.recorder.recording_at(self.camera.id, target_epoch)
+                    if row is None:
+                        continue
+                    start_epoch = row.get("start_epoch")
+                    if start_epoch is None:
+                        continue
+                    frame_offset = max(0.0, target_epoch - float(start_epoch))
+                    frame = self._read_recorded_frame(
+                        Path(str(row["path"])),
+                        frame_offset,
+                        deadline=deadline,
+                    )
+                    if frame is None:
+                        continue
+                    objects = self._detect_objects(frame)
+                    samples_by_offset[sample_offset] = _RecordedDetectionSample(
+                        offset=sample_offset,
+                        frame=frame,
+                        objects=objects,
+                        recording_path=str(row["path"]),
+                    )
 
-            samples = [
-                samples_by_offset[offset]
-                for offset in RECORDED_EVENT_FRAME_OFFSETS
-                if offset in samples_by_offset
-            ]
-            if samples:
-                selected, objects = _temporal_consensus(
-                    samples,
-                    default_required,
-                    class_confirmations,
-                )
-                if any(item.get("temporal_consensus") is True for item in objects):
-                    return selected.frame, objects, selected.recording_path
-            if len(samples_by_offset) >= len(RECORDED_EVENT_FRAME_OFFSETS):
+                samples = [
+                    samples_by_offset[offset]
+                    for offset in RECORDED_EVENT_FRAME_OFFSETS
+                    if offset in samples_by_offset
+                ]
+                if samples:
+                    selected, objects = _temporal_consensus(
+                        samples,
+                        default_required,
+                        class_confirmations,
+                    )
+                    if any(item.get("temporal_consensus") is True for item in objects):
+                        if stage_index:
+                            LOGGER.info(
+                                "late recorded object discovery confirmed for %s at stage +%.1fs",
+                                self.camera.id,
+                                max(stage_offsets),
+                            )
+                        return selected.frame, objects, selected.recording_path
+                if all(offset in samples_by_offset for offset in stage_offsets):
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
+            if time.monotonic() >= deadline:
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
 
         if samples:
             selected, objects = _temporal_consensus(
