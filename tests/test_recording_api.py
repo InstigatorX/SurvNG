@@ -126,6 +126,39 @@ class RecordingApiTest(unittest.TestCase):
             False,
         )
 
+    def test_fresh_recording_rows_bypass_stale_cache_and_lease_result(self) -> None:
+        stale = [{"path": "/recordings/stale.mp4", "size_bytes": 2048}]
+        current = [{"path": "/recordings/current.mp4", "size_bytes": 4096}]
+        recorder = Mock()
+        recorder.recording_rows_between.return_value = current
+        recorder.discard_missing_recording_rows.return_value = current
+        manager = SimpleNamespace(recorder=recorder)
+        cache_key = ("gate", "main", 100, 200)
+
+        with (
+            patch.object(main, "manager", manager),
+            patch.object(main, "RECORDING_DAY_CACHE", {cache_key: (100.0, stale)}),
+            patch.object(main.time, "monotonic", return_value=101.0),
+        ):
+            rows = main._recording_day_rows(
+                "gate",
+                100.0,
+                200.0,
+                "main",
+                fresh=True,
+            )
+
+        self.assertEqual(rows, current)
+        recorder.recording_rows_between.assert_called_once_with(
+            "gate",
+            100.0,
+            200.0,
+            "main",
+            discover_missing=False,
+        )
+        recorder.discard_missing_recording_rows.assert_called_once_with(current)
+        recorder.lease_recordings_for_playback.assert_called_once_with(current)
+
 
 if __name__ == "__main__":
     unittest.main()

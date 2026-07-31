@@ -505,6 +505,96 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual([item["path"] for item in rows], [str(clip)])
 
+    def test_playback_lease_temporarily_protects_manifest_recordings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            external = Path(tmpdir) / "recordings" / "incident.mp4"
+            external.parent.mkdir(parents=True)
+            external.write_bytes(b"incident")
+            recorder = Recorder(
+                "ffmpeg",
+                Path(tmpdir),
+                segment_seconds=10,
+                protected_recording_paths=lambda: {str(external)},
+            )
+            clip = Path(tmpdir) / "recordings" / "gate" / "main" / "clip.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+
+            with patch("survng.app.recorder.time.monotonic", return_value=100.0):
+                recorder.lease_recordings_for_playback([{"path": str(clip)}], ttl_seconds=20)
+                protected = recorder.retention.protected_paths_provider()
+            with patch("survng.app.recorder.time.monotonic", return_value=121.0):
+                expired = recorder.retention.protected_paths_provider()
+
+        self.assertEqual(protected, {str(external.resolve()), str(clip.resolve())})
+        self.assertEqual(expired, {str(external.resolve())})
+
+    def test_playback_lease_rejects_paths_outside_recording_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            outside = Path(tmpdir) / "outside.mp4"
+
+            recorder.lease_recordings_for_playback([{"path": str(outside)}])
+
+            self.assertEqual(recorder.retention.protected_paths_provider(), set())
+
+    def test_manifest_validation_removes_missing_rows_from_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            present = Path(tmpdir) / "recordings" / "gate" / "main" / "present.mp4"
+            missing = present.with_name("missing.mp4")
+            present.parent.mkdir(parents=True)
+            present.write_bytes(b"recording")
+            rows = [self._row(present), {**self._row(present), "path": str(missing), "name": missing.name}]
+            recorder._store_recording_rows("gate", "main", rows)
+
+            filtered = recorder.discard_missing_recording_rows(rows)
+            with recorder._index_connection() as connection:
+                indexed = [
+                    str(row["path"])
+                    for row in connection.execute("SELECT path FROM recordings ORDER BY path")
+                ]
+
+        self.assertEqual(filtered, [rows[0]])
+        self.assertEqual(indexed, [str(present)])
+
+    def test_recording_index_paths_rebase_when_storage_mount_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            old_storage = root / "systemd-media"
+            new_storage = root / "docker-media"
+            index_dir = root / "index"
+            old_recorder = Recorder(
+                "ffmpeg",
+                old_storage,
+                segment_seconds=10,
+                index_dir=index_dir,
+            )
+            relative = Path("gate") / "main" / "2026-07-30" / "00" / "clip.mp4"
+            old_clip = old_storage / "recordings" / relative
+            old_clip.parent.mkdir(parents=True)
+            old_clip.write_bytes(b"recording")
+            old_recorder._store_recording_rows("gate", "main", [self._row(old_clip)])
+            new_clip = new_storage / "recordings" / relative
+            new_clip.parent.mkdir(parents=True)
+            new_clip.write_bytes(b"recording")
+
+            new_recorder = Recorder(
+                "ffmpeg",
+                new_storage,
+                segment_seconds=10,
+                index_dir=index_dir,
+            )
+            new_recorder._rebase_recording_index_paths()
+            rows = new_recorder.recording_rows_between(
+                "gate",
+                1_783_999_999.0,
+                1_784_000_011.0,
+                discover_missing=False,
+            )
+
+        self.assertEqual([row["path"] for row in rows], [str(new_clip.resolve())])
+
     def test_active_recorder_does_not_hide_last_historical_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

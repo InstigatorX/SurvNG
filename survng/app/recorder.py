@@ -89,13 +89,16 @@ class Recorder:
         self._validation_pending: deque[str] = deque()
         self._validation_pending_set: set[str] = set()
         self._validation_lock = threading.Lock()
+        self._external_protected_recording_paths = protected_recording_paths or set
+        self._playback_lease_lock = threading.Lock()
+        self._playback_leases: dict[str, float] = {}
         self._init_recording_index()
         self.retention = RecordingRetentionService(
             self.storage_dir,
             self.recordings_dir,
             self._index_connection,
             retention_config or RecordingRetentionConfig(),
-            protected_recording_paths,
+            self._protected_recording_paths,
         )
 
     def _index_connection(self) -> sqlite3.Connection:
@@ -153,6 +156,52 @@ class Recorder:
                 ON recordings(start_epoch DESC)
                 WHERE fingerprint_checked = 0
                 """
+            )
+
+    def _rebase_recording_index_paths(self) -> None:
+        """Rebase absolute media paths when the same index is used under a new mount."""
+        recordings_root = self.recordings_dir.resolve()
+        with self._index_connection() as connection:
+            indexed_paths = {
+                str(row["path"])
+                for row in connection.execute("SELECT path FROM recordings")
+            }
+            updates: list[tuple[str, str]] = []
+            duplicates: list[tuple[str]] = []
+            for old_path in tuple(indexed_paths):
+                path = Path(old_path)
+                try:
+                    marker_index = path.parts.index("recordings")
+                except ValueError:
+                    continue
+                relative_parts = path.parts[marker_index + 1:]
+                if not relative_parts or any(part in {"", ".", ".."} for part in relative_parts):
+                    continue
+                candidate = recordings_root.joinpath(*relative_parts)
+                new_path = str(candidate)
+                if new_path == old_path:
+                    continue
+                if new_path in indexed_paths:
+                    duplicates.append((old_path,))
+                else:
+                    updates.append((new_path, old_path))
+                    indexed_paths.add(new_path)
+            if duplicates:
+                connection.executemany(
+                    "DELETE FROM recordings WHERE path = ?",
+                    duplicates,
+                )
+            if updates:
+                connection.executemany(
+                    "UPDATE recordings SET path = ? WHERE path = ?",
+                    updates,
+                )
+        changed = len(updates) + len(duplicates)
+        if changed:
+            LOGGER.info(
+                "Rebased %d recording index paths for storage root %s",
+                changed,
+                self.storage_dir,
             )
 
     def start(self, camera: CameraConfig, source: str = "main") -> None:
@@ -732,6 +781,65 @@ class Recorder:
             row["start_at"] = datetime.fromtimestamp(float(row["start_epoch"]), timezone.utc).isoformat()
         return rows
 
+    def lease_recordings_for_playback(
+        self,
+        rows: list[dict],
+        *,
+        ttl_seconds: float = 90.0,
+    ) -> None:
+        """Keep manifest segments out of retention while clients fetch them."""
+        expires_at = time.monotonic() + max(10.0, float(ttl_seconds))
+        recordings_root = self.recordings_dir.resolve()
+        leased: list[str] = []
+        for row in rows:
+            raw_path = str(row.get("path") or "")
+            if not raw_path:
+                continue
+            resolved = Path(raw_path).resolve(strict=False)
+            try:
+                resolved.relative_to(recordings_root)
+            except ValueError:
+                continue
+            leased.append(str(resolved))
+        if not leased:
+            return
+        with self._playback_lease_lock:
+            self._discard_expired_playback_leases_locked()
+            for path in leased:
+                self._playback_leases[path] = max(
+                    expires_at,
+                    self._playback_leases.get(path, 0.0),
+                )
+
+    def discard_missing_recording_rows(self, rows: list[dict]) -> list[dict]:
+        """Remove missing indexed files before a playback manifest advertises them."""
+        existing: list[dict] = []
+        stale_paths: list[str] = []
+        for row in rows:
+            path = str(row.get("path") or "")
+            if path and Path(path).is_file():
+                existing.append(row)
+            elif path:
+                stale_paths.append(path)
+        self._delete_index_paths(stale_paths)
+        return existing
+
+    def _protected_recording_paths(self) -> set[str]:
+        protected = set(self._external_protected_recording_paths())
+        with self._playback_lease_lock:
+            self._discard_expired_playback_leases_locked()
+            protected.update(self._playback_leases)
+        return protected
+
+    def _discard_expired_playback_leases_locked(self) -> None:
+        now = time.monotonic()
+        expired = [
+            path for path, expires_at in self._playback_leases.items()
+            if expires_at <= now
+        ]
+        for path in expired:
+            self._playback_leases.pop(path, None)
+
     def recording_availability_between(
         self,
         camera_id: str,
@@ -955,6 +1063,7 @@ class Recorder:
             )
 
     def start_indexer(self, cameras: list[CameraConfig]) -> None:
+        self._rebase_recording_index_paths()
         camera_map = {camera.id: camera for camera in cameras if camera.record or camera.record_sub}
         self._index_stop.clear()
         self._index_wake.clear()

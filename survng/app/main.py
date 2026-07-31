@@ -3911,14 +3911,23 @@ def recording_updates(
     }
 
 
-def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, source: str) -> list[dict]:
+def _recording_day_rows(
+    camera_id: str,
+    start_epoch: float,
+    end_epoch: float,
+    source: str,
+    *,
+    fresh: bool = False,
+) -> list[dict]:
     selected_source = recording_source(source)
     cache_key = (camera_id, selected_source, int(start_epoch), int(end_epoch))
     now = time.monotonic()
-    with RECORDING_DAY_CACHE_LOCK:
-        cached = RECORDING_DAY_CACHE.get(cache_key)
-        if cached is not None and now - cached[0] < RECORDING_DAY_CACHE_SECONDS:
-            return cached[1]
+    if not fresh:
+        with RECORDING_DAY_CACHE_LOCK:
+            cached = RECORDING_DAY_CACHE.get(cache_key)
+            if cached is not None and now - cached[0] < RECORDING_DAY_CACHE_SECONDS:
+                manager.recorder.lease_recordings_for_playback(cached[1])
+                return cached[1]
     rows = [
         row for row in manager.recorder.recording_rows_between(
             camera_id,
@@ -3929,6 +3938,9 @@ def _recording_day_rows(camera_id: str, start_epoch: float, end_epoch: float, so
         )
         if int(row.get("size_bytes") or 0) > 1024
     ]
+    if fresh:
+        rows = manager.recorder.discard_missing_recording_rows(rows)
+    manager.recorder.lease_recordings_for_playback(rows)
     manager.recorder.queue_stream_fingerprints(rows)
     with RECORDING_DAY_CACHE_LOCK:
         RECORDING_DAY_CACHE[cache_key] = (now, rows)
@@ -4300,7 +4312,13 @@ def recording_day_hls_playlist(
     _require_recording_camera(camera_id)
     _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
     selected_source = recording_source(source)
-    rows = _recording_day_rows(camera_id, start_epoch, end_epoch, selected_source)
+    rows = _recording_day_rows(
+        camera_id,
+        start_epoch,
+        end_epoch,
+        selected_source,
+        fresh=True,
+    )
     if not rows:
         raise HTTPException(status_code=404, detail="no recordings found")
     target_duration = max(1, math.ceil(max(float(row["duration_seconds"]) for row in rows)))
@@ -4444,7 +4462,13 @@ def event_stream(event_id: int, before: float | None = None, after: float | None
     window_start = event_created_epoch - before_seconds
     window_end = event_created_epoch + after_seconds
     selected_source = recording_source(source)
-    rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
+    rows = _recording_day_rows(
+        camera_id,
+        window_start,
+        window_end,
+        selected_source,
+        fresh=True,
+    )
     if not rows:
         raise HTTPException(status_code=404, detail="no recording window found")
 
