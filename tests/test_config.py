@@ -106,6 +106,7 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertEqual(config.motion_qualification.frame_width, 320)
         self.assertEqual(config.motion_qualification.camera_mode_background_fps, 2.0)
+        self.assertEqual(config.motion_qualification.visual_backup_warmup_seconds, 10.0)
         self.assertEqual(config.motion_qualification.visual_backup_grace_seconds, 1.5)
         self.assertEqual(config.motion_qualification.visual_backup_min_score, 0.70)
         self.assertEqual(config.motion_qualification.visual_backup_min_consecutive, 3)

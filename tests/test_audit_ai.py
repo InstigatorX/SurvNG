@@ -50,6 +50,7 @@ class AuditAiTest(unittest.TestCase):
         self.assertIn("detection was attempted but did not complete", SYSTEM_PROMPT)
         self.assertIn("operator-owned safety settings", SYSTEM_PROMPT)
         self.assertIn("starts only after the initial detector decision", SYSTEM_PROMPT)
+        self.assertIn("audit category of visual_backup", SYSTEM_PROMPT)
 
     def test_audit_prompt_is_neutral_about_decision_outcome(self) -> None:
         prompt = audit_analysis_prompt('{"decision_outcome":{"object_detection_ran":true}}')
@@ -214,6 +215,10 @@ class AuditAiTest(unittest.TestCase):
     def test_pipeline_recommendations_are_high_level_and_bounded(self) -> None:
         self.assertEqual(validate_tuning_value("analysis_preset", "MODULAR"), "modular")
         self.assertEqual(validate_tuning_value("analysis_preset", "ADAPTIVE"), "adaptive")
+        self.assertEqual(validate_tuning_value("visual_backup_min_consecutive", 4), 4)
+        self.assertEqual(validate_tuning_value("visual_backup_min_score", 0.8), 0.8)
+        with self.assertRaises(ValueError):
+            validate_tuning_value("visual_backup_cooldown_seconds", 2)
         with self.assertRaises(ValueError):
             validate_tuning_value("fusion_policy", "weighted")
         with self.assertRaises(ValidationError):

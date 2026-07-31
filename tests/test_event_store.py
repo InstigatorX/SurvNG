@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -591,6 +591,72 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(backups[0]["reason"], "visual_backup_trigger")
             self.assertEqual(qualification_total, 1)
             self.assertEqual(qualification[0]["reason"], "low_persistence")
+
+    def test_visual_backup_event_is_recovered_by_incremental_audit_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                created_at="2026-07-31T16:02:07+00:00",
+                objects_json=json.dumps([
+                    {"label": "car", "confidence": 0.88, "incident_eligible": True},
+                    {
+                        "status": "motion_qualification",
+                        "motion_qualification": {
+                            "mode": "camera_rescue",
+                            "sensitivity": "balanced",
+                            "score": 0.81,
+                            "threshold": 0.48,
+                            "reason": "qualified",
+                            "trigger_count": 1,
+                            "trigger_source": "visual_backup",
+                            "would_suppress": False,
+                            "features": {"persistence": 1.0},
+                        },
+                    },
+                ]),
+            )
+
+            reloaded = EventStore(Path(tmpdir))
+            rows, total = reloaded.motion_audits(category="visual_backup")
+
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["event_id"], event["id"])
+            self.assertEqual(rows[0]["reason"], "visual_backup_trigger")
+            self.assertTrue(rows[0]["object_detected"])
+            features = json.loads(rows[0]["features_json"])
+            self.assertEqual(features["visual_backup_original_reason"], "qualified")
+
+            summary = reloaded.motion_effectiveness(days=90)["by_camera"]["gate"]["camera_rescue"]
+            self.assertEqual(summary["visual_backup_attempts"], 1)
+            self.assertEqual(summary["visual_backup_objects"], 1)
+            self.assertEqual(summary["visual_filtered"], 0)
+
+    def test_visual_backup_without_object_is_not_counted_as_visual_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.add_motion_audit(
+                camera_id="gate",
+                snapshot_path="",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                mode="camera_rescue",
+                sensitivity="balanced",
+                score=0.8,
+                threshold=0.48,
+                reason="visual_backup_trigger",
+                object_detected=False,
+                trigger_count=1,
+                features={},
+                category="visual_backup",
+            )
+
+            summary = store.motion_effectiveness(days=1)["by_camera"]["gate"]["camera_rescue"]
+
+            self.assertEqual(summary["visual_backup_attempts"], 1)
+            self.assertEqual(summary["visual_backup_no_object"], 1)
+            self.assertEqual(summary["visual_filtered"], 0)
+            self.assertEqual(summary["total_decisions"], 0)
 
     def test_suppressed_motion_audit_retry_is_idempotent_after_read_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

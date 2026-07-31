@@ -157,6 +157,7 @@ class MotionQualificationConfig(BaseModel):
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
     camera_mode_background_fps: float = Field(default=2.0, ge=0.5, le=5.0)
+    visual_backup_warmup_seconds: float = Field(default=10.0, ge=0.0, le=120.0)
     visual_backup_grace_seconds: float = Field(default=1.5, ge=0.0, le=5.0)
     visual_backup_min_score: float = Field(default=0.70, ge=0.0, le=1.0)
     visual_backup_score_margin: float = Field(default=0.15, ge=0.0, le=0.5)

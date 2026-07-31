@@ -425,7 +425,10 @@ class EventStore:
         inserts: list[tuple[Any, ...]] = []
         for row in rows:
             qualification = self._qualification_from_objects(str(row["objects_json"] or ""))
-            if not qualification or not qualification.get("would_suppress"):
+            if not qualification:
+                continue
+            visual_backup = qualification.get("trigger_source") == "visual_backup"
+            if not qualification.get("would_suppress") and not visual_backup:
                 continue
             try:
                 objects = json.loads(str(row["objects_json"] or "[]"))
@@ -437,6 +440,14 @@ class EventStore:
                 and item.get("incident_eligible") is not False
                 for item in objects
             ) if isinstance(objects, list) else False
+            raw_features = qualification.get("features")
+            features = dict(raw_features) if isinstance(raw_features, dict) else {}
+            reason = str(qualification.get("reason") or "rejected")
+            category = "qualification"
+            if visual_backup:
+                features["visual_backup_original_reason"] = reason
+                reason = "visual_backup_trigger"
+                category = "visual_backup"
             inserts.append((
                 int(row["id"]),
                 str(row["camera_id"]),
@@ -446,10 +457,11 @@ class EventStore:
                 str(qualification.get("sensitivity") or "balanced"),
                 float(qualification.get("score") or 0.0),
                 float(qualification.get("threshold") or 0.0),
-                str(qualification.get("reason") or "rejected"),
+                reason,
                 int(object_detected),
                 max(1, int(qualification.get("trigger_count") or 1)),
-                json.dumps(qualification.get("features") or {}, separators=(",", ":")),
+                json.dumps(features, separators=(",", ":")),
+                category,
             ))
         if inserts:
             conn.executemany(
@@ -457,8 +469,8 @@ class EventStore:
                 insert or ignore into motion_audits (
                     event_id, camera_id, snapshot_path, created_at, mode,
                     sensitivity, score, threshold, reason, object_detected,
-                    trigger_count, features_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trigger_count, features_json, category
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 inserts,
             )
@@ -986,7 +998,7 @@ class EventStore:
             ).fetchall()
             audit_rows = conn.execute(
                 """
-                select camera_id, mode, reason, event_id, object_detected, features_json
+                select camera_id, mode, reason, event_id, object_detected, features_json, category
                 from motion_audits
                 where created_at >= ?
                 """,
@@ -1006,6 +1018,10 @@ class EventStore:
                 "visual_filtered": 0,
                 "state_deduplicated": 0,
                 "unreviewed_visual_filters": 0,
+                "visual_backup_attempts": 0,
+                "visual_backup_objects": 0,
+                "visual_backup_no_object": 0,
+                "visual_backup_incomplete": 0,
             })
 
         for row in event_rows:
@@ -1030,6 +1046,9 @@ class EventStore:
             )
             summary["allowed_events"] += 1
             summary["object_events" if object_detected else "no_object_events"] += 1
+            if qualification.get("trigger_source") == "visual_backup":
+                summary["visual_backup_attempts"] += 1
+                summary["visual_backup_objects"] += int(object_detected)
             summary["borderline_rescued"] += int(
                 bool(qualification.get("borderline_candidate"))
             )
@@ -1044,6 +1063,15 @@ class EventStore:
             if row["event_id"] is not None:
                 continue
             summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
+            if str(row["category"] or "qualification") == "visual_backup":
+                summary["visual_backup_attempts"] += 1
+                if row["object_detected"] is None:
+                    summary["visual_backup_incomplete"] += 1
+                elif bool(row["object_detected"]):
+                    summary["visual_backup_objects"] += 1
+                else:
+                    summary["visual_backup_no_object"] += 1
+                continue
             reason = str(row["reason"] or "")
             if reason.startswith("event_state_"):
                 summary["state_deduplicated"] += 1

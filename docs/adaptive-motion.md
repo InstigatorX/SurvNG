@@ -34,7 +34,7 @@ strong persistent adaptive motion                  │
   → conservative score and persistence safeguards ┘
 ```
 
-This mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. A visual backup is considered only when adaptive motion is accepted, exceeds both an absolute confidence floor and a margin above the learned scene threshold, persists for multiple samples, and does not match known illumination, insect, persistent-scene, or stationary-foreground rejection reasons.
+This mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. After a startup learning period lets the adaptive background stabilize, a visual backup is considered only when adaptive motion is accepted, exceeds both an absolute confidence floor and a margin above the learned scene threshold, persists for multiple samples, and does not match known illumination, insect, persistent-scene, or stationary-foreground rejection reasons.
 
 SurvNG waits briefly for the camera notice before taking the backup path. A recent ONVIF notice suppresses the backup, and per-camera cooldown plus a five-minute rate limit bounds detector work during a noisy scene. A backup invocation does not create an empty incident: high-resolution object detection must find an incident-eligible object. Every completed backup attempt is stored under **Admin > Motion Audit > Visual backup**, including attempts where no object was found.
 
@@ -66,6 +66,6 @@ The frame is downscaled to `motion_qualification.frame_width` and converted to g
 
 ## CPU and queue behavior
 
-Only enabled visual processors consume analysis time. Camera + visual backup and Visual-triggered modes continuously run the adaptive processor. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded scheduling queues replace stale pending requests with the newest request.
+Only enabled visual processors consume analysis time. Camera + visual backup and Visual-triggered modes continuously run the selected qualification pipeline; the adaptive processor remains the recommended default. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded scheduling queues replace stale pending requests with the newest request.
 
 Capture, recording, and live view are not limited to two cameras. Enabling MOG2 adds a second background-analysis algorithm and therefore increases CPU usage. Runtime camera status reports analyzed frames, accepted candidates, dropped scheduling requests, delivered triggers, pipeline failures, and per-stage timing.

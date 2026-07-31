@@ -116,6 +116,7 @@ FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD: threading.Thread | None = None
 MANAGER_RELOAD_LOCK = threading.RLock()
+APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
@@ -201,6 +202,19 @@ class SecurityBoundaryMiddleware:
 
     async def __call__(self, scope, receive, send) -> None:
         scope_type = scope.get("type")
+        if (
+            scope_type == "http"
+            and APPLICATION_STOPPING.is_set()
+            and str(scope.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
+            and _api_scope_path(scope).startswith("/api/")
+        ):
+            response = JSONResponse(
+                {"detail": "SurvNG is shutting down; configuration changes are temporarily unavailable"},
+                status_code=503,
+                headers={"Cache-Control": "no-store", "Retry-After": "10"},
+            )
+            await response(scope, receive, send)
+            return
         if scope_type == "websocket" and not _same_origin_request(scope):
             await send({"type": "websocket.close", "code": 1008})
             return
@@ -543,6 +557,8 @@ def reload_manager(
         assign_ids=assign_ids,
     )
     with MANAGER_RELOAD_LOCK:
+        if APPLICATION_STOPPING.is_set():
+            raise RuntimeError("configuration reload refused while SurvNG is shutting down")
         previous_config = config
         previous_manager = manager
         active_storage_tasks = _active_storage_tasks(previous_manager)
@@ -756,12 +772,14 @@ def apply_config_update(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    APPLICATION_STOPPING.clear()
     loop = asyncio.get_running_loop()
     early_onvif_thread: threading.Thread | None = None
     early_onvif_lock = threading.Lock()
 
     def release_onvif_before_server_drain() -> None:
         nonlocal early_onvif_thread
+        APPLICATION_STOPPING.set()
         with early_onvif_lock:
             if early_onvif_thread is not None and early_onvif_thread.is_alive():
                 return
@@ -799,6 +817,7 @@ async def lifespan(app: FastAPI):
         _start_recording_prewarmer()
         yield
     finally:
+        APPLICATION_STOPPING.set()
         if early_signal_installed:
             loop.remove_signal_handler(signal.SIGUSR1)
         try:
@@ -811,7 +830,8 @@ async def lifespan(app: FastAPI):
                 _stop_recording_prewarmer()
             finally:
                 try:
-                    manager.stop_all()
+                    with MANAGER_RELOAD_LOCK:
+                        manager.stop_all()
                 finally:
                     if early_onvif_thread is not None and early_onvif_thread.is_alive():
                         early_onvif_thread.join()
@@ -1907,6 +1927,10 @@ def telemetry(hours: int = 24) -> dict:
                 "suppressed": int(motion.get("suppressed") or 0),
                 "dropped": int(motion.get("dropped_triggers") or 0),
                 "queue_depth": int(motion.get("queue_depth") or 0),
+                "visual_backup_candidates": int(motion.get("visual_backup_candidates") or 0),
+                "visual_backup_triggers": int(motion.get("visual_backup_triggers") or 0),
+                "visual_backup_onvif_matches": int(motion.get("visual_backup_onvif_matches") or 0),
+                "visual_backup_rate_limited": int(motion.get("visual_backup_rate_limited") or 0),
             },
             "tracking": {
                 "active": bool(tracking.get("active")),
@@ -2317,6 +2341,7 @@ def _audit_ai_context(
         "post_trigger_seconds": active_config.motion_qualification.post_trigger_seconds,
         "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
         "camera_mode_background_fps": active_config.motion_qualification.camera_mode_background_fps,
+        "visual_backup_warmup_seconds": active_config.motion_qualification.visual_backup_warmup_seconds,
         "visual_backup_grace_seconds": active_config.motion_qualification.visual_backup_grace_seconds,
         "visual_backup_min_score": active_config.motion_qualification.visual_backup_min_score,
         "visual_backup_score_margin": active_config.motion_qualification.visual_backup_score_margin,
@@ -2417,6 +2442,7 @@ def _audit_ai_context(
             "score": audit.get("score"),
             "threshold": audit.get("threshold"),
             "reason": audit.get("reason"),
+            "category": audit.get("category") or "qualification",
             "mode": audit.get("mode"),
             "sensitivity": audit.get("sensitivity"),
             "decision_id": audit.get("decision_id"),
@@ -2443,6 +2469,7 @@ def _audit_ai_context(
                 else bool(audit.get("object_detected"))
             ),
             "eligible_object_found": audit.get("object_detected") == 1,
+            "visual_backup": audit.get("category") == "visual_backup",
         },
         "related_prior_event": related_prior_event,
         "detected_objects": detected_objects,
@@ -2461,6 +2488,13 @@ def _audit_ai_context(
             "burst_quiet_seconds": [0.1, 2],
             "borderline_margin": [0, 0.10],
             "mog2_history_seconds": [5, 300],
+            "visual_backup_warmup_seconds": [0, 120],
+            "visual_backup_grace_seconds": [0, 5],
+            "visual_backup_min_score": [0, 1],
+            "visual_backup_score_margin": [0, 0.5],
+            "visual_backup_min_consecutive": [2, 10],
+            "visual_backup_cooldown_seconds": [5, 300],
+            "visual_backup_max_triggers_5m": [1, 30],
             "sensitivity": ["high", "balanced", "low"],
             "analysis_preset": ["adaptive", "modular", "classic"],
         },

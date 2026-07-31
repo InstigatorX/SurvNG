@@ -31,6 +31,13 @@ ALLOWED_GLOBAL_SETTINGS = {
     "borderline_rescue_enabled",
     "borderline_margin",
     "mog2_history_seconds",
+    "visual_backup_warmup_seconds",
+    "visual_backup_grace_seconds",
+    "visual_backup_min_score",
+    "visual_backup_score_margin",
+    "visual_backup_min_consecutive",
+    "visual_backup_cooldown_seconds",
+    "visual_backup_max_triggers_5m",
 }
 ALLOWED_CAMERA_SETTINGS = {
     "analysis_preset",
@@ -73,6 +80,13 @@ class AuditAiChange(BaseModel):
         "borderline_rescue_enabled",
         "borderline_margin",
         "mog2_history_seconds",
+        "visual_backup_warmup_seconds",
+        "visual_backup_grace_seconds",
+        "visual_backup_min_score",
+        "visual_backup_score_margin",
+        "visual_backup_min_consecutive",
+        "visual_backup_cooldown_seconds",
+        "visual_backup_max_triggers_5m",
         "analysis_preset",
     ]
     value: str | int | float | bool
@@ -122,13 +136,20 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         "burst_quiet_seconds": (0.1, 2.0),
         "borderline_margin": (0.0, 0.10),
         "mog2_history_seconds": (5.0, 300.0),
+        "visual_backup_warmup_seconds": (0.0, 120.0),
+        "visual_backup_grace_seconds": (0.0, 5.0),
+        "visual_backup_min_score": (0.0, 1.0),
+        "visual_backup_score_margin": (0.0, 0.5),
+        "visual_backup_min_consecutive": (2.0, 10.0),
+        "visual_backup_cooldown_seconds": (5.0, 300.0),
+        "visual_backup_max_triggers_5m": (1.0, 30.0),
     }
     if setting not in bounds:
         raise ValueError(f"unsupported motion tuning setting: {setting}")
     low, high = bounds[setting]
     if not low <= number <= high:
         raise ValueError(f"{setting} must be between {low:g} and {high:g}")
-    if setting == "frame_width":
+    if setting in {"frame_width", "visual_backup_min_consecutive", "visual_backup_max_triggers_5m"}:
         return int(round(number))
     return number
 
@@ -175,6 +196,10 @@ SurvNG has three current trigger models:
 3. visual_triggered: adaptive scene analysis is the only automatic trigger. MOG2 may validate it.
    ONVIF notices are diagnostic only and cannot start object detection.
 Selected validators fail open while unavailable or warming so real events are not silently lost.
+
+An audit category of visual_backup means the camera stayed silent and the conservative adaptive
+backup path invoked object detection. Judge both whether the visible motion was credible and whether
+the detector correctly found an incident-eligible object; do not describe it as filtered motion.
 
 An audit can represent motion suppressed before object detection or a decision that proceeded
 because it qualified, bypassed validation, was rescued as borderline, used legacy audit/off behavior,

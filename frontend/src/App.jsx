@@ -6823,12 +6823,16 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
       <div className="motion-audit-grid">
         {items.map((item) => {
           const outcome = motionAuditOutcome(item);
-          const features = Object.entries(item.features || {}).filter(([name]) => !name.startsWith("mog2_") || ["mog2_score", "mog2_track_persistence"].includes(name));
+          const features = Object.entries(item.features || {}).filter(([name, value]) => (
+            typeof value === "number"
+            && Number.isFinite(value)
+            && (!name.startsWith("mog2_") || ["mog2_score", "mog2_track_persistence"].includes(name))
+          ));
           return (
             <article className="motion-audit-card" key={item.id}>
               <button type="button" className="motion-audit-media" onClick={() => onOpen(item)} aria-label={`Open ${item.camera_id} motion audit image`}>
                 {item.has_snapshot
-                  ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} loading="lazy" />
+                  ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} motion decision`} loading="lazy" />
                   : <div className="empty-thumb"><Camera size={28} /><span>Audit image unavailable</span></div>}
                 <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
               </button>
@@ -7612,6 +7616,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>ONVIF background upkeep<select value={String(config.motion_qualification?.camera_mode_background_fps ?? 2)} onChange={(event) => updateConfig(["motion_qualification", "camera_mode_background_fps"], Number(event.target.value))}><option value="1">Low CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Faster adaptation (3 frames/sec)</option><option value="5">Maximum adaptation (5 frames/sec)</option></select><small>When camera alerts trigger motion, SurvNG maintains the visual background at this lower rate. Trigger validation still analyzes the full buffered window.</small></label>
           {config.motion_qualification?.mode === "camera_rescue" ? <>
             <div className="detection-settings-subhead"><strong>Visual backup safeguards</strong><small>These conservative limits control when SurvNG may compensate for a missing camera notice.</small></div>
+            <label>Scene learning time<input type="number" min="0" max="120" step="1" value={config.motion_qualification?.visual_backup_warmup_seconds ?? 10} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_warmup_seconds"], Number(event.target.value))} /><small>After startup, visual backup waits while the adaptive background learns the scene.</small></label>
             <label>Wait for camera notice<input type="number" min="0" max="5" step="0.25" value={config.motion_qualification?.visual_backup_grace_seconds ?? 1.5} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_grace_seconds"], Number(event.target.value))} /><small>Seconds strong visual motion must persist while SurvNG waits for ONVIF.</small></label>
             <label>Minimum visual confidence<input type="number" min="0" max="1" step="0.01" value={config.motion_qualification?.visual_backup_min_score ?? 0.7} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_min_score"], Number(event.target.value))} /><small>Absolute adaptive score required before visual backup is considered.</small></label>
             <label>Confidence above normal<input type="number" min="0" max="0.5" step="0.01" value={config.motion_qualification?.visual_backup_score_margin ?? 0.15} onChange={(event) => updateConfig(["motion_qualification", "visual_backup_score_margin"], Number(event.target.value))} /><small>Additional margin above the camera&apos;s adaptive threshold.</small></label>
@@ -7942,6 +7947,7 @@ function MotionEffectiveness({ cameraId, mode }) {
       <span>{summary.object_events || 0} allowed events found a configured object · {summary.no_object_events || 0} found none</span>
       <span>{Math.round(Number(summary.visual_rejection_rate || 0) * 100)}% visually filtered · {Math.round(Number(summary.object_yield_rate || 0) * 100)}% object yield · {summary.borderline_rescued || 0} borderline rescues</span>
       <span>{summary.suppression_verification_checks || 0} filtered events double-checked · {summary.suppression_verification_rescues || 0} restored after finding an object</span>
+      {summary.visual_backup_attempts ? <span>{summary.visual_backup_attempts} visual backup attempts · {summary.visual_backup_objects || 0} found an object · {summary.visual_backup_no_object || 0} found none{summary.visual_backup_incomplete ? ` · ${summary.visual_backup_incomplete} incomplete` : ""}</span> : null}
       {summary.unreviewed_visual_filters ? <span className="motion-runtime-warning">{summary.unreviewed_visual_filters} visual filters were not independently checked by object detection.</span> : null}
     </div>
   );

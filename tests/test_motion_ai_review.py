@@ -71,6 +71,7 @@ class MotionAiReviewTest(unittest.TestCase):
             report["review_context"]["motion_paradigm"]["paradigm"],
             "camera_triggered",
         )
+        self.assertTrue(all(sample["category"] == "qualification" for sample in report["samples"]))
 
     def test_aggregation_ignores_global_changes_for_per_camera_report(self) -> None:
         report = aggregate_motion_ai_review(

@@ -157,6 +157,8 @@ class CameraWorker:
         self._adaptive_last_completed_at = 0.0
         self._priority_motion_times: deque[float] = deque(maxlen=16)
         self._camera_motion_times: deque[float] = deque(maxlen=32)
+        self._visual_backup_last_matched_camera_at = 0.0
+        self._visual_backup_analysis_started_at = 0.0
         self._visual_backup_candidate_since = 0.0
         self._visual_backup_last_candidate_at = 0.0
         self._visual_backup_consecutive = 0
@@ -346,6 +348,8 @@ class CameraWorker:
             self._adaptive_last_completed_at = 0.0
             self._priority_motion_times.clear()
             self._camera_motion_times.clear()
+            self._visual_backup_last_matched_camera_at = 0.0
+            self._visual_backup_analysis_started_at = 0.0
             self._visual_backup_candidate_since = 0.0
             self._visual_backup_last_candidate_at = 0.0
             self._visual_backup_consecutive = 0
@@ -483,6 +487,7 @@ class CameraWorker:
                 "camera_mode_background_fps": self.motion_config.camera_mode_background_fps,
                 "visual_backup": {
                     "enabled": mode == "camera_rescue",
+                    "warmup_seconds": self.motion_config.visual_backup_warmup_seconds,
                     "grace_seconds": self.motion_config.visual_backup_grace_seconds,
                     "minimum_score": self.motion_config.visual_backup_min_score,
                     "score_margin": self.motion_config.visual_backup_score_margin,
@@ -733,8 +738,7 @@ class CameraWorker:
                         )
                         self.motion_observation_pipeline.process(observation)
                     if (
-                        self.motion_pipeline.continuous_analysis
-                        and self._adaptive_analysis_required()
+                        self._continuous_primary_analysis_required()
                         and self._continuous_primary_analysis_due(captured_at)
                     ):
                         self._analyze_continuous_motion(captured_at)
@@ -819,6 +823,17 @@ class CameraWorker:
         if not self._detection_enabled:
             self._reset_visual_backup_candidate()
             return
+        if (
+            self._visual_backup_analysis_started_at <= 0.0
+            or captured_at < self._visual_backup_analysis_started_at
+        ):
+            self._visual_backup_analysis_started_at = captured_at
+        if (
+            captured_at - self._visual_backup_analysis_started_at
+            < self.motion_config.visual_backup_warmup_seconds
+        ):
+            self._reset_visual_backup_candidate()
+            return
         required_score = max(
             float(self.motion_config.visual_backup_min_score),
             float(result.threshold) + float(self.motion_config.visual_backup_score_margin),
@@ -865,13 +880,19 @@ class CameraWorker:
         ):
             return
         with self._motion_stats_lock:
-            camera_notice_recent = any(
-                0.0 <= captured_at - observed_at
-                <= self.motion_config.visual_backup_cooldown_seconds
-                for observed_at in self._camera_motion_times
+            matched_camera_at = max(
+                (
+                    observed_at
+                    for observed_at in self._camera_motion_times
+                    if 0.0 <= captured_at - observed_at
+                    <= self.motion_config.visual_backup_cooldown_seconds
+                ),
+                default=0.0,
             )
-            if camera_notice_recent:
+            camera_notice_recent = matched_camera_at > 0.0
+            if matched_camera_at > self._visual_backup_last_matched_camera_at:
                 self._motion_stats["visual_backup_onvif_matches"] += 1
+                self._visual_backup_last_matched_camera_at = matched_camera_at
         if camera_notice_recent:
             self._reset_visual_backup_candidate()
             return
@@ -1085,6 +1106,16 @@ class CameraWorker:
             and bool(options.get("include_primary", True))
         )
 
+    def _continuous_primary_analysis_required(self) -> bool:
+        """Return whether this mode needs frame-driven qualification cycles."""
+        return bool(
+            self._adaptive_analysis_required()
+            and (
+                self.motion_pipeline.continuous_analysis
+                or self._trigger_mode() in {"adaptive", "camera_rescue"}
+            )
+        )
+
     def _continuous_primary_analysis_due(self, captured_at: float) -> bool:
         if self._trigger_mode() == "adaptive":
             return True
@@ -1272,6 +1303,16 @@ class CameraWorker:
             features=features,
             telemetry=telemetry,
         )
+
+    def _reset_motion_fusion_runtime(self) -> None:
+        """Reset event-state stages without disturbing unrelated fusion state."""
+        event_state_stage_ids = frozenset(
+            str(stage.get("stage_id") or "")
+            for stage in self.motion_fusion_pipeline.stage_configuration
+            if stage.get("implementation") == "score_event_state"
+        )
+        with self._motion_fusion_lock:
+            self.motion_fusion_pipeline.runtime.reset_stages(event_state_stage_ids)
 
     def _validation_fail_open_result(
         self,
@@ -1658,10 +1699,17 @@ class CameraWorker:
                 str(item.get("topic") or "").startswith("adaptive/")
                 for item in triggers
             )
-            visual_backup = any(
+            visual_backup_queued = any(
                 str(item.get("topic") or "") == "adaptive/visual_backup"
                 for item in triggers
             )
+            visual_backup = adaptive_only and visual_backup_queued
+            if visual_backup_queued and not visual_backup:
+                with self._motion_stats_lock:
+                    matched_camera_at = max(self._camera_motion_times, default=0.0)
+                    if matched_camera_at > self._visual_backup_last_matched_camera_at:
+                        self._motion_stats["visual_backup_onvif_matches"] += 1
+                        self._visual_backup_last_matched_camera_at = matched_camera_at
             prequalified = [
                 item["prequalified"]
                 for item in triggers
@@ -1878,6 +1926,12 @@ class CameraWorker:
                     with self._motion_stats_lock:
                         self._motion_stats["audit_object_matches"] += 1
                 if visual_backup:
+                    if not found_object:
+                        # A backup with no eligible object must not leave the
+                        # fusion event state ACTIVE. A real camera notice that
+                        # arrives just after the backup still deserves its own
+                        # ordinary detector pass.
+                        self._reset_motion_fusion_runtime()
                     self.motion_decision_handler.record_audit(
                         event_id=int(event_id) if event_id is not None else None,
                         decision_id=decision_id if event_id is None else "",

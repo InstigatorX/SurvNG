@@ -33,6 +33,21 @@ class MotionRuntimeState:
             self.generation += 1
         self._close_states(states)
 
+    def reset_stages(self, stage_ids: set[str] | frozenset[str]) -> None:
+        """Reset selected stage state without disturbing unrelated processors."""
+        normalized = {str(stage_id) for stage_id in stage_ids if str(stage_id)}
+        if not normalized:
+            return
+        with self._lock:
+            states = tuple(
+                self.stage_state.pop(stage_id)
+                for stage_id in normalized
+                if stage_id in self.stage_state
+            )
+            if states:
+                self.generation += 1
+        self._close_states(states)
+
     def close(self) -> None:
         """Release runtime-owned resources without creating a new generation."""
         with self._lock:

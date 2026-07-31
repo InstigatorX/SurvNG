@@ -32,6 +32,7 @@ def aggregate_motion_ai_review(
             "audit_id": int(audit["id"]),
             "created_at": audit.get("created_at"),
             "reason": audit.get("reason"),
+            "category": audit.get("category") or "qualification",
             "verdict": advice.verdict,
             "confidence": round(float(advice.confidence), 4),
             "summary": advice.summary,

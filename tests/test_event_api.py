@@ -127,7 +127,14 @@ class EventApiSerializationTest(unittest.TestCase):
                     "onvif_connected": True,
                     "onvif_notifications_received": 12,
                     "onvif_motion_events_received": 4,
-                    "motion_qualification": {"passed": 3, "audit_rejected": 2},
+                    "motion_qualification": {
+                        "passed": 3,
+                        "audit_rejected": 2,
+                        "visual_backup_candidates": 11,
+                        "visual_backup_triggers": 4,
+                        "visual_backup_onvif_matches": 3,
+                        "visual_backup_rate_limited": 2,
+                    },
                     "object_tracking": {
                         "reid_attempts": 7,
                         "reid_successes": 6,
@@ -153,6 +160,10 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
             self.assertEqual(payload["cameras"][0]["onvif"]["notifications"], 12)
             self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)
+            self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_candidates"], 11)
+            self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_triggers"], 4)
+            self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_onvif_matches"], 3)
+            self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_rate_limited"], 2)
             self.assertEqual(payload["cameras"][0]["tracking"]["reid_attempts"], 7)
             self.assertEqual(payload["cameras"][0]["tracking"]["reid_recoveries"], 2)
             self.assertEqual(
@@ -417,6 +428,8 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertTrue(context["decision_outcome"]["filtered_before_object_detection"])
         self.assertFalse(context["decision_outcome"]["object_detection_ran"])
         self.assertIsNone(context["decision_outcome"]["object_detected"])
+        self.assertEqual(context["audit"]["category"], "qualification")
+        self.assertFalse(context["decision_outcome"]["visual_backup"])
         self.assertEqual(
             context["decision_outcome"]["interpretation"]["category"],
             "duplicate_active_event",

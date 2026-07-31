@@ -11,10 +11,25 @@ class ConfigReloadTest(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_config = main.config
         self.previous_manager = main.manager
+        main.APPLICATION_STOPPING.clear()
 
     def tearDown(self) -> None:
+        main.APPLICATION_STOPPING.clear()
         main.config = self.previous_config
         main.manager = self.previous_manager
+
+    def test_manager_reload_is_refused_during_shutdown(self) -> None:
+        active = Mock()
+        main.config = AppConfig(base_path="/old")
+        main.manager = active
+        main.APPLICATION_STOPPING.set()
+
+        with patch("survng.app.main.AppManager") as manager_factory:
+            with self.assertRaisesRegex(RuntimeError, "shutting down"):
+                main.reload_manager(AppConfig(base_path="/new"))
+
+        manager_factory.assert_not_called()
+        active.stop_all_with_runtime_preferences.assert_not_called()
 
     def test_manager_reload_is_refused_without_stopping_active_storage_work(self) -> None:
         active = Mock()

@@ -617,6 +617,23 @@ class MotionPipelineTest(unittest.TestCase):
         self.assertEqual(closed, ["interrupting", "following"])
         self.assertEqual(runtime.stage_state, {})
 
+    def test_runtime_can_reset_selected_stages_without_discarding_other_state(self) -> None:
+        closed: list[str] = []
+        runtime = MotionRuntimeState("gate")
+        runtime.state_for(
+            "event_state",
+            lambda: type("EventState", (), {"close": lambda self: closed.append("event_state")})(),
+        )
+        retained = runtime.state_for("evidence", list)
+        retained.append("sample")
+
+        runtime.reset_stages({"event_state", "missing"})
+
+        self.assertEqual(closed, ["event_state"])
+        self.assertNotIn("event_state", runtime.stage_state)
+        self.assertIs(runtime.stage_state["evidence"], retained)
+        self.assertEqual(runtime.generation, 2)
+
     def test_pipeline_close_from_observer_fails_instead_of_deadlocking(self) -> None:
         class ClosingObserver:
             pipeline = None
