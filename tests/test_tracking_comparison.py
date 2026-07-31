@@ -26,6 +26,35 @@ class Detector:
 
 
 class TrackingComparisonRunnerTest(unittest.TestCase):
+    def test_excluded_classes_are_not_in_offline_comparisons(self) -> None:
+        class DetectorWithFace(Detector):
+            def detect(self, frame, confidence_threshold=None):
+                return [
+                    *super().detect(frame, confidence_threshold),
+                    {
+                        "label": "face",
+                        "confidence": 0.9,
+                        "box": {"x1": 15, "y1": 12, "x2": 30, "y2": 30},
+                    },
+                ]
+
+        registry = ObjectTrackerRegistry()
+        registry.register("survng_hybrid", ByteTrackObjectTracker)
+        registry.register("ultralytics_botsort", ByteTrackObjectTracker)
+        runner = TrackingComparisonRunner(
+            config=ObjectTrackingConfig(min_confirmations=1, excluded_labels=["face"]),
+            detector=DetectorWithFace(),
+            tracker_registry=registry,
+        )
+
+        result = runner.run(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            [(100.0, np.zeros((100, 120, 3), dtype=np.uint8))],
+        )
+
+        for engine in result["engines"].values():
+            self.assertEqual(engine["labels"], {"person": 1})
+
     def test_runs_both_engines_on_the_same_detections_and_reports_metrics(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)

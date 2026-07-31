@@ -102,6 +102,20 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
         self.assertEqual(tracked[0]["track_id"], 2)
 
+    def test_excluded_object_classes_never_receive_track_ids(self) -> None:
+        tracker = ByteTrackObjectTracker(
+            self.config.model_copy(update={"excluded_labels": ["face"]}),
+            high_confidence_threshold=0.7,
+        )
+
+        tracked = tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80)),
+            detection("face", 0.9, (15, 12, 30, 30)),
+        ], 10.0, confirm_new=True)
+
+        self.assertEqual([item["label"] for item in tracked], ["person"])
+        self.assertEqual([item["label"] for item in tracker.summaries(10.0)], ["person"])
+
     def test_transient_scene_sized_box_does_not_pull_confirmed_track_off_object(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         tracker.update(

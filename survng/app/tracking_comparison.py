@@ -267,6 +267,11 @@ class TrackingComparisonRunner:
             failure = detection_failure(objects)
             if failure:
                 raise RuntimeError(f"comparison detector failed: {failure}")
+            objects = [
+                item
+                for item in objects
+                if self.config.tracks_label(item.get("label"))
+            ]
             apply_detection_zones(
                 camera,
                 objects,

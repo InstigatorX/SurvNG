@@ -255,6 +255,7 @@ class CameraConfig(BaseModel):
 class ObjectTrackingConfig(BaseModel):
     enabled: bool = True
     implementation: str = Field(default="survng_hybrid", min_length=1, max_length=64)
+    excluded_labels: list[str] = Field(default_factory=lambda: ["face"], max_length=128)
     sample_fps: float = Field(default=2.0, ge=0.5, le=5.0)
     max_session_seconds: float = Field(default=15.0, ge=3.0, le=120.0)
     lost_timeout_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
@@ -302,9 +303,18 @@ class ObjectTrackingConfig(BaseModel):
             for value in self.vehicle_reid_labels
             if (label := str(value).strip().lower())
         ))
+        self.excluded_labels = list(dict.fromkeys(
+            label
+            for value in self.excluded_labels
+            if (label := str(value).strip().lower())
+        ))
         if self.vehicle_reid_enabled and not self.vehicle_reid_labels:
             raise ValueError("vehicle_reid_labels must contain at least one label")
         return self
+
+    def tracks_label(self, label: object) -> bool:
+        normalized = str(label or "").strip().lower()
+        return bool(normalized and normalized not in self.excluded_labels)
 
     @property
     def appearance_reid_enabled(self) -> bool:

@@ -205,7 +205,7 @@ class UltralyticsBotSortObjectTracker:
         usable = [
             (detection, parsed)
             for detection in detections
-            if detection.get("label")
+            if self.config.tracks_label(detection.get("label"))
             and detection.get("incident_eligible") is not False
             and (parsed := _box(detection.get("box"))) is not None
         ]

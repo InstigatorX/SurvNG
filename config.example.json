@@ -61,6 +61,7 @@
     "tracking": {
       "enabled": true,
       "implementation": "survng_hybrid",
+      "excluded_labels": ["face"],
       "sample_fps": 2.0,
       "max_session_seconds": 15.0,
       "lost_timeout_seconds": 3.0,

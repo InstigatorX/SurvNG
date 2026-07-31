@@ -403,7 +403,8 @@ class ByteTrackObjectTracker:
         usable = [
             (index, detection, parsed)
             for index, detection in enumerate(detections)
-            if detection.get("label") and (parsed := _box(detection.get("box"))) is not None
+            if self.config.tracks_label(detection.get("label"))
+            and (parsed := _box(detection.get("box"))) is not None
         ]
         high = [
             item
@@ -919,6 +920,11 @@ class ObjectTrackingSession:
         initial_objects: list[dict[str, Any]],
         initial_frame: np.ndarray | None,
     ) -> bool:
+        initial_objects = [
+            item
+            for item in initial_objects
+            if self.config.tracks_label(item.get("label"))
+        ]
         if not self.config.enabled or not any(
             item.get("label") and item.get("incident_eligible") is not False
             for item in initial_objects
@@ -1119,6 +1125,11 @@ class ObjectTrackingSession:
                         raise RuntimeError(f"tracking detector failed repeatedly: {failure}")
                     return False
                 consecutive_failures = 0
+                objects = [
+                    item
+                    for item in objects
+                    if self.config.tracks_label(item.get("label"))
+                ]
                 apply_detection_zones(
                     self.camera,
                     objects,

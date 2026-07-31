@@ -21,6 +21,15 @@ from survng.app.config import (
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_object_tracking_excludes_faces_by_default_and_normalizes_overrides(self) -> None:
+        defaults = ObjectTrackingConfig()
+        self.assertFalse(defaults.tracks_label("face"))
+        self.assertTrue(defaults.tracks_label("person"))
+
+        tracking = ObjectTrackingConfig(excluded_labels=[" Face ", "FACE", "bird", ""])
+        self.assertEqual(tracking.excluded_labels, ["face", "bird"])
+        self.assertFalse(tracking.tracks_label("BIRD"))
+
     def test_person_reid_uses_conservative_similarity_default(self) -> None:
         self.assertEqual(ObjectTrackingConfig().reid_match_threshold, 0.70)
 
