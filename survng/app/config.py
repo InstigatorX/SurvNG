@@ -59,6 +59,9 @@ class MqttConfig(BaseModel):
     discovery_enabled: bool = True
     discovery_prefix: str = "homeassistant"
     incident_events_enabled: bool = True
+    server_status_enabled: bool = True
+    server_name: str = Field(default="SurvNG Server", min_length=1, max_length=128)
+    server_metrics_interval_seconds: int = Field(default=30, ge=10, le=3600)
 
     @field_validator("topic_prefix", "discovery_prefix", mode="before")
     @classmethod

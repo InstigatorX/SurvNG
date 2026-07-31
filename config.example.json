@@ -6,6 +6,16 @@
   "event_clip_before_seconds": 5.0,
   "event_clip_after_seconds": 5.0,
   "recording_segment_seconds": 10.0,
+  "mqtt": {
+    "enabled": false,
+    "host": "",
+    "port": 1883,
+    "topic_prefix": "survng",
+    "discovery_enabled": true,
+    "server_status_enabled": true,
+    "server_name": "SurvNG Server",
+    "server_metrics_interval_seconds": 30
+  },
   "retention": {
     "enabled": true,
     "automatic_cleanup": false,

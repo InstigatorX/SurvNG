@@ -54,6 +54,110 @@ class MqttServiceTest(unittest.TestCase):
         self.assertIn("homeassistant/switch/survng_gate/recording/config", topics)
         self.assertIn("homeassistant/switch/survng_gate/detection/config", topics)
 
+    def test_discovery_includes_server_device_entities(self) -> None:
+        service = self.service()
+        service.publish_discovery([])
+
+        published = {topic: json.loads(payload) for topic, payload, _qos, _retain in service.client.published}
+        self.assertIn("homeassistant/sensor/survng_server/lifecycle/config", published)
+        self.assertIn("homeassistant/binary_sensor/survng_server/problem/config", published)
+        self.assertIn("homeassistant/sensor/survng_server/storage/config", published)
+        lifecycle = published["homeassistant/sensor/survng_server/lifecycle/config"]
+        self.assertEqual(lifecycle["device"]["identifiers"], ["survng_server"])
+        self.assertEqual(lifecycle["availability_topic"], "survng/status")
+
+    def test_server_discovery_can_be_disabled_without_disabling_camera_discovery(self) -> None:
+        service = MqttService(
+            MqttConfig(
+                enabled=True,
+                host="broker",
+                discovery_enabled=True,
+                server_status_enabled=False,
+            ),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+        )
+        service.client = FakeClient()
+        service.connected = True
+        self.addCleanup(service.stop)
+
+        service.publish_discovery([{"id": "gate", "name": "Gate", "zones": []}])
+
+        topics = {item[0] for item in service.client.published}
+        self.assertIn("homeassistant/switch/survng_gate/power/config", topics)
+        self.assertFalse(any("survng_server" in topic for topic in topics))
+
+    def test_server_status_publishes_retained_state_metrics_and_transition_event(self) -> None:
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            server_status_callback=lambda: {
+                "state": {
+                    "health": "ok",
+                    "activity": "idle",
+                    "uptime_seconds": 42.5,
+                },
+                "metrics": {"cameras_running": 2, "cameras_total": 2},
+            },
+        )
+        service.client = FakeClient()
+        service.connected = True
+        self.addCleanup(service.stop)
+
+        service.set_server_lifecycle("running")
+
+        messages = [
+            (topic, json.loads(payload), retained)
+            for topic, payload, _qos, retained in service.client.published
+        ]
+        state = next(item for item in messages if item[0] == "survng/server/state")
+        metrics = next(item for item in messages if item[0] == "survng/server/metrics")
+        event = next(item for item in messages if item[0] == "survng/server/event")
+        self.assertTrue(state[2])
+        self.assertEqual(state[1]["lifecycle"], "running")
+        self.assertEqual(state[1]["health"], "ok")
+        self.assertTrue(metrics[2])
+        self.assertEqual(metrics[1]["cameras_running"], 2)
+        self.assertFalse(event[2])
+
+    def test_server_lifecycle_rejects_unknown_state(self) -> None:
+        service = self.service()
+        with self.assertRaisesRegex(ValueError, "invalid server lifecycle"):
+            service.set_server_lifecycle("rebooted")
+
+    def test_stopping_uses_cached_server_state_without_blocking_status_provider(self) -> None:
+        provider = Mock(return_value={
+            "state": {"health": "ok", "activity": "retention"},
+            "metrics": {"cameras_running": 1},
+        })
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            server_status_callback=provider,
+        )
+        service.client = FakeClient()
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.publish_server_status()
+        provider.reset_mock()
+
+        service.set_server_lifecycle("stopping", refresh_status=False)
+
+        provider.assert_not_called()
+        states = [
+            json.loads(payload)
+            for topic, payload, _qos, _retain in service.client.published
+            if topic == "survng/server/state"
+        ]
+        self.assertEqual(states[-1]["lifecycle"], "stopping")
+        self.assertEqual(states[-1]["health"], "ok")
+        self.assertEqual(states[-1]["activity"], "retention")
+
     def test_feature_state_is_retained(self) -> None:
         service = self.service()
         service.publish_camera_feature_state("gate", "recording", False)

@@ -359,6 +359,10 @@ The power command also accepts JSON such as `{"state":"OFF"}`. Replace `survng` 
 
 When Home Assistant Discovery is enabled, SurvNG publishes retained entity configuration under `homeassistant/` by default. Each camera appears as a Home Assistant device with a power switch, camera-wide motion and object binary sensors, and a last-object sensor. Every enabled detection zone appears as its own device with an any-object binary sensor and one binary sensor for each class configured on that zone. A zone with no class filter receives sensors for every class in the active detection model. Change the discovery prefix if the Home Assistant MQTT integration uses a non-default prefix.
 
+SurvNG also publishes a separate `SurvNG Server` device. Its entities report lifecycle (`starting`, `running`, `stopping`, or `restarting`), overall health, current maintenance activity, uptime, camera and recorder counts, CPU and memory load, cached storage capacity, and object-detector status. Server state and metrics are retained at `survng/server/state` and `survng/server/metrics`; state transitions are published without retention at `survng/server/event`. The existing `survng/status` topic remains the availability and Last Will topic for both server and camera entities. An unexpected process or network failure therefore becomes `offline`; graceful shutdown is reported as `stopping` before disconnect.
+
+Server status publishing can be disabled independently of camera messages. The metrics interval defaults to 30 seconds and can be adjusted from 10 to 3600 seconds under Admin > MQTT. Storage metrics reuse the most recent retention plan instead of scanning the recording filesystem on every MQTT update.
+
 Zone object events are published under `survng/zone/CAMERA_ID/ZONE/object`; per-class events use `survng/zone/CAMERA_ID/ZONE/class/CLASS`. Camera topics contain every object detected for that camera event and are not filtered by incident-zone eligibility.
 
 ## Recording Playback Test

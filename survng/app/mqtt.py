@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 MQTT_COMMAND_QUEUE_SIZE = 64
 MQTT_COMMAND_STOP_TIMEOUT_SECONDS = 5.0
 MQTT_COMMAND_MAX_PAYLOAD_BYTES = 4096
+MQTT_SERVER_MONITOR_STOP_TIMEOUT_SECONDS = 5.0
 
 
 class MqttService:
@@ -31,16 +32,19 @@ class MqttService:
         recording_callback: Callable[[str, bool], bool],
         detection_callback: Callable[[str, bool], bool],
         connected_callback: Callable[[], None] | None = None,
+        server_status_callback: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.config = config
         self.power_callback = power_callback
         self.recording_callback = recording_callback
         self.detection_callback = detection_callback
         self.connected_callback = connected_callback
+        self.server_status_callback = server_status_callback
         self.client: Any = None
         self.connected = False
         self.last_connected_at = ""
         self.last_error = ""
+        self.server_status_error = ""
         self.messages_published = 0
         self.publish_failures = 0
         self.commands_received = 0
@@ -58,6 +62,11 @@ class MqttService:
         self._incident_lock = threading.RLock()
         self._pending_incidents: dict[str, dict[str, Any]] = {}
         self._accept_incidents = True
+        self._server_lifecycle = "starting"
+        self._server_monitor_stop = threading.Event()
+        self._server_monitor_thread: threading.Thread | None = None
+        self._last_server_state: tuple[str, str, str] | None = None
+        self._server_state_payload: dict[str, Any] = {}
 
     @property
     def prefix(self) -> str:
@@ -84,7 +93,7 @@ class MqttService:
                 client.reconnect_delay_set(min_delay=1, max_delay=60)
                 client.will_set(
                     f"{self.prefix}/status",
-                    json.dumps({"online": False}),
+                    json.dumps({"online": False, "lifecycle": "offline"}),
                     qos=self.config.qos,
                     retain=True,
                 )
@@ -92,6 +101,7 @@ class MqttService:
                 client.on_disconnect = self._on_disconnect
                 client.on_message = self._on_message
                 self._start_command_worker()
+                self._start_server_monitor()
                 self.client = client
                 connect_result = client.connect_async(
                     self.config.host.strip(),
@@ -119,9 +129,10 @@ class MqttService:
                     except Exception:
                         LOGGER.debug("failed to roll back MQTT network loop", exc_info=True)
                 self._stop_command_worker()
+                self._stop_server_monitor()
                 LOGGER.exception("failed to start MQTT client")
 
-    def stop(self) -> None:
+    def stop(self, *, lifecycle: str = "stopping") -> None:
         with self._lifecycle_lock:
             client = self.client
             self._accept_incidents = False
@@ -137,7 +148,12 @@ class MqttService:
                 LOGGER.exception("failed to cancel pending MQTT incident timers")
             if client is not None:
                 if was_connected:
-                    self.publish("status", {"online": False}, retain=True)
+                    self.set_server_lifecycle(lifecycle, refresh_status=False)
+                    self.publish(
+                        "status",
+                        {"online": False, "lifecycle": self._server_lifecycle},
+                        retain=True,
+                    )
                 # Invalidate the client before disconnecting so callbacks
                 # racing with shutdown cannot restore connected state or
                 # enqueue commands for a service that is stopping.
@@ -157,6 +173,108 @@ class MqttService:
             self.command_subscriptions_active = False
             self.client = None
             self._stop_command_worker()
+            self._stop_server_monitor()
+
+    def _start_server_monitor(self) -> None:
+        if not self.config.server_status_enabled or self.server_status_callback is None:
+            return
+        thread = self._server_monitor_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._server_monitor_stop.clear()
+        thread = threading.Thread(
+            target=self._run_server_monitor,
+            name="mqtt-server-monitor",
+            daemon=True,
+        )
+        self._server_monitor_thread = thread
+        thread.start()
+
+    def _stop_server_monitor(self) -> None:
+        self._server_monitor_stop.set()
+        thread = self._server_monitor_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=MQTT_SERVER_MONITOR_STOP_TIMEOUT_SECONDS)
+        if thread is not None and thread.is_alive():
+            LOGGER.error("MQTT server monitor did not stop")
+        else:
+            self._server_monitor_thread = None
+
+    def _run_server_monitor(self) -> None:
+        interval = float(self.config.server_metrics_interval_seconds)
+        while not self._server_monitor_stop.wait(interval):
+            if self.connected:
+                self.publish_server_status()
+
+    def set_server_lifecycle(self, lifecycle: str, *, refresh_status: bool = True) -> None:
+        normalized = str(lifecycle or "").strip().lower()
+        if normalized not in {"starting", "running", "stopping", "restarting"}:
+            raise ValueError(f"invalid server lifecycle: {lifecycle}")
+        self._server_lifecycle = normalized
+        if self.connected:
+            self.publish(
+                "status",
+                {
+                    "online": True,
+                    "lifecycle": normalized,
+                    "connected_at": self.last_connected_at,
+                },
+                retain=True,
+            )
+            if refresh_status:
+                self.publish_server_status()
+            else:
+                now = datetime.now(timezone.utc).isoformat()
+                with self._lock:
+                    state = dict(self._server_state_payload)
+                state.update({"lifecycle": normalized, "updated_at": now})
+                self.publish("server/state", state, retain=True)
+                self._publish_server_transition(state, now)
+
+    def _publish_server_transition(self, state: dict[str, Any], created_at: str) -> None:
+        fingerprint = (
+            self._server_lifecycle,
+            str(state.get("health") or "unknown"),
+            str(state.get("activity") or "idle"),
+        )
+        with self._lock:
+            changed = fingerprint != self._last_server_state
+            if changed:
+                self._last_server_state = fingerprint
+        if changed:
+            self.publish(
+                "server/event",
+                {
+                    "event": "state_changed",
+                    "lifecycle": fingerprint[0],
+                    "health": fingerprint[1],
+                    "activity": fingerprint[2],
+                    "created_at": created_at,
+                },
+            )
+
+    def publish_server_status(self) -> None:
+        if not self.config.server_status_enabled or self.server_status_callback is None:
+            return
+        try:
+            snapshot = dict(self.server_status_callback() or {})
+            state = dict(snapshot.get("state") or {})
+            metrics = dict(snapshot.get("metrics") or {})
+            now = datetime.now(timezone.utc).isoformat()
+            state.update({
+                "lifecycle": self._server_lifecycle,
+                "updated_at": now,
+            })
+            metrics["updated_at"] = now
+            with self._lock:
+                self._server_state_payload = dict(state)
+            self.publish("server/state", state, retain=True)
+            self.publish("server/metrics", metrics, retain=True)
+            self._publish_server_transition(state, now)
+            self.server_status_error = ""
+        except Exception as exc:
+            self.server_status_error = redact_secret_text(exc)
+            LOGGER.exception("failed to publish MQTT server telemetry")
 
     def _start_command_worker(self) -> None:
         thread = self._command_thread
@@ -271,6 +389,7 @@ class MqttService:
             "payload_available": "True",
             "payload_not_available": "False",
         }
+        self._publish_server_discovery(discovery_prefix, availability)
         for camera in cameras:
             camera_id = str(camera.get("id") or "")
             if not camera_id:
@@ -425,6 +544,141 @@ class MqttService:
                 payload = {**entity, **availability, "device": device, "origin": {"name": "SurvNG"}}
                 topic = f"{discovery_prefix}/{component}/{object_id}/{entity_name}/config"
                 self.publish_topic(topic, payload, retain=True)
+
+    def _publish_server_discovery(
+        self,
+        discovery_prefix: str,
+        availability: dict[str, str],
+    ) -> None:
+        if not self.config.server_status_enabled:
+            return
+        object_id = "survng_server"
+        state_topic = f"{self.prefix}/server/state"
+        metrics_topic = f"{self.prefix}/server/metrics"
+        device = {
+            "identifiers": [object_id],
+            "name": self.config.server_name,
+            "manufacturer": "SurvNG",
+            "model": "Video Surveillance Server",
+        }
+        entities: list[tuple[str, str, dict[str, Any]]] = [
+            ("sensor", "lifecycle", {
+                "name": "Lifecycle",
+                "unique_id": "survng_server_lifecycle",
+                "state_topic": state_topic,
+                "value_template": "{{ value_json.lifecycle }}",
+                "device_class": "enum",
+                "options": ["starting", "running", "stopping", "restarting"],
+                "icon": "mdi:server",
+                "json_attributes_topic": state_topic,
+            }),
+            ("sensor", "health", {
+                "name": "Health",
+                "unique_id": "survng_server_health",
+                "state_topic": state_topic,
+                "value_template": "{{ value_json.health }}",
+                "device_class": "enum",
+                "options": ["ok", "degraded", "fault"],
+                "icon": "mdi:heart-pulse",
+            }),
+            ("sensor", "activity", {
+                "name": "Activity",
+                "unique_id": "survng_server_activity",
+                "state_topic": state_topic,
+                "value_template": "{{ value_json.activity }}",
+                "icon": "mdi:progress-wrench",
+            }),
+            ("binary_sensor", "problem", {
+                "name": "Problem",
+                "unique_id": "survng_server_problem",
+                "state_topic": state_topic,
+                "value_template": "{{ 'ON' if value_json.health in ['degraded', 'fault'] else 'OFF' }}",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device_class": "problem",
+            }),
+            ("sensor", "uptime", {
+                "name": "Uptime",
+                "unique_id": "survng_server_uptime",
+                "state_topic": state_topic,
+                "value_template": "{{ value_json.uptime_seconds }}",
+                "device_class": "duration",
+                "unit_of_measurement": "s",
+                "state_class": "measurement",
+                "icon": "mdi:timer-outline",
+            }),
+            ("sensor", "cameras", {
+                "name": "Cameras Running",
+                "unique_id": "survng_server_cameras_running",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.cameras_running }}",
+                "state_class": "measurement",
+                "icon": "mdi:cctv",
+                "json_attributes_topic": metrics_topic,
+            }),
+            ("sensor", "recorders", {
+                "name": "Recorders Running",
+                "unique_id": "survng_server_recorders_running",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.recorders_running }}",
+                "state_class": "measurement",
+                "icon": "mdi:record-rec",
+            }),
+            ("sensor", "cpu", {
+                "name": "CPU Load",
+                "unique_id": "survng_server_cpu_load",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.cpu_load_percent }}",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:cpu-64-bit",
+            }),
+            ("sensor", "memory", {
+                "name": "Memory Used",
+                "unique_id": "survng_server_memory_used",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.memory_used_percent }}",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:memory",
+            }),
+            ("sensor", "storage", {
+                "name": "Storage Free",
+                "unique_id": "survng_server_storage_free",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.storage_free_percent }}",
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "icon": "mdi:harddisk",
+            }),
+            ("sensor", "detector", {
+                "name": "Detector",
+                "unique_id": "survng_server_detector",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.detector_state }}",
+                "icon": "mdi:brain",
+            }),
+            ("sensor", "object_queue", {
+                "name": "Object Queue",
+                "unique_id": "survng_server_object_queue",
+                "state_topic": metrics_topic,
+                "value_template": "{{ value_json.object_queue_depth }}",
+                "state_class": "measurement",
+                "icon": "mdi:tray-full",
+            }),
+        ]
+        for component, entity_name, entity in entities:
+            payload = {
+                **entity,
+                **availability,
+                "device": device,
+                "origin": {"name": "SurvNG"},
+            }
+            self.publish_topic(
+                f"{discovery_prefix}/{component}/{object_id}/{entity_name}/config",
+                payload,
+                retain=True,
+            )
 
     def remove_zone_discovery(
         self,
@@ -738,6 +992,16 @@ class MqttService:
             "incident_events_enabled": self.config.incident_events_enabled,
             "incident_topic": f"{self.prefix}/events/incidents",
             "pending_incidents": pending_incidents,
+            "server_status_enabled": self.config.server_status_enabled,
+            "server_state_topic": f"{self.prefix}/server/state",
+            "server_metrics_topic": f"{self.prefix}/server/metrics",
+            "server_metrics_interval_seconds": self.config.server_metrics_interval_seconds,
+            "server_lifecycle": self._server_lifecycle,
+            "server_monitor_running": bool(
+                self._server_monitor_thread is not None
+                and self._server_monitor_thread.is_alive()
+            ),
+            "server_status_error": self.server_status_error,
         }
 
     def _on_connect(self, client: Any, userdata: Any, flags: Any, reason_code: Any, properties: Any) -> None:
@@ -767,12 +1031,21 @@ class MqttService:
             self.subscription_failures += 1
             self.last_error = f"MQTT command subscription failed: {redact_secret_text(exc)}"
             LOGGER.exception("failed to subscribe to MQTT command topics")
-        self.publish("status", {"online": True, "connected_at": self.last_connected_at}, retain=True)
+        self.publish(
+            "status",
+            {
+                "online": True,
+                "lifecycle": self._server_lifecycle,
+                "connected_at": self.last_connected_at,
+            },
+            retain=True,
+        )
         if self.connected_callback:
             try:
                 self.connected_callback()
             except Exception:
                 LOGGER.exception("MQTT connected callback failed")
+        self.publish_server_status()
         LOGGER.info("MQTT connected to %s:%s", self.config.host, self.config.port)
 
     def _on_disconnect(self, client: Any, userdata: Any, disconnect_flags: Any, reason_code: Any, properties: Any) -> None:

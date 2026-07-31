@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import CameraWorker
@@ -143,6 +144,8 @@ class AppManager:
             appearance_encoder=self.person_reidentifier,
         )
         self.mqtt = self._build_mqtt_service(config.mqtt)
+        self._process_started_monotonic = time.monotonic()
+        self._process_started_at = datetime.now(timezone.utc).isoformat()
         self._lifecycle_lock = threading.RLock()
         self._runtime_state_lock = threading.Lock()
         self._runtime_state_path = self.storage_dir / "runtime_state.json"
@@ -464,6 +467,7 @@ class AppManager:
                 self.mqtt.start()
                 self._start_state_monitor()
                 self._started = True
+                self.mqtt.set_server_lifecycle("running")
             except BaseException:
                 self._stopping = True
                 try:
@@ -547,6 +551,7 @@ class AppManager:
                 LOGGER.exception("SurvNG shutdown step failed: %s", label)
 
         started = time.monotonic()
+        self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
         LOGGER.info("SurvNG shutdown: releasing ONVIF subscriptions")
         attempt("ONVIF subscriptions", self.release_onvif_subscriptions)
         attempt("state monitor", self._stop_state_monitor)
@@ -686,6 +691,7 @@ class AppManager:
             self.set_recording,
             self.set_detection,
             self._mqtt_connected,
+            self._mqtt_server_status,
         )
 
     def reconfigure_mqtt(self, mqtt_config: MqttConfig) -> None:
@@ -695,17 +701,146 @@ class AppManager:
                 raise RuntimeError("application manager is stopping")
             previous = self.mqtt
             replacement = self._build_mqtt_service(mqtt_config)
-            previous.stop()
+            previous.stop(lifecycle="restarting")
             self.mqtt = replacement
             try:
                 replacement.start()
+                if self._started:
+                    replacement.set_server_lifecycle("running")
             except BaseException:
                 self.mqtt = previous
                 try:
-                    replacement.stop()
+                    replacement.stop(lifecycle="restarting")
                 finally:
                     previous.start()
+                    if self._started:
+                        previous.set_server_lifecycle("running")
                 raise
+
+    @staticmethod
+    def _memory_usage() -> tuple[int, int, float]:
+        values: dict[str, int] = {}
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                key, raw = line.split(":", 1)
+                values[key] = int(raw.strip().split()[0]) * 1024
+        except (OSError, ValueError, IndexError):
+            return 0, 0, 0.0
+        total = values.get("MemTotal", 0)
+        available = values.get("MemAvailable", values.get("MemFree", 0))
+        used = max(0, total - available)
+        return total, used, round((used / total) * 100.0, 1) if total else 0.0
+
+    @staticmethod
+    def _process_rss_bytes() -> int:
+        try:
+            for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass
+        return 0
+
+    def _mqtt_server_status(self) -> dict[str, dict[str, object]]:
+        """Build a bounded MQTT snapshot without scanning recording storage."""
+        statuses = self.statuses()
+        enabled_ids = {
+            camera.id
+            for camera in self._unique_cameras()
+            if self._camera_enabled.get(camera.id, True)
+        }
+        running_cameras = sum(
+            1 for status in statuses
+            if status.get("id") in enabled_ids and status.get("running")
+        )
+        recorder_total = 0
+        recorders_running = 0
+        for status in statuses:
+            camera = self.camera(str(status.get("id") or ""))
+            if camera is None or camera.id not in enabled_ids or not self.recording_enabled(camera.id):
+                continue
+            if camera.record:
+                recorder_total += 1
+                recorders_running += int(bool(status.get("recording")))
+            if camera.record_sub and camera.live_stream_url:
+                recorder_total += 1
+                recorders_running += int(bool(status.get("sub_recording")))
+
+        detector_state = "disabled"
+        detector_device = str(self.config.detector.device or "")
+        object_queue_depth = 0
+        detector_ready = True
+        if self.config.detector.enabled:
+            try:
+                detector = self.detector_status()
+                runtime = dict(detector.get("runtime") or {})
+                detector_ready = bool(detector.get("ready"))
+                detector_state = "ready" if detector_ready else "unavailable"
+                detector_device = str(detector.get("configured_device") or detector_device)
+                object_queue_depth = int(runtime.get("queue_depth") or 0)
+            except Exception:
+                detector_ready = False
+                detector_state = "unavailable"
+                LOGGER.warning("failed to sample detector status for MQTT", exc_info=True)
+
+        retention = self.recorder.retention_status()
+        retention_state = str(retention.get("state") or "idle")
+        if retention_state == "cleaning":
+            activity = "retention_cleanup"
+        elif retention_state in {"queued", "running"}:
+            activity = "retention"
+        else:
+            activity = "idle"
+        plan = dict(retention.get("plan") or {})
+        storage = dict(plan.get("storage") or {})
+
+        health = "ok"
+        if self._started and not self._stopping:
+            if self.config.detector.enabled and not detector_ready:
+                health = "fault"
+            elif enabled_ids and running_cameras == 0:
+                health = "fault"
+            elif running_cameras < len(enabled_ids) or recorders_running < recorder_total:
+                health = "degraded"
+            if bool(storage.get("emergency")):
+                health = "fault"
+
+        memory_total, memory_used, memory_percent = self._memory_usage()
+        cpu_count = os.cpu_count() or 1
+        try:
+            load_1m = os.getloadavg()[0]
+        except OSError:
+            load_1m = 0.0
+        storage_free_percent = storage.get("free_percent")
+        return {
+            "state": {
+                "health": health,
+                "activity": activity,
+                "started_at": self._process_started_at,
+                "uptime_seconds": round(
+                    max(0.0, time.monotonic() - self._process_started_monotonic),
+                    1,
+                ),
+            },
+            "metrics": {
+                "cameras_running": running_cameras,
+                "cameras_total": len(enabled_ids),
+                "recorders_running": recorders_running,
+                "recorders_total": recorder_total,
+                "cpu_load_percent": round(min(100.0, (load_1m / cpu_count) * 100.0), 1),
+                "memory_used_percent": memory_percent,
+                "memory_used_bytes": memory_used,
+                "memory_total_bytes": memory_total,
+                "process_rss_bytes": self._process_rss_bytes(),
+                "storage_free_percent": storage_free_percent,
+                "storage_free_bytes": storage.get("free_bytes"),
+                "storage_total_bytes": storage.get("total_bytes"),
+                "detector_state": detector_state,
+                "detector_device": detector_device,
+                "object_queue_depth": object_queue_depth,
+                "retention_state": retention_state,
+            },
+        }
 
     def reconfigure_recorders(self, next_config: AppConfig) -> None:
         """Restart recorder processes only; camera capture workers remain active."""

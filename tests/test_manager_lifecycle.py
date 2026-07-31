@@ -42,7 +42,7 @@ class ManagerLifecycleTest(unittest.TestCase):
         with patch("survng.app.manager.MqttService", return_value=replacement) as service:
             manager.reconfigure_mqtt(manager.config.mqtt)
 
-        previous.stop.assert_called_once_with()
+        previous.stop.assert_called_once_with(lifecycle="restarting")
         replacement.start.assert_called_once_with()
         service.assert_called_once()
         manager.workers["gate"].stop.assert_not_called()
@@ -59,7 +59,7 @@ class ManagerLifecycleTest(unittest.TestCase):
                 manager.reconfigure_mqtt(manager.config.mqtt)
 
         self.assertIs(manager.mqtt, previous)
-        replacement.stop.assert_called_once_with()
+        replacement.stop.assert_called_once_with(lifecycle="restarting")
         previous.start.assert_called_once_with()
         manager.workers["gate"].stop.assert_not_called()
 
@@ -115,6 +115,10 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager.start_all()
             self.assertTrue(manager._started)
             self.assertTrue(manager._state_monitor_thread.is_alive())
+            server = manager._mqtt_server_status()
+            self.assertEqual(server["state"]["health"], "ok")
+            self.assertEqual(server["metrics"]["cameras_total"], 0)
+            self.assertEqual(server["metrics"]["detector_state"], "disabled")
 
             manager.stop_all()
 

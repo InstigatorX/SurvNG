@@ -209,6 +209,13 @@ class AppConfigTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             MqttConfig(discovery_prefix="home/+/assistant")
 
+    def test_mqtt_server_metrics_interval_is_bounded(self) -> None:
+        self.assertEqual(MqttConfig().server_metrics_interval_seconds, 30)
+        with self.assertRaises(ValidationError):
+            MqttConfig(server_metrics_interval_seconds=9)
+        with self.assertRaises(ValidationError):
+            MqttConfig(server_metrics_interval_seconds=3601)
+
     def test_save_config_is_atomic_and_does_not_mutate_assigned_ids(self) -> None:
         config = AppConfig(
             cameras=[CameraConfig(id="old", name="Front Door", stream_url="rtsp://camera/main")]
