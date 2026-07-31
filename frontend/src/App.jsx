@@ -7314,6 +7314,12 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     ...Object.keys(eventClassConfirmations),
   ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
+  const trackingExcludedLabels = config.detector?.tracking?.excluded_labels || ["face"];
+  const trackingClassOptions = [...new Set([
+    ...(activeModel?.classes || []),
+    ...trackingExcludedLabels,
+  ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
 
   function selectOpenvinoModel(path) {
     updateConfig(["detector", "model_path"], path);
@@ -7479,7 +7485,20 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           </header>
           <div className="detection-field-grid">
           <label>Tracking detail<select value={String(config.detector?.tracking?.sample_fps ?? 2)} onChange={(event) => updateConfig(["detector", "tracking", "sample_fps"], Number(event.target.value))}><option value="1">Lower CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Smoother (3 frames/sec)</option><option value="5">Maximum detail (5 frames/sec)</option></select><small>OpenVINO runs once for every analyzed tracking frame.</small></label>
-          <label>Do not track<input value={(config.detector?.tracking?.excluded_labels || ["face"]).join(", ")} onChange={(event) => updateConfig(["detector", "tracking", "excluded_labels"], event.target.value.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))} placeholder="face" /><small>Comma-separated object classes. Face detection and recognition continue normally; excluded classes simply do not receive track IDs.</small></label>
+          <div className="zone-class-field tracking-class-field">
+            <span>Do not track</span>
+            <details className="zone-class-dropdown">
+              <summary>{trackingExcludedLabels.length ? trackingExcludedLabels.join(", ") : "Track all classes"}</summary>
+              <div className="zone-class-menu">
+                <label><input type="checkbox" checked={!trackingExcludedLabels.length} onChange={() => updateConfig(["detector", "tracking", "excluded_labels"], [])} /> Track all classes</label>
+                {trackingClassOptions.map((label) => {
+                  const checked = trackingExcludedLabels.includes(label);
+                  return <label key={label}><input type="checkbox" checked={checked} onChange={() => updateConfig(["detector", "tracking", "excluded_labels"], checked ? trackingExcludedLabels.filter((item) => item !== label) : [...trackingExcludedLabels, label])} /> {label}</label>;
+                })}
+              </div>
+            </details>
+            <small>Select classes to exclude. Face detection and recognition continue normally; excluded classes simply do not receive track IDs.</small>
+          </div>
           <label>Maximum duration<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after initial detection.</small></label>
           <label>Lost-object grace<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Seconds to retain an obstructed object.</small></label>
           <label>Camera limit<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Maximum simultaneous tracking sessions.</small></label>
