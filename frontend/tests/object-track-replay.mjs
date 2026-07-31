@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "../src/objectTrackReplay.mjs";
+import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt, withoutIsolatedTrackSpikes } from "../src/objectTrackReplay.mjs";
 
 const tracks = storedObjectTracks({ object_tracking: { tracks: [{
   track_id: 7,
@@ -71,6 +71,35 @@ assert.equal(playbackEpochAt(1000, 8, 8), 1000);
 assert.equal(playbackEpochAt(1000, 29, 8), 1021);
 assert.equal(playbackEpochAt(1000, 0, 0), 1000);
 assert.equal(playbackEpochAt(1000, "bad", 0), null);
+
+const eventManifest = `#EXTM3U
+#EXT-X-START:TIME-OFFSET=7.000,PRECISE=YES
+#EXT-X-PROGRAM-DATE-TIME:2026-07-31T11:57:13+00:00
+#EXTINF:10.000,
+segment.m4s
+`;
+assert.equal(hlsProgramStartEpoch(eventManifest), Date.parse("2026-07-31T11:57:13+00:00") / 1000);
+assert.equal(hlsProgramStartEpoch("#EXTM3U\n#EXTINF:10,"), null);
+assert.equal(hlsProgramStartEpoch(null), null);
+assert.equal(hlsPlaybackOffset(1020, 1013, 19), 26);
+assert.equal(hlsPlaybackOffset(1020, 1020, 0), 0);
+assert.equal(hlsPlaybackOffset(1020, null, 4), 4);
+
+const cleanTrackSamples = withoutIsolatedTrackSpikes([
+  [1.0, 570, 532, 1074, 1858],
+  [1.31, 1120, 312, 2044, 1916],
+  [1.63, 600, 500, 1204, 1916],
+]);
+assert.deepEqual(cleanTrackSamples.map((sample) => sample[0]), [1.0, 1.63]);
+assert.deepEqual(withoutIsolatedTrackSpikes([
+  [1.0, 0, 0, 100, 200],
+  [1.33, 25, 0, 125, 200],
+  [1.66, 50, 0, 150, 200],
+]), [
+  [1.0, 0, 0, 100, 200],
+  [1.33, 25, 0, 125, 200],
+  [1.66, 50, 0, 150, 200],
+]);
 
 assert.deepEqual(containedFrameTransform({ width: 1600, height: 900 }, { width: 1920, height: 1080 }), {
   x: 0,

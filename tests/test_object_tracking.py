@@ -102,6 +102,35 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
         self.assertEqual(tracked[0]["track_id"], 2)
 
+    def test_transient_scene_sized_box_does_not_pull_confirmed_track_off_object(self) -> None:
+        tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
+        tracker.update(
+            [detection("person", 0.9, (570, 532, 1074, 1858))],
+            10.0,
+            confirm_new=True,
+        )
+        tracker.update(
+            [detection("person", 0.9, (575, 530, 1079, 1856))],
+            10.15,
+        )
+
+        transient = tracker.update(
+            [detection("person", 0.9, (1120, 312, 2044, 1916))],
+            10.31,
+        )
+        recovered = tracker.update(
+            [detection("person", 0.9, (600, 500, 1204, 1916))],
+            10.63,
+        )
+
+        self.assertNotEqual(transient[0]["track_id"], 1)
+        self.assertEqual(recovered[0]["track_id"], 1)
+        summary = tracker.summaries(10.63)[0]
+        self.assertEqual(
+            [sample[0] for sample in summary["box_history"]],
+            [10.0, 10.15, 10.63],
+        )
+
     def test_low_confidence_detection_recovers_track_but_does_not_start_one(self) -> None:
         tracker = ByteTrackObjectTracker(self.config, high_confidence_threshold=0.7)
         initial = tracker.update(

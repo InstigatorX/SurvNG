@@ -1,4 +1,5 @@
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -7,6 +8,33 @@ function eventEpoch(event) {
   const parsed = Date.parse(String(event?.created_at || ""));
   if (Number.isFinite(parsed)) return parsed / 1000;
   return finiteNumber(event?.start_epoch);
+}
+
+export function withoutIsolatedTrackSpikes(samples) {
+  if (!Array.isArray(samples) || samples.length < 3) return Array.isArray(samples) ? samples : [];
+  const rejected = new Set();
+  for (let index = 1; index < samples.length - 1; index += 1) {
+    const previous = samples[index - 1];
+    const candidate = samples[index];
+    const next = samples[index + 1];
+    if (![previous, candidate, next].every((sample) => Array.isArray(sample) && sample.length >= 5)) continue;
+    const beforeGap = candidate[0] - previous[0];
+    const afterGap = next[0] - candidate[0];
+    if (beforeGap <= 0 || afterGap <= 0 || beforeGap > 1.5 || afterGap > 1.5) continue;
+    const center = (sample) => [(sample[1] + sample[3]) / 2, (sample[2] + sample[4]) / 2];
+    const diagonal = (sample) => Math.hypot(sample[3] - sample[1], sample[4] - sample[2]);
+    const distance = (left, right) => Math.hypot(left[0] - right[0], left[1] - right[1]);
+    const previousCenter = center(previous);
+    const candidateCenter = center(candidate);
+    const nextCenter = center(next);
+    const stableScale = Math.max(1, diagonal(previous), diagonal(next));
+    if (
+      distance(previousCenter, candidateCenter) > stableScale * 0.40
+      && distance(candidateCenter, nextCenter) > stableScale * 0.40
+      && distance(previousCenter, nextCenter) < stableScale * 0.20
+    ) rejected.add(index);
+  }
+  return samples.filter((_sample, index) => !rejected.has(index));
 }
 
 export function containedFrameTransform(containerSize, sourceSize) {
@@ -60,14 +88,18 @@ export function storedObjectTracks(event) {
         return values.some((value) => value === null) ? [] : [values];
       }).sort((left, right) => left[0] - right[0])
       : [];
-    const boxHistory = Array.isArray(track.box_history)
+    const boxHistory = withoutIsolatedTrackSpikes(Array.isArray(track.box_history)
       ? track.box_history.flatMap((sample) => {
         if (!Array.isArray(sample) || sample.length < 5) return [];
         const values = sample.slice(0, 5).map(finiteNumber);
         if (values.some((value) => value === null) || values[3] <= values[1] || values[4] <= values[2]) return [];
         return [values];
       }).sort((left, right) => left[0] - right[0])
-      : [];
+      : []);
+    const boxTimestamps = new Set(boxHistory.map((sample) => sample[0]));
+    const filteredTrajectory = boxHistory.length
+      ? trajectory.filter((point) => boxTimestamps.has(point[0]))
+      : trajectory;
     const recoveryHistory = Array.isArray(track.reid_recovery_history)
       ? track.reid_recovery_history.flatMap((recovery) => {
         const capturedAt = finiteNumber(recovery?.captured_at);
@@ -92,7 +124,7 @@ export function storedObjectTracks(event) {
       y1: coordinates[1],
       x2: coordinates[2],
       y2: coordinates[3],
-      trajectory,
+      trajectory: filteredTrajectory,
       boxHistory,
       recoveryHistory,
     }];
@@ -140,4 +172,20 @@ export function playbackEpochAt(windowStartEpoch, mediaTime, mediaStartTime) {
   const originTime = finiteNumber(mediaStartTime);
   if (startEpoch === null || currentTime === null || originTime === null) return null;
   return startEpoch + currentTime - originTime;
+}
+
+export function hlsProgramStartEpoch(manifest) {
+  if (typeof manifest !== "string") return null;
+  const line = manifest.split(/\r?\n/).find((value) => value.startsWith("#EXT-X-PROGRAM-DATE-TIME:"));
+  if (!line) return null;
+  const parsed = Date.parse(line.slice("#EXT-X-PROGRAM-DATE-TIME:".length).trim());
+  return Number.isFinite(parsed) ? parsed / 1000 : null;
+}
+
+export function hlsPlaybackOffset(windowStartEpoch, mediaStartEpoch, initialOffset = 0) {
+  const windowStart = finiteNumber(windowStartEpoch);
+  const mediaStart = finiteNumber(mediaStartEpoch);
+  const requestedOffset = finiteNumber(initialOffset);
+  if (windowStart === null || mediaStart === null) return Math.max(0, requestedOffset || 0);
+  return Math.max(0, windowStart - mediaStart) + Math.max(0, requestedOffset || 0);
 }

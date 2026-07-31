@@ -512,6 +512,7 @@ class ByteTrackObjectTracker:
                 score = self._geometry_score(
                     track.predicted_box(captured_at),
                     box,
+                    allow_scale_jump=track.seeded,
                 )
                 if score is not None:
                     candidates.append((score, track_id, index, detection, box))
@@ -588,6 +589,7 @@ class ByteTrackObjectTracker:
                 track.predicted_box(captured_at),
                 box,
                 center_distance_multiplier=2.0 if track.seeded else 1.75,
+                allow_scale_jump=track.seeded,
             )
             if score is None:
                 continue
@@ -631,10 +633,8 @@ class ByteTrackObjectTracker:
         right: Box,
         *,
         center_distance_multiplier: float = 1.0,
+        allow_scale_jump: bool = False,
     ) -> float | None:
-        overlap = _iou(left, right)
-        if overlap >= self.config.match_iou_threshold:
-            return 1.0 + overlap
         left_width = left[2] - left[0]
         left_height = left[3] - left[1]
         right_width = right[2] - right[0]
@@ -647,8 +647,6 @@ class ByteTrackObjectTracker:
         )
         containment = intersection / max(1.0, min(left_area, right_area))
         area_ratio = min(left_area, right_area) / max(1.0, max(left_area, right_area))
-        if containment >= 0.55 and area_ratio >= 0.10:
-            return 0.9 + containment
         left_center = ((left[0] + left[2]) / 2.0, (left[1] + left[3]) / 2.0)
         right_center = ((right[0] + right[2]) / 2.0, (right[1] + right[3]) / 2.0)
         distance = float(np.hypot(
@@ -660,6 +658,22 @@ class ByteTrackObjectTracker:
             max(left_height, right_height),
         )))
         distance_ratio = distance / scale
+        # A detector can occasionally emit a scene-sized box around an object
+        # for one frame.  Its overlap is deceptively high because it contains
+        # the prior box, but accepting it produces a physically impossible
+        # track jump.  Permit major scale changes only while the center remains
+        # close; normal perspective growth and edge entry still satisfy this.
+        if (
+            not allow_scale_jump
+            and right_area > left_area * 2.0
+            and distance_ratio > self.config.match_center_distance_ratio * 0.55
+        ):
+            return None
+        overlap = _iou(left, right)
+        if overlap >= self.config.match_iou_threshold:
+            return 1.0 + overlap
+        if containment >= 0.55 and area_ratio >= 0.10:
+            return 0.9 + containment
         center_limit = (
             self.config.match_center_distance_ratio
             * max(1.0, min(2.0, center_distance_multiplier))

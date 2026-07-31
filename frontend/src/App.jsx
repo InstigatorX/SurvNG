@@ -69,7 +69,7 @@ import {
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
-import { containedFrameTransform, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
+import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentThumbnailPageSize, incidentsNewestFirst, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
@@ -2096,11 +2096,20 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
       const safeAfter = Number.isFinite(after) ? after : 5;
       const window = incidentClipWindow(event, safeBefore, safeAfter);
       const anchorEpoch = eventEpoch(event);
+      const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
+      const streamUrl = eventStreamUrl(eventId, window.before, window.after);
+      const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+        ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
+        : null;
+      if (cancelled) return;
+      const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
       const info = {
-        streamUrl: eventStreamUrl(eventId, window.before, window.after),
+        streamUrl,
         downloadUrl: eventClipUrl(eventId, window.before, window.after),
-        windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null,
-        initialPlaybackOffset: Math.max(0, window.before - safeBefore),
+        windowStartEpoch: timelineStartEpoch,
+        requestedWindowStartEpoch,
+        initialPlaybackOffset,
+        playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
       };
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
@@ -2123,13 +2132,12 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
             playsInline
             preload="metadata"
             onReady={(_player, video) => {
-              const originTime = Number.isFinite(video?.currentTime) ? video.currentTime : 0;
-              setPlaybackOriginTime(originTime);
-              if (clipInfo.initialPlaybackOffset > 0 && video) {
+              setPlaybackOriginTime(0);
+              if (clipInfo.playbackStartOffset > 0 && video) {
                 const seekToIncident = () => {
-                  const targetTime = originTime + clipInfo.initialPlaybackOffset;
+                  const targetTime = clipInfo.playbackStartOffset;
                   video.currentTime = Number.isFinite(video.duration)
-                    ? Math.min(targetTime, Math.max(originTime, video.duration - 0.25))
+                    ? Math.min(targetTime, Math.max(0, video.duration - 0.25))
                     : targetTime;
                 };
                 if (video.paused) video.addEventListener("playing", seekToIncident, { once: true });
@@ -2141,6 +2149,12 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
             onError={() => {
               if (playback.url !== clipInfo.downloadUrl) {
                 setClipLoading(true);
+                setPlaybackOriginTime(null);
+                setClipInfo((current) => current ? {
+                  ...current,
+                  windowStartEpoch: current.requestedWindowStartEpoch,
+                  playbackStartOffset: current.initialPlaybackOffset,
+                } : current);
                 setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
               } else {
                 setClipLoading(false);
@@ -2367,7 +2381,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
         title={desktopWorkspace && expanded ? (snapshotZoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll to zoom. Click to play event video.") : undefined}
       >
         <SnapshotImage
-          event={expanded ? trackingPreview : preview}
+          event={preview}
           alt="incident snapshot"
           layerStyle={desktopWorkspace && expanded ? { transform: `translate3d(${snapshotZoom.x}px, ${snapshotZoom.y}px, 0) scale(${snapshotZoom.scale})` } : null}
           showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
@@ -2376,7 +2390,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
           thumbnail={!desktopWorkspace || !expanded}
           onImageSize={expanded && onImageSize ? (size) => onImageSize({
             ...size,
-            eventId: Number(trackingPreview.representative_event_id || trackingPreview.id),
+            eventId: Number(preview.representative_event_id || preview.id),
           }) : undefined}
         >
           {!desktopWorkspace || !expanded ? (
@@ -2764,14 +2778,23 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       const safeAfter = Number.isFinite(after) ? after : 5;
       const window = incidentClipWindow(viewerEvent, safeBefore, safeAfter);
       const anchorEpoch = eventEpoch(viewerEvent);
+      const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
+      const streamUrl = eventStreamUrl(eventId, window.before, window.after);
+      const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+        ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
+        : null;
+      if (cancelled) return;
+      const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
       const info = {
-        streamUrl: eventStreamUrl(eventId, window.before, window.after),
+        streamUrl,
         downloadUrl: eventClipUrl(eventId, window.before, window.after),
         before: window.before,
         after: window.after,
         duration: window.before + window.after,
-        windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null,
-        initialPlaybackOffset: Math.max(0, window.before - safeBefore),
+        windowStartEpoch: timelineStartEpoch,
+        requestedWindowStartEpoch,
+        initialPlaybackOffset,
+        playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
       };
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
@@ -3074,20 +3097,27 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     }
   }
 
-  function replayTrackingComparison(implementation) {
+  async function replayTrackingComparison(implementation) {
     const engine = trackingComparison?.engines?.[implementation];
     if (!engine || !clipInfo) return;
     const after = Math.max(0.1, Number(trackingComparison.requested_duration_seconds || trackingComparison.duration_seconds || 0));
     const anchorEpoch = eventEpoch(viewerEvent);
+    const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch : null;
+    const streamUrl = eventStreamUrl(manualEventId, 0, after);
+    const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+      ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
+      : null;
     const nextClip = {
       ...clipInfo,
       before: 0,
       after,
       duration: after,
-      streamUrl: eventStreamUrl(manualEventId, 0, after),
+      streamUrl,
       downloadUrl: eventClipUrl(manualEventId, 0, after),
-      windowStartEpoch: Number.isFinite(anchorEpoch) ? anchorEpoch : null,
+      windowStartEpoch: timelineStartEpoch,
+      requestedWindowStartEpoch,
       initialPlaybackOffset: 0,
+      playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, 0),
     };
     setTrackingComparisonEngine(implementation);
     setTrackingVisible(true);
@@ -3233,14 +3263,13 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 playsInline
                 preload="metadata"
                 onReady={(_player, video) => {
-                  const originTime = Number.isFinite(video?.currentTime) ? video.currentTime : 0;
-                  setPlaybackOriginTime(originTime);
-                  const initialOffset = Math.max(0, Number(clipInfo.initialPlaybackOffset) || 0);
-                  if (initialOffset > 0 && video) {
+                  setPlaybackOriginTime(0);
+                  const playbackStartOffset = Math.max(0, Number(clipInfo.playbackStartOffset) || 0);
+                  if (playbackStartOffset > 0 && video) {
                     const seekToSelectedEvent = () => {
-                      const targetTime = originTime + initialOffset;
+                      const targetTime = playbackStartOffset;
                       video.currentTime = Number.isFinite(video.duration)
-                        ? Math.min(targetTime, Math.max(originTime, video.duration - 0.25))
+                        ? Math.min(targetTime, Math.max(0, video.duration - 0.25))
                         : targetTime;
                     };
                     if (video.paused) video.addEventListener("playing", seekToSelectedEvent, { once: true });
@@ -3253,6 +3282,11 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                   if (playback.url !== clipInfo.downloadUrl) {
                     setClipLoading(true);
                     setPlaybackOriginTime(null);
+                    setClipInfo((current) => current ? {
+                      ...current,
+                      windowStartEpoch: current.requestedWindowStartEpoch,
+                      playbackStartOffset: current.initialPlaybackOffset,
+                    } : current);
                     setPlayback({ url: clipInfo.downloadUrl, mimeType: "video/mp4" });
                   } else {
                     setClipLoading(false);
@@ -3483,7 +3517,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
     || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
     || focusedIncident;
-  const focusedSnapshotEvent = incidentTrackingSource(focusedEvent, focusedIncident) || focusedEvent;
+  const focusedSnapshotEvent = focusedEvent;
   const focusedSnapshotEventId = Number(focusedSnapshotEvent?.representative_event_id || focusedSnapshotEvent?.id);
   const focusedLoadedImageSize = Number(focusedImageSize?.eventId) === focusedSnapshotEventId ? focusedImageSize : null;
   const galleryIncidents = visibleIncidents;
@@ -4297,6 +4331,16 @@ function eventClipUrl(eventId, before = 5, after = 5, source = "main") {
 function eventStreamUrl(eventId, before = 5, after = 5, source = "main") {
   const params = new URLSearchParams({ before: before.toFixed(3), after: after.toFixed(3), source });
   return appUrl(`/api/events/${eventId}/stream.m3u8?${params.toString()}`);
+}
+
+async function eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch) {
+  try {
+    const response = await fetch(streamUrl);
+    if (!response.ok) return requestedWindowStartEpoch;
+    return hlsProgramStartEpoch(await response.text()) ?? requestedWindowStartEpoch;
+  } catch {
+    return requestedWindowStartEpoch;
+  }
 }
 
 function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {
