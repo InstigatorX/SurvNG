@@ -1294,9 +1294,10 @@ function liveAspectStorageKey(cameraId, source) {
 function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
+  const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
   const normalizedStreamMode = STREAM_MODES.includes(streamMode) ? streamMode : "motion";
   const lastMotionMs = new Date(camera.last_motion_at || 0).getTime();
-  const motionActive = Number.isFinite(lastMotionMs) && Date.now() - lastMotionMs <= MOTION_WEBRTC_HOLD_MS;
+  const motionActive = camera.running && Number.isFinite(lastMotionMs) && motionWindowNow - lastMotionMs <= MOTION_WEBRTC_HOLD_MS;
   const activeTransport = normalizedStreamMode === "motion" ? (motionActive ? "webrtc" : "snapshot") : normalizedStreamMode;
   const [aspect, setAspect] = useState("16 / 9");
   const [mjpegToken, setMjpegToken] = useState(() => String(Date.now()));
@@ -1315,6 +1316,16 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   useEffect(() => {
     if (!STREAM_MODES.includes(streamMode)) setStreamMode("motion");
   }, [streamMode, setStreamMode]);
+
+  useEffect(() => {
+    const now = Date.now();
+    setMotionWindowNow(now);
+    if (!Number.isFinite(lastMotionMs)) return undefined;
+    const remaining = MOTION_WEBRTC_HOLD_MS - (now - lastMotionMs);
+    if (remaining <= 0) return undefined;
+    const timer = window.setTimeout(() => setMotionWindowNow(Date.now()), remaining + 50);
+    return () => window.clearTimeout(timer);
+  }, [lastMotionMs]);
 
   useEffect(() => {
     setMjpegToken(String(Date.now()));
@@ -1408,7 +1419,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
     : `/api/cameras/${camera.id}/snapshot.jpg?source=${posterSource}&t=${snapshotToken}`);
 
   return (
-    <article className={`bento-card camera-tile ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`} {...dropProps}>
+    <article
+      className={`bento-card camera-tile ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`}
+      data-motion-active={motionActive ? "true" : "false"}
+      {...dropProps}
+    >
       <div
         className="video-frame camera-open-target"
         style={{ "--media-aspect": aspect }}
@@ -3972,6 +3987,11 @@ function LivePage({ timeZone, onRecordingContextChange }) {
 
   useEffect(() => {
     incidentFeedCacheRef.current.clear();
+    incidentLoadedQueryRef.current = "";
+    setIncidents([]);
+    setIncidentHasMore(false);
+    setIncidentLoading(true);
+    setIncidentLoadError("");
     setIncidentPage(0);
     setExpandedIncidentId(null);
     setRetainedFocusedIncident(null);
@@ -4239,7 +4259,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
           </div>
         ) : null}
         <div className="incident-gallery" ref={liveIncidentGalleryRef}>
-          {incidentLoading && !visibleIncidents.length ? <div className="empty-state">Loading recent incidents...</div> : null}
+          {incidentLoading && !visibleIncidents.length ? <div className="empty-state">Loading {eventFilter} incidents...</div> : null}
           {!visibleIncidents.length && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
           {visibleIncidents.length
             ? pagedIncidents.map((incident) => (

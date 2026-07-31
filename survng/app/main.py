@@ -4673,7 +4673,11 @@ def _recent_filtered_incident_summaries(
     compact_rows: list[dict] = []
     before_created_at: str | None = None
     before_id: int | None = None
-    batch_size = 5000
+    # Most first-page filters are satisfied by a few hundred recent rows. A
+    # fixed 5,000-row batch made every toggle deserialize and regroup far more
+    # history than it displayed. Grow naturally through the cursor loop only
+    # when a selective camera/object/zone filter actually needs older events.
+    batch_size = max(500, min(5000, desired * 16))
 
     while True:
         batch = manager.events.recent_compact(batch_size, before_created_at, before_id)

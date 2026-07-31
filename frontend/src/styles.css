@@ -1397,6 +1397,10 @@ p {
   transition: border-color 140ms ease, opacity 140ms ease, transform 140ms ease;
 }
 
+.camera-tile.motion-active {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+}
+
 .camera-tile.dragging {
   opacity: 0.48;
 }
