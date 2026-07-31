@@ -48,10 +48,12 @@
   },
   "audit_ai": {
     "enabled": false,
+    "assistant_enabled": true,
     "provider": "openai",
     "api_key": "",
     "base_url": "",
     "model": "",
+    "assistant_reasoning_model": "",
     "timeout_seconds": 45.0,
     "allow_apply_recommendations": false
   },

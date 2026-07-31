@@ -76,10 +76,12 @@ class MqttConfig(BaseModel):
 
 class AuditAiConfig(BaseModel):
     enabled: bool = False
+    assistant_enabled: bool = True
     provider: Literal["openai", "gemini", "openai_compatible"] = "openai"
     api_key: str = Field(default="", max_length=4096)
     base_url: str = Field(default="", max_length=2048)
     model: str = Field(default="", max_length=256)
+    assistant_reasoning_model: str = Field(default="", max_length=256)
     timeout_seconds: float = Field(default=45.0, ge=5.0, le=120.0)
     allow_apply_recommendations: bool = False
 

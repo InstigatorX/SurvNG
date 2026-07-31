@@ -45,6 +45,12 @@ from .audit_ai import (
     motion_paradigm_context,
     validate_tuning_value,
 )
+from .assistant import (
+    AssistantChatRequest,
+    AssistantEvidence,
+    AssistantProvider,
+    AssistantToolCall,
+)
 from .detector import detection_failure, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_pipeline import (
@@ -119,6 +125,7 @@ MANAGER_RELOAD_LOCK = threading.RLock()
 APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
+ASSISTANT_LIMITER = threading.BoundedSemaphore(2)
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 PROCESS_STARTED_MONOTONIC = time.monotonic()
@@ -3072,6 +3079,544 @@ def incident_search(
         "end_at": day_end.astimezone(timezone.utc).isoformat(),
         "facets": facets,
     }
+
+
+def _assistant_catalog(active_config: AppConfig, active_manager: AppManager) -> dict[str, Any]:
+    return {
+        "cameras": [
+            {"id": camera.id, "name": camera.name}
+            for camera in active_config.cameras
+        ],
+        "object_labels": list(active_manager.detector.labels),
+        "zones": sorted({
+            zone.name
+            for camera in active_config.cameras
+            for zone in camera.zones
+            if zone.enabled
+        }),
+    }
+
+
+def _assistant_system_evidence(active_manager: AppManager) -> AssistantEvidence:
+    status = system_status()
+    cameras = active_manager.statuses()
+    unhealthy = [
+        {
+            "camera_id": str(camera.get("id") or ""),
+            "running": bool(camera.get("running")),
+            "connected": bool(camera.get("connected")),
+            "frame_fresh": bool(camera.get("frame_fresh")),
+            "recording": bool(camera.get("recording") or camera.get("sub_recording")),
+            "last_frame_age_seconds": camera.get("last_frame_age_seconds"),
+            "last_error": str(camera.get("last_error") or "")[:500],
+        }
+        for camera in cameras
+        if not camera.get("running")
+        or not camera.get("frame_fresh")
+        or not (camera.get("recording") or camera.get("sub_recording"))
+    ]
+    detector = status.get("detector") or {}
+    runtime = detector.get("runtime") or {}
+    retention = active_manager.recorder.retention_status()
+    retention_plan = retention.get("plan") or {}
+    retention_reclaim = retention_plan.get("reclaim") or {}
+    last_retention_run = retention.get("last_run") or {}
+    payload = {
+        "cameras": status.get("cameras"),
+        "unhealthy_cameras": unhealthy,
+        "storage": status.get("storage"),
+        "detector": {
+            "enabled": detector.get("enabled"),
+            "backend": detector.get("loaded_backend"),
+            "device": detector.get("loaded_device"),
+            "ready": bool(detector.get("openvino_loaded") or detector.get("coreml_loaded")),
+            "average_inference_ms": runtime.get("average_inference_ms"),
+            "queue_depth": runtime.get("queue_depth"),
+            "failed_inferences": runtime.get("failed_inferences"),
+            "active_workers": runtime.get("active_workers"),
+            "configured_workers": runtime.get("configured_workers"),
+            "reid_ready": bool((detector.get("reid") or {}).get("loaded")),
+        },
+        "mqtt": {
+            key: (status.get("mqtt") or {}).get(key)
+            for key in (
+                "enabled", "connected", "last_error", "publish_failures",
+                "pending_incidents", "server_lifecycle",
+            )
+        },
+        "go2rtc": status.get("go2rtc"),
+        "retention": {
+            "state": retention.get("state"),
+            "enabled": retention.get("enabled"),
+            "automatic_cleanup": retention.get("automatic_cleanup"),
+            "last_plan_at": retention.get("last_plan_at"),
+            "last_run_at": retention.get("last_run_at"),
+            "error": retention.get("error"),
+            "planned_reclaim_bytes": retention_reclaim.get("planned_bytes"),
+            "last_deleted_files": last_retention_run.get("deleted_files"),
+            "last_deleted_bytes": last_retention_run.get("deleted_bytes"),
+        },
+    }
+    total = int((status.get("cameras") or {}).get("total") or 0)
+    online = int((status.get("cameras") or {}).get("online") or 0)
+    return AssistantEvidence(
+        evidence_id="E-system",
+        kind="system_health",
+        title="Current SurvNG health",
+        summary=f"{online}/{total} cameras online; {len(unhealthy)} cameras need attention.",
+        data=payload,
+        href="/config#telemetry",
+    )
+
+
+def _assistant_camera_evidence(
+    active_manager: AppManager,
+    camera_id: str,
+) -> list[AssistantEvidence]:
+    requested = camera_id.strip().lower()
+    evidence: list[AssistantEvidence] = []
+    for camera in active_manager.statuses():
+        current_id = str(camera.get("id") or "")
+        if requested and current_id.lower() != requested:
+            continue
+        motion = camera.get("motion_qualification") or {}
+        tracking = camera.get("object_tracking") or {}
+        data = {
+            "camera_id": current_id,
+            "name": camera.get("name") or current_id,
+            "running": bool(camera.get("running")),
+            "connected": bool(camera.get("connected")),
+            "frame_fresh": bool(camera.get("frame_fresh")),
+            "last_frame_age_seconds": camera.get("last_frame_age_seconds"),
+            "recording": bool(camera.get("recording")),
+            "sub_recording": bool(camera.get("sub_recording")),
+            "detection_enabled": bool(camera.get("detection_enabled")),
+            "onvif": {
+                "enabled": bool(camera.get("onvif_enabled")),
+                "connected": bool(camera.get("onvif_connected")),
+                "notifications": int(camera.get("onvif_notifications_received") or 0),
+                "motion_events": int(camera.get("onvif_motion_events_received") or 0),
+                "poll_errors": int(camera.get("onvif_poll_errors") or 0),
+                "poll_timeouts": int(camera.get("onvif_poll_timeouts") or 0),
+                "last_motion_at": camera.get("onvif_last_motion_event_at"),
+                "last_error": str(camera.get("onvif_last_error") or "")[:500],
+            },
+            "motion": {
+                key: motion.get(key)
+                for key in (
+                    "mode", "sensitivity", "triggers", "passed", "audit_rejected",
+                    "suppressed", "dropped_triggers", "queue_depth",
+                    "visual_backup_triggers", "visual_backup_not_ready",
+                    "visual_backup_uncorrelated_objects",
+                )
+            },
+            "tracking": {
+                key: tracking.get(key)
+                for key in (
+                    "active", "frames_processed", "track_count", "reid_attempts",
+                    "reid_successes", "reid_failures", "coverage_incomplete",
+                )
+            },
+        }
+        healthy = data["running"] and data["frame_fresh"]
+        evidence.append(AssistantEvidence(
+            evidence_id=f"E-camera-{current_id}",
+            kind="camera_health",
+            title=str(data["name"]),
+            summary=(
+                f"{current_id} is {'healthy' if healthy else 'not healthy'}; "
+                f"recording is {'active' if data['recording'] or data['sub_recording'] else 'inactive'}."
+            ),
+            data=data,
+            href=f"/?camera={quote(current_id, safe='')}",
+        ))
+    return evidence
+
+
+def _assistant_configuration_evidence(active_config: AppConfig) -> AssistantEvidence:
+    assistant_provider = AssistantProvider(active_config.audit_ai)
+    data = {
+        "ai": {
+            "enabled": active_config.audit_ai.enabled,
+            "assistant_enabled": active_config.audit_ai.assistant_enabled,
+            "provider": active_config.audit_ai.provider,
+            "analysis_and_fast_model": assistant_provider.model_for_tier("fast"),
+            "deep_reasoning_model": assistant_provider.model_for_tier("deep"),
+            "deep_reasoning_uses_separate_model": (
+                assistant_provider.model_for_tier("deep")
+                != assistant_provider.model_for_tier("fast")
+            ),
+            "assistant_read_only": True,
+        },
+        "recording": {
+            "segment_seconds": active_config.recording_segment_seconds,
+            "cache_max_gb": active_config.recording_cache_max_gb,
+            "cache_max_days": active_config.recording_cache_max_days,
+            "prewarm": active_config.recording_cache_prewarm,
+            "retention": active_config.retention.model_dump(mode="json"),
+        },
+        "motion": active_config.motion_qualification.model_dump(mode="json"),
+        "detector": {
+            "enabled": active_config.detector.enabled,
+            "backend": active_config.detector.backend,
+            "device": active_config.detector.device,
+            "confidence_threshold": active_config.detector.confidence_threshold,
+            "nms_threshold": active_config.detector.nms_threshold,
+            "event_confirmation_frames": active_config.detector.event_confirmation_frames,
+            "event_class_confirmation_frames": active_config.detector.event_class_confirmation_frames,
+            "zone_only_incident_eligibility": active_config.detector.require_incident_zone,
+            "tracking": active_config.detector.tracking.model_dump(mode="json"),
+        },
+        "mqtt": {
+            "enabled": active_config.mqtt.enabled,
+            "tls": active_config.mqtt.tls,
+            "discovery_enabled": active_config.mqtt.discovery_enabled,
+            "incident_events_enabled": active_config.mqtt.incident_events_enabled,
+            "server_status_enabled": active_config.mqtt.server_status_enabled,
+        },
+        "cameras": [
+            {
+                "id": camera.id,
+                "name": camera.name,
+                "record": camera.record,
+                "record_sub": camera.record_sub,
+                "retention": camera.retention.model_dump(mode="json"),
+                "zone_only_incident_eligibility": camera.require_incident_zone,
+                "motion": camera.motion_qualification.model_dump(mode="json"),
+                "onvif_enabled": camera.onvif.enabled,
+                "zone_names": [zone.name for zone in camera.zones if zone.enabled],
+            }
+            for camera in active_config.cameras
+        ],
+    }
+    return AssistantEvidence(
+        evidence_id="E-config",
+        kind="configuration",
+        title="Active safe configuration",
+        summary=f"Credential-free configuration for {len(active_config.cameras)} cameras.",
+        data=data,
+        href="/config",
+    )
+
+
+def _assistant_event_objects(event: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    qualification: dict[str, Any] = {}
+    tracking: dict[str, Any] = {}
+    for item in event.get("objects") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("label"):
+            objects.append({
+                key: item.get(key)
+                for key in (
+                    "label", "confidence", "incident_eligible", "zones", "box",
+                    "temporal_observations", "temporal_required_observations",
+                    "temporal_center_displacement_ratio", "motion_correlated",
+                    "motion_correlation", "track_id", "track_state",
+                )
+            })
+        elif isinstance(item.get("motion_qualification"), dict):
+            qualification = item["motion_qualification"]
+        elif isinstance(item.get("object_tracking"), dict):
+            tracking = item["object_tracking"]
+    return objects, qualification, tracking
+
+
+def _assistant_incident_payload(incident: dict[str, Any]) -> dict[str, Any]:
+    events = []
+    for event in incident.get("events") or []:
+        objects, qualification, tracking = _assistant_event_objects(event)
+        events.append({
+            "id": event.get("id"),
+            "created_at": event.get("created_at"),
+            "kind": event.get("kind"),
+            "topic": event.get("topic"),
+            "trigger_source": event.get("trigger_source"),
+            "objects": objects,
+            "motion_qualification": qualification,
+            "object_tracking": tracking,
+            "recording_available": bool(event.get("recording_path")),
+            "faces": event.get("faces") or [],
+        })
+    return {
+        "incident_id": incident.get("id"),
+        "representative_event_id": incident.get("representative_event_id"),
+        "camera_id": incident.get("camera_id"),
+        "start_at": incident.get("start_at"),
+        "end_at": incident.get("end_at"),
+        "duration_seconds": incident.get("duration_seconds"),
+        "event_count": incident.get("event_count"),
+        "trigger_source": incident.get("trigger_source"),
+        "labels": incident.get("labels") or [],
+        "zones": incident.get("zones") or [],
+        "motion_observations": [
+            {
+                key: observation.get(key)
+                for key in (
+                    "id", "created_at", "category", "reason", "score", "threshold",
+                    "object_detected", "trigger_count", "interpretation",
+                )
+            }
+            for observation in incident.get("motion_observations") or []
+            if isinstance(observation, dict)
+        ],
+        "events": events,
+    }
+
+
+def _assistant_incident_for_event(event_id: int) -> dict[str, Any] | None:
+    row = manager.events.get(event_id)
+    if row is None:
+        return None
+    try:
+        anchor = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    # Fetch enough context to include delayed discoveries and a longer active
+    # incident. Grouping still enforces the normal incident gap.
+    start = (anchor - timedelta(minutes=15)).isoformat()
+    end = (anchor + timedelta(minutes=15)).isoformat()
+    rows = [
+        _event_row(candidate)
+        for candidate in manager.events.between(start, end, limit=2000)
+        if str(candidate.get("camera_id") or "") == str(row.get("camera_id") or "")
+    ]
+    for summary in _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS):
+        if any(int(event.get("id") or 0) == event_id for event in summary.get("events") or []):
+            hydrated = _incidents_with_faces(_hydrate_incidents([summary]))
+            return hydrated[0] if hydrated else summary
+    return None
+
+
+def _assistant_incident_evidence(
+    incident: dict[str, Any],
+    evidence_event_id: int | None = None,
+) -> AssistantEvidence:
+    payload = _assistant_incident_payload(incident)
+    event_ids = [str(event.get("id")) for event in incident.get("events") or [] if event.get("id")]
+    query = quote(",".join(event_ids), safe=",")
+    event_id = evidence_event_id or int(incident.get("representative_event_id") or event_ids[0])
+    return AssistantEvidence(
+        evidence_id=f"E-incident-{event_id}",
+        kind="incident",
+        title=f"{incident.get('camera_id')} · {incident.get('start_at')}",
+        summary=(
+            f"{len(payload['events'])} event(s); labels: "
+            f"{', '.join(payload['labels']) if payload['labels'] else 'motion only'}."
+        ),
+        data=payload,
+        href=f"/incidents?event_ids={query}",
+    )
+
+
+def _assistant_inspect_incident(event_id: int) -> AssistantEvidence | None:
+    incident = _assistant_incident_for_event(event_id)
+    if incident is None:
+        return None
+    return _assistant_incident_evidence(incident, event_id)
+
+
+def _assistant_parse_datetime(value: str, selected_zone: ZoneInfo) -> datetime | None:
+    if not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=selected_zone)
+    return parsed.astimezone(timezone.utc)
+
+
+def _assistant_search_incidents(
+    call: AssistantToolCall,
+    time_zone: str,
+) -> list[AssistantEvidence]:
+    try:
+        selected_zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        selected_zone = ZoneInfo("America/New_York")
+    now = datetime.now(timezone.utc)
+    start = _assistant_parse_datetime(call.start_at, selected_zone) or now - timedelta(hours=24)
+    end = _assistant_parse_datetime(call.end_at, selected_zone) or now
+    if end <= start:
+        start, end = end, start
+    start = max(start, end - timedelta(days=31))
+    rows = [
+        _event_row(row)
+        for row in manager.events.between_compact(start.isoformat(), end.isoformat())
+    ]
+    summaries = _filter_incident_summaries(
+        _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS),
+        call.event_type,
+        call.camera_id,
+        call.object_label,
+        call.zone,
+    )
+    candidate_summaries = summaries[: min(250, max(call.limit * 8, call.limit))]
+    hydrated = _incidents_with_faces(_hydrate_incidents(candidate_summaries))
+    filtered: list[dict[str, Any]] = []
+    wanted_face = call.face_name.strip().lower()
+    for incident in hydrated:
+        payload = _assistant_incident_payload(incident)
+        detections = [
+            obj
+            for event in payload["events"]
+            for obj in event["objects"]
+            if obj.get("incident_eligible") is not False
+        ]
+        if call.minimum_confidence is not None and not any(
+            float(obj.get("confidence") or 0) >= call.minimum_confidence
+            for obj in detections
+        ):
+            continue
+        if wanted_face:
+            face_names = {
+                str(face.get("name") or "").strip().lower()
+                for event in payload["events"]
+                for face in event.get("faces") or []
+                if isinstance(face, dict)
+            }
+            if wanted_face not in face_names:
+                continue
+        filtered.append(incident)
+        if len(filtered) >= call.limit:
+            break
+    query_summary = AssistantEvidence(
+        evidence_id="E-search",
+        kind="incident_search",
+        title="Incident search",
+        summary=f"Found {len(filtered)} matching incident(s) in the searched window.",
+        data={
+            "start_at": start.isoformat(),
+            "end_at": end.isoformat(),
+            "camera_id": call.camera_id,
+            "event_type": call.event_type,
+            "object_label": call.object_label,
+            "zone": call.zone,
+            "minimum_confidence": call.minimum_confidence,
+            "face_name": call.face_name,
+            "returned": len(filtered),
+            "candidate_count": len(summaries),
+            "scanned_candidates": len(candidate_summaries),
+            "candidate_scan_limited": len(candidate_summaries) < len(summaries),
+        },
+        href="/incidents",
+    )
+    evidence = [query_summary]
+    for incident in filtered:
+        event_id = int(incident.get("representative_event_id") or 0)
+        if event_id:
+            evidence.append(_assistant_incident_evidence(incident, event_id))
+    return evidence
+
+
+def _assistant_execute_tool(
+    call: AssistantToolCall,
+    request: AssistantChatRequest,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> list[AssistantEvidence]:
+    if call.name == "get_system_health":
+        return [_assistant_system_evidence(active_manager)]
+    if call.name == "get_camera_health":
+        camera_id = call.camera_id or request.context.camera_id
+        return _assistant_camera_evidence(active_manager, camera_id)
+    if call.name == "explain_configuration":
+        return [_assistant_configuration_evidence(active_config)]
+    if call.name == "inspect_incident":
+        event_id = call.event_id or request.context.incident_event_id
+        item = _assistant_inspect_incident(int(event_id)) if event_id else None
+        return [item] if item is not None else []
+    if call.name == "search_incidents":
+        return _assistant_search_incidents(call, request.context.time_zone)
+    return []
+
+
+@app.get("/api/assistant/status")
+def assistant_status() -> dict[str, Any]:
+    ai = config.audit_ai
+    configured = bool(
+        ai.enabled
+        and ai.assistant_enabled
+        and (
+            ai.api_key.strip()
+            or (ai.provider == "openai_compatible" and ai.base_url.strip())
+        )
+    )
+    provider = AssistantProvider(ai)
+    return {
+        "enabled": bool(ai.assistant_enabled),
+        "configured": configured,
+        "provider": ai.provider,
+        "fast_model": provider.model_for_tier("fast"),
+        "reasoning_model": provider.model_for_tier("deep"),
+        "read_only": True,
+    }
+
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
+    active_config = config
+    active_manager = manager
+    ai = active_config.audit_ai
+    if not ai.assistant_enabled:
+        raise HTTPException(status_code=409, detail="SurvNG Assistant is disabled")
+    if not ai.enabled:
+        raise HTTPException(status_code=409, detail="AI features are disabled in Admin")
+    if not ai.api_key.strip() and not (
+        ai.provider == "openai_compatible" and ai.base_url.strip()
+    ):
+        raise HTTPException(status_code=409, detail="AI provider credentials are not configured")
+    if not ASSISTANT_LIMITER.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="SurvNG Assistant is busy; try again shortly")
+
+    def run() -> dict[str, Any]:
+        provider = AssistantProvider(ai)
+        catalog = _assistant_catalog(active_config, active_manager)
+        try:
+            selected_zone = ZoneInfo(request.context.time_zone)
+        except (ZoneInfoNotFoundError, ValueError):
+            selected_zone = ZoneInfo("America/New_York")
+        now = datetime.now(timezone.utc).astimezone(selected_zone)
+        plan = provider.plan(request, catalog, now.isoformat())
+        evidence: list[AssistantEvidence] = []
+        seen: set[str] = set()
+        for call in plan.tool_calls:
+            for item in _assistant_execute_tool(
+                call,
+                request,
+                active_config,
+                active_manager,
+            ):
+                if item.evidence_id not in seen:
+                    seen.add(item.evidence_id)
+                    evidence.append(item)
+        answer = provider.answer(request, evidence, plan.reasoning_tier)
+        return {
+            "message": answer.answer,
+            "citations": answer.citations,
+            "suggestions": answer.suggestions,
+            "evidence": [item.client_payload() for item in evidence],
+            "tools": [call.name for call in plan.tool_calls],
+            "reasoning_tier": plan.reasoning_tier,
+            "model": provider.model_for_tier(plan.reasoning_tier),
+            "read_only": True,
+        }
+
+    try:
+        return await asyncio.to_thread(run)
+    except AuditAiError as exc:
+        LOGGER.warning("SurvNG Assistant provider failure: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        LOGGER.exception("SurvNG Assistant request failed")
+        raise HTTPException(status_code=500, detail="SurvNG Assistant could not complete the request") from exc
+    finally:
+        ASSISTANT_LIMITER.release()
 
 
 class FacePersonCreate(BaseModel):

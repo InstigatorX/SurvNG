@@ -1018,6 +1018,158 @@ function defaultCamera(cameras, seed = {}) {
   };
 }
 
+const ASSISTANT_STORAGE_KEY = "survng.assistantConversation.v1";
+
+function readAssistantMessages() {
+  try {
+    const parsed = JSON.parse(readStoredValue(browserStorage(window), ASSISTANT_STORAGE_KEY, "[]"));
+    return Array.isArray(parsed) ? parsed.slice(-30) : [];
+  } catch {
+    return [];
+  }
+}
+
+function AssistantPanel({ pageContext, timeZone }) {
+  const [openValue, setOpenValue] = useStoredState("survng.assistantOpen.v1", "false");
+  const open = openValue === "true";
+  const [messages, setMessages] = useState(readAssistantMessages);
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const bodyRef = useRef(null);
+
+  useEffect(() => {
+    writeStoredValue(browserStorage(window), ASSISTANT_STORAGE_KEY, JSON.stringify(messages.slice(-30)));
+  }, [messages]);
+
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/assistant/status")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Assistant status unavailable")))
+      .then(setStatus)
+      .catch((statusError) => setError(statusError.message || "Assistant status unavailable"));
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const body = bodyRef.current;
+    if (body) body.scrollTop = body.scrollHeight;
+  }, [messages, busy, open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function closeOnEscape(event) {
+      if (event.key === "Escape") setOpenValue("false");
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open, setOpenValue]);
+
+  function clearConversation() {
+    setMessages([]);
+    setError("");
+  }
+
+  async function sendMessage(messageText = draft) {
+    const content = String(messageText || "").trim();
+    if (!content || busy) return;
+    const userMessage = { id: `user-${Date.now()}`, role: "user", content };
+    const prior = messages.slice(-12);
+    setMessages((current) => [...current, userMessage].slice(-30));
+    setDraft("");
+    setError("");
+    setBusy(true);
+    try {
+      const response = await fetch("/api/assistant/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: content,
+          history: prior.map(({ role, content: historyContent }) => ({ role, content: historyContent })),
+          context: {
+            page: pageContext?.page || "live",
+            camera_id: pageContext?.camera_id || "",
+            incident_event_id: pageContext?.incident_event_id || null,
+            recording_epoch: pageContext?.recording_epoch || null,
+            filters: pageContext?.filters || {},
+            time_zone: timeZone,
+          },
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Assistant failed (${response.status})`);
+      setStatus((current) => current ? { ...current, configured: true } : current);
+      setMessages((current) => [...current, {
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        content: payload.message || "No answer returned.",
+        evidence: payload.evidence || [],
+        citations: payload.citations || [],
+        suggestions: payload.suggestions || [],
+        reasoningTier: payload.reasoning_tier || "fast",
+        model: payload.model || "",
+      }].slice(-30));
+    } catch (sendError) {
+      setError(sendError.message || "Assistant request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => setOpenValue(open ? "false" : "true")} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} title="SurvNG Assistant">
+        {open ? <X size={22} /> : <Sparkles size={22} />}
+      </button>
+      {open ? <aside className="assistant-drawer" role="dialog" aria-label="SurvNG Assistant">
+        <header className="assistant-head">
+          <div><strong><Sparkles size={17} /> SurvNG Assistant</strong><small>Grounded, read-only system help</small></div>
+          <div>
+            <button type="button" onClick={clearConversation} aria-label="Clear assistant conversation" title="Clear conversation"><Trash2 size={16} /></button>
+            <button type="button" onClick={() => setOpenValue("false")} aria-label="Close SurvNG Assistant"><X size={17} /></button>
+          </div>
+        </header>
+        <div className="assistant-context">
+          <span>{pageContext?.page || "live"}</span>
+          {pageContext?.camera_id ? <span>{pageContext.camera_id}</span> : null}
+          {pageContext?.incident_event_id ? <span>event #{pageContext.incident_event_id}</span> : null}
+          {status ? <span>{status.fast_model === status.reasoning_model ? status.fast_model : `${status.fast_model} · ${status.reasoning_model}`}</span> : null}
+        </div>
+        <div className="assistant-body" ref={bodyRef}>
+          {!messages.length ? <div className="assistant-welcome">
+            <Sparkles size={26} />
+            <strong>What would you like to know?</strong>
+            <p>I can search incidents, explain the selected event, inspect camera health, and explain active settings.</p>
+            <div>
+              {["Is everything healthy?", "Explain this incident", "Find person incidents from the last 24 hours"].map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
+            </div>
+          </div> : null}
+          {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
+            <div className="assistant-message-text">{message.content}</div>
+            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Deep reasoning" : "Fast"}{message.model ? ` · ${message.model}` : ""}</small> : null}
+            {message.evidence?.length ? <div className="assistant-evidence">
+              {message.evidence.map((item) => <a key={item.id} href={item.href ? appUrl(item.href) : undefined} className="assistant-evidence-card">
+                <span>{item.id}</span><strong>{item.title}</strong><small>{item.summary}</small>
+              </a>)}
+            </div> : null}
+            {message.suggestions?.length ? <div className="assistant-suggestions">
+              {message.suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
+            </div> : null}
+          </article>)}
+          {busy ? <div className="assistant-thinking"><span /><span /><span /> Gathering SurvNG evidence…</div> : null}
+          {error ? <div className="assistant-error"><CircleAlert size={15} /> {error}</div> : null}
+          {status && !status.configured ? <div className="assistant-error"><CircleAlert size={15} /> Configure and enable the AI provider under Admin → Object Detection.</div> : null}
+        </div>
+        <form className="assistant-compose" onSubmit={(event) => { event.preventDefault(); sendMessage(); }}>
+          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="Ask about SurvNG…" rows="2" maxLength="8000" disabled={busy} />
+          <button type="submit" disabled={busy || !draft.trim()}>Send</button>
+        </form>
+      </aside> : null}
+    </>
+  );
+}
+
 function Shell({ page, theme, recordingContext, children }) {
   const isLive = page === "live";
   const isRecordings = page === "recordings";
@@ -3501,7 +3653,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   );
 }
 
-function IncidentsPage({ timeZone, onRecordingContextChange }) {
+function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useState("object");
@@ -3564,6 +3716,34 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   const incidentPageCount = Math.max(1, Math.ceil(incidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+
+  useEffect(() => {
+    onAssistantContextChange?.({
+      page: "incidents",
+      camera_id: focusedIncident?.camera_id || (incidentCameraFilter === "all" ? "" : incidentCameraFilter),
+      incident_event_id: Number(focusedEvent?.representative_event_id || focusedEvent?.id) || null,
+      filters: {
+        day: incidentDay,
+        event_type: eventFilter,
+        camera: incidentCameraFilter,
+        object: incidentObjectFilter,
+        zone: incidentZoneFilter,
+      },
+    });
+  }, [eventFilter, focusedEvent?.id, focusedEvent?.representative_event_id, focusedIncident?.camera_id, incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter, onAssistantContextChange]);
+
+  useEffect(() => {
+    const eventIds = new URLSearchParams(window.location.search).get("event_ids");
+    if (!eventIds) return;
+    const query = new URLSearchParams({ event_ids: eventIds, gap_seconds: "45" });
+    fetch(`/api/incidents/detail?${query}`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Linked incident unavailable")))
+      .then((detail) => {
+        setSelectedEvent(detail);
+        setExpandedIncidentId(detail.id);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     clearLegacyIncidentFilterStorage();
@@ -3940,7 +4120,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange }) {
   );
 }
 
-function LivePage({ timeZone, onRecordingContextChange }) {
+function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
   const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
   const [eventFilter, setEventFilter] = useState("object");
@@ -3953,6 +4133,7 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
+  const linkedCameraIdRef = useRef(new URLSearchParams(window.location.search).get("camera") || "");
   const [incidentPage, setIncidentPage] = useState(0);
   const [incidents, setIncidents] = useState([]);
   const [incidentFacets, setIncidentFacets] = useState({ camera_ids: [], labels: [], zones: [] });
@@ -4001,6 +4182,13 @@ function LivePage({ timeZone, onRecordingContextChange }) {
     const seen = new Set(sorted.map((camera) => camera.id));
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
+  useEffect(() => {
+    const linkedCameraId = linkedCameraIdRef.current;
+    if (!linkedCameraId || !cameras.length) return;
+    const linkedCamera = cameras.find((camera) => camera.id === linkedCameraId);
+    if (linkedCamera) setExpandedCamera(linkedCamera);
+    linkedCameraIdRef.current = "";
+  }, [cameras]);
   const cameraNameById = useMemo(() => new Map(cameras.map((camera) => [camera.id, camera.name || camera.id])), [cameras]);
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
@@ -4017,6 +4205,21 @@ function LivePage({ timeZone, onRecordingContextChange }) {
   const clampedIncidentPage = incidentPage;
   const pagedIncidents = galleryIncidents;
   incidentInteractionActiveRef.current = Boolean(expandedIncidentId != null || selectedEvent);
+
+  useEffect(() => {
+    const contextualIncident = selectedEvent || focusedIncident;
+    onAssistantContextChange?.({
+      page: "live",
+      camera_id: expandedCamera?.id || contextualIncident?.camera_id || (incidentCameraFilter === "all" ? "" : incidentCameraFilter),
+      incident_event_id: Number(contextualIncident?.representative_event_id || contextualIncident?.id) || null,
+      filters: {
+        event_type: eventFilter,
+        camera: incidentCameraFilter,
+        object: incidentObjectFilter,
+        zone: incidentZoneFilter,
+      },
+    });
+  }, [eventFilter, expandedCamera?.id, focusedIncident?.camera_id, focusedIncident?.id, focusedIncident?.representative_event_id, incidentCameraFilter, incidentObjectFilter, incidentZoneFilter, onAssistantContextChange, selectedEvent?.camera_id, selectedEvent?.id, selectedEvent?.representative_event_id]);
 
   useEffect(() => {
     clearLegacyIncidentFilterStorage();
@@ -4454,7 +4657,7 @@ function mergeRecordingEvents(current, updates) {
     .slice(-5000);
 }
 
-function RecordingsPage({ timeZone }) {
+function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const queryAt = Number(initialQuery.get("at"));
   const initialEpoch = Number.isFinite(queryAt) && queryAt > 0 ? queryAt : null;
@@ -4495,6 +4698,15 @@ function RecordingsPage({ timeZone }) {
   const nextDate = addDaysToDateKey(date, 1);
   const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
   const daySeconds = Math.max(1, dayEnd - dayStart);
+
+  useEffect(() => {
+    onAssistantContextChange?.({
+      page: "recordings",
+      camera_id: activeCameraId,
+      recording_epoch: Number(playhead) || initialEpoch || dayStart,
+      filters: { date, source },
+    });
+  }, [activeCameraId, date, dayStart, initialEpoch, onAssistantContextChange, playhead, source]);
 
   const timeline = useMemo(() => {
     let mediaOffset = 0;
@@ -5676,7 +5888,7 @@ function MaintenanceViewer({ state }) {
   );
 }
 
-function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
+function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContextChange }) {
   const [config, setConfig] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState([]);
   const [accelerator, setAccelerator] = useState(null);
@@ -5723,6 +5935,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme }) {
   const [maintenanceError, setMaintenanceError] = useState("");
   const configLoadSequence = useRef(0);
   const auditPageSize = 24;
+
+  useEffect(() => {
+    onAssistantContextChange?.({
+      page: "config",
+      camera_id: settingsTab === "cameras" ? selectedId : "",
+      filters: { section: settingsTab, general_section: generalSection },
+    });
+  }, [generalSection, onAssistantContextChange, selectedId, settingsTab]);
 
   async function load() {
     const sequence = ++configLoadSequence.current;
@@ -7689,15 +7909,17 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         </details>
 
         <details className="detection-settings-card detection-feature-card">
-          <summary><span className="detection-settings-card-icon"><Sparkles size={18} /></span><span><strong>AI audit advisor</strong><small>Optional analysis of recent motion-audit outcomes and tuning suggestions.</small></span></summary>
+          <summary><span className="detection-settings-card-icon"><Sparkles size={18} /></span><span><strong>AI analysis &amp; assistant</strong><small>One provider and API key, with your existing analysis model plus an optional deep-reasoning model.</small></span></summary>
           <div className="detection-feature-body detection-field-grid">
-          <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /><span>AI advisor enabled</span></label>
+          <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.enabled ?? false} onChange={(event) => updateConfig(["audit_ai", "enabled"], event.target.checked)} /><span>AI features enabled</span></label>
+          <label className="compact-toggle"><input type="checkbox" checked={config.audit_ai?.assistant_enabled ?? true} onChange={(event) => updateConfig(["audit_ai", "assistant_enabled"], event.target.checked)} disabled={!config.audit_ai?.enabled} /><span>SurvNG Assistant enabled</span></label>
           <label>Provider<select value={config.audit_ai?.provider || "openai"} onChange={(event) => updateConfig(["audit_ai", "provider"], event.target.value)}>
             <option value="openai">OpenAI</option>
             <option value="gemini">Google Gemini</option>
             <option value="openai_compatible">OpenAI compatible</option>
           </select></label>
-          <label>Model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /></label>
+          <label>Analysis + fast model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Your existing Motion Audit model. It also handles assistant routing, searches, status, and direct factual answers.</small></label>
+          <label>Deep reasoning model<input value={config.audit_ai?.assistant_reasoning_model || ""} onChange={(event) => updateConfig(["audit_ai", "assistant_reasoning_model"], event.target.value)} placeholder="Leave blank to use the analysis model" /><small>Optional second model for incident diagnosis, comparisons, ambiguous timelines, and tuning advice.</small></label>
           <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
           <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
           <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>
@@ -8127,7 +8349,7 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
   );
 }
 
-function FacesPage({ timeZone }) {
+function FacesPage({ timeZone, onAssistantContextChange }) {
   const [people, setPeople] = useState([]);
   const [observations, setObservations] = useState([]);
   const [cameras, setCameras] = useState([]);
@@ -8143,6 +8365,15 @@ function FacesPage({ timeZone }) {
   const faceLoadSequence = useRef(0);
   const pageSize = isMobileViewport() ? 24 : 48;
   const pageCount = Math.max(1, Math.ceil(totalObservations / pageSize));
+
+  useEffect(() => {
+    onAssistantContextChange?.({
+      page: "faces",
+      camera_id: selected?.camera_id || cameraId,
+      incident_event_id: Number(selected?.event_id) || null,
+      filters: { status: filter, person_id: personId },
+    });
+  }, [cameraId, filter, onAssistantContextChange, personId, selected?.camera_id, selected?.event_id]);
 
   async function load() {
     const sequence = ++faceLoadSequence.current;
@@ -8293,20 +8524,25 @@ function App() {
         : pathname.startsWith("/faces")
           ? "faces"
         : "live";
+  const [assistantContext, setAssistantContext] = useState({ page });
+  useEffect(() => {
+    setAssistantContext({ page });
+  }, [page]);
   useEffect(() => {
     document.documentElement.dataset.theme = THEMES.includes(theme) ? theme : "auto";
   }, [theme]);
   return (
     <Shell page={page} theme={theme} recordingContext={recordingContext}>
       {page === "config"
-        ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} />
+        ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
         : page === "recordings"
-          ? <RecordingsPage timeZone={timeZone} />
+          ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
           : page === "incidents"
-            ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} />
+            ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
             : page === "faces"
-              ? <FacesPage timeZone={timeZone} />
-            : <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} />}
+              ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+            : <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />}
+      <AssistantPanel pageContext={{ page, ...assistantContext }} timeZone={timeZone} />
     </Shell>
   );
 }

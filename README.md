@@ -21,6 +21,28 @@ document synchronized with changes to any video-processing stage.
 - Listens for ONVIF pull-point events when the camera supports them, with explicit camera-triggered or adaptive visual-triggered operation.
 - Runs an OpenVINO detection pass on the latest frame when motion is reported.
 - Serves a React bento-style GUI for live streams, event history, recordings, and camera controls.
+- Provides an optional read-only AI assistant for health checks, configuration explanations, incident investigation, and structured incident search.
+
+## AI analysis and assistant
+
+SurvNG reuses one configured AI provider, API key, and optional base URL for
+Motion Audit image analysis and the global assistant. Under **Admin → Object
+Detection → AI analysis & assistant**, two model roles can be configured:
+
+- **Analysis + fast model** is the existing Motion Audit image-analysis model.
+  It also handles assistant routing, incident searches, system status, and
+  straightforward factual questions.
+- **Deep reasoning model** is the optional second model for incident diagnosis, ambiguous
+  timelines, comparisons, and tuning advice. Leave it blank to use the fast
+  model.
+
+The assistant is the sparkle button at the lower-right of every screen. It is
+read-only: it can query bounded, typed SurvNG tools, but cannot change settings,
+run commands, restart services, delete media, or send notifications. Evidence
+sent to the provider is bounded and strips credentials, stream URLs, web URLs,
+and filesystem paths. Responses link back to the camera or incident used as
+evidence. Configuration saves for these model fields use the existing hot AI
+configuration path and do not restart camera workers.
 
 ## Reolink / ONVIF Notes
 
