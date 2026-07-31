@@ -1670,6 +1670,24 @@ button.status-pill.hud-toggle:disabled {
 .live-video,
 .live-stack > video {
   z-index: 1;
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+
+.live-stack.video-ready > .live-video,
+.live-stack.video-ready > video {
+  opacity: 1;
+}
+
+.camera-live-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.camera-live-layer .live-stack {
+  background: transparent;
 }
 
 .zoomable-event-image {

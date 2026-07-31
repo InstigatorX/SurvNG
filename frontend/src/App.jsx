@@ -320,6 +320,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   timeZone = DEFAULT_TIME_ZONE,
   muted = true,
   controls = false,
+  showPoster = true,
   onReady,
   onStageChange,
 }, forwardedRef) {
@@ -327,16 +328,19 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   const [stage, setStage] = useState(() => initialLiveTransport(cameraId, source));
   const [deliverySource, setDeliverySource] = useState(source);
   const [snapshotToken, setSnapshotToken] = useState(() => Date.now());
+  const [videoReady, setVideoReady] = useState(false);
   const [nativeControlsVisible, setNativeControlsVisible] = useState(false);
   useImperativeHandle(forwardedRef, () => videoRef.current);
 
   useEffect(() => {
     setStage(initialLiveTransport(cameraId, source));
     setDeliverySource(source);
+    setVideoReady(false);
     setNativeControlsVisible(false);
   }, [cameraId, source]);
 
   useEffect(() => {
+    setVideoReady(false);
     setNativeControlsVisible(false);
   }, [controls, stage]);
 
@@ -358,6 +362,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const fallback = () => {
       if (!disposed) {
         rememberWebRtcFailure(cameraId, deliverySource);
+        setVideoReady(false);
         setStage("mse");
       }
     };
@@ -365,6 +370,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 
     const markMediaReady = () => {
       mediaReady = true;
+      setVideoReady(true);
       window.clearTimeout(failTimer);
       clearWebRtcFailure(cameraId, deliverySource);
     };
@@ -460,6 +466,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const MediaSourceApi = window.ManagedMediaSource || window.MediaSource;
     if (!MediaSourceApi) {
       const fallbackSource = nextNativeFallbackSource(source, deliverySource);
+      setVideoReady(false);
       if (fallbackSource) {
         setDeliverySource(fallbackSource);
         setStage(initialLiveTransport(cameraId, fallbackSource));
@@ -485,6 +492,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     const fallback = () => {
       if (disposed) return;
       const fallbackSource = nextNativeFallbackSource(source, deliverySource);
+      setVideoReady(false);
       if (fallbackSource) {
         setDeliverySource(fallbackSource);
         setStage(initialLiveTransport(cameraId, fallbackSource));
@@ -495,6 +503,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     };
     const markReady = () => {
       ready = true;
+      setVideoReady(true);
       window.clearTimeout(failTimer);
     };
     let lastDataAt = Date.now();
@@ -633,6 +642,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     if (stage === "webrtc") return undefined;
     const delay = Math.max(1000, webRtcRetryDelay(cameraId, deliverySource));
     const timer = window.setTimeout(() => {
+      setVideoReady(false);
       setDeliverySource(source);
       setStage(initialLiveTransport(cameraId, source));
       setSnapshotToken(Date.now());
@@ -647,15 +657,17 @@ const WebRtcLive = forwardRef(function WebRtcLive({
   }, [stage]);
 
   return (
-    <div className="live-stack" data-stage={stage}>
-      <img
-        className="live-poster"
-        src={appUrl(stage === "mjpeg"
-          ? `/api/cameras/${cameraId}/stream.mjpg?source=${deliverySource}&fps=1&t=${snapshotToken}`
-          : `/api/cameras/${cameraId}/snapshot.jpg?source=${deliverySource === "main" ? "live" : deliverySource}&t=${snapshotToken}`)}
-        alt=""
-        onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, stage)}
-      />
+    <div className={`live-stack ${videoReady ? "video-ready" : ""} ${showPoster ? "" : "external-poster"}`} data-stage={stage} data-video-ready={videoReady ? "true" : "false"}>
+      {showPoster || !["webrtc", "mse", "recording"].includes(stage) ? (
+        <img
+          className="live-poster"
+          src={appUrl(stage === "mjpeg"
+            ? `/api/cameras/${cameraId}/stream.mjpg?source=${deliverySource}&fps=1&t=${snapshotToken}`
+            : `/api/cameras/${cameraId}/snapshot.jpg?source=${deliverySource === "main" ? "live" : deliverySource}&t=${snapshotToken}`)}
+          alt=""
+          onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, stage)}
+        />
+      ) : null}
       {["webrtc", "mse"].includes(stage) ? (
         <video
           ref={videoRef}
@@ -669,6 +681,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           onFocus={() => controls && setNativeControlsVisible(true)}
           onLoadedData={(event) => {
             event.currentTarget.play().catch(() => {});
+            setVideoReady(true);
             onReady?.(event.currentTarget, stage);
           }}
         />
@@ -1414,20 +1427,27 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
           <div className="camera-offline-state" role="img" aria-label={`${camera.name} is powered off`}>
             <Power size={24} />
           </div>
-        ) : shouldUseWebRtc ? (
-          <WebRtcLive
-            cameraId={camera.id}
-            source={sourceMode}
-            timeZone={timeZone}
-            muted
-            onReady={(media) => setAspect(mediaAspect(media))}
-          />
         ) : (
-          <img
-            src={imageUrl}
-            alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
-            onLoad={(event) => setAspect(mediaAspect(event.currentTarget))}
-          />
+          <>
+            <img
+              className="camera-tile-poster"
+              src={imageUrl}
+              alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
+              onLoad={(event) => setAspect(mediaAspect(event.currentTarget))}
+            />
+            {shouldUseWebRtc ? (
+              <div className="camera-live-layer">
+                <WebRtcLive
+                  cameraId={camera.id}
+                  source={sourceMode}
+                  timeZone={timeZone}
+                  muted
+                  showPoster={false}
+                  onReady={(media) => setAspect(mediaAspect(media))}
+                />
+              </div>
+            ) : null}
+          </>
         )}
         <div
           className="tile-header camera-hud"
