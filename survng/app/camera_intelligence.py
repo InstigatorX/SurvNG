@@ -154,3 +154,76 @@ def aggregate_camera_intelligence(
         "recommendations": recommendations[:8],
         "samples": samples,
     }
+
+
+def compare_camera_intelligence_results(
+    baseline: dict[str, Any],
+    followup: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare two balanced reviews without pretending they are exhaustive counts."""
+    before_total = max(1, int(baseline.get("analyzed") or 0))
+    after_total = max(1, int(followup.get("analyzed") or 0))
+    before_counts = baseline.get("verdict_counts") or {}
+    after_counts = followup.get("verdict_counts") or {}
+    definitions = (
+        ("likely_miss", "Likely missed subjects"),
+        ("likely_false_alarm", "Likely nuisance alerts"),
+        ("likely_misclassification", "Likely wrong labels"),
+        ("consistent", "Results that look correct"),
+    )
+    metrics: list[dict[str, Any]] = []
+    for key, label in definitions:
+        before_count = int(before_counts.get(key) or 0)
+        after_count = int(after_counts.get(key) or 0)
+        before_rate = before_count / before_total
+        after_rate = after_count / after_total
+        metrics.append({
+            "key": key,
+            "label": label,
+            "before_count": before_count,
+            "after_count": after_count,
+            "before_rate": round(before_rate, 4),
+            "after_rate": round(after_rate, 4),
+            "change_points": round((after_rate - before_rate) * 100, 1),
+        })
+
+    issue_keys = {"likely_miss", "likely_false_alarm", "likely_misclassification"}
+    before_issues = sum(
+        int(before_counts.get(key) or 0) for key in issue_keys
+    ) / before_total
+    after_issues = sum(
+        int(after_counts.get(key) or 0) for key in issue_keys
+    ) / after_total
+    change_points = round((after_issues - before_issues) * 100, 1)
+    if change_points <= -5:
+        outcome = "improved"
+        summary = (
+            f"The reviewed issue rate fell from {before_issues * 100:.0f}% to "
+            f"{after_issues * 100:.0f}% after the setting change."
+        )
+    elif change_points >= 5:
+        outcome = "worsened"
+        summary = (
+            f"The reviewed issue rate rose from {before_issues * 100:.0f}% to "
+            f"{after_issues * 100:.0f}% after the setting change."
+        )
+    else:
+        outcome = "inconclusive"
+        summary = (
+            f"The reviewed issue rate was broadly unchanged "
+            f"({before_issues * 100:.0f}% before and {after_issues * 100:.0f}% after)."
+        )
+    return {
+        "outcome": outcome,
+        "summary": summary,
+        "before_analyzed": int(baseline.get("analyzed") or 0),
+        "after_analyzed": int(followup.get("analyzed") or 0),
+        "before_issue_rate": round(before_issues, 4),
+        "after_issue_rate": round(after_issues, 4),
+        "issue_rate_change_points": change_points,
+        "metrics": metrics,
+        "caution": (
+            "This compares balanced image samples, not every camera frame. "
+            "Treat small changes as directional evidence rather than proof."
+        ),
+    }

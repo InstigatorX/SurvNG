@@ -5051,6 +5051,86 @@ section.detection-settings-card {
   justify-self: start;
 }
 
+.camera-intelligence-apply-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+
+.camera-intelligence-effectiveness {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.camera-intelligence-effectiveness.improved {
+  border-left-color: var(--ok-ink);
+}
+
+.camera-intelligence-effectiveness.worsened {
+  border-left-color: var(--bad-ink);
+}
+
+.camera-intelligence-effectiveness > header,
+.camera-intelligence-effectiveness > header > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.camera-intelligence-effectiveness > header > div {
+  flex-direction: column;
+}
+
+.camera-intelligence-effectiveness > header span,
+.camera-intelligence-effectiveness small {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.camera-intelligence-effectiveness p {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.camera-intelligence-applied {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.camera-intelligence-applied span {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.82rem;
+}
+
+.camera-intelligence-comparison {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 8px;
+}
+
+.camera-intelligence-comparison article {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.camera-intelligence-outcome {
+  font-weight: 650;
+}
+
 @media (max-width: 720px) {
   .motion-ai-review-stats {
     grid-template-columns: 1fr;

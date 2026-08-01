@@ -14,6 +14,44 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_camera_intelligence_effectiveness_lifecycle_is_durable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            evaluation = store.create_camera_intelligence_evaluation(
+                camera_id="gate",
+                baseline_review_id=4,
+                evaluation_hours=24,
+                applied_changes=[{"setting": "frame_width", "proposed": 480}],
+                baseline_result={"analyzed": 8},
+            )
+            old_applied_at = "2026-01-01T00:00:00+00:00"
+            with store._connect() as conn:
+                conn.execute(
+                    "update camera_intelligence_evaluations set applied_at = ? where id = ?",
+                    (old_applied_at, evaluation["id"]),
+                )
+
+            ready = store.get_camera_intelligence_evaluation(evaluation["id"])
+            reviewing = store.start_camera_intelligence_followup(
+                evaluation["id"],
+                12,
+            )
+            completed = store.complete_camera_intelligence_evaluation(
+                evaluation["id"],
+                followup_result={"analyzed": 7},
+                comparison={"outcome": "improved"},
+            )
+            reloaded = EventStore(Path(tmpdir)).latest_camera_intelligence_evaluation(
+                "gate"
+            )
+
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(reviewing["status"], "reviewing")
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(reloaded["comparison"]["outcome"], "improved")
+        self.assertEqual(reloaded["baseline_result"]["analyzed"], 8)
+        self.assertEqual(reloaded["followup_result"]["analyzed"], 7)
+
     def test_recent_camera_range_is_filtered_and_newest_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

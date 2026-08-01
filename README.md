@@ -76,6 +76,16 @@ multiple samples independently support the same value. Suggestions remain
 camera-scoped, configuration-fingerprinted, server-validated, and require an
 explicit confirmation before SurvNG applies them.
 
+When a recommendation is applied, SurvNG can measure it after either 24 hours
+or 7 days. The original balanced review and exact applied values become the
+baseline. Once the observation period ends, **Run follow-up review** analyzes a
+new bounded sample and compares likely misses, nuisance alerts, wrong labels,
+and results that look correct as percentages of each reviewed sample. The GUI
+labels the outcome improved, worsened, or inconclusive and retains the report
+across restarts. Follow-up analysis remains manually initiated so it cannot
+silently incur provider costs; small changes are explicitly described as
+directional evidence rather than proof.
+
 ## Reolink / ONVIF Notes
 
 ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
 from survng.app import main
 from survng.app.camera_intelligence import (
     aggregate_camera_intelligence,
+    compare_camera_intelligence_results,
     select_balanced_samples,
 )
 from survng.app.config import AppConfig
@@ -18,7 +19,11 @@ class CameraIntelligenceTest(unittest.TestCase):
     @staticmethod
     def configured_app() -> AppConfig:
         return AppConfig.model_validate({
-            "audit_ai": {"allow_apply_recommendations": True},
+            "audit_ai": {
+                "enabled": True,
+                "api_key": "secret",
+                "allow_apply_recommendations": True,
+            },
             "cameras": [{
                 "id": "gate",
                 "name": "Gate",
@@ -115,6 +120,31 @@ class CameraIntelligenceTest(unittest.TestCase):
 
         self.assertEqual(report["recommendations"], [])
 
+    def test_effectiveness_comparison_uses_rates_and_marks_improvement(self) -> None:
+        comparison = compare_camera_intelligence_results(
+            {
+                "analyzed": 10,
+                "verdict_counts": {
+                    "likely_miss": 3,
+                    "likely_false_alarm": 2,
+                    "consistent": 5,
+                },
+            },
+            {
+                "analyzed": 8,
+                "verdict_counts": {
+                    "likely_miss": 1,
+                    "likely_false_alarm": 1,
+                    "consistent": 6,
+                },
+            },
+        )
+
+        self.assertEqual(comparison["outcome"], "improved")
+        self.assertEqual(comparison["before_issue_rate"], 0.5)
+        self.assertEqual(comparison["after_issue_rate"], 0.25)
+        self.assertEqual(comparison["issue_rate_change_points"], -25.0)
+
     def test_apply_accepts_only_persisted_review_recommendations(self) -> None:
         active_config = self.configured_app()
         camera = active_config.cameras[0]
@@ -133,12 +163,15 @@ class CameraIntelligenceTest(unittest.TestCase):
                 }],
             },
         }
-        fake_manager = SimpleNamespace(
-            events=SimpleNamespace(get_motion_ai_review=lambda _review_id: review),
-        )
-        request = main.IncidentAiApplyRequest.model_validate({
+        create_evaluation = Mock(return_value={"id": 9, "status": "collecting"})
+        fake_manager = SimpleNamespace(events=SimpleNamespace(
+            get_motion_ai_review=lambda _review_id: review,
+            create_camera_intelligence_evaluation=create_evaluation,
+        ))
+        request = main.CameraIntelligenceApplyRequest.model_validate({
             "confirmed": True,
             "configuration_fingerprint": fingerprint,
+            "evaluation_hours": 24,
             "changes": [{
                 "scope": "camera",
                 "setting": "frame_width",
@@ -160,6 +193,11 @@ class CameraIntelligenceTest(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["camera_id"], "gate")
         self.assertEqual(response["applied"][0]["proposed"], 480)
+        self.assertEqual(response["effectiveness_evaluation"]["id"], 9)
+        self.assertEqual(
+            create_evaluation.call_args.kwargs["baseline_review_id"],
+            7,
+        )
         applied_config = apply_update.call_args.args[0]
         self.assertEqual(applied_config.cameras[0].motion_qualification.frame_width, 480)
 
@@ -178,7 +216,7 @@ class CameraIntelligenceTest(unittest.TestCase):
                 },
             },
         ))
-        request = main.IncidentAiApplyRequest.model_validate({
+        request = main.CameraIntelligenceApplyRequest.model_validate({
             "confirmed": True,
             "configuration_fingerprint": fingerprint,
             "changes": [{
@@ -194,6 +232,55 @@ class CameraIntelligenceTest(unittest.TestCase):
                 main.camera_intelligence_apply(7, request)
 
         self.assertEqual(raised.exception.status_code, 400)
+
+    def test_ready_effectiveness_check_starts_bounded_followup(self) -> None:
+        active_config = self.configured_app()
+        ready = {
+            "id": 9,
+            "camera_id": "gate",
+            "status": "ready",
+            "applied_at": "2026-07-30T12:00:00+00:00",
+            "baseline_result": {"analyzed": 8},
+        }
+        reviewing = {**ready, "status": "reviewing", "followup_review_id": 22}
+        events = SimpleNamespace(
+            get_camera_intelligence_evaluation=Mock(
+                side_effect=[ready, reviewing]
+            ),
+            create_motion_ai_review=Mock(return_value={"id": 22}),
+            start_camera_intelligence_followup=Mock(return_value=reviewing),
+        )
+        fake_manager = SimpleNamespace(events=events)
+        limiter = SimpleNamespace(acquire=Mock(return_value=True), release=Mock())
+        thread = SimpleNamespace(start=Mock())
+        samples = [{"kind": "incident", "event_id": 5, "camera_id": "gate"}]
+
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", fake_manager),
+            patch.object(main, "AUDIT_AI_LIMITER", limiter),
+            patch.object(
+                main,
+                "_camera_intelligence_candidates",
+                return_value=(samples, 10),
+            ) as candidates,
+            patch.object(main.threading, "Thread", return_value=thread) as thread_factory,
+        ):
+            response = main.start_camera_intelligence_followup(
+                9,
+                main.CameraIntelligenceFollowupRequest(image_limit=8),
+            )
+
+        self.assertEqual(response["status"], "reviewing")
+        limiter.acquire.assert_called_once_with(blocking=False)
+        candidates.assert_called_once()
+        self.assertEqual(candidates.call_args.kwargs["image_limit"], 8)
+        events.start_camera_intelligence_followup.assert_called_once_with(9, 22)
+        self.assertEqual(
+            thread_factory.call_args.kwargs["name"],
+            "camera-effectiveness-gate",
+        )
+        thread.start.assert_called_once_with()
 
 
 if __name__ == "__main__":

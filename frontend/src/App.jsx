@@ -7477,7 +7477,9 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   const [cameraId, setCameraId] = useState(cameras[0]?.id || "");
   const [hours, setHours] = useState(24);
   const [imageLimit, setImageLimit] = useState(12);
+  const [evaluationHours, setEvaluationHours] = useState(24);
   const [review, setReview] = useState(null);
+  const [evaluation, setEvaluation] = useState(null);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState("");
@@ -7505,12 +7507,31 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
     }
   }
 
+  async function loadEvaluation(selectedCameraId, quiet = false) {
+    if (!selectedCameraId) return;
+    try {
+      const response = await fetch(`/api/camera-intelligence/evaluations/latest?camera_id=${encodeURIComponent(selectedCameraId)}`);
+      if (!response.ok) throw new Error(await response.text());
+      setEvaluation(await response.json());
+    } catch (loadError) {
+      if (!quiet) setError(loadError.message || "Unable to load the latest effectiveness check.");
+    }
+  }
+
   useEffect(() => {
     setReview(null);
+    setEvaluation(null);
     setError("");
     setNotice("");
     void loadReview(cameraId);
+    void loadEvaluation(cameraId);
   }, [cameraId]);
+
+  useEffect(() => {
+    if (!cameraId || evaluation?.status !== "reviewing") return undefined;
+    const timer = window.setInterval(() => void loadEvaluation(cameraId, true), 2000);
+    return () => window.clearInterval(timer);
+  }, [cameraId, evaluation?.status]);
 
   useEffect(() => {
     if (!cameraId || !["queued", "running"].includes(review?.status)) return undefined;
@@ -7553,6 +7574,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
         body: JSON.stringify({
           confirmed: true,
           configuration_fingerprint: report.configuration_fingerprint,
+          evaluation_hours: evaluationHours,
           changes: recommendations.map((recommendation) => ({
             scope: "camera",
             setting: recommendation.setting,
@@ -7562,12 +7584,34 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
         }),
       });
       if (!response.ok) throw new Error(await response.text());
+      const applied = await response.json();
+      setEvaluation(applied.effectiveness_evaluation || null);
       setReview((current) => current ? ({ ...current, result: { ...(current.result || {}), can_apply: false } }) : current);
       setNotice("Recommended camera settings were applied successfully.");
     } catch (applyError) {
       setError(applyError.message || "Unable to apply the reviewed settings.");
     } finally {
       setApplying(false);
+    }
+  }
+
+  async function runFollowup() {
+    if (!evaluation?.id || evaluation.status !== "ready" || loading) return;
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/camera-intelligence/evaluations/${evaluation.id}/follow-up`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_limit: imageLimit }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setEvaluation(await response.json());
+    } catch (followupError) {
+      setError(followupError.message || "Unable to start the effectiveness check.");
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -7615,7 +7659,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
           {running ? <RefreshCcw className="spin" size={16} /> : <Sparkles size={16} />}
           {running ? "Reviewing..." : "Review camera"}
         </button>
-        <button type="button" onClick={() => loadReview(cameraId)} disabled={!cameraId || loading}><RefreshCcw className={loading ? "spin" : ""} size={16} /> Refresh</button>
+        <button type="button" onClick={() => { void loadReview(cameraId); void loadEvaluation(cameraId, true); }} disabled={!cameraId || loading}><RefreshCcw className={loading ? "spin" : ""} size={16} /> Refresh</button>
       </div>
       {!advisorEnabled ? <div className="save-status motion-audit-error">Enable and save AI analysis under Object Detection before running a review.</div> : null}
       <div className="probe-result">
@@ -7680,11 +7724,22 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
                   ))}
                 </div>
               ) : <span>No setting change was recommended consistently enough across the analyzed images.</span>}
-              {isCameraIntelligence && report.recommendations?.length && !notice ? <button type="button" className="primary camera-intelligence-apply" onClick={applyRecommendations} disabled={!report.can_apply || applying}>{applying ? <RefreshCcw className="spin" size={16} /> : <Check size={16} />}{report.can_apply ? (applying ? "Applying..." : "Review and apply suggestions") : "Applying AI suggestions is disabled"}</button> : null}
+              {isCameraIntelligence && report.recommendations?.length && !notice ? <div className="camera-intelligence-apply-row"><label>Check results after<select value={evaluationHours} onChange={(event) => setEvaluationHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={168}>7 days</option></select></label><button type="button" className="primary camera-intelligence-apply" onClick={applyRecommendations} disabled={!report.can_apply || applying}>{applying ? <RefreshCcw className="spin" size={16} /> : <Check size={16} />}{report.can_apply ? (applying ? "Applying..." : "Review and apply suggestions") : "Applying AI suggestions is disabled"}</button></div> : null}
             </>
           ) : null}
         </section>
       ) : <div className="probe-result"><strong>No review yet</strong><span>Choose a camera and run its first manual review.</span></div>}
+      {evaluation?.status && evaluation.status !== "never" ? (
+        <section className={`camera-intelligence-effectiveness ${evaluation.comparison?.outcome || evaluation.status}`}>
+          <header><div><strong>Did the change help?</strong><span>Applied {formatDateTime(evaluation.applied_at)}</span></div><span>{String(evaluation.status).replaceAll("_", " ")}</span></header>
+          {evaluation.applied_changes?.length ? <div className="camera-intelligence-applied">{evaluation.applied_changes.map((change) => <span key={change.setting}>{motionAiSettingLabels[change.setting] || change.setting.replaceAll("_", " ")}: {formatMotionAiValue(change.setting, change.current)} → {formatMotionAiValue(change.setting, change.proposed)}</span>)}</div> : null}
+          {evaluation.status === "collecting" ? <p>SurvNG is gathering normal camera activity. The follow-up becomes available {evaluation.ready_at ? formatDateTime(evaluation.ready_at) : "after the selected period"}.</p> : null}
+          {evaluation.status === "ready" ? <><p>Enough time has passed to compare a new balanced image sample against the review made before the change.</p><button type="button" className="primary" onClick={runFollowup} disabled={loading}><Sparkles size={16} />Run follow-up review</button></> : null}
+          {evaluation.status === "reviewing" ? <p><RefreshCcw className="spin" size={16} /> Reviewing post-change camera activity…</p> : null}
+          {evaluation.status === "completed" && evaluation.comparison ? <><p className="camera-intelligence-outcome">{evaluation.comparison.summary}</p><div className="camera-intelligence-comparison">{evaluation.comparison.metrics?.map((metric) => <article key={metric.key}><span>{metric.label}</span><strong>{Math.round(Number(metric.before_rate || 0) * 100)}% → {Math.round(Number(metric.after_rate || 0) * 100)}%</strong><small>{Number(metric.change_points || 0) > 0 ? "+" : ""}{metric.change_points} percentage points</small></article>)}</div><small>{evaluation.comparison.caution}</small></> : null}
+          {evaluation.error ? <div className="motion-runtime-warning">{evaluation.error}</div> : null}
+        </section>
+      ) : null}
     </div>
   );
 }

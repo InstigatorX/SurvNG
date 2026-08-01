@@ -54,6 +54,7 @@ from .assistant import (
 )
 from .camera_intelligence import (
     aggregate_camera_intelligence,
+    compare_camera_intelligence_results,
     select_balanced_samples,
 )
 from .detector import detection_failure, objects_to_json
@@ -2249,6 +2250,14 @@ class MotionAiReviewRequest(BaseModel):
     image_limit: int = Field(default=12, ge=4, le=24)
 
 
+class CameraIntelligenceApplyRequest(IncidentAiApplyRequest):
+    evaluation_hours: float = Field(default=24.0, ge=24.0, le=168.0)
+
+
+class CameraIntelligenceFollowupRequest(BaseModel):
+    image_limit: int = Field(default=12, ge=4, le=24)
+
+
 class TrackingComparisonVerdictRequest(BaseModel):
     verdict: str = Field(
         pattern=r"^(survng_hybrid|ultralytics_botsort|inconclusive)$"
@@ -2902,6 +2911,8 @@ def _run_camera_intelligence_review(
     hours: float,
     active_config: AppConfig,
     active_manager: AppManager,
+    evaluation_id: int = 0,
+    baseline_result: dict[str, Any] | None = None,
 ) -> None:
     analyses: list[dict[str, Any]] = []
     failed = 0
@@ -3010,6 +3021,11 @@ def _run_camera_intelligence_review(
                 failed=failed,
                 error=first_error or "No retained images could be reviewed",
             )
+            if evaluation_id:
+                active_manager.events.reset_camera_intelligence_followup(
+                    evaluation_id,
+                    first_error or "No retained images could be reviewed",
+                )
             return
         result = aggregate_camera_intelligence(
             analyses,
@@ -3050,6 +3066,17 @@ def _run_camera_intelligence_review(
             result["can_apply"] = bool(
                 recommendations and active_config.audit_ai.allow_apply_recommendations
             )
+        if evaluation_id and baseline_result is not None:
+            comparison = compare_camera_intelligence_results(
+                baseline_result,
+                result,
+            )
+            result["effectiveness_comparison"] = comparison
+            active_manager.events.complete_camera_intelligence_evaluation(
+                evaluation_id,
+                followup_result=result,
+                comparison=comparison,
+            )
         active_manager.events.update_motion_ai_review(
             review_id,
             status="completed",
@@ -3074,6 +3101,17 @@ def _run_camera_intelligence_review(
                 "failed to persist camera intelligence review %s failure",
                 review_id,
             )
+        if evaluation_id:
+            try:
+                active_manager.events.reset_camera_intelligence_followup(
+                    evaluation_id,
+                    redact_secret_text(exc),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "failed to reset camera intelligence evaluation %s",
+                    evaluation_id,
+                )
     finally:
         AUDIT_AI_LIMITER.release()
 
@@ -3167,7 +3205,7 @@ def motion_ai_review(review_id: int) -> dict:
 @app.post("/api/motion-ai-reviews/{review_id}/apply")
 def camera_intelligence_apply(
     review_id: int,
-    request: IncidentAiApplyRequest,
+    request: CameraIntelligenceApplyRequest,
 ) -> dict:
     if not request.confirmed:
         raise HTTPException(status_code=400, detail="explicit confirmation is required")
@@ -3244,7 +3282,15 @@ def camera_intelligence_apply(
             next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        active_events = manager.events
         _effective_config, apply_result = apply_config_update(next_config)
+        evaluation = active_events.create_camera_intelligence_evaluation(
+            camera_id=camera.id,
+            baseline_review_id=review_id,
+            evaluation_hours=request.evaluation_hours,
+            applied_changes=previews,
+            baseline_result=result,
+        )
     return {
         "ok": True,
         "review_id": review_id,
@@ -3252,7 +3298,116 @@ def camera_intelligence_apply(
         "applied": previews,
         "workers_restarted": bool(apply_result["camera_workers_restarted"]),
         "apply_mode": apply_result["apply_mode"],
+        "effectiveness_evaluation": evaluation,
     }
+
+
+@app.get("/api/camera-intelligence/evaluations/latest")
+def latest_camera_intelligence_evaluation(camera_id: str) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        camera = camera_by_id(config, camera_id)
+        active_events = manager.events
+    if camera is None:
+        raise HTTPException(status_code=404, detail="camera not found")
+    evaluation = active_events.latest_camera_intelligence_evaluation(camera.id)
+    return evaluation or {"camera_id": camera.id, "status": "never"}
+
+
+@app.post("/api/camera-intelligence/evaluations/{evaluation_id}/follow-up")
+def start_camera_intelligence_followup(
+    evaluation_id: int,
+    request: CameraIntelligenceFollowupRequest,
+) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        active_config = config.model_copy(deep=True)
+        evaluation = active_manager.events.get_camera_intelligence_evaluation(
+            evaluation_id
+        )
+        if evaluation is None:
+            raise HTTPException(status_code=404, detail="effectiveness evaluation not found")
+        if evaluation.get("status") != "ready":
+            detail = (
+                f"follow-up evidence is still being collected until {evaluation.get('ready_at')}"
+                if evaluation.get("status") == "collecting"
+                else "effectiveness follow-up is already running or complete"
+            )
+            raise HTTPException(status_code=409, detail=detail)
+        camera = camera_by_id(active_config, str(evaluation.get("camera_id") or ""))
+        if camera is None:
+            raise HTTPException(status_code=404, detail="reviewed camera not found")
+        if not active_config.audit_ai.enabled or not active_config.audit_ai.api_key.strip():
+            raise HTTPException(status_code=400, detail="AI analysis is not configured")
+        try:
+            applied_at = datetime.fromisoformat(
+                str(evaluation["applied_at"]).replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="evaluation start time is invalid") from exc
+        if applied_at.tzinfo is None:
+            applied_at = applied_at.replace(tzinfo=timezone.utc)
+        elapsed_hours = max(
+            1.0,
+            (datetime.now(timezone.utc) - applied_at).total_seconds() / 3600.0,
+        )
+        samples, records_considered = _camera_intelligence_candidates(
+            camera,
+            active_manager,
+            hours=min(168.0, elapsed_hours),
+            record_limit=100,
+            image_limit=request.image_limit,
+        )
+        if not samples:
+            raise HTTPException(status_code=404, detail="no follow-up camera images are available")
+        if not AUDIT_AI_LIMITER.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="another AI camera review is already running",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            review = active_manager.events.create_motion_ai_review(
+                camera.id,
+                records_considered,
+            )
+            active_manager.events.start_camera_intelligence_followup(
+                evaluation_id,
+                int(review["id"]),
+            )
+        except BaseException:
+            AUDIT_AI_LIMITER.release()
+            raise
+    thread = threading.Thread(
+        target=_run_camera_intelligence_review,
+        args=(
+            int(review["id"]),
+            camera.id,
+            samples,
+            records_considered,
+            min(168.0, elapsed_hours),
+            active_config,
+            active_manager,
+            evaluation_id,
+            evaluation.get("baseline_result") or {},
+        ),
+        name=f"camera-effectiveness-{camera.id}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        AUDIT_AI_LIMITER.release()
+        active_manager.events.update_motion_ai_review(
+            int(review["id"]),
+            status="failed",
+            error="Effectiveness review worker could not start",
+        )
+        active_manager.events.reset_camera_intelligence_followup(
+            evaluation_id,
+            "Effectiveness review worker could not start",
+        )
+        raise
+    return active_manager.events.get_camera_intelligence_evaluation(evaluation_id) or {}
 
 
 @app.get("/api/events/{event_id}/snapshot.jpg")

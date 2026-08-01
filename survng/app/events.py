@@ -139,6 +139,29 @@ class EventStore:
             )
             conn.execute(
                 """
+                create table if not exists camera_intelligence_evaluations (
+                    id integer primary key autoincrement,
+                    camera_id text not null,
+                    baseline_review_id integer not null unique,
+                    followup_review_id integer,
+                    status text not null default 'collecting',
+                    evaluation_hours real not null default 24,
+                    applied_changes_json text not null default '[]',
+                    baseline_result_json text not null default '{}',
+                    followup_result_json text not null default '{}',
+                    comparison_json text not null default '{}',
+                    error text not null default '',
+                    applied_at text not null,
+                    updated_at text not null,
+                    completed_at text
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_camera_intelligence_evaluations_camera_applied on camera_intelligence_evaluations(camera_id, applied_at desc, id desc)"
+            )
+            conn.execute(
+                """
                 create table if not exists tracking_comparisons (
                     id integer primary key autoincrement,
                     event_id integer not null unique,
@@ -156,6 +179,16 @@ class EventStore:
             )
             conn.execute(
                 "update motion_ai_reviews set status = 'interrupted', error = 'SurvNG restarted before this review completed' where status in ('queued', 'running')"
+            )
+            conn.execute(
+                """
+                update camera_intelligence_evaluations
+                set status = 'collecting', followup_review_id = null,
+                    error = 'SurvNG restarted during the follow-up; run it again',
+                    updated_at = ?
+                where status = 'reviewing'
+                """,
+                (datetime.now(timezone.utc).isoformat(),),
             )
             # Older active/cooldown observations predate durable linkage. The
             # state reason guarantees they belong to an already-created event;
@@ -981,6 +1014,163 @@ class EventStore:
                 (camera_id,),
             ).fetchone()
         return self._motion_ai_review_row(row)
+
+    @staticmethod
+    def _camera_intelligence_evaluation_row(
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        payload = dict(row)
+        for column, target in (
+            ("applied_changes_json", "applied_changes"),
+            ("baseline_result_json", "baseline_result"),
+            ("followup_result_json", "followup_result"),
+            ("comparison_json", "comparison"),
+        ):
+            try:
+                decoded = json.loads(str(payload.pop(column) or "{}"))
+            except (json.JSONDecodeError, TypeError):
+                decoded = [] if target == "applied_changes" else {}
+            payload[target] = decoded
+        try:
+            applied_at = datetime.fromisoformat(
+                str(payload.get("applied_at") or "").replace("Z", "+00:00")
+            )
+            if applied_at.tzinfo is None:
+                applied_at = applied_at.replace(tzinfo=timezone.utc)
+            ready_at = applied_at + timedelta(
+                hours=float(payload.get("evaluation_hours") or 24)
+            )
+            payload["ready_at"] = ready_at.isoformat()
+            remaining = (ready_at - datetime.now(timezone.utc)).total_seconds()
+            payload["seconds_until_ready"] = max(0, round(remaining))
+            if payload.get("status") == "collecting" and remaining <= 0:
+                payload["status"] = "ready"
+        except (TypeError, ValueError):
+            payload["ready_at"] = ""
+            payload["seconds_until_ready"] = 0
+        return payload
+
+    def create_camera_intelligence_evaluation(
+        self,
+        *,
+        camera_id: str,
+        baseline_review_id: int,
+        evaluation_hours: float,
+        applied_changes: list[dict[str, Any]],
+        baseline_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into camera_intelligence_evaluations (
+                    camera_id, baseline_review_id, evaluation_hours,
+                    applied_changes_json, baseline_result_json, applied_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    camera_id,
+                    int(baseline_review_id),
+                    max(24.0, min(float(evaluation_hours), 168.0)),
+                    json.dumps(applied_changes, separators=(",", ":"), allow_nan=False),
+                    json.dumps(baseline_result, separators=(",", ":"), allow_nan=False),
+                    now,
+                    now,
+                ),
+            )
+            evaluation_id = int(cursor.lastrowid)
+        return self.get_camera_intelligence_evaluation(evaluation_id) or {}
+
+    def get_camera_intelligence_evaluation(
+        self,
+        evaluation_id: int,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from camera_intelligence_evaluations where id = ?",
+                (int(evaluation_id),),
+            ).fetchone()
+        return self._camera_intelligence_evaluation_row(row)
+
+    def latest_camera_intelligence_evaluation(
+        self,
+        camera_id: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select * from camera_intelligence_evaluations
+                where camera_id = ?
+                order by applied_at desc, id desc limit 1
+                """,
+                (camera_id,),
+            ).fetchone()
+        return self._camera_intelligence_evaluation_row(row)
+
+    def start_camera_intelligence_followup(
+        self,
+        evaluation_id: int,
+        followup_review_id: int,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                update camera_intelligence_evaluations
+                set status = 'reviewing', followup_review_id = ?, error = '', updated_at = ?
+                where id = ? and status = 'collecting'
+                """,
+                (int(followup_review_id), now, int(evaluation_id)),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("effectiveness follow-up is already running or complete")
+        return self.get_camera_intelligence_evaluation(evaluation_id) or {}
+
+    def complete_camera_intelligence_evaluation(
+        self,
+        evaluation_id: int,
+        *,
+        followup_result: dict[str, Any],
+        comparison: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                update camera_intelligence_evaluations
+                set status = 'completed', followup_result_json = ?, comparison_json = ?,
+                    error = '', updated_at = ?, completed_at = ?
+                where id = ? and status = 'reviewing'
+                """,
+                (
+                    json.dumps(followup_result, separators=(",", ":"), allow_nan=False),
+                    json.dumps(comparison, separators=(",", ":"), allow_nan=False),
+                    now,
+                    now,
+                    int(evaluation_id),
+                ),
+            )
+        return self.get_camera_intelligence_evaluation(evaluation_id) or {}
+
+    def reset_camera_intelligence_followup(
+        self,
+        evaluation_id: int,
+        error: str,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                update camera_intelligence_evaluations
+                set status = 'collecting', followup_review_id = null,
+                    error = ?, updated_at = ?
+                where id = ? and status = 'reviewing'
+                """,
+                (str(error), now, int(evaluation_id)),
+            )
+        return self.get_camera_intelligence_evaluation(evaluation_id) or {}
 
     def motion_effectiveness(self, *, days: float = 7.0) -> dict[str, Any]:
         """Summarize durable motion decisions without conflating visual filters and deduplication."""
