@@ -8276,6 +8276,42 @@ section.detection-settings-card {
   font-size: 9px;
 }
 
+.assistant-timeline {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid var(--line);
+  padding: 8px;
+}
+
+.assistant-timeline > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  border-left: 2px solid var(--accent);
+  padding-left: 7px;
+}
+
+.assistant-timeline > div span,
+.assistant-timeline > div small,
+.assistant-timeline > small,
+.assistant-timeline > p {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.assistant-timeline > div strong {
+  font-size: 10px;
+}
+
+.assistant-timeline > div small {
+  grid-column: 1 / -1;
+}
+
+.assistant-timeline > p {
+  margin: 3px 0 0;
+  line-height: 1.4;
+}
+
 .assistant-visual-review {
   display: grid;
   gap: 8px;

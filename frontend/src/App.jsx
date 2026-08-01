@@ -1210,11 +1210,11 @@ function AssistantPanel({ pageContext, timeZone }) {
           {!messages.length ? <div className="assistant-welcome">
             <Sparkles size={26} />
             <strong>What would you like to know?</strong>
-            <p>I can search incidents, visually review a selected incident, inspect camera health, and explain active settings.</p>
+            <p>I can search incidents, trace related activity across cameras, visually review a selected incident, inspect camera health, and explain active settings.</p>
             <div>
               {[
                 "Is everything healthy?",
-                ...(pageContext?.incident_event_id ? ["Visually analyze this incident"] : []),
+                ...(pageContext?.incident_event_id ? ["Trace this incident across cameras", "Visually analyze this incident"] : []),
                 "Find person incidents from the last 24 hours",
               ].map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
             </div>
@@ -1226,6 +1226,10 @@ function AssistantPanel({ pageContext, timeZone }) {
               {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`}>
                 {item.image_url ? <a className="assistant-evidence-image" href={item.href ? appUrl(item.href) : appUrl(item.image_url)}><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
                 <a href={item.href ? appUrl(item.href) : undefined}><span title={item.id}>Source</span><strong>{item.title}</strong><small>{item.summary}</small></a>
+                {item.details?.timeline ? <div className="assistant-timeline">
+                  {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <div key={match.event_id}><span>{formatDateTime(match.start_at)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></div>) : <small>No related incidents were found in this time window.</small>}
+                  <p>{item.details.timeline.limitations?.[3]}</p>
+                </div> : null}
                 {item.details?.advice ? <div className="assistant-visual-review">
                   <div><strong>{assistantVisualVerdicts[item.details.advice.verdict] || "The image is inconclusive"}</strong><span>{Math.round(Number(item.details.advice.confidence || 0) * 100)}%</span></div>
                   <p>{item.details.advice.summary}</p>

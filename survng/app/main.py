@@ -52,6 +52,7 @@ from .assistant import (
     AssistantToolCall,
     IncidentVisualReviewer,
 )
+from .assistant_investigation import correlate_incident_timeline
 from .camera_intelligence import (
     aggregate_camera_intelligence,
     compare_camera_intelligence_results,
@@ -3638,6 +3639,12 @@ def incident_search(
 
 
 def _assistant_catalog(active_config: AppConfig, active_manager: AppManager) -> dict[str, Any]:
+    face_store = getattr(active_manager, "faces", None)
+    try:
+        people = face_store.people() if face_store is not None else []
+    except Exception:
+        LOGGER.warning("assistant catalog could not read recognized face names")
+        people = []
     return {
         "cameras": [
             {"id": camera.id, "name": camera.name}
@@ -3650,6 +3657,14 @@ def _assistant_catalog(active_config: AppConfig, active_manager: AppManager) -> 
             for zone in camera.zones
             if zone.enabled
         }),
+        "recognized_faces": [
+            {
+                "id": int(person.get("id") or 0),
+                "name": str(person.get("name") or "")[:128],
+            }
+            for person in people[:200]
+            if str(person.get("name") or "").strip()
+        ],
     }
 
 
@@ -4266,6 +4281,157 @@ def _assistant_search_incidents(
     return evidence
 
 
+def _assistant_trace_across_cameras(
+    call: AssistantToolCall,
+    request: AssistantChatRequest,
+    active_manager: AppManager,
+) -> list[AssistantEvidence]:
+    event_id = call.event_id or request.context.incident_event_id
+    if not event_id and not call.face_name.strip() and not call.object_label.strip():
+        return []
+    anchor = (
+        _assistant_incident_for_event(int(event_id), active_manager)
+        if event_id
+        else None
+    )
+    if event_id and anchor is None:
+        return []
+    try:
+        selected_zone = ZoneInfo(request.context.time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        selected_zone = ZoneInfo("America/New_York")
+    now = datetime.now(timezone.utc)
+    try:
+        anchor_at = datetime.fromisoformat(
+            str((anchor or {}).get("start_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        anchor_at = now
+    if anchor_at.tzinfo is None:
+        anchor_at = anchor_at.replace(tzinfo=timezone.utc)
+    default_start = (
+        anchor_at - timedelta(minutes=15) if anchor else now - timedelta(hours=24)
+    )
+    default_end = anchor_at + timedelta(minutes=15) if anchor else now
+    start = _assistant_parse_datetime(call.start_at, selected_zone) or default_start
+    end = _assistant_parse_datetime(call.end_at, selected_zone) or default_end
+    if end <= start:
+        start, end = end, start
+    start = max(start, end - timedelta(hours=24))
+    rows = [
+        _event_row(row)
+        for row in active_manager.events.between_compact(
+            start.isoformat(),
+            end.isoformat(),
+        )
+    ]
+    summaries = _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS)
+    wanted_label = call.object_label.strip().lower()
+    anchor_labels = {
+        str(label).strip().lower()
+        for label in (anchor or {}).get("labels") or []
+        if str(label).strip()
+    }
+    target_labels = {wanted_label} if wanted_label else anchor_labels
+    candidate_summaries = [
+        summary
+        for summary in summaries
+        if not target_labels
+        or target_labels & {
+            str(label).strip().lower()
+            for label in summary.get("labels") or []
+        }
+        or bool(call.face_name.strip())
+    ]
+    def distance_from_anchor(summary: dict[str, Any]) -> float:
+        parsed = _assistant_parse_datetime(
+            str(summary.get("start_at") or ""),
+            selected_zone,
+        )
+        return (
+            abs(parsed.timestamp() - anchor_at.timestamp())
+            if parsed is not None
+            else float("inf")
+        )
+
+    candidate_summaries.sort(key=distance_from_anchor)
+    candidate_summaries = candidate_summaries[:500]
+    candidates = _incidents_with_faces(
+        _hydrate_incidents(candidate_summaries, active_manager),
+        active_manager,
+    )
+    correlation_anchor = anchor or {
+        "representative_event_id": 0,
+        "camera_id": "",
+        "start_at": start.isoformat(),
+        "labels": [call.object_label] if call.object_label else [],
+        "faces": [],
+    }
+    matches = correlate_incident_timeline(
+        correlation_anchor,
+        candidates,
+        object_label=call.object_label,
+        face_name=call.face_name,
+        limit=min(call.limit, 12),
+    )
+    confirmed = sum(
+        item["match_strength"] == "confirmed_identity" for item in matches
+    )
+    possible = sum(
+        item["match_strength"] == "possible_identity" for item in matches
+    )
+    contextual = sum(
+        item["match_strength"] == "context_candidate" for item in matches
+    )
+    timeline_data = {
+        "anchor_event_id": int(event_id) if event_id else None,
+        "anchor_camera_id": (anchor or {}).get("camera_id"),
+        "start_at": start.isoformat(),
+        "end_at": end.isoformat(),
+        "object_label": call.object_label,
+        "face_name": call.face_name,
+        "matches": [
+            {key: item.get(key) for key in (
+                "event_id", "camera_id", "start_at", "seconds_from_anchor",
+                "match_strength", "confidence", "reasons",
+            )}
+            for item in matches
+        ],
+        "limitations": [
+            "Confirmed recognized faces can link incidents across cameras.",
+            "Possible face matches remain uncertain.",
+            "Shared person, vehicle, or animal labels plus nearby time provide context only.",
+            "SurvNG does not yet persist a cross-camera vehicle appearance identity.",
+            "Only the strongest 12 candidates and at most 24 hours are returned.",
+        ],
+    }
+    trace = AssistantEvidence(
+        evidence_id=f"E-trace-{event_id or 'search'}",
+        kind="cross_camera_timeline",
+        title="Cross-camera investigation timeline",
+        summary=(
+            f"Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed "
+            f"identity, {possible} possible identity, and {contextual} context-only."
+        ),
+        data=timeline_data,
+        href=(
+            _assistant_incident_evidence(anchor, int(event_id)).href
+            if anchor and event_id
+            else "/incidents"
+        ),
+        client_data={"timeline": timeline_data},
+    )
+    evidence = [trace]
+    if anchor and event_id:
+        evidence.append(_assistant_incident_evidence(anchor, int(event_id)))
+    for item in matches:
+        incident = item["incident"]
+        evidence.append(
+            _assistant_incident_evidence(incident, int(item["event_id"]))
+        )
+    return evidence
+
+
 def _assistant_execute_tool(
     call: AssistantToolCall,
     request: AssistantChatRequest,
@@ -4302,6 +4468,8 @@ def _assistant_execute_tool(
             request.context.time_zone,
             active_manager,
         )
+    if call.name == "trace_across_cameras":
+        return _assistant_trace_across_cameras(call, request, active_manager)
     return []
 
 
@@ -6267,6 +6435,7 @@ def _incidents_with_faces(
             if current is None or score > current["confidence"]:
                 summaries[key] = {
                     "observation_id": int(observation["observation_id"]),
+                    "identity_id": identity_id,
                     "name": name,
                     "status": status,
                     "confidence": round(score, 4),

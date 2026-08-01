@@ -86,6 +86,16 @@ across restarts. Follow-up analysis remains manually initiated so it cannot
 silently incur provider costs; small changes are explicitly described as
 directional evidence rather than proof.
 
+The assistant can also build a bounded cross-camera investigation timeline from
+the incident currently open in the viewer. Ask **Trace this incident across
+cameras** or name a recognized face and time range. Confirmed face recognition
+is treated as a strong identity link, possible face recognition remains
+uncertain, and nearby incidents sharing only an object class are labeled as
+context candidates rather than the same person or vehicle. Each timeline result
+includes its incident image and link. SurvNG does not yet persist a durable
+cross-camera vehicle appearance identity, so it will not claim two generic car
+detections are the same vehicle.
+
 ## Reolink / ONVIF Notes
 
 ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.

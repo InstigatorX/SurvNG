@@ -207,6 +207,27 @@ class IncidentVisualReviewerTest(unittest.TestCase):
 
 
 class AssistantApiTest(unittest.TestCase):
+    def test_assistant_catalog_includes_only_safe_face_identity_fields(self) -> None:
+        from survng.app import main
+
+        catalog = main._assistant_catalog(
+            AppConfig(),
+            SimpleNamespace(
+                detector=SimpleNamespace(labels=["person"]),
+                faces=SimpleNamespace(people=lambda: [{
+                    "id": 7,
+                    "name": "Steve",
+                    "notes": "private note",
+                }]),
+            ),
+        )
+
+        self.assertEqual(
+            catalog["recognized_faces"],
+            [{"id": 7, "name": "Steve"}],
+        )
+        self.assertNotIn("private note", json.dumps(catalog))
+
     def test_visual_incident_evidence_builds_server_owned_change_preview(self) -> None:
         from survng.app import main
 
@@ -376,6 +397,98 @@ class AssistantApiTest(unittest.TestCase):
 
         self.assertEqual(evidence, [expected])
         self.assertEqual(review.call_args.args[0], 42)
+
+    def test_cross_camera_tool_uses_current_incident_context(self) -> None:
+        from survng.app import main
+
+        request = AssistantChatRequest.model_validate({
+            "message": "Where did this person go next?",
+            "context": {"incident_event_id": 42},
+        })
+        expected = AssistantEvidence(
+            "E-trace-42",
+            "cross_camera_timeline",
+            "Timeline",
+            "One confirmed match",
+            {},
+        )
+        with patch.object(
+            main,
+            "_assistant_trace_across_cameras",
+            return_value=[expected],
+        ) as trace:
+            evidence = main._assistant_execute_tool(
+                AssistantToolCall(name="trace_across_cameras"),
+                request,
+                AppConfig(),
+                SimpleNamespace(),
+            )
+
+        self.assertEqual(evidence, [expected])
+        self.assertEqual(trace.call_args.args[0].name, "trace_across_cameras")
+        self.assertEqual(trace.call_args.args[1].context.incident_event_id, 42)
+
+    def test_cross_camera_trace_returns_ranked_timeline_and_incident_images(self) -> None:
+        from survng.app import main
+
+        def incident(event_id: int, camera_id: str, started: str) -> dict:
+            return {
+                "id": f"incident-{camera_id}-{event_id}",
+                "representative_event_id": event_id,
+                "camera_id": camera_id,
+                "start_at": started,
+                "end_at": started,
+                "duration_seconds": 1,
+                "event_count": 1,
+                "trigger_source": "camera",
+                "labels": ["person"],
+                "zones": [],
+                "motion_observations": [],
+                "faces": [{
+                    "identity_id": 7,
+                    "name": "Steve",
+                    "status": "confirmed",
+                    "confidence": 0.95,
+                }],
+                "events": [{
+                    "id": event_id,
+                    "kind": "motion",
+                    "objects": [{"label": "person", "confidence": 0.9}],
+                    "faces": [],
+                }],
+            }
+
+        anchor = incident(42, "gate", "2026-08-01T12:00:00+00:00")
+        match = incident(43, "front-door", "2026-08-01T12:03:00+00:00")
+        request = AssistantChatRequest.model_validate({
+            "message": "Trace this person",
+            "context": {"incident_event_id": 42},
+        })
+        manager = SimpleNamespace(
+            events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
+        )
+        with (
+            patch.object(main, "_assistant_incident_for_event", return_value=anchor),
+            patch.object(main, "_incident_rows", return_value=[match]),
+            patch.object(main, "_hydrate_incidents", return_value=[match]),
+            patch.object(main, "_incidents_with_faces", return_value=[match]),
+        ):
+            evidence = main._assistant_trace_across_cameras(
+                AssistantToolCall(
+                    name="trace_across_cameras",
+                    event_id=42,
+                    start_at="2026-08-01T11:45:00+00:00",
+                    end_at="2026-08-01T12:15:00+00:00",
+                ),
+                request,
+                manager,
+            )
+
+        self.assertEqual(evidence[0].kind, "cross_camera_timeline")
+        timeline = evidence[0].client_payload()["details"]["timeline"]
+        self.assertEqual(timeline["matches"][0]["match_strength"], "confirmed_identity")
+        self.assertEqual(evidence[1].client_payload()["image_url"], "/api/events/42/thumbnail.jpg?width=960&quality=82")
+        self.assertEqual(evidence[2].client_payload()["image_url"], "/api/events/43/thumbnail.jpg?width=960&quality=82")
 
     def test_configuration_evidence_includes_model_roles_without_provider_secrets(self) -> None:
         from survng.app import main
