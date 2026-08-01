@@ -225,6 +225,80 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertTrue(outcome.object_detected)
         self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "spatial")
 
+    def test_ema_rescue_rejects_spatially_overlapping_stationary_object(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="lower-garage",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "car",
+                    "confidence": 0.96,
+                    "incident_eligible": True,
+                    "box": {"x1": 60, "y1": 47, "x2": 92, "y2": 82},
+                    "temporal_track_observations": 2,
+                    "temporal_center_displacement_ratio": 0.0012,
+                    "temporal_center_path_ratio": 0.0012,
+                    "temporal_newly_appeared": False,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 1, 22, 10, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.60, 0.47, 0.78, 0.82]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertEqual(outcome.motion_correlation["stationary_spatial_rejection_count"], 1)
+
+    def test_ema_rescue_accepts_new_object_appearing_inside_motion_region(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "car",
+                    "confidence": 0.91,
+                    "incident_eligible": True,
+                    "box": {"x1": 20, "y1": 20, "x2": 55, "y2": 65},
+                    "temporal_track_observations": 2,
+                    "temporal_center_displacement_ratio": 0.001,
+                    "temporal_center_path_ratio": 0.001,
+                    "temporal_newly_appeared": True,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 1, 22, 10, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.15, 0.15, 0.60, 0.70]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "appearance")
+        self.assertEqual(outcome.motion_correlation["new_appearance_match_count"], 1)
+
     def test_ema_rescue_accepts_temporally_moving_object_outside_latest_region(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -260,6 +334,42 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(outcome.event_id, 42)
         self.assertTrue(outcome.object_detected)
         self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "temporal")
+
+    def test_ema_rescue_scales_temporal_movement_for_distant_object(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((1000, 1000, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="back-right",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.86,
+                    "incident_eligible": True,
+                    "box": {"x1": 800, "y1": 150, "x2": 830, "y2": 210},
+                    "temporal_track_observations": 2,
+                    "temporal_center_displacement_ratio": 0.004,
+                    "temporal_center_path_ratio": 0.004,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 1, 22, 10, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.1, 0.1, 0.2, 0.2]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "temporal")
+        self.assertLess(outcome.detected_objects[0]["motion_correlation_threshold"], 0.004)
 
     def test_handler_owns_motion_audit_persistence_and_notification(self) -> None:
         events = RecordingEventStore()

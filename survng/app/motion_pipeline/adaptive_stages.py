@@ -22,6 +22,7 @@ from .registry import (
 @dataclass(slots=True)
 class _BackgroundRuntime:
     background: np.ndarray | None = None
+    persistent_change_seconds: np.ndarray | None = None
     noise_ema: float = 4.0
     brightness_ema: float = 128.0
     last_processed_at: float | None = None
@@ -31,6 +32,11 @@ class _BackgroundRuntime:
         with self.lock:
             return _BackgroundRuntime(
                 background=None if self.background is None else self.background.copy(),
+                persistent_change_seconds=(
+                    None
+                    if self.persistent_change_seconds is None
+                    else self.persistent_change_seconds.copy()
+                ),
                 noise_ema=self.noise_ema,
                 brightness_ema=self.brightness_ema,
                 last_processed_at=self.last_processed_at,
@@ -100,6 +106,7 @@ class _TrackerRuntime:
 class _ScoringRuntime:
     accumulated_scores: dict[int, float] = field(default_factory=dict)
     last_seen: dict[int, float] = field(default_factory=dict)
+    stationary_regions: list["_StationaryRegion"] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> "_ScoringRuntime":
@@ -107,7 +114,16 @@ class _ScoringRuntime:
             return _ScoringRuntime(
                 accumulated_scores=dict(self.accumulated_scores),
                 last_seen=dict(self.last_seen),
+                stationary_regions=[replace(region) for region in self.stationary_regions],
             )
+
+
+@dataclass(slots=True)
+class _StationaryRegion:
+    box: tuple[float, float, float, float]
+    first_seen: float
+    last_seen: float
+    hits: int = 1
 
 
 class AdaptiveEmaBackgroundStage:
@@ -120,12 +136,19 @@ class AdaptiveEmaBackgroundStage:
         learning_rate: float = 0.025,
         fast_learning_rate: float = 0.18,
         motion_learning_scale: float = 0.03,
+        stationary_learning_seconds: float = 8.0,
+        stationary_learning_rate: float = 0.05,
         global_change_ratio: float = 0.55,
     ) -> None:
         self._stage_id = stage_id
         self.learning_rate = min(1.0, max(0.0001, float(learning_rate)))
         self.fast_learning_rate = min(1.0, max(self.learning_rate, float(fast_learning_rate)))
         self.motion_learning_scale = min(1.0, max(0.0, float(motion_learning_scale)))
+        self.stationary_learning_seconds = max(1.0, float(stationary_learning_seconds))
+        self.stationary_learning_rate = min(
+            1.0,
+            max(self.learning_rate, float(stationary_learning_rate)),
+        )
         self.global_change_ratio = min(1.0, max(0.05, float(global_change_ratio)))
 
     @property
@@ -139,6 +162,8 @@ class AdaptiveEmaBackgroundStage:
         state = context.runtime.state_for(self.stage_id, _BackgroundRuntime)
         differences: list[np.ndarray] = []
         learning_rates: list[float] = []
+        moving_learning_rates: list[float] = []
+        persistent_change_ratios: list[float] = []
         global_changes: list[float] = []
         with state.lock:
             first = frames[0].astype(np.float32, copy=False)
@@ -153,9 +178,17 @@ class AdaptiveEmaBackgroundStage:
             if state.background is None or state.background.shape != first.shape:
                 state.noise_ema = 4.0
                 state.brightness_ema = float(np.mean(first))
+            if (
+                state.persistent_change_seconds is None
+                or state.persistent_change_seconds.shape != first.shape
+            ):
+                persistent_change_seconds = np.zeros(first.shape, dtype=np.float32)
+            else:
+                persistent_change_seconds = state.persistent_change_seconds.copy()
             noise_ema = state.noise_ema
             brightness_ema = state.brightness_ema
             sample_fps = max(1.0, float(context.configuration.get("sample_fps", 5.0)))
+            previous_processed_at = state.last_processed_at
             for frame_index, frame in enumerate(frames[1:], start=1):
                 current = frame.astype(np.float32, copy=False)
                 delta = cv2.absdiff(current, background)
@@ -171,13 +204,29 @@ class AdaptiveEmaBackgroundStage:
                 if frame_index < len(timestamps):
                     previous_at = timestamps[frame_index - 1]
                     current_at = timestamps[frame_index]
-                    if current_at > previous_at:
+                    if previous_processed_at is not None and current_at > previous_processed_at:
+                        elapsed = current_at - previous_processed_at
+                    elif current_at > previous_at:
                         elapsed = current_at - previous_at
+                    if previous_processed_at is None or current_at > previous_processed_at:
+                        previous_processed_at = current_at
                 elapsed_frames = min(sample_fps * 10.0, max(0.05, elapsed * sample_fps))
+                persistent_elapsed = min(elapsed, 1.0)
+                persistent_change_seconds = np.where(
+                    changed,
+                    persistent_change_seconds + persistent_elapsed,
+                    0.0,
+                ).astype(np.float32, copy=False)
+                persistent_change = np.logical_and(
+                    changed,
+                    persistent_change_seconds >= self.stationary_learning_seconds,
+                )
 
                 if changed_ratio >= self.global_change_ratio:
                     rate = 1.0 - (1.0 - self.fast_learning_rate) ** elapsed_frames
                     cv2.accumulateWeighted(current, background, rate)
+                    moving_rate = rate
+                    stationary_rate = rate
                 else:
                     noise_boost = min(3.0, max(1.0, noise_ema / 6.0))
                     base_rate = min(self.fast_learning_rate, self.learning_rate * noise_boost)
@@ -185,7 +234,7 @@ class AdaptiveEmaBackgroundStage:
                     stable = np.logical_not(changed).astype(np.uint8)
                     cv2.accumulateWeighted(current, background, rate, mask=stable)
                     if self.motion_learning_scale > 0:
-                        moving = changed.astype(np.uint8)
+                        moving = np.logical_and(changed, np.logical_not(persistent_change)).astype(np.uint8)
                         moving_rate = 1.0 - (
                             1.0 - base_rate * self.motion_learning_scale
                         ) ** elapsed_frames
@@ -195,15 +244,33 @@ class AdaptiveEmaBackgroundStage:
                             moving_rate,
                             mask=moving,
                         )
+                    else:
+                        moving_rate = 0.0
+                    stationary_rate = 1.0 - (
+                        1.0 - self.stationary_learning_rate
+                    ) ** elapsed_frames
+                    cv2.accumulateWeighted(
+                        current,
+                        background,
+                        stationary_rate,
+                        mask=persistent_change.astype(np.uint8),
+                    )
 
                 differences.append(np.clip(delta, 0, 255).astype(np.uint8))
                 learning_rates.append(rate)
+                moving_learning_rates.append(
+                    stationary_rate if np.any(persistent_change) else moving_rate
+                )
+                persistent_change_ratios.append(
+                    float(np.count_nonzero(persistent_change)) / max(1, persistent_change.size)
+                )
                 global_changes.append(changed_ratio)
                 brightness = float(np.mean(current))
                 brightness_ema = brightness_ema * 0.96 + brightness * 0.04
 
             if not timestamps or state.last_processed_at is None or timestamps[-1] > state.last_processed_at:
                 state.background = background
+                state.persistent_change_seconds = persistent_change_seconds
                 state.noise_ema = noise_ema
                 state.brightness_ema = brightness_ema
                 state.last_processed_at = timestamps[-1] if timestamps else context.captured_at
@@ -215,6 +282,9 @@ class AdaptiveEmaBackgroundStage:
         context.difference_image = differences[-1] if differences else None
         context.debug.values.update({
             "background_learning_rates": [round(value, 5) for value in learning_rates],
+            "background_moving_learning_rates": [round(value, 5) for value in moving_learning_rates],
+            "background_persistent_change_ratios": [round(value, 6) for value in persistent_change_ratios],
+            "background_stationary_learning_seconds": self.stationary_learning_seconds,
             "scene_noise": round(scene_noise, 4),
             "scene_brightness": round(brightness, 2),
             "scene_mode": "night" if brightness < 55 else "day",
@@ -659,14 +729,28 @@ class AdaptiveMotionScoringStage:
             context.configuration.get("stationary_object_tolerance") or ""
         )
         stationary_thresholds = {
-            "low": (0.006, 0.015),
-            "balanced": (0.01, 0.025),
-            "high": (0.02, 0.05),
+            # displacement, path, containment radius, maximum oscillation
+            # progress, maximum oscillation displacement
+            "low": (0.006, 0.015, 0.012, 0.18, 0.035),
+            "balanced": (0.01, 0.025, 0.025, 0.32, 0.065),
+            "high": (0.02, 0.05, 0.045, 0.45, 0.12),
         }
-        stationary_displacement_ratio, stationary_path_ratio = (
+        (
+            stationary_displacement_ratio,
+            stationary_path_ratio,
+            stationary_containment_ratio,
+            stationary_progress_ratio,
+            stationary_max_displacement_ratio,
+        ) = (
             stationary_thresholds.get(
                 stationary_tolerance,
-                (self.stationary_displacement_ratio, self.stationary_path_ratio),
+                (
+                    self.stationary_displacement_ratio,
+                    self.stationary_path_ratio,
+                    max(self.stationary_displacement_ratio * 2.5, 0.025),
+                    0.32,
+                    max(self.stationary_displacement_ratio * 6.0, 0.065),
+                ),
             )
         )
         context.debug.values["stationary_object_tolerance"] = (
@@ -676,6 +760,9 @@ class AdaptiveMotionScoringStage:
             stationary_displacement_ratio
         )
         context.debug.values["stationary_path_ratio"] = stationary_path_ratio
+        context.debug.values["stationary_containment_ratio"] = stationary_containment_ratio
+        context.debug.values["stationary_progress_ratio"] = stationary_progress_ratio
+        context.debug.values["stationary_max_displacement_ratio"] = stationary_max_displacement_ratio
         base_threshold = MOTION_SCORE_THRESHOLDS.get(sensitivity, MOTION_SCORE_THRESHOLDS["balanced"])
         scene_noise = float(context.debug.values.get("scene_noise", 4.0))
         night = context.debug.values.get("scene_mode") == "night"
@@ -702,6 +789,13 @@ class AdaptiveMotionScoringStage:
             )
             scores.append((min(1.0, max(0.0, score)), track, features))
         score_state = context.runtime.state_for(self.stage_id, _ScoringRuntime)
+        with score_state.lock:
+            score_state.stationary_regions = [
+                region
+                for region in score_state.stationary_regions
+                if context.captured_at - region.last_seen <= 120.0
+            ]
+            stationary_regions = [replace(region) for region in score_state.stationary_regions]
         if scores:
             minimum_persistence_seconds = self.minimum_persistence_frames / sample_fps
             evaluations: list[
@@ -718,9 +812,36 @@ class AdaptiveMotionScoringStage:
                 )
                 stationary_foreground = (
                     candidate_features["persistence"] >= 0.4
-                    and candidate_features["path_length"] < stationary_path_ratio
-                    and candidate_features["net_displacement"]
-                    < stationary_displacement_ratio
+                    and (
+                        (
+                            candidate_features["path_length"] < stationary_path_ratio
+                            and candidate_features["robust_displacement"]
+                            < stationary_displacement_ratio
+                        )
+                        or (
+                            candidate_features["containment_radius"]
+                            < stationary_containment_ratio
+                            and candidate_features["motion_progress"] < 0.65
+                            and candidate_features["robust_displacement"]
+                            < stationary_max_displacement_ratio
+                        )
+                        or (
+                            candidate_features["motion_progress"]
+                            < stationary_progress_ratio
+                            and candidate_features["robust_displacement"]
+                            < stationary_max_displacement_ratio
+                        )
+                    )
+                )
+                stationary_region = (
+                    candidate_features["persistence"] >= 0.4
+                    and candidate_features["motion_progress"] < 0.55
+                    and candidate_features["robust_displacement"]
+                    < stationary_max_displacement_ratio
+                    and self._matches_stationary_region(
+                        candidate_track.box,
+                        stationary_regions,
+                    )
                 )
                 micro_jitter = (
                     candidate_features["median_area_ratio"] < self.micro_area_ratio
@@ -736,6 +857,7 @@ class AdaptiveMotionScoringStage:
                     and persistence_ok
                     and not insect_like
                     and not stationary_foreground
+                    and not stationary_region
                     and not micro_jitter
                     and not persistent_scene_motion
                 )
@@ -744,6 +866,7 @@ class AdaptiveMotionScoringStage:
                     "persistent_scene_motion" if persistent_scene_motion else
                     "insect_like_motion" if insect_like else
                     "stationary_foreground" if stationary_foreground else
+                    "stationary_region" if stationary_region else
                     "micro_jitter" if micro_jitter else
                     "low_score"
                 )
@@ -754,6 +877,14 @@ class AdaptiveMotionScoringStage:
                     candidate_accepted,
                     candidate_reason,
                 ))
+            with score_state.lock:
+                for _candidate_score, candidate_track, _features, _accepted, candidate_reason in evaluations:
+                    if candidate_reason in {"stationary_foreground", "stationary_region", "persistent_scene_motion"}:
+                        self._remember_stationary_region(
+                            score_state.stationary_regions,
+                            candidate_track.box,
+                            context.captured_at,
+                        )
             accepted_evaluations = [item for item in evaluations if item[3]]
             score, best, features, accepted, reason = max(
                 accepted_evaluations or evaluations,
@@ -791,6 +922,10 @@ class AdaptiveMotionScoringStage:
                 "net_displacement": 0.0,
                 "path_length": 0.0,
                 "translation": 0.0,
+                "raw_translation": 0.0,
+                "robust_displacement": 0.0,
+                "containment_radius": 0.0,
+                "motion_progress": 0.0,
             }
         global_changes = context.debug.values.get("global_change_ratios", [])
         global_change = max(global_changes, default=0.0) if isinstance(global_changes, list) else 0.0
@@ -807,6 +942,25 @@ class AdaptiveMotionScoringStage:
             reason = "global_illumination_change"
         scoring_features: dict[str, Any] = {
             **{key: round(value, 4) for key, value in features.items()},
+            "stationary_object_tolerance": stationary_tolerance or "custom",
+            "stationary_displacement_threshold": stationary_displacement_ratio,
+            "stationary_path_threshold": stationary_path_ratio,
+            "stationary_containment_threshold": stationary_containment_ratio,
+            "stationary_progress_threshold": stationary_progress_ratio,
+            "stationary_max_displacement_threshold": stationary_max_displacement_ratio,
+            "stationary_region_count": len(score_state.stationary_regions),
+            "background_learning_rate": round(
+                max(context.debug.values.get("background_learning_rates", [0.0]), default=0.0),
+                5,
+            ),
+            "background_moving_learning_rate": round(
+                max(context.debug.values.get("background_moving_learning_rates", [0.0]), default=0.0),
+                5,
+            ),
+            "background_persistent_change_ratio": round(
+                max(context.debug.values.get("background_persistent_change_ratios", [0.0]), default=0.0),
+                6,
+            ),
             "scene_noise": round(scene_noise, 4),
             "scene_mode": "night" if night else "day",
             "adaptive_threshold": round(threshold, 4),
@@ -854,7 +1008,26 @@ class AdaptiveMotionScoringStage:
             if len(path) > 1
             else 0.0
         )
-        translation = min(1.0, net_displacement / credible_displacement_ratio)
+        if len(path) > 1:
+            anchor_count = min(3, max(1, len(path) // 3))
+            start_anchor = np.median(path[:anchor_count], axis=0)
+            end_anchor = np.median(path[-anchor_count:], axis=0)
+            robust_displacement = float(np.linalg.norm(end_anchor - start_anchor))
+            median_center = np.median(path, axis=0)
+            containment_radius = float(
+                np.percentile(np.linalg.norm(path - median_center, axis=1), 90)
+            )
+        else:
+            robust_displacement = 0.0
+            containment_radius = 0.0
+        motion_progress = min(
+            1.0,
+            robust_displacement / max(path_length, 1e-6),
+        )
+        raw_translation = min(1.0, robust_displacement / credible_displacement_ratio)
+        translation = raw_translation * (
+            0.35 + 0.65 * min(1.0, motion_progress / 0.75)
+        )
         median_speed = 0.0
         if len(vectors):
             speeds = np.linalg.norm(vectors, axis=1)
@@ -891,7 +1064,64 @@ class AdaptiveMotionScoringStage:
             "net_displacement": net_displacement,
             "path_length": path_length,
             "translation": translation,
+            "raw_translation": raw_translation,
+            "robust_displacement": robust_displacement,
+            "containment_radius": containment_radius,
+            "motion_progress": motion_progress,
         }
+
+    @staticmethod
+    def _matches_stationary_region(
+        box: tuple[float, float, float, float],
+        regions: list[_StationaryRegion],
+    ) -> bool:
+        x1, y1, x2, y2 = box
+        center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        diagonal = max(0.02, math.hypot(x2 - x1, y2 - y1))
+        for region in regions:
+            rx1, ry1, rx2, ry2 = region.box
+            intersection = max(0.0, min(x2, rx2) - max(x1, rx1)) * max(
+                0.0,
+                min(y2, ry2) - max(y1, ry1),
+            )
+            union = max(
+                1e-9,
+                (x2 - x1) * (y2 - y1)
+                + (rx2 - rx1) * (ry2 - ry1)
+                - intersection,
+            )
+            region_center = ((rx1 + rx2) / 2.0, (ry1 + ry2) / 2.0)
+            region_diagonal = max(0.02, math.hypot(rx2 - rx1, ry2 - ry1))
+            if intersection / union >= 0.2 or math.dist(center, region_center) <= max(
+                diagonal,
+                region_diagonal,
+            ) * 0.5:
+                return True
+        return False
+
+    @classmethod
+    def _remember_stationary_region(
+        cls,
+        regions: list[_StationaryRegion],
+        box: tuple[float, float, float, float],
+        observed_at: float,
+    ) -> None:
+        for region in regions:
+            if cls._matches_stationary_region(box, [region]):
+                region.box = tuple(
+                    old * 0.75 + new * 0.25
+                    for old, new in zip(region.box, box)
+                )
+                region.last_seen = observed_at
+                region.hits += 1
+                return
+        regions.append(_StationaryRegion(
+            box=box,
+            first_seen=observed_at,
+            last_seen=observed_at,
+        ))
+        if len(regions) > 64:
+            del regions[:len(regions) - 64]
 
 
 def _build_background(stage_id: str, options: Mapping[str, Any], dependencies: MotionStageDependencies) -> AdaptiveEmaBackgroundStage:
@@ -901,6 +1131,12 @@ def _build_background(stage_id: str, options: Mapping[str, Any], dependencies: M
         learning_rate=float(options.get("learning_rate", 0.025)),
         fast_learning_rate=float(options.get("fast_learning_rate", 0.18)),
         motion_learning_scale=float(options.get("motion_learning_scale", 0.03)),
+        stationary_learning_seconds=float(
+            options.get("stationary_learning_seconds", 8.0)
+        ),
+        stationary_learning_rate=float(
+            options.get("stationary_learning_rate", 0.05)
+        ),
         global_change_ratio=float(options.get("global_change_ratio", 0.55)),
     )
 
@@ -980,6 +1216,8 @@ def register_adaptive_motion_stages(registry: MotionStageRegistry) -> None:
             MotionStageOption("learning_rate", "Normal learning speed", "number", 0.025, minimum=0.0001, maximum=1, advanced=True),
             MotionStageOption("fast_learning_rate", "Scene-change learning speed", "number", 0.18, minimum=0.001, maximum=1, advanced=True),
             MotionStageOption("motion_learning_scale", "Moving-region learning", "number", 0.03, minimum=0, maximum=1, advanced=True),
+            MotionStageOption("stationary_learning_seconds", "Stable foreground wait", "number", 8.0, minimum=1, maximum=120, advanced=True),
+            MotionStageOption("stationary_learning_rate", "Stable foreground learning", "number", 0.05, minimum=0.0001, maximum=1, advanced=True),
             MotionStageOption("global_change_ratio", "Whole-scene change level", "number", 0.55, minimum=0.05, maximum=1, advanced=True),
         ),
     ))

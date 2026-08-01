@@ -899,6 +899,7 @@ class CameraWorker:
                 "insect_like_motion",
                 "persistent_scene_motion",
                 "stationary_foreground",
+                "stationary_region",
             }
         )
         if not strong_candidate:

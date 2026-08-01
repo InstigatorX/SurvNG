@@ -292,6 +292,17 @@ def _temporal_consensus(
             "temporal_peak_confidence": round(track.peak_confidence, 4),
             "temporal_label_votes": track.label_votes,
         }
+        observation_indices = sorted(track.observations)
+        if observation_indices:
+            first_observation_index = observation_indices[0]
+            last_observation_index = observation_indices[-1]
+            enriched["temporal_first_observation_offset_seconds"] = samples[
+                first_observation_index
+            ].offset
+            enriched["temporal_last_observation_offset_seconds"] = samples[
+                last_observation_index
+            ].offset
+            enriched["temporal_newly_appeared"] = first_observation_index > 0
         displacement, path = _temporal_motion_metrics(track, samples)
         enriched["temporal_center_displacement_ratio"] = round(displacement, 5)
         enriched["temporal_center_path_ratio"] = round(path, 5)

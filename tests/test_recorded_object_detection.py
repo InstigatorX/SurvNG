@@ -90,6 +90,19 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             objects[0]["temporal_center_displacement_ratio"],
         )
 
+    def test_temporal_consensus_marks_object_that_appears_after_empty_sample(self) -> None:
+        samples = [
+            sample(-0.5, []),
+            sample(0.0, [detected("car", 0.82, (100, 100, 160, 160))]),
+            sample(0.5, [detected("car", 0.84, (101, 100, 161, 160))]),
+        ]
+
+        _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertTrue(objects[0]["temporal_newly_appeared"])
+        self.assertEqual(objects[0]["temporal_first_observation_offset_seconds"], 0.0)
+        self.assertEqual(objects[0]["temporal_last_observation_offset_seconds"], 0.5)
+
     def test_spatial_track_votes_prevent_high_confidence_label_outliers(self) -> None:
         samples = [
             sample(-1.0, [detected("robot_lawnmower", 0.93, (100, 100, 150, 150))]),

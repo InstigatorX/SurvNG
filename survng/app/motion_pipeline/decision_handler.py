@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import math
 import time
 from typing import Any, Callable, Protocol
 
@@ -19,6 +20,8 @@ MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
 LOGGER = logging.getLogger(__name__)
 MOTION_REGION_MARGIN_RATIO = 0.035
 TEMPORAL_OBJECT_MOVEMENT_RATIO = 0.02
+MINIMUM_TEMPORAL_OBJECT_MOVEMENT_RATIO = 0.003
+TEMPORAL_OBJECT_BOX_MOVEMENT_SCALE = 0.04
 
 
 def _detection_box_ratio(
@@ -62,6 +65,22 @@ def _intersects_motion_region(
     return False
 
 
+def _temporal_movement_threshold(
+    box: tuple[float, float, float, float] | None,
+) -> float:
+    if box is None:
+        return TEMPORAL_OBJECT_MOVEMENT_RATIO
+    x1, y1, x2, y2 = box
+    object_diagonal = math.hypot(x2 - x1, y2 - y1)
+    return min(
+        TEMPORAL_OBJECT_MOVEMENT_RATIO,
+        max(
+            MINIMUM_TEMPORAL_OBJECT_MOVEMENT_RATIO,
+            object_diagonal * TEMPORAL_OBJECT_BOX_MOVEMENT_SCALE,
+        ),
+    )
+
+
 def motion_correlated_objects(
     frame: Frame,
     objects: list[dict[str, Any]],
@@ -75,32 +94,45 @@ def motion_correlated_objects(
     correlated: list[dict[str, Any]] = []
     spatial_matches = 0
     temporal_matches = 0
+    new_appearance_matches = 0
+    stationary_spatial_rejections = 0
     for detected in objects:
-        spatial = bool(
-            (box := _detection_box_ratio(detected, frame)) is not None
-            and _intersects_motion_region(box, regions)
-        )
+        box = _detection_box_ratio(detected, frame)
+        spatial = bool(box is not None and _intersects_motion_region(box, regions))
         try:
             displacement = float(detected.get("temporal_center_displacement_ratio") or 0.0)
-            path = float(detected.get("temporal_center_path_ratio") or 0.0)
         except (TypeError, ValueError):
             displacement = 0.0
-            path = 0.0
+        movement_threshold = _temporal_movement_threshold(box)
+        temporal_evidence_available = bool(
+            int(detected.get("temporal_track_observations") or 0) >= 2
+        )
+        newly_appeared = bool(detected.get("temporal_newly_appeared"))
         # Net displacement is deliberately authoritative. Detector-box jitter
         # can accumulate a long path around an otherwise stationary object.
-        temporal = displacement >= TEMPORAL_OBJECT_MOVEMENT_RATIO
-        detected["motion_correlated"] = bool(spatial or temporal)
+        temporal = displacement >= movement_threshold
+        spatial_fallback = spatial and not temporal_evidence_available
+        appearance_match = spatial and newly_appeared
+        motion_correlated = bool(temporal or spatial_fallback or appearance_match)
+        detected["motion_correlated"] = motion_correlated
         detected["motion_correlation"] = (
-            "spatial" if spatial else "temporal" if temporal else "none"
+            "temporal" if temporal else
+            "appearance" if appearance_match else
+            "spatial" if spatial_fallback else
+            "none"
         )
-        if spatial or temporal:
+        detected["motion_correlation_threshold"] = round(movement_threshold, 5)
+        detected["motion_temporal_evidence_available"] = temporal_evidence_available
+        if motion_correlated:
             correlated.append(detected)
             spatial_matches += int(spatial)
             temporal_matches += int(temporal)
+            new_appearance_matches += int(appearance_match)
         else:
             # Preserve the detection as diagnostic evidence without allowing
             # an unrelated stationary object to become an incident label.
             detected["incident_eligible"] = False
+            stationary_spatial_rejections += int(spatial and temporal_evidence_available)
     return correlated, {
         "required": True,
         "motion_region_count": len(regions),
@@ -108,7 +140,10 @@ def motion_correlated_objects(
         "correlated_object_count": len(correlated),
         "spatial_match_count": spatial_matches,
         "temporal_match_count": temporal_matches,
+        "new_appearance_match_count": new_appearance_matches,
+        "stationary_spatial_rejection_count": stationary_spatial_rejections,
         "minimum_temporal_movement_ratio": TEMPORAL_OBJECT_MOVEMENT_RATIO,
+        "adaptive_minimum_temporal_movement_ratio": MINIMUM_TEMPORAL_OBJECT_MOVEMENT_RATIO,
         "region_margin_ratio": MOTION_REGION_MARGIN_RATIO,
     }
 

@@ -13,6 +13,8 @@ def adaptive_motion_stage_configs() -> list[MotionStageConfig]:
                 "learning_rate": 0.025,
                 "fast_learning_rate": 0.18,
                 "motion_learning_scale": 0.03,
+                "stationary_learning_seconds": 8.0,
+                "stationary_learning_rate": 0.05,
                 "global_change_ratio": 0.55,
             },
         ),
