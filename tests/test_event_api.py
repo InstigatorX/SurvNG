@@ -19,6 +19,38 @@ from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_appearance_match_endpoint_bounds_window_and_keeps_vectors_private(self) -> None:
+        events = SimpleNamespace(get=lambda event_id: {
+            "id": event_id,
+            "created_at": "2026-08-01T12:00:00+00:00",
+        })
+        appearance_index = SimpleNamespace(matches=Mock(return_value=[{
+            "event_id": 8,
+            "camera_id": "foyer",
+            "similarity": 0.91,
+            "visually_similar": True,
+        }]))
+        active_manager = SimpleNamespace(
+            events=events,
+            appearance_index=appearance_index,
+        )
+        with patch.object(main, "manager", active_manager):
+            response = main.event_appearance_matches(
+                7,
+                hours=1000,
+                limit=500,
+            )
+
+        self.assertEqual(response["hours"], 720.0)
+        self.assertEqual(response["matches"][0]["similarity"], 0.91)
+        self.assertNotIn("embedding", response["matches"][0])
+        call = appearance_index.matches.call_args
+        self.assertEqual(call.kwargs["limit"], 100)
+        self.assertEqual(
+            call.kwargs["start_at"],
+            "2026-07-02T12:00:00+00:00",
+        )
+
     def test_motion_audit_endpoint_filters_visual_backup_category(self) -> None:
         events = SimpleNamespace(motion_audits=Mock(return_value=([], 0)))
         active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"))

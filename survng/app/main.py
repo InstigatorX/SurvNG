@@ -3481,6 +3481,49 @@ def event_thumbnail(event_id: int, width: int = 640, quality: int = 82) -> FileR
     )
 
 
+@app.get("/api/events/{event_id}/appearance-matches")
+def event_appearance_matches(
+    event_id: int,
+    hours: float = 24.0,
+    limit: int = 12,
+    cross_camera_only: bool = True,
+) -> dict[str, Any]:
+    bounded_hours = max(0.25, min(float(hours), 24.0 * 30.0))
+    bounded_limit = max(1, min(int(limit), 100))
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        event = active_manager.events.get(event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        try:
+            anchor_at = datetime.fromisoformat(
+                str(event.get("created_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="event timestamp is invalid") from exc
+        if anchor_at.tzinfo is None:
+            anchor_at = anchor_at.replace(tzinfo=timezone.utc)
+        matches = active_manager.appearance_index.matches(
+            event_id,
+            start_at=(anchor_at - timedelta(hours=bounded_hours)).isoformat(),
+            end_at=(anchor_at + timedelta(hours=bounded_hours)).isoformat(),
+            cross_camera_only=bool(cross_camera_only),
+            limit=bounded_limit,
+        )
+    return {
+        "event_id": event_id,
+        "hours": bounded_hours,
+        "cross_camera_only": bool(cross_camera_only),
+        "matches": matches,
+    }
+
+
+@app.get("/api/appearance-index/status")
+def appearance_index_status() -> dict[str, Any]:
+    with MANAGER_RELOAD_LOCK:
+        return manager.appearance_index.status()
+
+
 @app.get("/api/incidents")
 def incidents(limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
     bounded_limit = max(1, min(limit, 200))
@@ -4324,6 +4367,27 @@ def _assistant_trace_across_cameras(
     if end <= start:
         start, end = end, start
     start = max(start, end - timedelta(hours=24))
+    appearance_matches: list[dict[str, Any]] = []
+    appearance_index = getattr(active_manager, "appearance_index", None)
+    if event_id and appearance_index is not None:
+        try:
+            appearance_matches = appearance_index.matches(
+                int(event_id),
+                start_at=start.isoformat(),
+                end_at=end.isoformat(),
+                cross_camera_only=True,
+                limit=100,
+            )
+        except Exception:
+            LOGGER.exception(
+                "cross-camera appearance lookup failed for event %s",
+                event_id,
+            )
+    appearance_event_ids = {
+        int(item.get("event_id") or 0)
+        for item in appearance_matches
+        if item.get("visually_similar")
+    }
     rows = [
         _event_row(row)
         for row in active_manager.events.between_compact(
@@ -4348,6 +4412,10 @@ def _assistant_trace_across_cameras(
             for label in summary.get("labels") or []
         }
         or bool(call.face_name.strip())
+        or any(
+            int(event.get("id") or 0) in appearance_event_ids
+            for event in summary.get("events") or []
+        )
     ]
     def distance_from_anchor(summary: dict[str, Any]) -> float:
         parsed = _assistant_parse_datetime(
@@ -4380,6 +4448,82 @@ def _assistant_trace_across_cameras(
         face_name=call.face_name,
         limit=min(call.limit, 12),
     )
+    incident_by_event_id: dict[int, dict[str, Any]] = {}
+    for incident in candidates:
+        representative_id = int(incident.get("representative_event_id") or 0)
+        if representative_id > 0:
+            incident_by_event_id[representative_id] = incident
+        for event in incident.get("events") or []:
+            candidate_event_id = int(event.get("id") or 0)
+            if candidate_event_id > 0:
+                incident_by_event_id[candidate_event_id] = incident
+    matches_by_event_id = {
+        int(item.get("event_id") or 0): item
+        for item in matches
+    }
+    for appearance in appearance_matches:
+        if not appearance.get("visually_similar"):
+            continue
+        matched_incident = incident_by_event_id.get(int(appearance["event_id"]))
+        if matched_incident is None:
+            continue
+        representative_id = int(
+            matched_incident.get("representative_event_id")
+            or appearance["event_id"]
+        )
+        similarity = float(appearance.get("similarity") or 0.0)
+        reason = (
+            f"{str(appearance.get('model_kind') or 'object').title()} appearance "
+            f"is {round(similarity * 100)}% similar using the same ReID model"
+        )
+        existing = matches_by_event_id.get(representative_id)
+        if existing is not None:
+            existing.setdefault("reasons", []).append(reason)
+            existing["appearance_similarity"] = round(similarity, 4)
+            if existing.get("match_strength") not in {
+                "confirmed_identity",
+                "possible_identity",
+            }:
+                existing["match_strength"] = "appearance_similarity"
+                existing["confidence"] = round(similarity, 3)
+            continue
+        matched_at = str(matched_incident.get("start_at") or appearance.get("created_at") or "")
+        matched_epoch = _assistant_parse_datetime(matched_at, selected_zone)
+        item = {
+            "incident": matched_incident,
+            "event_id": representative_id,
+            "camera_id": str(matched_incident.get("camera_id") or appearance.get("camera_id") or ""),
+            "start_at": matched_at,
+            "seconds_from_anchor": round(
+                (matched_epoch.timestamp() - anchor_at.timestamp())
+                if matched_epoch is not None
+                else 0.0,
+                1,
+            ),
+            "match_strength": "appearance_similarity",
+            "confidence": round(similarity, 3),
+            "appearance_similarity": round(similarity, 4),
+            "reasons": [reason],
+        }
+        matches.append(item)
+        matches_by_event_id[representative_id] = item
+    strength_rank = {
+        "confirmed_identity": 4,
+        "possible_identity": 3,
+        "appearance_similarity": 2,
+        "context_candidate": 1,
+    }
+    matches = sorted(
+        sorted(
+            matches,
+            key=lambda item: (
+                -strength_rank.get(str(item.get("match_strength") or ""), 0),
+                -float(item.get("confidence") or 0.0),
+                abs(float(item.get("seconds_from_anchor") or 0.0)),
+            ),
+        )[:min(call.limit, 12)],
+        key=lambda item: str(item.get("start_at") or ""),
+    )
     confirmed = sum(
         item["match_strength"] == "confirmed_identity" for item in matches
     )
@@ -4388,6 +4532,9 @@ def _assistant_trace_across_cameras(
     )
     contextual = sum(
         item["match_strength"] == "context_candidate" for item in matches
+    )
+    appearance_similar = sum(
+        item["match_strength"] == "appearance_similarity" for item in matches
     )
     timeline_data = {
         "anchor_event_id": int(event_id) if event_id else None,
@@ -4400,6 +4547,7 @@ def _assistant_trace_across_cameras(
             {key: item.get(key) for key in (
                 "event_id", "camera_id", "start_at", "seconds_from_anchor",
                 "match_strength", "confidence", "reasons",
+                "appearance_similarity",
             )}
             for item in matches
         ],
@@ -4407,7 +4555,8 @@ def _assistant_trace_across_cameras(
             "Confirmed recognized faces can link incidents across cameras.",
             "Possible face matches remain uncertain.",
             "Shared person, vehicle, or animal labels plus nearby time provide context only.",
-            "SurvNG does not yet persist a cross-camera vehicle appearance identity.",
+            "Appearance similarity uses durable, model-versioned ReID vectors and is stronger than a shared class label, but it is not proof of identity.",
+            "Camera angle, lighting, occlusion, and visually similar subjects can change the score.",
             "Only the strongest 12 candidates and at most 24 hours are returned.",
         ],
     }
@@ -4417,7 +4566,8 @@ def _assistant_trace_across_cameras(
         title="Cross-camera investigation timeline",
         summary=(
             f"Found {len(matches)} bounded timeline candidate(s): {confirmed} confirmed "
-            f"identity, {possible} possible identity, and {contextual} context-only."
+            f"identity, {possible} possible identity, {appearance_similar} appearance-similar, "
+            f"and {contextual} context-only."
         ),
         data=timeline_data,
         href=(

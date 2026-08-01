@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import CameraWorker
+from .appearance_index import AppearanceIndex
 from .config import (
     AppConfig,
     CameraConfig,
@@ -101,6 +102,7 @@ class AppManager:
         self.database_dir.mkdir(parents=True, exist_ok=True)
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
+        self.appearance_index = AppearanceIndex(self.events.db_path)
         self.detector = InferenceSupervisor(config.detector)
         self.face_recognizer = IsolatedFaceRecognizer(self.detector)
         self.person_reidentifier = IsolatedPersonReidentifier(self.detector)
@@ -142,6 +144,7 @@ class AppManager:
             publisher=self.publish_event,
             limiter=self._object_tracking_limiter,
             appearance_encoder=self.person_reidentifier,
+            appearance_indexer=self.appearance_index.replace_event,
         )
         self.mqtt = self._build_mqtt_service(config.mqtt)
         self._process_started_monotonic = time.monotonic()

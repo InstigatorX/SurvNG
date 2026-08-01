@@ -624,6 +624,51 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             {"track_seed": 1},
         )
 
+    def test_completed_tracking_session_indexes_confirmed_track_appearance(self) -> None:
+        class Encoder:
+            enabled = True
+
+            @staticmethod
+            def model_identity_for_label(label):
+                if label != "car":
+                    return None
+                return {
+                    "model_kind": "vehicle",
+                    "model_fingerprint": "vehicle-model-v1",
+                    "match_threshold": 0.8,
+                }
+
+        indexed: list[tuple[int, str, list[dict]]] = []
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                vehicle_reid_enabled=True,
+                vehicle_reid_model_path="vehicle.xml",
+            ),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            appearance_encoder=Encoder(),
+            appearance_indexer=lambda event_id, camera_id, records: (
+                indexed.append((event_id, camera_id, list(records))) or len(indexed[-1][2])
+            ),
+        )
+        tracker = ByteTrackObjectTracker(session.config, high_confidence_threshold=0.7)
+        detected = detection("car", 0.9, (5, 5, 95, 80))
+        detected["_tracking_embedding"] = np.asarray([1.0, 0.0], dtype=np.float32)
+        tracker.update([detected], 10.0, confirm_new=True)
+
+        session._persist(7, tracker, 11.0, None, 1, "complete")
+
+        self.assertEqual(len(indexed), 1)
+        self.assertEqual(indexed[0][0:2], (7, "gate"))
+        self.assertEqual(indexed[0][2][0]["model_kind"], "vehicle")
+        self.assertEqual(indexed[0][2][0]["model_fingerprint"], "vehicle-model-v1")
+        np.testing.assert_allclose(indexed[0][2][0]["embedding"], [1.0, 0.0])
+        self.assertEqual(session.status()["appearance_vectors_indexed"], 1)
+
     def test_label_aware_encoder_annotates_people_and_vehicles(self) -> None:
         class Encoder:
             enabled = True

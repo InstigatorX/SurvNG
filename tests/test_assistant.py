@@ -490,6 +490,66 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(evidence[1].client_payload()["image_url"], "/api/events/42/thumbnail.jpg?width=960&quality=82")
         self.assertEqual(evidence[2].client_payload()["image_url"], "/api/events/43/thumbnail.jpg?width=960&quality=82")
 
+    def test_cross_camera_trace_uses_durable_vehicle_appearance_across_labels(self) -> None:
+        from survng.app import main
+
+        def incident(event_id: int, camera_id: str, started: str, label: str) -> dict:
+            return {
+                "id": f"incident-{camera_id}-{event_id}",
+                "representative_event_id": event_id,
+                "camera_id": camera_id,
+                "start_at": started,
+                "end_at": started,
+                "duration_seconds": 1,
+                "event_count": 1,
+                "trigger_source": "camera",
+                "labels": [label],
+                "zones": [],
+                "motion_observations": [],
+                "faces": [],
+                "events": [{"id": event_id, "kind": "motion", "objects": []}],
+            }
+
+        anchor = incident(42, "gate", "2026-08-01T12:00:00+00:00", "car")
+        match = incident(43, "upper-garage", "2026-08-01T12:04:00+00:00", "truck")
+        manager = SimpleNamespace(
+            events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
+            appearance_index=SimpleNamespace(matches=lambda *_args, **_kwargs: [{
+                "event_id": 43,
+                "camera_id": "upper-garage",
+                "created_at": "2026-08-01T12:04:00+00:00",
+                "model_kind": "vehicle",
+                "similarity": 0.91,
+                "threshold": 0.8,
+                "visually_similar": True,
+            }]),
+        )
+        request = AssistantChatRequest.model_validate({
+            "message": "Is this the same vehicle?",
+            "context": {"incident_event_id": 42},
+        })
+        with (
+            patch.object(main, "_assistant_incident_for_event", return_value=anchor),
+            patch.object(main, "_incident_rows", return_value=[match]),
+            patch.object(main, "_hydrate_incidents", return_value=[match]),
+            patch.object(main, "_incidents_with_faces", return_value=[match]),
+        ):
+            evidence = main._assistant_trace_across_cameras(
+                AssistantToolCall(
+                    name="trace_across_cameras",
+                    event_id=42,
+                    start_at="2026-08-01T11:45:00+00:00",
+                    end_at="2026-08-01T12:15:00+00:00",
+                ),
+                request,
+                manager,
+            )
+
+        timeline = evidence[0].client_payload()["details"]["timeline"]
+        self.assertEqual(timeline["matches"][0]["match_strength"], "appearance_similarity")
+        self.assertEqual(timeline["matches"][0]["appearance_similarity"], 0.91)
+        self.assertIn("appearance-similar", evidence[0].summary)
+
     def test_configuration_evidence_includes_model_roles_without_provider_secrets(self) -> None:
         from survng.app import main
 

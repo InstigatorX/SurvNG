@@ -98,6 +98,8 @@ class PersonReidentificationTest(unittest.TestCase):
         router.vehicle._input = "input"
         router.vehicle._output = "vehicle"
         router.vehicle.ready = True
+        router.vehicle.model_fingerprint = "vehicle-model-v1"
+        router.vehicle.embedding_size = 2
 
         vehicle = router.embed_for_label(
             "car",
@@ -107,6 +109,13 @@ class PersonReidentificationTest(unittest.TestCase):
         self.assertTrue(router.supports_label("car"))
         self.assertFalse(router.supports_label("dog"))
         self.assertTrue(np.allclose(vehicle, [0.0, 1.0]))
+        self.assertEqual(router.model_identity_for_label("car"), {
+            "model_kind": "vehicle",
+            "model_fingerprint": "vehicle-model-v1",
+            "embedding_size": 2,
+            "match_threshold": router.vehicle.match_threshold,
+        })
+        self.assertIsNone(router.model_identity_for_label("dog"))
 
     def test_appearance_router_does_not_retry_an_unavailable_model_per_frame(self) -> None:
         config = DetectorConfig.model_validate({

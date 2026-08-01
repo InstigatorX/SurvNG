@@ -92,9 +92,13 @@ cameras** or name a recognized face and time range. Confirmed face recognition
 is treated as a strong identity link, possible face recognition remains
 uncertain, and nearby incidents sharing only an object class are labeled as
 context candidates rather than the same person or vehicle. Each timeline result
-includes its incident image and link. SurvNG does not yet persist a durable
-cross-camera vehicle appearance identity, so it will not claim two generic car
-detections are the same vehicle.
+includes its incident image and link. For newly tracked incidents, SurvNG also
+stores normalized person and vehicle appearance signatures in a durable local
+index. Comparisons are restricted to signatures produced by the exact same ReID
+model version. A strong match is reported as visual similarity—not confirmed
+identity—because camera angle, lighting, occlusion, and similar-looking subjects
+can affect the score. Raw appearance vectors remain server-side and are never
+returned by the API or assistant.
 
 ## Reolink / ONVIF Notes
 

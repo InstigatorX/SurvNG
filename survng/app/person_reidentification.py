@@ -237,6 +237,25 @@ class OpenVinoAppearanceReidentifier:
             return self.vehicle.embed(crop)
         raise ValueError(f"ReID is not configured for label {normalized!r}")
 
+    def model_identity_for_label(self, label: str) -> dict[str, Any] | None:
+        normalized = str(label or "").strip().lower()
+        if normalized == "person":
+            engine = self.person
+            model_kind = "person"
+        elif normalized in self.config.vehicle_reid_labels:
+            engine = self.vehicle
+            model_kind = "vehicle"
+        else:
+            return None
+        if not engine.ready or not engine.model_fingerprint:
+            return None
+        return {
+            "model_kind": model_kind,
+            "model_fingerprint": engine.model_fingerprint,
+            "embedding_size": engine.embedding_size,
+            "match_threshold": engine.match_threshold,
+        }
+
     def status(self) -> dict[str, Any]:
         person = self.person.status()
         vehicle = self.vehicle.status()

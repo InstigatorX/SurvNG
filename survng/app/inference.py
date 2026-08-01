@@ -960,5 +960,28 @@ class IsolatedPersonReidentifier:
     def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
         return self.supervisor.embed_reid(label, crop)
 
+    def model_identity_for_label(self, label: str) -> dict[str, Any] | None:
+        normalized = str(label or "").strip().lower()
+        status = self.supervisor.cached_reid_status()
+        if normalized == "person":
+            engine = status.get("person", status)
+            model_kind = "person"
+        elif normalized in self.config.vehicle_reid_labels:
+            engine = status.get("vehicle", {})
+            model_kind = "vehicle"
+        else:
+            return None
+        if not isinstance(engine, dict) or not engine.get("ready"):
+            return None
+        fingerprint = str(engine.get("model_fingerprint") or "")
+        if not fingerprint:
+            return None
+        return {
+            "model_kind": model_kind,
+            "model_fingerprint": fingerprint,
+            "embedding_size": int(engine.get("embedding_size") or 0),
+            "match_threshold": float(engine.get("match_threshold") or 0.0),
+        }
+
     def status(self) -> dict[str, Any]:
         return self.supervisor.reid_status()

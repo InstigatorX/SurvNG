@@ -27,6 +27,7 @@ FrameProvider = Callable[[], FrameSample | None]
 CatchupFrameProvider = Callable[[float, float, float, int], Iterable[tuple[float, np.ndarray]]]
 TrackingUpdate = Callable[[int, dict[str, Any], list[dict[str, Any]] | None], object | None]
 TrackingPublisher = Callable[[str, dict[str, Any]], None]
+AppearanceIndexWriter = Callable[[int, str, Iterable[dict[str, Any]]], int]
 
 
 def _rescale_detection_boxes(
@@ -82,6 +83,9 @@ class AppearanceEncoder(Protocol):
         ...
 
     def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
+        ...
+
+    def model_identity_for_label(self, label: str) -> dict[str, Any] | None:
         ...
 
 
@@ -811,6 +815,28 @@ class ByteTrackObjectTracker:
         ]
         return sorted([*completed, *active], key=lambda item: int(item["track_id"]))
 
+    def appearance_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for track in [*self._completed.values(), *self._tracks.values()]:
+            if not track.confirmed or track.appearance is None:
+                continue
+            records.append({
+                "track_id": track.track_id,
+                "label": track.label,
+                "embedding": track.appearance.copy(),
+                "observation_count": track.hits,
+                "quality": track.max_confidence,
+                "first_seen": datetime.fromtimestamp(
+                    track.first_seen,
+                    timezone.utc,
+                ).isoformat(),
+                "last_seen": datetime.fromtimestamp(
+                    track.last_seen,
+                    timezone.utc,
+                ).isoformat(),
+            })
+        return records
+
     def _association_stale_limit(self, track: ObjectTrack) -> float:
         if track.seeded:
             return max(
@@ -849,6 +875,7 @@ class ObjectTrackingSession:
         limiter: threading.BoundedSemaphore,
         tracker_registry: ObjectTrackerRegistry | None = None,
         appearance_encoder: AppearanceEncoder | None = None,
+        appearance_indexer: AppearanceIndexWriter | None = None,
         catchup_frame_provider: CatchupFrameProvider | None = None,
     ) -> None:
         self.camera = camera
@@ -860,6 +887,7 @@ class ObjectTrackingSession:
         self.limiter = limiter
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
         self.appearance_encoder = appearance_encoder
+        self.appearance_indexer = appearance_indexer
         self.catchup_frame_provider = catchup_frame_provider
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
@@ -908,6 +936,8 @@ class ObjectTrackingSession:
             "reid_avoided_geometry_matches": 0,
             "reid_avoided_by_label": {},
             "last_reid_error": "",
+            "appearance_vectors_indexed": 0,
+            "appearance_index_error": "",
         }
 
     def start(
@@ -1408,6 +1438,8 @@ class ObjectTrackingSession:
             payload["frame_height"] = self._frame_height
         if self.update_event(event_id, payload, tracked_objects) is None:
             raise RuntimeError(f"tracking event {event_id} no longer exists")
+        if state in {"complete", "interrupted"}:
+            self._index_track_appearances(event_id, tracker)
         self._set_status(
             enabled=True,
             active=state == "active",
@@ -1445,6 +1477,55 @@ class ObjectTrackingSession:
         )
         if state in {"complete", "interrupted"}:
             self._publish_safely(event_id, payload)
+
+    def _index_track_appearances(
+        self,
+        event_id: int,
+        tracker: ObjectTrackerBackend,
+    ) -> None:
+        if self.appearance_indexer is None or self.appearance_encoder is None:
+            return
+        records_method = getattr(tracker, "appearance_records", None)
+        identity_method = getattr(
+            self.appearance_encoder,
+            "model_identity_for_label",
+            None,
+        )
+        if not callable(records_method) or not callable(identity_method):
+            return
+        prepared: list[dict[str, Any]] = []
+        for record in records_method():
+            identity = identity_method(str(record.get("label") or ""))
+            if not isinstance(identity, dict) or not identity.get("model_fingerprint"):
+                continue
+            prepared.append({
+                **record,
+                "model_kind": identity.get("model_kind"),
+                "model_fingerprint": identity.get("model_fingerprint"),
+                "match_threshold": identity.get("match_threshold"),
+                "created_at": record.get("last_seen"),
+            })
+        if not prepared:
+            return
+        try:
+            indexed = self.appearance_indexer(
+                event_id,
+                self.camera.id,
+                prepared,
+            )
+        except Exception as exc:
+            error = redact_secret_text(exc)[:240]
+            self._set_status(appearance_index_error=error)
+            LOGGER.exception(
+                "failed to index object appearances for %s event %d",
+                self.camera.id,
+                event_id,
+            )
+            return
+        self._set_status(
+            appearance_vectors_indexed=int(indexed),
+            appearance_index_error="",
+        )
 
     def _persist_failure(
         self,
@@ -1623,6 +1704,7 @@ class ObjectTrackingSessionFactory:
         limiter: threading.BoundedSemaphore,
         tracker_registry: ObjectTrackerRegistry | None = None,
         appearance_encoder: AppearanceEncoder | None = None,
+        appearance_indexer: AppearanceIndexWriter | None = None,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -1631,6 +1713,7 @@ class ObjectTrackingSessionFactory:
         self.limiter = limiter
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
         self.appearance_encoder = appearance_encoder
+        self.appearance_indexer = appearance_indexer
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
         if (
@@ -1657,5 +1740,6 @@ class ObjectTrackingSessionFactory:
             limiter=self.limiter,
             tracker_registry=self.tracker_registry,
             appearance_encoder=self.appearance_encoder,
+            appearance_indexer=self.appearance_indexer,
             catchup_frame_provider=catchup_frame_provider,
         )
