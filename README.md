@@ -36,9 +36,9 @@ Detection → AI analysis & assistant**, two model roles can be configured:
   timelines, comparisons, and tuning advice. Leave it blank to use the fast
   model.
 
-The assistant is the sparkle button at the lower-right of every screen. It is
-read-only: it can query bounded, typed SurvNG tools, but cannot change settings,
-run commands, restart services, delete media, or send notifications. Evidence
+The assistant is the sparkle button at the lower-right of every screen. Normal
+chat is read-only: it can query bounded, typed SurvNG tools, but cannot run
+commands, restart services, delete media, or send notifications. Evidence
 sent to the provider is bounded and strips credentials, stream URLs, web URLs,
 and filesystem paths. Responses link back to the camera or incident used as
 evidence. Configuration saves for these model fields use the existing hot AI
@@ -64,6 +64,17 @@ to be enabled plus an explicit confirmation in the drawer. A configuration
 fingerprint rejects stale proposals if motion settings changed after analysis.
 No object thresholds, zones, tracking settings, models, trigger topology, or
 global settings can be changed through this incident-review path.
+
+Under **Admin → Camera Intelligence**, a manual per-camera review looks across
+up to 100 records from the last 24 hours, 3 days, or 7 days. It balances likely
+misses, visual backup triggers, filtered motion, motion-only incidents, and
+recognized incidents so frequent routine successes do not hide rarer problems.
+Only 4–24 representative images are sent to the provider (12 by default), which
+bounds both cost and review time. The report shows the actual reviewed images in
+SurvNG, uses plain-language verdicts, and recommends a camera setting only when
+multiple samples independently support the same value. Suggestions remain
+camera-scoped, configuration-fingerprinted, server-validated, and require an
+explicit confirmation before SurvNG applies them.
 
 ## Reolink / ONVIF Notes
 

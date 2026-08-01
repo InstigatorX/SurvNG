@@ -4995,6 +4995,62 @@ section.detection-settings-card {
   margin: 0;
 }
 
+.camera-intelligence-samples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.camera-intelligence-samples article {
+  overflow: hidden;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+}
+
+.camera-intelligence-samples img,
+.camera-intelligence-image-missing {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: var(--background);
+}
+
+.camera-intelligence-image-missing {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.camera-intelligence-samples article > div:not(.camera-intelligence-image-missing),
+.camera-intelligence-samples article > p {
+  margin: 0;
+  padding-inline: 10px;
+}
+
+.camera-intelligence-samples article > div:not(.camera-intelligence-image-missing) {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.camera-intelligence-samples article > div span,
+.camera-intelligence-samples article > p {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.camera-intelligence-samples article > p {
+  padding-bottom: 10px;
+}
+
+.camera-intelligence-apply {
+  justify-self: start;
+}
+
 @media (max-width: 720px) {
   .motion-ai-review-stats {
     grid-template-columns: 1fr;

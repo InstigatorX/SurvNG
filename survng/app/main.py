@@ -52,6 +52,10 @@ from .assistant import (
     AssistantToolCall,
     IncidentVisualReviewer,
 )
+from .camera_intelligence import (
+    aggregate_camera_intelligence,
+    select_balanced_samples,
+)
 from .detector import detection_failure, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_pipeline import (
@@ -2240,6 +2244,9 @@ class IncidentAiApplyRequest(BaseModel):
 
 class MotionAiReviewRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=128)
+    hours: float = Field(default=24.0, ge=1.0, le=168.0)
+    record_limit: int = Field(default=100, ge=20, le=100)
+    image_limit: int = Field(default=12, ge=4, le=24)
 
 
 class TrackingComparisonVerdictRequest(BaseModel):
@@ -2792,6 +2799,285 @@ def _run_motion_ai_review(
         AUDIT_AI_LIMITER.release()
 
 
+def _camera_intelligence_candidates(
+    camera: CameraConfig,
+    active_manager: AppManager,
+    *,
+    hours: float,
+    record_limit: int,
+    image_limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff_iso = cutoff.isoformat()
+    audits, _total = active_manager.events.motion_audits(
+        limit=record_limit,
+        camera_id=camera.id,
+    )
+    recent_audits = [
+        audit for audit in audits
+        if not audit.get("created_at") or str(audit.get("created_at")) >= cutoff_iso
+    ]
+    end_iso = datetime.now(timezone.utc).isoformat()
+    if hasattr(active_manager.events, "recent_for_camera_range"):
+        event_rows = active_manager.events.recent_for_camera_range(
+            camera.id,
+            cutoff_iso,
+            end_iso,
+            limit=max(500, record_limit * 8),
+        )
+    elif hasattr(active_manager.events, "for_camera_range"):
+        event_rows = list(reversed(active_manager.events.for_camera_range(
+            camera.id,
+            cutoff_iso,
+            end_iso,
+            limit=max(500, record_limit * 8),
+        )))
+    else:
+        event_rows = []
+    incident_summaries = _incident_rows(
+        [_event_row(row) for row in event_rows],
+        DEFAULT_INCIDENT_GAP_SECONDS,
+    )[:record_limit]
+    incidents = _incidents_with_faces(
+        _hydrate_incidents(incident_summaries, active_manager),
+        active_manager,
+    ) if incident_summaries else []
+
+    candidates: list[dict[str, Any]] = []
+    incident_event_ids: set[int] = set()
+    for incident in incidents:
+        event_id = int(incident.get("representative_event_id") or 0)
+        if event_id <= 0:
+            continue
+        incident_event_ids.update(
+            int(event.get("id") or 0)
+            for event in incident.get("events") or []
+        )
+        candidates.append({
+            "kind": "incident",
+            "camera_id": camera.id,
+            "record_id": event_id,
+            "event_id": event_id,
+            "created_at": incident.get("start_at"),
+            "category": (
+                "recognized_incident"
+                if incident.get("has_objects") or incident.get("labels")
+                else "motion_only_incident"
+            ),
+        })
+    for audit in recent_audits:
+        reason = str(audit.get("reason") or "")
+        if reason in {"event_state_active", "event_state_cooldown"}:
+            continue
+        linked_event_id = int(audit.get("event_id") or 0)
+        if linked_event_id and linked_event_id in incident_event_ids:
+            continue
+        if audit.get("category") == "visual_backup":
+            category = "visual_backup"
+        elif audit.get("object_detected") == 0:
+            category = "possible_miss"
+        elif not linked_event_id:
+            category = "motion_filtered"
+        else:
+            category = "other"
+        candidates.append({
+            "kind": "motion_decision",
+            "camera_id": camera.id,
+            "record_id": int(audit.get("id") or 0),
+            "audit_id": int(audit.get("id") or 0),
+            "created_at": audit.get("created_at"),
+            "category": category,
+            "audit": audit,
+        })
+    candidates.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    record_pool = select_balanced_samples(candidates, record_limit)
+    return select_balanced_samples(record_pool, image_limit), len(record_pool)
+
+
+def _run_camera_intelligence_review(
+    review_id: int,
+    camera_id: str,
+    samples: list[dict[str, Any]],
+    records_considered: int,
+    hours: float,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> None:
+    analyses: list[dict[str, Any]] = []
+    failed = 0
+    consecutive_failures = 0
+    first_error = ""
+    try:
+        active_manager.events.update_motion_ai_review(
+            review_id,
+            status="running",
+            images_available=len(samples),
+            analyzed=0,
+            failed=0,
+        )
+        audit_advisor = AuditAiAdvisor(active_config.audit_ai)
+        for sample in samples:
+            try:
+                if sample["kind"] == "incident":
+                    evidence = _assistant_visual_incident_evidence(
+                        int(sample["event_id"]),
+                        active_config,
+                        active_manager,
+                    )
+                    if evidence is None:
+                        raise AuditAiError("incident evidence is unavailable")
+                    advice = evidence.client_data["advice"]
+                    verdict = {
+                        "detection_consistent": "consistent",
+                        "probable_missed_detection": "likely_miss",
+                        "probable_misclassification": "likely_misclassification",
+                        "probable_false_positive": "likely_false_alarm",
+                    }.get(str(advice.get("verdict")), "uncertain")
+                    analyses.append({
+                        **sample,
+                        "verdict": verdict,
+                        "confidence": advice.get("confidence"),
+                        "summary": advice.get("summary"),
+                        "visible_subjects": advice.get("visible_subjects") or [],
+                        "detector_assessment": advice.get("detector_assessment"),
+                        "tracking_assessment": advice.get("tracking_assessment"),
+                        "changes": advice.get("changes") or [],
+                        "image_url": evidence.image_url,
+                    })
+                    consecutive_failures = 0
+                else:
+                    audit = sample["audit"]
+                    snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+                    context = _audit_ai_context(audit, active_config, active_manager)
+                    context["camera_intelligence_review"] = {
+                        "purpose": "balanced cross-incident camera review",
+                        "instruction": "Recommend only bounded camera-scoped changes this image supports; SurvNG will require repeated support across images.",
+                    }
+                    advice = audit_advisor.analyze(snapshot_path, context)
+                    has_subject = bool(advice.visible_subjects)
+                    verdict = (
+                        "likely_miss"
+                        if advice.verdict == "real_motion"
+                        and has_subject
+                        and audit.get("object_detected") != 1
+                        else "likely_false_alarm"
+                        if advice.verdict == "noise"
+                        else "consistent"
+                        if advice.verdict == "real_motion"
+                        else "uncertain"
+                    )
+                    audit_id = int(audit["id"])
+                    analyses.append({
+                        **sample,
+                        "verdict": verdict,
+                        "confidence": advice.confidence,
+                        "summary": advice.summary,
+                        "visible_subjects": advice.visible_subjects,
+                        "detector_assessment": (
+                            "missed" if verdict == "likely_miss" else "unavailable"
+                        ),
+                        "tracking_assessment": "unavailable",
+                        "changes": [
+                            change.model_dump(mode="json")
+                            for change in advice.changes
+                            if change.scope == "camera"
+                        ],
+                        "image_url": f"/api/motion-audit/{audit_id}/snapshot.jpg",
+                    })
+                    consecutive_failures = 0
+            except (AuditAiError, FileNotFoundError, PermissionError, ValueError) as exc:
+                failed += 1
+                consecutive_failures += 1
+                if not first_error:
+                    first_error = redact_secret_text(exc)
+            active_manager.events.update_motion_ai_review(
+                review_id,
+                status="running",
+                images_available=len(samples),
+                analyzed=len(analyses),
+                failed=failed,
+            )
+            if consecutive_failures >= 3:
+                first_error = first_error or "Camera review stopped after repeated analysis failures"
+                break
+
+        if not analyses:
+            active_manager.events.update_motion_ai_review(
+                review_id,
+                status="failed",
+                images_available=len(samples),
+                analyzed=0,
+                failed=failed,
+                error=first_error or "No retained images could be reviewed",
+            )
+            return
+        result = aggregate_camera_intelligence(
+            analyses,
+            records_considered=records_considered,
+            selected_images=len(samples),
+            failed=failed,
+            hours=hours,
+        )
+        camera = camera_by_id(active_config, camera_id)
+        if camera is not None:
+            proposed_changes = [
+                AuditAiChange(
+                    scope="camera",
+                    setting=item["setting"],
+                    value=item["value"],
+                    reason=(item.get("reasons") or ["Repeated review evidence supports this change."])[0],
+                )
+                for item in result.get("recommendations") or []
+            ]
+            _normalized, previews = _assistant_motion_change_previews(
+                active_config, camera, proposed_changes
+            )
+            preview_by_key = {
+                (item["setting"], json.dumps(item["proposed"], sort_keys=True)): item
+                for item in previews
+            }
+            recommendations = []
+            for item in result.get("recommendations") or []:
+                preview = preview_by_key.get((
+                    item["setting"], json.dumps(item["value"], sort_keys=True)
+                ))
+                if preview:
+                    recommendations.append({**item, **preview})
+            result["recommendations"] = recommendations
+            result["configuration_fingerprint"] = _assistant_motion_config_fingerprint(
+                active_config, camera
+            )
+            result["can_apply"] = bool(
+                recommendations and active_config.audit_ai.allow_apply_recommendations
+            )
+        active_manager.events.update_motion_ai_review(
+            review_id,
+            status="completed",
+            images_available=len(samples),
+            analyzed=len(analyses),
+            failed=failed,
+            result=result,
+            error=first_error if failed else "",
+        )
+    except Exception as exc:
+        LOGGER.exception("camera intelligence review %s failed", review_id)
+        try:
+            active_manager.events.update_motion_ai_review(
+                review_id,
+                status="failed",
+                analyzed=len(analyses),
+                failed=failed,
+                error=redact_secret_text(exc),
+            )
+        except Exception:
+            LOGGER.exception(
+                "failed to persist camera intelligence review %s failure",
+                review_id,
+            )
+    finally:
+        AUDIT_AI_LIMITER.release()
+
+
 @app.post("/api/motion-ai-reviews")
 def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
     with MANAGER_RELOAD_LOCK:
@@ -2804,12 +3090,18 @@ def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
             raise HTTPException(status_code=400, detail="AI audit advisor is disabled")
         if not active_config.audit_ai.api_key.strip():
             raise HTTPException(status_code=400, detail="AI audit API key is not configured")
-        audits, _total = active_manager.events.motion_audits(
-            limit=100,
-            camera_id=camera.id,
+        samples, records_considered = _camera_intelligence_candidates(
+            camera,
+            active_manager,
+            hours=request.hours,
+            record_limit=request.record_limit,
+            image_limit=request.image_limit,
         )
-        if not audits:
-            raise HTTPException(status_code=404, detail="this camera has no motion audits to review")
+        if not samples:
+            raise HTTPException(
+                status_code=404,
+                detail="this camera has no recent incidents or motion decisions to review",
+            )
         if not AUDIT_AI_LIMITER.acquire(blocking=False):
             raise HTTPException(
                 status_code=429,
@@ -2817,14 +3109,25 @@ def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
                 headers={"Retry-After": "5"},
             )
         try:
-            review = active_manager.events.create_motion_ai_review(camera.id, len(audits))
+            review = active_manager.events.create_motion_ai_review(
+                camera.id,
+                records_considered,
+            )
         except BaseException:
             AUDIT_AI_LIMITER.release()
             raise
     thread = threading.Thread(
-        target=_run_motion_ai_review,
-        args=(int(review["id"]), audits, active_config, active_manager),
-        name=f"motion-ai-review-{camera.id}",
+        target=_run_camera_intelligence_review,
+        args=(
+            int(review["id"]),
+            camera.id,
+            samples,
+            records_considered,
+            request.hours,
+            active_config,
+            active_manager,
+        ),
+        name=f"camera-intelligence-{camera.id}",
         daemon=True,
     )
     try:
@@ -2859,6 +3162,97 @@ def motion_ai_review(review_id: int) -> dict:
     if review is None:
         raise HTTPException(status_code=404, detail="motion AI review not found")
     return review
+
+
+@app.post("/api/motion-ai-reviews/{review_id}/apply")
+def camera_intelligence_apply(
+    review_id: int,
+    request: IncidentAiApplyRequest,
+) -> dict:
+    if not request.confirmed:
+        raise HTTPException(status_code=400, detail="explicit confirmation is required")
+    if not request.changes:
+        raise HTTPException(status_code=400, detail="no recommendation changes supplied")
+    if any(change.scope != "camera" for change in request.changes):
+        raise HTTPException(
+            status_code=400,
+            detail="camera intelligence may only change settings for the reviewed camera",
+        )
+    with MANAGER_RELOAD_LOCK:
+        if not config.audit_ai.allow_apply_recommendations:
+            raise HTTPException(
+                status_code=403,
+                detail="applying AI recommendations is disabled",
+            )
+        review = manager.events.get_motion_ai_review(review_id)
+        if review is None:
+            raise HTTPException(status_code=404, detail="camera intelligence review not found")
+        result = review.get("result") or {}
+        if review.get("status") != "completed" or result.get("review_type") != "camera_intelligence":
+            raise HTTPException(status_code=409, detail="camera intelligence review is not complete")
+        next_config = config.model_copy(deep=True)
+        camera = camera_by_id(next_config, str(review.get("camera_id") or ""))
+        if camera is None:
+            raise HTTPException(status_code=404, detail="reviewed camera not found")
+        current_fingerprint = _assistant_motion_config_fingerprint(next_config, camera)
+        if request.configuration_fingerprint != current_fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="motion settings changed after this review; run camera intelligence again",
+            )
+
+        persisted: dict[tuple[str, str], dict[str, Any]] = {}
+        for recommendation in result.get("recommendations") or []:
+            setting = str(recommendation.get("setting") or "")
+            value = recommendation.get("proposed", recommendation.get("value"))
+            persisted[(setting, json.dumps(value, sort_keys=True))] = recommendation
+        approved_changes: list[AuditAiChange] = []
+        for submitted in request.changes:
+            try:
+                normalized_value = validate_tuning_value(
+                    submitted.setting,
+                    submitted.value,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            recommendation = persisted.get((
+                submitted.setting,
+                json.dumps(normalized_value, sort_keys=True),
+            ))
+            if recommendation is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{submitted.setting} is not an unchanged recommendation from this review",
+                )
+            approved_changes.append(AuditAiChange(
+                scope="camera",
+                setting=submitted.setting,
+                value=normalized_value,
+                reason=str((recommendation.get("reasons") or [recommendation.get("reason") or "Repeated evidence supports this change."])[0]),
+            ))
+        try:
+            changes, previews = _assistant_motion_change_previews(
+                next_config,
+                camera,
+                approved_changes,
+            )
+            if not changes:
+                raise ValueError("recommendations do not change active settings")
+            for change in changes:
+                _apply_pipeline_ai_change(next_config, camera, change, change.value)
+            validate_motion_pipeline_configuration(next_config)
+            next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _effective_config, apply_result = apply_config_update(next_config)
+    return {
+        "ok": True,
+        "review_id": review_id,
+        "camera_id": camera.id,
+        "applied": previews,
+        "workers_restarted": bool(apply_result["camera_workers_restarted"]),
+        "apply_mode": apply_result["apply_mode"],
+    }
 
 
 @app.get("/api/events/{event_id}/snapshot.jpg")

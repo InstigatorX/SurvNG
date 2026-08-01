@@ -14,6 +14,22 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_recent_camera_range_is_filtered_and_newest_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.add_event("gate", "motion", created_at="2026-07-28T10:00:00+00:00")
+            newest = store.add_event("gate", "motion", created_at="2026-07-28T11:00:00+00:00")
+            store.add_event("foyer", "motion", created_at="2026-07-28T11:30:00+00:00")
+
+            rows = store.recent_for_camera_range(
+                "gate",
+                "2026-07-28T09:00:00+00:00",
+                "2026-07-28T12:00:00+00:00",
+                limit=1,
+            )
+
+        self.assertEqual([row["id"] for row in rows], [newest["id"]])
+
     def test_telemetry_activity_groups_events_objects_and_cameras(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

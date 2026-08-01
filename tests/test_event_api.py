@@ -580,7 +580,11 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(review["id"], 17)
         limiter.acquire.assert_called_once_with(blocking=False)
         thread.start.assert_called_once_with()
-        self.assertEqual(thread_factory.call_args.kwargs["name"], "motion-ai-review-gate")
+        self.assertEqual(thread_factory.call_args.kwargs["name"], "camera-intelligence-gate")
+        self.assertIs(
+            thread_factory.call_args.kwargs["target"],
+            main._run_camera_intelligence_review,
+        )
 
     def test_initial_event_stream_does_not_drop_change_racing_snapshot(self) -> None:
         class Request:

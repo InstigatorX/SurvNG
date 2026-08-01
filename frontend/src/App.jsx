@@ -6571,7 +6571,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             <button type="button" className={generalSection === "storage" ? "active" : ""} onClick={() => setGeneralSection("storage")}><HardDrive size={16} /><span>Storage</span></button>
             <button type="button" className={generalSection === "mqtt" ? "active" : ""} onClick={() => setGeneralSection("mqtt")}><Radio size={16} /><span>MQTT</span></button>
             <button type="button" className={generalSection === "detection" ? "active" : ""} onClick={() => setGeneralSection("detection")}><Cpu size={16} /><span>Object Detection</span></button>
-            <button type="button" className={generalSection === "motion-review" ? "active" : ""} onClick={() => setGeneralSection("motion-review")}><Sparkles size={16} /><span>AI Motion Review</span></button>
+            <button type="button" className={generalSection === "motion-review" ? "active" : ""} onClick={() => setGeneralSection("motion-review")}><Sparkles size={16} /><span>Camera Intelligence</span></button>
           </div>
         </section>
         <section className="bento-card config-editor settings-panel">
@@ -7475,9 +7475,13 @@ function ProbeResult({ probe }) {
 
 function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   const [cameraId, setCameraId] = useState(cameras[0]?.id || "");
+  const [hours, setHours] = useState(24);
+  const [imageLimit, setImageLimit] = useState(12);
   const [review, setReview] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     if (!cameraId && cameras[0]?.id) setCameraId(cameras[0].id);
@@ -7495,7 +7499,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
       setReview(await response.json());
       setError("");
     } catch (loadError) {
-      setError(loadError.message || "Unable to load the latest AI motion review.");
+      setError(loadError.message || "Unable to load the latest camera review.");
     } finally {
       if (!quiet) setLoading(false);
     }
@@ -7504,6 +7508,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   useEffect(() => {
     setReview(null);
     setError("");
+    setNotice("");
     void loadReview(cameraId);
   }, [cameraId]);
 
@@ -7517,18 +7522,52 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
     if (!cameraId || loading) return;
     setLoading(true);
     setError("");
+    setNotice("");
     try {
       const response = await fetch("/api/motion-ai-reviews", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ camera_id: cameraId }),
+        body: JSON.stringify({ camera_id: cameraId, hours, record_limit: 100, image_limit: imageLimit }),
       });
       if (!response.ok) throw new Error(await response.text());
       setReview(await response.json());
     } catch (startError) {
-      setError(startError.message || "Unable to start the AI motion review.");
+      setError(startError.message || "Unable to start the camera review.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function applyRecommendations() {
+    const recommendations = report.recommendations || [];
+    if (!review?.id || !recommendations.length || applying) return;
+    const cameraName = selectedCamera?.name || cameraId;
+    if (!window.confirm(`Apply ${recommendations.length} reviewed setting change${recommendations.length === 1 ? "" : "s"} to ${cameraName}? SurvNG will validate the changes and reload only the affected camera services.`)) return;
+    setApplying(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/motion-ai-reviews/${review.id}/apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirmed: true,
+          configuration_fingerprint: report.configuration_fingerprint,
+          changes: recommendations.map((recommendation) => ({
+            scope: "camera",
+            setting: recommendation.setting,
+            value: recommendation.proposed ?? recommendation.value,
+            reason: recommendation.reasons?.[0] || recommendation.reason || "Repeated review evidence supports this change.",
+          })),
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setReview((current) => current ? ({ ...current, result: { ...(current.result || {}), can_apply: false } }) : current);
+      setNotice("Recommended camera settings were applied successfully.");
+    } catch (applyError) {
+      setError(applyError.message || "Unable to apply the reviewed settings.");
+    } finally {
+      setApplying(false);
     }
   }
 
@@ -7536,28 +7575,56 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
   const report = review?.result || {};
   const completedWork = Number(review?.analyzed || 0) + Number(review?.failed || 0);
   const selectedCamera = cameras.find((camera) => camera.id === cameraId);
+  const isCameraIntelligence = report.review_type === "camera_intelligence";
+  const verdictLabels = {
+    consistent: "Looks correct",
+    likely_miss: "Likely missed subject",
+    likely_false_alarm: "Likely nuisance alert",
+    likely_misclassification: "Likely wrong label",
+    uncertain: "Uncertain",
+  };
+  const categoryLabels = {
+    possible_miss: "Possible miss",
+    visual_backup: "Visual backup",
+    motion_filtered: "Filtered motion",
+    motion_only_incident: "Motion-only incident",
+    recognized_incident: "Recognized incident",
+    other: "Other",
+  };
 
   return (
     <div className="sub-panel motion-ai-review-panel">
-      <h3>AI Motion Review</h3>
-      <p className="settings-help">Manually review up to the latest 100 motion decisions for one camera. SurvNG analyzes each retained image with the configured AI Advisor, then combines repeated findings into camera-specific suggestions. Continuous active/cooldown updates are excluded, and nothing is applied automatically.</p>
+      <h3>Camera Intelligence</h3>
+      <p className="settings-help">Review how one camera has performed across recent incidents and motion decisions. SurvNG deliberately samples successes, possible misses, visual rescues, and filtered motion, then recommends a change only when multiple images support it. Nothing is applied automatically.</p>
       <div className="field-row motion-ai-review-controls">
         <label>Camera<select value={cameraId} onChange={(event) => setCameraId(event.target.value)} disabled={running}>
           {cameras.map((camera) => <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>)}
         </select></label>
+        <label>Review period<select value={hours} onChange={(event) => setHours(Number(event.target.value))} disabled={running}>
+          <option value={24}>Last 24 hours</option>
+          <option value={72}>Last 3 days</option>
+          <option value={168}>Last 7 days</option>
+        </select></label>
+        <label>Images to inspect<select value={imageLimit} onChange={(event) => setImageLimit(Number(event.target.value))} disabled={running}>
+          <option value={8}>8 · Lower cost</option>
+          <option value={12}>12 · Balanced</option>
+          <option value={16}>16 · More evidence</option>
+          <option value={24}>24 · Most thorough</option>
+        </select></label>
         <button type="button" className="primary" onClick={startReview} disabled={!cameraId || !advisorEnabled || running || loading}>
           {running ? <RefreshCcw className="spin" size={16} /> : <Sparkles size={16} />}
-          {running ? "Analyzing..." : "Analyze latest 100"}
+          {running ? "Reviewing..." : "Review camera"}
         </button>
         <button type="button" onClick={() => loadReview(cameraId)} disabled={!cameraId || loading}><RefreshCcw className={loading ? "spin" : ""} size={16} /> Refresh</button>
       </div>
-      {!advisorEnabled ? <div className="save-status motion-audit-error">Enable and save the AI Audit Advisor under Object Detection before running a review.</div> : null}
+      {!advisorEnabled ? <div className="save-status motion-audit-error">Enable and save AI analysis under Object Detection before running a review.</div> : null}
       <div className="probe-result">
         <strong>What this uses</strong>
-        <span>The latest 100 discrete decision records for {selectedCamera?.name || cameraId || "the selected camera"}; records whose retained image has expired are skipped.</span>
-        <span>Each available image is a separate provider request. A camera with 100 retained images can therefore make up to 100 billable AI requests.</span>
+        <span>Up to 100 recent records for {selectedCamera?.name || cameraId || "the selected camera"}, balanced across different outcomes instead of simply choosing the newest images.</span>
+        <span>At most {imageLimit} images are sent for analysis. Each image is one provider request; missing or expired images are skipped.</span>
       </div>
       {error ? <div className="save-status motion-audit-error">{error}</div> : null}
+      {notice ? <div className="save-status">{notice}</div> : null}
       {review?.status && review.status !== "never" ? (
         <section className="motion-ai-review-report">
           <header>
@@ -7566,31 +7633,46 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
           </header>
           {running ? (
             <div className="motion-ai-review-progress">
-              <div><i style={{ width: `${Math.min(100, Number(review.audits_considered || 0) ? completedWork / Number(review.audits_considered) * 100 : 0)}%` }} /></div>
-              <span>{review.analyzed || 0} analyzed · {review.failed || 0} failed · {review.images_available || 0} retained images found among {review.audits_considered || 0} audits</span>
+              <div><i style={{ width: `${Math.min(100, Number(review.images_available || 0) ? completedWork / Number(review.images_available) * 100 : 0)}%` }} /></div>
+              <span>{review.analyzed || 0} reviewed · {review.failed || 0} unavailable · {review.images_available || 0} selected images from {review.audits_considered || 0} recent records</span>
             </div>
           ) : null}
           {review.error ? <div className="motion-runtime-warning">{review.error}</div> : null}
           {review.status === "completed" ? (
             <>
               <p>{report.summary}</p>
-              {report.review_context?.motion_paradigm ? (
+              {!isCameraIntelligence && report.review_context?.motion_paradigm ? (
                 <div className="probe-result">
                   <strong>Configuration analyzed</strong>
                   <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "camera_triggered_with_visual_backup" ? "ONVIF + visual backup" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "Adaptive visual-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} visual analysis</span>
                 </div>
               ) : null}
               <div className="motion-ai-review-stats">
-                <span><strong>{report.verdict_counts?.real_motion || 0}</strong> likely real motion</span>
-                <span><strong>{report.verdict_counts?.noise || 0}</strong> likely nuisance</span>
+                <span><strong>{report.verdict_counts?.likely_miss ?? report.verdict_counts?.real_motion ?? 0}</strong>{isCameraIntelligence ? " likely missed" : " likely real motion"}</span>
+                <span><strong>{report.verdict_counts?.likely_false_alarm ?? report.verdict_counts?.noise ?? 0}</strong> likely nuisance</span>
+                {isCameraIntelligence ? <span><strong>{report.verdict_counts?.consistent || 0}</strong> looks correct</span> : null}
                 <span><strong>{report.verdict_counts?.uncertain || 0}</strong> uncertain</span>
               </div>
+              {isCameraIntelligence && report.samples?.length ? (
+                <>
+                  <h4>Images reviewed</h4>
+                  <div className="camera-intelligence-samples">
+                    {report.samples.map((sample) => (
+                      <article key={`${sample.kind}-${sample.record_id}`}>
+                        {sample.image_url?.startsWith("/api/") ? <img src={sample.image_url} alt={`${selectedCamera?.name || cameraId} review sample`} loading="lazy" /> : <div className="camera-intelligence-image-missing">Image unavailable</div>}
+                        <div><strong>{verdictLabels[sample.verdict] || String(sample.verdict || "Uncertain").replaceAll("_", " ")}</strong><span>{categoryLabels[sample.category] || String(sample.category || "Other").replaceAll("_", " ")}</span></div>
+                        <p>{sample.summary}</p>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : null}
               <h4>Suggested camera changes</h4>
               {report.recommendations?.length ? (
                 <div className="motion-ai-review-recommendations">
                   {report.recommendations.map((recommendation) => (
                     <article key={`${recommendation.setting}-${JSON.stringify(recommendation.value)}`}>
-                      <div><strong>{motionAiSettingLabels[recommendation.setting] || recommendation.setting.replaceAll("_", " ")}</strong><code>{recommendation.current_value == null ? "Current unavailable" : formatMotionAiValue(recommendation.setting, recommendation.current_value)} → {formatMotionAiValue(recommendation.setting, recommendation.value)}</code></div>
+                      <div><strong>{motionAiSettingLabels[recommendation.setting] || recommendation.setting.replaceAll("_", " ")}</strong><code>{(recommendation.current ?? recommendation.current_value) == null ? "Current unavailable" : formatMotionAiValue(recommendation.setting, recommendation.current ?? recommendation.current_value)} → {formatMotionAiValue(recommendation.setting, recommendation.proposed ?? recommendation.value)}</code></div>
                       <span>Supported by {recommendation.support_count} analyzed image{recommendation.support_count === 1 ? "" : "s"} · {Math.round(Number(recommendation.average_confidence || 0) * 100)}% average confidence</span>
                       <p>{recommendation.reasons?.[0]}</p>
                       {recommendation.evidence_audit_ids?.length ? <small>Evidence: audit {recommendation.evidence_audit_ids.join(", ")}</small> : null}
@@ -7598,6 +7680,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
                   ))}
                 </div>
               ) : <span>No setting change was recommended consistently enough across the analyzed images.</span>}
+              {isCameraIntelligence && report.recommendations?.length && !notice ? <button type="button" className="primary camera-intelligence-apply" onClick={applyRecommendations} disabled={!report.can_apply || applying}>{applying ? <RefreshCcw className="spin" size={16} /> : <Check size={16} />}{report.can_apply ? (applying ? "Applying..." : "Review and apply suggestions") : "Applying AI suggestions is disabled"}</button> : null}
             </>
           ) : null}
         </section>

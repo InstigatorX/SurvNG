@@ -1364,3 +1364,26 @@ class EventStore:
                 (camera_id, start_at, end_at, bounded_limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def recent_for_camera_range(
+        self,
+        camera_id: str,
+        start_at: str,
+        end_at: str,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return the newest camera events without scanning unrelated cameras."""
+        bounded_limit = max(1, min(int(limit), 200000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from events
+                where camera_id = ?
+                    and created_at >= ?
+                    and created_at < ?
+                order by created_at desc, id desc
+                limit ?
+                """,
+                (camera_id, start_at, end_at, bounded_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
