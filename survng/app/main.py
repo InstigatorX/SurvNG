@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import logging
 import math
 import mmap
@@ -12,6 +13,7 @@ import queue
 import os
 import re
 import signal
+import secrets
 import platform
 import shutil
 import time
@@ -25,6 +27,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import quote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -41,6 +44,7 @@ from .audit_ai import (
     AuditAiAdvisor,
     AuditAiChange,
     AuditAiError,
+    ai_provider_configured,
     motion_audit_interpretation,
     motion_paradigm_context,
     validate_tuning_value,
@@ -133,6 +137,10 @@ APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 ASSISTANT_LIMITER = threading.BoundedSemaphore(2)
+AI_ACTIVITY_LOCK = threading.Lock()
+AI_ACTIVE_OPERATIONS: dict[str, int] = {}
+AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
+AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 PROCESS_STARTED_MONOTONIC = time.monotonic()
@@ -146,6 +154,25 @@ STORAGE_MAINTENANCE = StorageMaintenanceRunner()
 
 class RecordingPrewarmCancelled(Exception):
     pass
+
+
+def _begin_ai_operation(kind: str) -> None:
+    with AI_ACTIVITY_LOCK:
+        AI_ACTIVE_OPERATIONS[kind] = AI_ACTIVE_OPERATIONS.get(kind, 0) + 1
+
+
+def _end_ai_operation(kind: str) -> None:
+    with AI_ACTIVITY_LOCK:
+        remaining = AI_ACTIVE_OPERATIONS.get(kind, 0) - 1
+        if remaining > 0:
+            AI_ACTIVE_OPERATIONS[kind] = remaining
+        else:
+            AI_ACTIVE_OPERATIONS.pop(kind, None)
+
+
+def _active_ai_operations() -> dict[str, int]:
+    with AI_ACTIVITY_LOCK:
+        return dict(AI_ACTIVE_OPERATIONS)
 
 
 class ConfiguredBasePathMiddleware:
@@ -550,6 +577,19 @@ class StorageTasksActiveError(RuntimeError):
         )
 
 
+class AiOperationsActiveError(RuntimeError):
+    def __init__(self, operations: dict[str, int]) -> None:
+        self.operations = operations
+        labels = ", ".join(
+            f"{name.replace('_', ' ')} ({count})"
+            for name, count in sorted(operations.items())
+        )
+        super().__init__(
+            "configuration change was not applied because AI analysis is active: "
+            f"{labels}. Wait for it to finish and try again."
+        )
+
+
 def _active_storage_tasks(active_manager: AppManager) -> list[str]:
     tasks: list[str] = []
     maintenance = STORAGE_MAINTENANCE.status()
@@ -578,6 +618,9 @@ def reload_manager(
         active_storage_tasks = _active_storage_tasks(previous_manager)
         if active_storage_tasks:
             raise StorageTasksActiveError(active_storage_tasks)
+        active_ai_operations = _active_ai_operations()
+        if active_ai_operations:
+            raise AiOperationsActiveError(active_ai_operations)
         prewarmer_was_running = bool(
             RECORDING_PREWARM_THREAD is not None
             and RECORDING_PREWARM_THREAD.is_alive()
@@ -868,6 +911,17 @@ async def storage_tasks_active_handler(
     return JSONResponse(
         status_code=409,
         content={"detail": str(error), "active_storage_tasks": error.tasks},
+    )
+
+
+@app.exception_handler(AiOperationsActiveError)
+async def ai_operations_active_handler(
+    _request: Request,
+    error: AiOperationsActiveError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(error), "active_ai_operations": error.operations},
     )
 
 
@@ -2236,12 +2290,16 @@ def _motion_audit_row(row: dict, storage_dir: Path) -> dict:
 
 class AuditAiApplyRequest(BaseModel):
     changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
+    confirmed: bool = False
+    configuration_fingerprint: str = Field(default="", max_length=64)
+    recommendation_proof: str = Field(default="", max_length=256)
 
 
 class IncidentAiApplyRequest(BaseModel):
     changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
     confirmed: bool = False
     configuration_fingerprint: str = Field(default="", max_length=64)
+    recommendation_proof: str = Field(default="", max_length=256)
 
 
 class MotionAiReviewRequest(BaseModel):
@@ -2626,14 +2684,15 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
         active_config = config.model_copy(deep=True)
         audit_config = active_config.audit_ai
         audit = active_manager.events.get_motion_audit(audit_id)
-    if audit is None:
-        raise HTTPException(status_code=404, detail="motion audit entry not found")
-    if not AUDIT_AI_LIMITER.acquire(blocking=False):
-        raise HTTPException(
-            status_code=429,
-            detail="an AI audit request is already running",
-            headers={"Retry-After": "5"},
-        )
+        if audit is None:
+            raise HTTPException(status_code=404, detail="motion audit entry not found")
+        if not AUDIT_AI_LIMITER.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="an AI audit request is already running",
+                headers={"Retry-After": "5"},
+            )
+        _begin_ai_operation("motion_audit")
     try:
         snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
         analysis_context = _audit_ai_context(audit, active_config, active_manager)
@@ -2642,6 +2701,26 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
             snapshot_path,
             analysis_context,
         )
+        camera = camera_by_id(active_config, str(audit.get("camera_id") or ""))
+        if camera is None:
+            raise AuditAiError("audit camera is unavailable")
+        changes, _previews = _assistant_motion_change_previews(
+            active_config,
+            camera,
+            [change for change in advice.changes if change.scope == "camera"],
+        )
+        advice.changes = changes
+        configuration_fingerprint = _assistant_motion_config_fingerprint(
+            active_config,
+            camera,
+        )
+        recommendation_proof = _issue_ai_recommendation_token(
+            kind="motion_audit",
+            record_id=audit_id,
+            camera_id=camera.id,
+            configuration_fingerprint=configuration_fingerprint,
+            changes=changes,
+        )
     except AuditAiError as exc:
         raise HTTPException(status_code=502, detail=redact_secret_text(exc)) from exc
     except FileNotFoundError as exc:
@@ -2649,6 +2728,7 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     finally:
+        _end_ai_operation("motion_audit")
         AUDIT_AI_LIMITER.release()
     return {
         "audit_id": audit_id,
@@ -2657,23 +2737,51 @@ async def motion_audit_ai_analyze(audit_id: int) -> dict:
         "model": audit_config.model or "",
         "motion_paradigm": analysis_context["motion_paradigm"],
         "advice": advice.model_dump(mode="json"),
+        "configuration_fingerprint": configuration_fingerprint,
+        "recommendation_proof": recommendation_proof,
+        "apply_requires_confirmation": True,
     }
 
 
 @app.post("/api/motion-audit/{audit_id}/ai-apply")
 def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
+    if not request.confirmed:
+        raise HTTPException(status_code=400, detail="explicit confirmation is required")
+    if not request.changes:
+        raise HTTPException(status_code=400, detail="no recommendation changes supplied")
+    if any(change.scope != "camera" for change in request.changes):
+        raise HTTPException(
+            status_code=400,
+            detail="single motion reviews may only change settings for the reviewed camera",
+        )
     with MANAGER_RELOAD_LOCK:
         if not config.audit_ai.allow_apply_recommendations:
             raise HTTPException(status_code=403, detail="applying AI recommendations is disabled")
         audit = manager.events.get_motion_audit(audit_id)
         if audit is None:
             raise HTTPException(status_code=404, detail="motion audit entry not found")
-        if not request.changes:
-            raise HTTPException(status_code=400, detail="no recommendation changes supplied")
         next_config = config.model_copy(deep=True)
         camera = camera_by_id(next_config, str(audit.get("camera_id") or ""))
         if camera is None:
             raise HTTPException(status_code=404, detail="audit camera not found")
+        current_fingerprint = _assistant_motion_config_fingerprint(next_config, camera)
+        if request.configuration_fingerprint != current_fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="motion settings changed after this review; run AI analysis again",
+            )
+        if not _verify_ai_recommendation_token(
+            request.recommendation_proof,
+            kind="motion_audit",
+            record_id=audit_id,
+            camera_id=camera.id,
+            configuration_fingerprint=current_fingerprint,
+            changes=request.changes,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="AI recommendations are expired or do not match this review",
+            )
         applied: list[dict] = []
         try:
             for change in request.changes:
@@ -2684,13 +2792,14 @@ def motion_audit_ai_apply(audit_id: int, request: AuditAiApplyRequest) -> dict:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         next_config = AppConfig.model_validate(next_config.model_dump(mode="json"))
-        reload_manager(next_config)
+        _effective_config, apply_result = apply_config_update(next_config)
     return {
         "ok": True,
         "audit_id": audit_id,
         "camera_id": camera.id,
         "applied": applied,
-        "workers_restarted": True,
+        "workers_restarted": bool(apply_result["camera_workers_restarted"]),
+        "apply_mode": apply_result["apply_mode"],
     }
 
 
@@ -3120,6 +3229,7 @@ def _run_camera_intelligence_review(
                     evaluation_id,
                 )
     finally:
+        _end_ai_operation("camera_intelligence")
         AUDIT_AI_LIMITER.release()
 
 
@@ -3133,7 +3243,7 @@ def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
             raise HTTPException(status_code=404, detail="camera not found")
         if not active_config.audit_ai.enabled:
             raise HTTPException(status_code=400, detail="AI audit advisor is disabled")
-        if not active_config.audit_ai.api_key.strip():
+        if not ai_provider_configured(active_config.audit_ai):
             raise HTTPException(status_code=400, detail="AI audit API key is not configured")
         samples, records_considered = _camera_intelligence_candidates(
             camera,
@@ -3153,12 +3263,14 @@ def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
                 detail="an AI audit or camera review is already running",
                 headers={"Retry-After": "5"},
             )
+        _begin_ai_operation("camera_intelligence")
         try:
             review = active_manager.events.create_motion_ai_review(
                 camera.id,
                 records_considered,
             )
         except BaseException:
+            _end_ai_operation("camera_intelligence")
             AUDIT_AI_LIMITER.release()
             raise
     thread = threading.Thread(
@@ -3178,6 +3290,7 @@ def start_motion_ai_review(request: MotionAiReviewRequest) -> dict:
     try:
         thread.start()
     except BaseException:
+        _end_ai_operation("camera_intelligence")
         AUDIT_AI_LIMITER.release()
         active_manager.events.update_motion_ai_review(
             int(review["id"]),
@@ -3343,7 +3456,10 @@ def start_camera_intelligence_followup(
         camera = camera_by_id(active_config, str(evaluation.get("camera_id") or ""))
         if camera is None:
             raise HTTPException(status_code=404, detail="reviewed camera not found")
-        if not active_config.audit_ai.enabled or not active_config.audit_ai.api_key.strip():
+        if (
+            not active_config.audit_ai.enabled
+            or not ai_provider_configured(active_config.audit_ai)
+        ):
             raise HTTPException(status_code=400, detail="AI analysis is not configured")
         try:
             applied_at = datetime.fromisoformat(
@@ -3372,6 +3488,7 @@ def start_camera_intelligence_followup(
                 detail="another AI camera review is already running",
                 headers={"Retry-After": "5"},
             )
+        _begin_ai_operation("camera_intelligence")
         try:
             review = active_manager.events.create_motion_ai_review(
                 camera.id,
@@ -3382,6 +3499,7 @@ def start_camera_intelligence_followup(
                 int(review["id"]),
             )
         except BaseException:
+            _end_ai_operation("camera_intelligence")
             AUDIT_AI_LIMITER.release()
             raise
     thread = threading.Thread(
@@ -3403,6 +3521,7 @@ def start_camera_intelligence_followup(
     try:
         thread.start()
     except BaseException:
+        _end_ai_operation("camera_intelligence")
         AUDIT_AI_LIMITER.release()
         active_manager.events.update_motion_ai_review(
             int(review["id"]),
@@ -4130,6 +4249,101 @@ def _assistant_motion_config_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _ai_recommendation_payload(
+    *,
+    kind: str,
+    record_id: int,
+    camera_id: str,
+    configuration_fingerprint: str,
+    changes: list[AuditAiChange],
+    issued_at: int,
+) -> bytes:
+    normalized = [
+        {
+            "scope": change.scope,
+            "setting": change.setting,
+            "value": validate_tuning_value(change.setting, change.value),
+            "reason": change.reason,
+        }
+        for change in changes
+    ]
+    payload = {
+        "version": 1,
+        "kind": kind,
+        "record_id": int(record_id),
+        "camera_id": camera_id,
+        "configuration_fingerprint": configuration_fingerprint,
+        "changes": normalized,
+        "issued_at": int(issued_at),
+    }
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _issue_ai_recommendation_token(
+    *,
+    kind: str,
+    record_id: int,
+    camera_id: str,
+    configuration_fingerprint: str,
+    changes: list[AuditAiChange],
+) -> str:
+    issued_at = int(time.time())
+    signature = hmac.new(
+        AI_RECOMMENDATION_SECRET,
+        _ai_recommendation_payload(
+            kind=kind,
+            record_id=record_id,
+            camera_id=camera_id,
+            configuration_fingerprint=configuration_fingerprint,
+            changes=changes,
+            issued_at=issued_at,
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"v1.{issued_at}.{signature}"
+
+
+def _verify_ai_recommendation_token(
+    token: str,
+    *,
+    kind: str,
+    record_id: int,
+    camera_id: str,
+    configuration_fingerprint: str,
+    changes: list[AuditAiChange],
+) -> bool:
+    try:
+        version, raw_issued_at, supplied_signature = token.split(".", 2)
+        issued_at = int(raw_issued_at)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    now = int(time.time())
+    if (
+        version != "v1"
+        or issued_at > now + 30
+        or now - issued_at > AI_RECOMMENDATION_MAX_AGE_SECONDS
+    ):
+        return False
+    expected = hmac.new(
+        AI_RECOMMENDATION_SECRET,
+        _ai_recommendation_payload(
+            kind=kind,
+            record_id=record_id,
+            camera_id=camera_id,
+            configuration_fingerprint=configuration_fingerprint,
+            changes=changes,
+            issued_at=issued_at,
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(supplied_signature, expected)
+
+
 def _assistant_visual_incident_evidence(
     event_id: int,
     active_config: AppConfig,
@@ -4200,6 +4414,10 @@ def _assistant_visual_incident_evidence(
     )
     advice_payload = advice.model_dump(mode="json")
     advice_payload["changes"] = [change.model_dump(mode="json") for change in changes]
+    configuration_fingerprint = _assistant_motion_config_fingerprint(
+        active_config,
+        camera,
+    )
     details = {
         "event_id": event_id,
         "source_event_id": source_event_id,
@@ -4210,8 +4428,13 @@ def _assistant_visual_incident_evidence(
             previews and active_config.audit_ai.allow_apply_recommendations
         ),
         "apply_requires_confirmation": True,
-        "configuration_fingerprint": _assistant_motion_config_fingerprint(
-            active_config, camera
+        "configuration_fingerprint": configuration_fingerprint,
+        "recommendation_proof": _issue_ai_recommendation_token(
+            kind="incident_visual",
+            record_id=event_id,
+            camera_id=camera.id,
+            configuration_fingerprint=configuration_fingerprint,
+            changes=changes,
         ),
     }
     incident_evidence = _assistant_incident_evidence(incident, event_id)
@@ -4224,7 +4447,14 @@ def _assistant_visual_incident_evidence(
             f"({round(advice.confidence * 100)}% confidence); "
             f"{len(previews)} bounded setting proposal(s)."
         ),
-        data={**details, "incident_evidence": incident_evidence.data},
+        data={
+            **{
+                key: value
+                for key, value in details.items()
+                if key != "recommendation_proof"
+            },
+            "incident_evidence": incident_evidence.data,
+        },
         href=incident_evidence.href,
         image_url=f"/api/events/{source_event_id}/thumbnail.jpg?width=960&quality=82",
         client_data=details,
@@ -4330,6 +4560,48 @@ def _assistant_search_incidents(
     return evidence
 
 
+def _assistant_prioritize_trace_candidates(
+    candidate_summaries: list[dict[str, Any]],
+    appearance_matches: list[dict[str, Any]],
+    appearance_event_ids: set[int],
+    distance_from_anchor: Callable[[dict[str, Any]], float],
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Keep strongest appearance evidence before filling a bounded temporal scan."""
+    candidate_summaries = sorted(candidate_summaries, key=distance_from_anchor)
+    appearance_summaries = [
+        summary
+        for summary in candidate_summaries
+        if any(
+            int(event.get("id") or 0) in appearance_event_ids
+            for event in summary.get("events") or []
+        )
+    ]
+    appearance_score_by_event = {
+        int(item.get("event_id") or 0): float(item.get("similarity") or 0.0)
+        for item in appearance_matches
+        if item.get("visually_similar")
+    }
+    appearance_summaries.sort(
+        key=lambda summary: max(
+            (
+                appearance_score_by_event.get(int(event.get("id") or 0), 0.0)
+                for event in summary.get("events") or []
+            ),
+            default=0.0,
+        ),
+        reverse=True,
+    )
+    retained_ids = {id(summary) for summary in appearance_summaries}
+    retained_appearance = appearance_summaries[:min(100, limit)]
+    return retained_appearance + [
+        summary
+        for summary in candidate_summaries
+        if id(summary) not in retained_ids
+    ][:max(0, limit - len(retained_appearance))]
+
+
 def _assistant_trace_across_cameras(
     call: AssistantToolCall,
     request: AssistantChatRequest,
@@ -4428,8 +4700,13 @@ def _assistant_trace_across_cameras(
             else float("inf")
         )
 
-    candidate_summaries.sort(key=distance_from_anchor)
-    candidate_summaries = candidate_summaries[:500]
+    candidate_summaries = _assistant_prioritize_trace_candidates(
+        candidate_summaries,
+        appearance_matches,
+        appearance_event_ids,
+        distance_from_anchor,
+    )
+
     candidates = _incidents_with_faces(
         _hydrate_incidents(candidate_summaries, active_manager),
         active_manager,
@@ -4635,10 +4912,7 @@ def assistant_status() -> dict[str, Any]:
     configured = bool(
         ai.enabled
         and ai.assistant_enabled
-        and (
-            ai.api_key.strip()
-            or (ai.provider == "openai_compatible" and ai.base_url.strip())
-        )
+        and ai_provider_configured(ai)
     )
     provider = AssistantProvider(ai)
     return {
@@ -4653,19 +4927,19 @@ def assistant_status() -> dict[str, Any]:
 
 @app.post("/api/assistant/chat")
 async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
-    active_config = config
-    active_manager = manager
-    ai = active_config.audit_ai
-    if not ai.assistant_enabled:
-        raise HTTPException(status_code=409, detail="SurvNG Assistant is disabled")
-    if not ai.enabled:
-        raise HTTPException(status_code=409, detail="AI features are disabled in Admin")
-    if not ai.api_key.strip() and not (
-        ai.provider == "openai_compatible" and ai.base_url.strip()
-    ):
-        raise HTTPException(status_code=409, detail="AI provider credentials are not configured")
-    if not ASSISTANT_LIMITER.acquire(blocking=False):
-        raise HTTPException(status_code=429, detail="SurvNG Assistant is busy; try again shortly")
+    with MANAGER_RELOAD_LOCK:
+        active_config = config
+        active_manager = manager
+        ai = active_config.audit_ai
+        if not ai.assistant_enabled:
+            raise HTTPException(status_code=409, detail="SurvNG Assistant is disabled")
+        if not ai.enabled:
+            raise HTTPException(status_code=409, detail="AI features are disabled in Admin")
+        if not ai_provider_configured(ai):
+            raise HTTPException(status_code=409, detail="AI provider credentials are not configured")
+        if not ASSISTANT_LIMITER.acquire(blocking=False):
+            raise HTTPException(status_code=429, detail="SurvNG Assistant is busy; try again shortly")
+        _begin_ai_operation("assistant")
 
     def run() -> dict[str, Any]:
         provider = AssistantProvider(ai)
@@ -4709,6 +4983,7 @@ async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
         LOGGER.exception("SurvNG Assistant request failed")
         raise HTTPException(status_code=500, detail="SurvNG Assistant could not complete the request") from exc
     finally:
+        _end_ai_operation("assistant")
         ASSISTANT_LIMITER.release()
 
 
@@ -4746,6 +5021,18 @@ def incident_ai_apply(event_id: int, request: IncidentAiApplyRequest) -> dict:
             raise HTTPException(
                 status_code=409,
                 detail="motion settings changed after this review; run visual analysis again",
+            )
+        if not _verify_ai_recommendation_token(
+            request.recommendation_proof,
+            kind="incident_visual",
+            record_id=event_id,
+            camera_id=camera.id,
+            configuration_fingerprint=current_fingerprint,
+            changes=request.changes,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="AI recommendations are expired or do not match this visual review",
             )
         try:
             changes, previews = _assistant_motion_change_previews(

@@ -88,6 +88,10 @@ class CameraIntelligenceTest(unittest.TestCase):
         self.assertEqual(report["review_type"], "camera_intelligence")
         self.assertEqual(report["verdict_counts"], {"likely_miss": 4})
         self.assertEqual(report["visible_subject_counts"], {"person": 4})
+        self.assertEqual(
+            report["category_verdict_counts"],
+            {"possible_miss": {"likely_miss": 4}},
+        )
         self.assertEqual(len(report["samples"]), 4)
         self.assertEqual(len(report["recommendations"]), 1)
         self.assertEqual(report["recommendations"][0]["setting"], "frame_width")
@@ -129,6 +133,13 @@ class CameraIntelligenceTest(unittest.TestCase):
                     "likely_false_alarm": 2,
                     "consistent": 5,
                 },
+                "category_verdict_counts": {
+                    "recognized_incident": {
+                        "likely_miss": 3,
+                        "likely_false_alarm": 2,
+                        "consistent": 5,
+                    },
+                },
             },
             {
                 "analyzed": 8,
@@ -137,6 +148,13 @@ class CameraIntelligenceTest(unittest.TestCase):
                     "likely_false_alarm": 1,
                     "consistent": 6,
                 },
+                "category_verdict_counts": {
+                    "recognized_incident": {
+                        "likely_miss": 1,
+                        "likely_false_alarm": 1,
+                        "consistent": 6,
+                    },
+                },
             },
         )
 
@@ -144,6 +162,28 @@ class CameraIntelligenceTest(unittest.TestCase):
         self.assertEqual(comparison["before_issue_rate"], 0.5)
         self.assertEqual(comparison["after_issue_rate"], 0.25)
         self.assertEqual(comparison["issue_rate_change_points"], -25.0)
+        self.assertEqual(comparison["matched_sample_support"], 8)
+
+    def test_effectiveness_is_inconclusive_without_matched_categories(self) -> None:
+        comparison = compare_camera_intelligence_results(
+            {
+                "analyzed": 8,
+                "verdict_counts": {"likely_miss": 4, "consistent": 4},
+                "category_verdict_counts": {
+                    "motion_filtered": {"likely_miss": 4, "consistent": 4},
+                },
+            },
+            {
+                "analyzed": 8,
+                "verdict_counts": {"consistent": 8},
+                "category_verdict_counts": {
+                    "recognized_incident": {"consistent": 8},
+                },
+            },
+        )
+
+        self.assertEqual(comparison["outcome"], "inconclusive")
+        self.assertEqual(comparison["matched_sample_support"], 0)
 
     def test_apply_accepts_only_persisted_review_recommendations(self) -> None:
         active_config = self.configured_app()
@@ -259,6 +299,7 @@ class CameraIntelligenceTest(unittest.TestCase):
             patch.object(main, "config", active_config),
             patch.object(main, "manager", fake_manager),
             patch.object(main, "AUDIT_AI_LIMITER", limiter),
+            patch.object(main, "_begin_ai_operation"),
             patch.object(
                 main,
                 "_camera_intelligence_candidates",

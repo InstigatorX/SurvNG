@@ -51,12 +51,16 @@ def aggregate_camera_intelligence(
     subjects: Counter[str] = Counter()
     detector: Counter[str] = Counter()
     tracking: Counter[str] = Counter()
+    category_verdicts: dict[str, Counter[str]] = defaultdict(Counter)
     grouped_changes: dict[tuple[str, str], dict[str, Any]] = {}
     samples: list[dict[str, Any]] = []
 
     for row in rows:
-        verdicts[str(row.get("verdict") or "uncertain")] += 1
-        categories[str(row.get("category") or "other")] += 1
+        verdict = str(row.get("verdict") or "uncertain")
+        category = str(row.get("category") or "other")
+        verdicts[verdict] += 1
+        categories[category] += 1
+        category_verdicts[category][verdict] += 1
         detector[str(row.get("detector_assessment") or "unavailable")] += 1
         tracking[str(row.get("tracking_assessment") or "unavailable")] += 1
         subjects.update(
@@ -148,6 +152,10 @@ def aggregate_camera_intelligence(
         "failed": failed,
         "verdict_counts": dict(verdicts),
         "category_counts": dict(categories),
+        "category_verdict_counts": {
+            category: dict(counts)
+            for category, counts in sorted(category_verdicts.items())
+        },
         "visible_subject_counts": dict(subjects.most_common(12)),
         "detector_assessments": dict(detector),
         "tracking_assessments": dict(tracking),
@@ -188,14 +196,50 @@ def compare_camera_intelligence_results(
         })
 
     issue_keys = {"likely_miss", "likely_false_alarm", "likely_misclassification"}
-    before_issues = sum(
-        int(before_counts.get(key) or 0) for key in issue_keys
-    ) / before_total
-    after_issues = sum(
-        int(after_counts.get(key) or 0) for key in issue_keys
-    ) / after_total
+    before_strata = baseline.get("category_verdict_counts") or {}
+    after_strata = followup.get("category_verdict_counts") or {}
+    strata: list[dict[str, Any]] = []
+    weighted_before = 0.0
+    weighted_after = 0.0
+    matched_support = 0
+    for category in sorted(set(before_strata) & set(after_strata)):
+        before_category = before_strata.get(category) or {}
+        after_category = after_strata.get(category) or {}
+        before_category_total = sum(int(value or 0) for value in before_category.values())
+        after_category_total = sum(int(value or 0) for value in after_category.values())
+        if before_category_total <= 0 or after_category_total <= 0:
+            continue
+        support = min(before_category_total, after_category_total)
+        before_rate = sum(
+            int(before_category.get(key) or 0) for key in issue_keys
+        ) / before_category_total
+        after_rate = sum(
+            int(after_category.get(key) or 0) for key in issue_keys
+        ) / after_category_total
+        weighted_before += before_rate * support
+        weighted_after += after_rate * support
+        matched_support += support
+        strata.append({
+            "category": category,
+            "matched_support": support,
+            "before_rate": round(before_rate, 4),
+            "after_rate": round(after_rate, 4),
+            "change_points": round((after_rate - before_rate) * 100, 1),
+        })
+    sufficiently_comparable = (
+        matched_support >= 4
+        and int(baseline.get("analyzed") or 0) >= 4
+        and int(followup.get("analyzed") or 0) >= 4
+    )
+    before_issues = weighted_before / matched_support if matched_support else 0.0
+    after_issues = weighted_after / matched_support if matched_support else 0.0
     change_points = round((after_issues - before_issues) * 100, 1)
-    if change_points <= -5:
+    if not sufficiently_comparable:
+        outcome = "inconclusive"
+        summary = (
+            "There is not enough category-matched evidence to measure this setting change yet."
+        )
+    elif change_points <= -5:
         outcome = "improved"
         summary = (
             f"The reviewed issue rate fell from {before_issues * 100:.0f}% to "
@@ -221,9 +265,12 @@ def compare_camera_intelligence_results(
         "before_issue_rate": round(before_issues, 4),
         "after_issue_rate": round(after_issues, 4),
         "issue_rate_change_points": change_points,
+        "comparison_basis": "category_matched_balanced_samples",
+        "matched_sample_support": matched_support,
+        "category_comparisons": strata,
         "metrics": metrics,
         "caution": (
-            "This compares balanced image samples, not every camera frame. "
-            "Treat small changes as directional evidence rather than proof."
+            "This compares like-for-like review categories using matched sample support, "
+            "not every camera frame. Treat small changes as directional evidence rather than proof."
         ),
     }

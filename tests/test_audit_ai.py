@@ -17,6 +17,7 @@ from survng.app.audit_ai import (
     AuditAiChange,
     AuditAiError,
     SYSTEM_PROMPT,
+    ai_provider_configured,
     audit_analysis_prompt,
     motion_audit_interpretation,
     motion_paradigm_context,
@@ -26,6 +27,26 @@ from survng.app.config import AuditAiConfig
 
 
 class AuditAiTest(unittest.TestCase):
+    def test_keyless_openai_compatible_provider_is_configured(self) -> None:
+        config = AuditAiConfig(
+            enabled=True,
+            provider="openai_compatible",
+            base_url="http://localhost:11434/v1",
+        )
+
+        self.assertTrue(ai_provider_configured(config))
+        advisor = AuditAiAdvisor(config)
+        expected = AuditAiAdvice(
+            verdict="uncertain",
+            confidence=0.5,
+            summary="Insufficient evidence.",
+        )
+        with patch.object(advisor, "analyze_structured", return_value=expected) as analyze:
+            result = advisor.analyze(Path("unused.jpg"), {"camera": "gate"})
+
+        self.assertEqual(result, expected)
+        analyze.assert_called_once()
+
     def test_structured_multimodal_transport_accepts_custom_prompt_schema_and_model(self) -> None:
         class Result(BaseModel):
             value: str

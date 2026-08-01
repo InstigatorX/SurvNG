@@ -150,10 +150,21 @@ class AssistantProviderTest(unittest.TestCase):
         self.assertEqual(plan.tool_calls[0].event_id, 42)
         self.assertEqual(complete.call_args.kwargs["model_override"], "analysis-model")
 
-    def test_answer_uses_selected_tier_and_discards_unknown_citations(self) -> None:
+    def test_answer_rejects_unknown_citations(self) -> None:
         response = json.dumps({
             "answer": "The detector was delayed [E1].",
             "citations": ["E1", "E-unknown", "E1"],
+            "suggestions": [],
+        })
+        evidence = [AssistantEvidence("E1", "incident", "Gate", "One event", {})]
+        with patch.object(self.provider, "_complete_json", return_value=response):
+            with self.assertRaisesRegex(AuditAiError, "not supplied"):
+                self.provider.answer(self.request, evidence, "deep")
+
+    def test_answer_requires_matching_inline_and_structured_citations(self) -> None:
+        response = json.dumps({
+            "answer": "The detector was delayed [E1].",
+            "citations": ["E1"],
             "suggestions": [],
         })
         evidence = [AssistantEvidence("E1", "incident", "Gate", "One event", {})]
@@ -283,6 +294,8 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(details["proposals"][0]["current"], "balanced")
         self.assertEqual(details["proposals"][0]["proposed"], "high")
         self.assertEqual(len(details["configuration_fingerprint"]), 64)
+        self.assertTrue(details["recommendation_proof"].startswith("v1."))
+        self.assertNotIn("recommendation_proof", evidence.prompt_payload()["data"])
         self.assertEqual(
             evidence.client_payload()["image_url"],
             "/api/events/42/thumbnail.jpg?width=960&quality=82",
@@ -379,6 +392,66 @@ class AssistantApiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
 
+    def test_incident_apply_accepts_only_server_issued_exact_changes(self) -> None:
+        from fastapi import HTTPException
+        from survng.app import main
+
+        active_config = AppConfig(
+            audit_ai=AuditAiConfig(allow_apply_recommendations=True),
+            cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
+        )
+        camera = active_config.cameras[0]
+        change = AuditAiChange(
+            scope="camera",
+            setting="sensitivity",
+            value="high",
+            reason="The reviewed image supports this camera adjustment.",
+        )
+        fingerprint = main._assistant_motion_config_fingerprint(active_config, camera)
+        token = main._issue_ai_recommendation_token(
+            kind="incident_visual",
+            record_id=42,
+            camera_id="gate",
+            configuration_fingerprint=fingerprint,
+            changes=[change],
+        )
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(get=lambda _event_id: {"camera_id": "gate"}),
+        )
+        request = main.IncidentAiApplyRequest(
+            confirmed=True,
+            configuration_fingerprint=fingerprint,
+            recommendation_proof=token,
+            changes=[change],
+        )
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            patch.object(
+                main,
+                "apply_config_update",
+                return_value=(active_config, {
+                    "camera_workers_restarted": True,
+                    "apply_mode": "manager_reload",
+                }),
+            ) as apply_update,
+        ):
+            response = main.incident_ai_apply(42, request)
+
+        self.assertTrue(response["ok"])
+        apply_update.assert_called_once()
+
+        altered = request.model_copy(update={
+            "changes": [change.model_copy(update={"value": "low"})],
+        })
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            main.incident_ai_apply(42, altered)
+        self.assertEqual(raised.exception.status_code, 409)
+
     def test_visual_tool_uses_current_incident_context(self) -> None:
         from survng.app import main
 
@@ -427,6 +500,35 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(evidence, [expected])
         self.assertEqual(trace.call_args.args[0].name, "trace_across_cameras")
         self.assertEqual(trace.call_args.args[1].context.incident_event_id, 42)
+
+    def test_trace_candidate_cap_preserves_strong_appearance_matches(self) -> None:
+        from survng.app import main
+
+        candidates = [
+            {
+                "representative_event_id": event_id,
+                "events": [{"id": event_id}],
+                "distance": event_id,
+            }
+            for event_id in range(1, 602)
+        ]
+        appearance = [{
+            "event_id": 601,
+            "similarity": 0.94,
+            "visually_similar": True,
+        }]
+
+        selected = main._assistant_prioritize_trace_candidates(
+            candidates,
+            appearance,
+            {601},
+            lambda item: item["distance"],
+            limit=500,
+        )
+
+        self.assertEqual(len(selected), 500)
+        self.assertEqual(selected[0]["representative_event_id"], 601)
+        self.assertIn(1, {item["representative_event_id"] for item in selected})
 
     def test_cross_camera_trace_returns_ranked_timeline_and_incident_images(self) -> None:
         from survng.app import main

@@ -411,6 +411,17 @@ class AuditAiError(RuntimeError):
     pass
 
 
+def ai_provider_configured(config: AuditAiConfig) -> bool:
+    """Return whether the selected provider has enough connection information."""
+    return bool(
+        config.api_key.strip()
+        or (
+            config.provider == "openai_compatible"
+            and config.base_url.strip()
+        )
+    )
+
+
 def audit_analysis_prompt(context_json: str) -> str:
     return (
         "Review this motion-decision audit. It may represent an accepted, filtered, rescued, "
@@ -430,7 +441,7 @@ class AuditAiAdvisor:
     def analyze(self, image_path: Path, context: dict[str, Any]) -> AuditAiAdvice:
         if not self.config.enabled:
             raise AuditAiError("AI audit advisor is disabled")
-        if not self.config.api_key.strip():
+        if not ai_provider_configured(self.config):
             raise AuditAiError("AI audit API key is not configured")
         try:
             context_json = json.dumps(
@@ -468,9 +479,7 @@ class AuditAiAdvisor:
         """Run a bounded multimodal request through the configured Audit AI transport."""
         if not self.config.enabled:
             raise AuditAiError("AI audit advisor is disabled")
-        if not self.config.api_key.strip() and not (
-            self.config.provider == "openai_compatible" and self.config.base_url.strip()
-        ):
+        if not ai_provider_configured(self.config):
             raise AuditAiError("AI audit API key is not configured")
         try:
             if not image_path.is_file():

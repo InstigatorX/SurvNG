@@ -41,8 +41,9 @@ chat is read-only: it can query bounded, typed SurvNG tools, but cannot run
 commands, restart services, delete media, or send notifications. Evidence
 sent to the provider is bounded and strips credentials, stream URLs, web URLs,
 and filesystem paths. Responses link back to the camera or incident used as
-evidence. Configuration saves for these model fields use the existing hot AI
-configuration path and do not restart camera workers.
+evidence. Assistant conversation history expires from browser storage after
+24 hours of inactivity. Configuration saves for these model fields use the
+existing hot AI configuration path and do not restart camera workers.
 
 When incident evidence has a retained snapshot, the assistant response includes
 the actual incident image in its source card. Images are served through SurvNG's
@@ -62,6 +63,10 @@ camera-scoped motion settings. SurvNG calculates the displayed before/after
 values itself; the model does not. Applying requires **Allow confirmed changes**
 to be enabled plus an explicit confirmation in the drawer. A configuration
 fingerprint rejects stale proposals if motion settings changed after analysis.
+Each apply request also carries a one-hour server-issued proof binding it to the
+exact reviewed incident, camera, settings, values, and explanation; edited or
+replayed recommendations are rejected. Active AI analysis prevents a camera
+manager reload from tearing down resources that the review is still using.
 No object thresholds, zones, tracking settings, models, trigger topology, or
 global settings can be changed through this incident-review path.
 
@@ -80,7 +85,8 @@ When a recommendation is applied, SurvNG can measure it after either 24 hours
 or 7 days. The original balanced review and exact applied values become the
 baseline. Once the observation period ends, **Run follow-up review** analyzes a
 new bounded sample and compares likely misses, nuisance alerts, wrong labels,
-and results that look correct as percentages of each reviewed sample. The GUI
+and results that look correct within like-for-like review categories. A result
+without enough category-matched evidence remains inconclusive. The GUI
 labels the outcome improved, worsened, or inconclusive and retains the report
 across restarts. Follow-up analysis remains manually initiated so it cannot
 silently incur provider costs; small changes are explicitly described as

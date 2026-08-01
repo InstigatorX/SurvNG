@@ -79,6 +79,7 @@ import {
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
+import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
@@ -1058,12 +1059,7 @@ const assistantSettingLabels = {
 };
 
 function readAssistantMessages() {
-  try {
-    const parsed = JSON.parse(readStoredValue(browserStorage(window), ASSISTANT_STORAGE_KEY, "[]"));
-    return Array.isArray(parsed) ? parsed.slice(-30) : [];
-  } catch {
-    return [];
-  }
+  return readAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY);
 }
 
 function AssistantPanel({ pageContext, timeZone }) {
@@ -1078,7 +1074,7 @@ function AssistantPanel({ pageContext, timeZone }) {
   const bodyRef = useRef(null);
 
   useEffect(() => {
-    writeStoredValue(browserStorage(window), ASSISTANT_STORAGE_KEY, JSON.stringify(messages.slice(-30)));
+    writeAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY, messages);
   }, [messages]);
 
   useEffect(() => {
@@ -1171,6 +1167,7 @@ function AssistantPanel({ pageContext, timeZone }) {
           changes,
           confirmed: true,
           configuration_fingerprint: details.configuration_fingerprint || "",
+          recommendation_proof: details.recommendation_proof || "",
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -7374,7 +7371,12 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
       const response = await fetch(`/api/motion-audit/${item.id}/ai-apply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ changes }),
+        body: JSON.stringify({
+          changes,
+          confirmed: true,
+          configuration_fingerprint: aiAdvice?.configuration_fingerprint || "",
+          recommendation_proof: aiAdvice?.recommendation_proof || "",
+        }),
       });
       if (!response.ok) throw new Error(await response.text());
       const result = await response.json();

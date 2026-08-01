@@ -12,13 +12,67 @@ import cv2
 import numpy as np
 
 from survng.app import main
-from survng.app.config import AppConfig, CameraConfig
+from survng.app.audit_ai import AuditAiChange
+from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 from survng.app.image_cache import LocalImageCache
 from survng.app.state_events import StateEventBroker
 from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_motion_audit_apply_requires_bound_camera_recommendation(self) -> None:
+        active_config = AppConfig(
+            audit_ai=AuditAiConfig(allow_apply_recommendations=True),
+            cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")],
+        )
+        camera = active_config.cameras[0]
+        change = AuditAiChange(
+            scope="camera",
+            setting="sensitivity",
+            value="high",
+            reason="The reviewed audit supports this camera adjustment.",
+        )
+        fingerprint = main._assistant_motion_config_fingerprint(active_config, camera)
+        token = main._issue_ai_recommendation_token(
+            kind="motion_audit",
+            record_id=7,
+            camera_id="gate",
+            configuration_fingerprint=fingerprint,
+            changes=[change],
+        )
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(get_motion_audit=lambda _audit_id: {"camera_id": "gate"}),
+        )
+        request = main.AuditAiApplyRequest(
+            changes=[change],
+            confirmed=True,
+            configuration_fingerprint=fingerprint,
+            recommendation_proof=token,
+        )
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            patch.object(
+                main,
+                "apply_config_update",
+                return_value=(active_config, {
+                    "camera_workers_restarted": True,
+                    "apply_mode": "manager_reload",
+                }),
+            ) as apply_update,
+        ):
+            response = main.motion_audit_ai_apply(7, request)
+
+        self.assertTrue(response["ok"])
+        apply_update.assert_called_once()
+
+        with self.assertRaises(HTTPException) as raised:
+            main.motion_audit_ai_apply(
+                7,
+                request.model_copy(update={"confirmed": False}),
+            )
+        self.assertEqual(raised.exception.status_code, 400)
+
     def test_appearance_match_endpoint_bounds_window_and_keeps_vectors_private(self) -> None:
         events = SimpleNamespace(get=lambda event_id: {
             "id": event_id,
@@ -605,6 +659,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "config", config),
             patch.object(main, "manager", manager),
             patch.object(main, "AUDIT_AI_LIMITER", limiter),
+            patch.object(main, "_begin_ai_operation"),
             patch.object(main.threading, "Thread", return_value=thread) as thread_factory,
         ):
             review = main.start_motion_ai_review(main.MotionAiReviewRequest(camera_id="gate"))

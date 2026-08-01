@@ -31,6 +31,21 @@ class ConfigReloadTest(unittest.TestCase):
         manager_factory.assert_not_called()
         active.stop_all_with_runtime_preferences.assert_not_called()
 
+    def test_manager_reload_is_refused_while_ai_uses_active_manager(self) -> None:
+        active = Mock()
+        main.config = AppConfig(base_path="/old")
+        main.manager = active
+
+        with (
+            patch.object(main, "_active_ai_operations", return_value={"assistant": 1}),
+            patch("survng.app.main.AppManager") as manager_factory,
+            self.assertRaises(main.AiOperationsActiveError),
+        ):
+            main.reload_manager(AppConfig(base_path="/new"))
+
+        manager_factory.assert_not_called()
+        active.stop_all_with_runtime_preferences.assert_not_called()
+
     def test_manager_reload_is_refused_without_stopping_active_storage_work(self) -> None:
         active = Mock()
         active.recorder.retention_status.return_value = {"state": "idle"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -474,7 +475,17 @@ class AssistantProvider:
         except (ValidationError, ValueError) as exc:
             raise AuditAiError("AI provider returned an invalid assistant answer") from exc
         allowed = {item.evidence_id for item in evidence}
-        answer.citations = list(dict.fromkeys(item for item in answer.citations if item in allowed))
+        submitted = list(dict.fromkeys(answer.citations))
+        unknown = [item for item in submitted if item not in allowed]
+        inline = list(dict.fromkeys(re.findall(r"\[(E[A-Za-z0-9_-]*)\]", answer.answer)))
+        unknown.extend(item for item in inline if item not in allowed)
+        if unknown:
+            raise AuditAiError("AI provider cited evidence that was not supplied")
+        answer.citations = [item for item in submitted if item in allowed]
+        if evidence and (not answer.citations or not inline):
+            raise AuditAiError("AI provider returned an ungrounded assistant answer")
+        if set(answer.citations) != set(inline):
+            raise AuditAiError("AI provider returned inconsistent assistant citations")
         return answer
 
     def _default_model(self) -> str:
