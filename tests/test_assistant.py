@@ -89,6 +89,22 @@ class AssistantModelsTest(unittest.TestCase):
 
         self.assertEqual(details, {"ok": True})
 
+    def test_client_evidence_allows_only_internal_api_images(self) -> None:
+        internal = AssistantEvidence(
+            "E1", "incident", "Gate", "Evidence", {},
+            image_url="/api/events/42/thumbnail.jpg?width=960",
+        )
+        external = AssistantEvidence(
+            "E2", "incident", "Gate", "Evidence", {},
+            image_url="https://provider.example/private.jpg",
+        )
+
+        self.assertEqual(
+            internal.client_payload()["image_url"],
+            "/api/events/42/thumbnail.jpg?width=960",
+        )
+        self.assertNotIn("image_url", external.client_payload())
+
 
 class AssistantProviderTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -246,6 +262,10 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(details["proposals"][0]["current"], "balanced")
         self.assertEqual(details["proposals"][0]["proposed"], "high")
         self.assertEqual(len(details["configuration_fingerprint"]), 64)
+        self.assertEqual(
+            evidence.client_payload()["image_url"],
+            "/api/events/42/thumbnail.jpg?width=960&quality=82",
+        )
 
     def test_motion_change_preview_resolves_camera_inheritance_and_deduplicates(self) -> None:
         from survng.app import main

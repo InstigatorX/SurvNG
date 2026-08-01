@@ -29,10 +29,10 @@ SurvNG reuses one configured AI provider, API key, and optional base URL for
 Motion Audit image analysis and the global assistant. Under **Admin → Object
 Detection → AI analysis & assistant**, two model roles can be configured:
 
-- **Analysis + fast model** is the existing Motion Audit image-analysis model.
+- **Everyday AI model** is the existing Motion Audit image-analysis model.
   It also handles assistant routing, incident searches, system status, and
   straightforward factual questions.
-- **Deep reasoning model** is the optional second model for incident diagnosis, ambiguous
+- **Detailed analysis model** is the optional second model for incident diagnosis, ambiguous
   timelines, comparisons, and tuning advice. Leave it blank to use the fast
   model.
 
@@ -43,6 +43,12 @@ sent to the provider is bounded and strips credentials, stream URLs, web URLs,
 and filesystem paths. Responses link back to the camera or incident used as
 evidence. Configuration saves for these model fields use the existing hot AI
 configuration path and do not restart camera workers.
+
+When incident evidence has a retained snapshot, the assistant response includes
+the actual incident image in its source card. Images are served through SurvNG's
+existing authenticated event-image endpoint rather than embedded in conversation
+storage or returned as provider-hosted URLs. System-health and configuration
+answers do not attach unrelated camera images.
 
 When an incident is selected, asking the assistant to **visually analyze this
 incident** sends its representative retained image and bounded incident

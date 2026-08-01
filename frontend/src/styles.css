@@ -8093,6 +8093,19 @@ section.detection-settings-card {
   text-decoration: none;
 }
 
+.assistant-evidence-card > .assistant-evidence-image {
+  display: block;
+  padding: 0;
+  background: #05090a;
+}
+
+.assistant-evidence-image img {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+}
+
 .assistant-evidence-card:hover,
 .assistant-evidence-card:focus-within {
   border-color: var(--accent);

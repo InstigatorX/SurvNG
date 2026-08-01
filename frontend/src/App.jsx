@@ -1022,6 +1022,39 @@ function defaultCamera(cameras, seed = {}) {
 
 const ASSISTANT_STORAGE_KEY = "survng.assistantConversation.v1";
 
+const assistantVisualVerdicts = {
+  detection_consistent: "What SurvNG found matches the image",
+  probable_missed_detection: "SurvNG likely missed something visible",
+  probable_misclassification: "The object was likely labeled incorrectly",
+  probable_false_positive: "The detection was likely a false alarm",
+  uncertain: "The single image is inconclusive",
+};
+
+const assistantDetectorAssessments = {
+  consistent: "Matches the image",
+  missed: "Likely missed a visible object",
+  misclassified: "Likely used the wrong label",
+  false_positive: "Likely detected something that is not there",
+  uncertain: "Not enough visual evidence",
+};
+
+const assistantTrackingAssessments = {
+  consistent: "Followed the object normally",
+  late: "Started following it late",
+  lost: "Stopped following it too early",
+  duplicate: "Likely counted one object more than once",
+  unavailable: "No useful follow-up tracking was available",
+  uncertain: "Not enough evidence to judge tracking",
+};
+
+const assistantSettingLabels = {
+  analysis_preset: "Motion analysis style",
+  sensitivity: "Motion sensitivity",
+  frame_width: "Motion analysis image size",
+  borderline_rescue_enabled: "Second look at borderline motion",
+  borderline_margin: "Borderline motion range",
+};
+
 function readAssistantMessages() {
   try {
     const parsed = JSON.parse(readStoredValue(browserStorage(window), ASSISTANT_STORAGE_KEY, "[]"));
@@ -1171,7 +1204,7 @@ function AssistantPanel({ pageContext, timeZone }) {
           <span>{pageContext?.page || "live"}</span>
           {pageContext?.camera_id ? <span>{pageContext.camera_id}</span> : null}
           {pageContext?.incident_event_id ? <span>event #{pageContext.incident_event_id}</span> : null}
-          {status ? <span>{status.fast_model === status.reasoning_model ? status.fast_model : `${status.fast_model} · ${status.reasoning_model}`}</span> : null}
+          {status ? <span title={status.fast_model === status.reasoning_model ? "Everyday and detailed questions use this model" : `Everyday: ${status.fast_model} · Detailed: ${status.reasoning_model}`}>{status.fast_model === status.reasoning_model ? status.fast_model : "Everyday + detailed AI"}</span> : null}
         </div>
         <div className="assistant-body" ref={bodyRef}>
           {!messages.length ? <div className="assistant-welcome">
@@ -1188,21 +1221,22 @@ function AssistantPanel({ pageContext, timeZone }) {
           </div> : null}
           {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
             <div className="assistant-message-text">{message.content}</div>
-            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Deep reasoning" : "Fast"}{message.model ? ` · ${message.model}` : ""}</small> : null}
+            {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Detailed analysis" : "Quick answer"}{message.model ? ` · ${message.model}` : ""}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">
               {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`}>
-                <a href={item.href ? appUrl(item.href) : undefined}><span>{item.id}</span><strong>{item.title}</strong><small>{item.summary}</small></a>
+                {item.image_url ? <a className="assistant-evidence-image" href={item.href ? appUrl(item.href) : appUrl(item.image_url)}><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
+                <a href={item.href ? appUrl(item.href) : undefined}><span title={item.id}>Source</span><strong>{item.title}</strong><small>{item.summary}</small></a>
                 {item.details?.advice ? <div className="assistant-visual-review">
-                  <div><strong>{String(item.details.advice.verdict || "uncertain").replaceAll("_", " ")}</strong><span>{Math.round(Number(item.details.advice.confidence || 0) * 100)}%</span></div>
+                  <div><strong>{assistantVisualVerdicts[item.details.advice.verdict] || "The image is inconclusive"}</strong><span>{Math.round(Number(item.details.advice.confidence || 0) * 100)}%</span></div>
                   <p>{item.details.advice.summary}</p>
-                  {item.details.advice.visible_subjects?.length ? <small>Visible: {item.details.advice.visible_subjects.join(", ")}</small> : null}
+                  {item.details.advice.visible_subjects?.length ? <small>Visible in this image: {item.details.advice.visible_subjects.join(", ")}</small> : null}
                   <dl>
-                    <div><dt>Detector</dt><dd>{String(item.details.advice.detector_assessment || "uncertain").replaceAll("_", " ")}</dd></div>
-                    <div><dt>Tracking</dt><dd>{String(item.details.advice.tracking_assessment || "uncertain").replaceAll("_", " ")}</dd></div>
+                    <div><dt>Object recognition</dt><dd>{assistantDetectorAssessments[item.details.advice.detector_assessment] || assistantDetectorAssessments.uncertain}</dd></div>
+                    <div><dt>Follow-up tracking</dt><dd>{assistantTrackingAssessments[item.details.advice.tracking_assessment] || assistantTrackingAssessments.uncertain}</dd></div>
                   </dl>
                   {item.details.proposals?.length ? <div className="assistant-proposals">
                     {item.details.proposals.map((proposal) => <div key={`${proposal.scope}-${proposal.setting}`}>
-                      <strong>{proposal.scope} · {String(proposal.setting).replaceAll("_", " ")}</strong>
+                      <strong>This camera · {assistantSettingLabels[proposal.setting] || String(proposal.setting).replaceAll("_", " ")}</strong>
                       <span><code>{String(proposal.current)}</code><ArrowRight size={13} /><code>{String(proposal.proposed)}</code></span>
                       <small>{proposal.reason}</small>
                     </div>)}
@@ -7978,8 +8012,8 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <option value="gemini">Google Gemini</option>
             <option value="openai_compatible">OpenAI compatible</option>
           </select></label>
-          <label>Analysis + fast model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Your existing Motion Audit model. It also handles assistant routing, searches, status, and direct factual answers.</small></label>
-          <label>Deep reasoning model<input value={config.audit_ai?.assistant_reasoning_model || ""} onChange={(event) => updateConfig(["audit_ai", "assistant_reasoning_model"], event.target.value)} placeholder="Leave blank to use the analysis model" /><small>Optional second model for incident diagnosis, comparisons, ambiguous timelines, and tuning advice.</small></label>
+          <label>Everyday AI model<input value={config.audit_ai?.model || ""} onChange={(event) => updateConfig(["audit_ai", "model"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "gemini-2.5-flash" : "gpt-4.1-mini"} /><small>Used for Motion Audit reviews, finding incidents, status questions, and straightforward answers.</small></label>
+          <label>Detailed analysis model<input value={config.audit_ai?.assistant_reasoning_model || ""} onChange={(event) => updateConfig(["audit_ai", "assistant_reasoning_model"], event.target.value)} placeholder="Leave blank to use the everyday model" /><small>Optional second model for visual incident reviews, difficult diagnoses, comparisons, and tuning advice.</small></label>
           <label>API Key<input type="password" value={secretInputValue(config.audit_ai?.api_key)} placeholder={secretInputHint(config.audit_ai?.api_key)} onChange={(event) => updateConfig(["audit_ai", "api_key"], event.target.value)} autoComplete="new-password" /></label>
           <label>Base URL<input value={config.audit_ai?.base_url || ""} onChange={(event) => updateConfig(["audit_ai", "base_url"], event.target.value)} placeholder={config.audit_ai?.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : config.audit_ai?.provider === "openai_compatible" ? "http://localhost:11434/v1" : "https://api.openai.com/v1"} /></label>
           <label>Timeout Seconds<input type="number" min="5" max="120" step="1" value={config.audit_ai?.timeout_seconds ?? 45} onChange={(event) => updateConfig(["audit_ai", "timeout_seconds"], Number(event.target.value))} /></label>

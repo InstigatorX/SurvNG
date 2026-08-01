@@ -191,6 +191,7 @@ class AssistantEvidence:
     summary: str
     data: dict[str, Any]
     href: str = ""
+    image_url: str = ""
     client_data: dict[str, Any] = field(default_factory=dict)
 
     def prompt_payload(self) -> dict[str, Any]:
@@ -212,6 +213,8 @@ class AssistantEvidence:
         }
         if self.client_data:
             payload["details"] = sanitize_assistant_data(self.client_data)
+        if self.image_url.startswith("/api/"):
+            payload["image_url"] = self.image_url
         return payload
 
 
@@ -349,7 +352,10 @@ State uncertainty and missing evidence clearly. Cite factual claims using eviden
 brackets, for example [E1]. Do not expose credentials, stream URLs, filesystem paths, provider keys,
 or internal secrets. Do not propose that you already changed configuration. When asked to change
 something, explain that this version can analyze and suggest but is read-only. Keep the answer
-concise and useful. Return JSON only."""
+concise, useful, and natural. Prefer everyday terms such as camera alert, visual motion check,
+object recognition, and follow-up tracking. Introduce technical names such as ONVIF, EMA, ReID,
+or temporal consensus only when they materially explain the answer, and define them briefly.
+Return JSON only."""
 
 INCIDENT_VISUAL_PROMPT = """You are a conservative SurvNG incident visual reviewer. Compare the
 single representative saved image with the supplied deterministic incident metadata. The image is

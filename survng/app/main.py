@@ -3419,6 +3419,10 @@ def _assistant_incident_evidence(
         incident.get("representative_event_id")
         or (event_ids[0] if event_ids else 0)
     )
+    image_event_id = int(
+        incident.get("representative_event_id")
+        or event_id
+    )
     return AssistantEvidence(
         evidence_id=f"E-incident-{event_id}",
         kind="incident",
@@ -3429,6 +3433,11 @@ def _assistant_incident_evidence(
         ),
         data=payload,
         href=f"/incidents?event_ids={query}",
+        image_url=(
+            f"/api/events/{image_event_id}/thumbnail.jpg?width=960&quality=82"
+            if image_event_id > 0
+            else ""
+        ),
     )
 
 
@@ -3604,6 +3613,7 @@ def _assistant_visual_incident_evidence(
         ),
         data={**details, "incident_evidence": incident_evidence.data},
         href=incident_evidence.href,
+        image_url=f"/api/events/{source_event_id}/thumbnail.jpg?width=960&quality=82",
         client_data=details,
     )
 
