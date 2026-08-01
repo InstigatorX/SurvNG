@@ -65,6 +65,9 @@ export function createIncidentPageCache(loader) {
         if (!retained.has(key)) entries.delete(key);
       }
     },
+    invalidate(key) {
+      if (key) entries.delete(key);
+    },
     clear() {
       entries = new Map();
     },

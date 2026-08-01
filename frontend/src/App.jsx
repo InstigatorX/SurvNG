@@ -1304,6 +1304,7 @@ function Shell({ page, theme, recordingContext, children }) {
 }
 
 const APP_EVENT_TYPES = ["camera_state", "cameras_state", "motion", "object", "incident", "system_state"];
+const INCIDENT_REFRESH_FALLBACK_MS = 15_000;
 const appEventListeners = new Set();
 let appEventSource = null;
 let appEventCloseTimer = null;
@@ -3899,6 +3900,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     incidentEventRefreshTimer.current = window.setTimeout(
       () => {
         incidentEventRefreshTimer.current = null;
+        if (focusedDetailQuery) {
+          incidentDetailCacheRef.current.invalidate(focusedDetailQuery);
+          incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
+            setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
+          }).catch(() => {
+            // Keep the existing detail visible; the next event or fallback poll retries.
+          });
+        }
         setIncidentRefreshToken((value) => value + 1);
       },
       1000,
@@ -3906,6 +3915,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   });
 
   useEffect(() => () => window.clearTimeout(incidentEventRefreshTimer.current), []);
+
+  useEffect(() => {
+    if (incidentDay !== today || incidentPage !== 0) return undefined;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) setIncidentRefreshToken((value) => value + 1);
+    }, INCIDENT_REFRESH_FALLBACK_MS);
+    return () => window.clearInterval(timer);
+  }, [incidentDay, incidentPage, today]);
 
   async function openFaceReview(face) {
     const observationId = Number(face?.observation_id);
@@ -4240,8 +4257,6 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
-  const incidentRefreshPendingRef = useRef(false);
-  const incidentInteractionActiveRef = useRef(false);
   const incidentDetailCacheRef = useRef(null);
   if (!incidentDetailCacheRef.current) {
     incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
@@ -4301,7 +4316,6 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const incidentPageCount = incidentPage + (incidentHasMore ? 2 : 1);
   const clampedIncidentPage = incidentPage;
   const pagedIncidents = galleryIncidents;
-  incidentInteractionActiveRef.current = Boolean(expandedIncidentId != null || selectedEvent);
 
   useEffect(() => {
     const contextualIncident = selectedEvent || focusedIncident;
@@ -4412,25 +4426,31 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
 
   useAppEvents(({ type }) => {
     if (type !== "incident" || incidentPage !== 0 || document.hidden) return;
-    incidentRefreshPendingRef.current = true;
     window.clearTimeout(incidentEventRefreshTimer.current);
     incidentEventRefreshTimer.current = window.setTimeout(() => {
       incidentEventRefreshTimer.current = null;
-      if (incidentInteractionActiveRef.current || !incidentRefreshPendingRef.current) return;
-      incidentRefreshPendingRef.current = false;
       incidentFeedCacheRef.current.clear();
+      if (focusedDetailQuery) {
+        incidentDetailCacheRef.current.invalidate(focusedDetailQuery);
+        incidentDetailCacheRef.current.load(focusedDetailQuery).then((detail) => {
+          setIncidentDetails((current) => ({ ...current, [focusedDetailQuery]: detail }));
+        }).catch(() => {
+          // Keep the existing detail visible; the next event or fallback poll retries.
+        });
+      }
       setIncidentRefreshToken((value) => value + 1);
     }, 1000);
   });
 
   useEffect(() => {
-    if (incidentInteractionActiveRef.current || !incidentRefreshPendingRef.current) return;
-    window.clearTimeout(incidentEventRefreshTimer.current);
-    incidentEventRefreshTimer.current = null;
-    incidentRefreshPendingRef.current = false;
-    incidentFeedCacheRef.current.clear();
-    setIncidentRefreshToken((value) => value + 1);
-  }, [expandedIncidentId, selectedEvent]);
+    if (incidentPage !== 0) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      incidentFeedCacheRef.current.clear();
+      setIncidentRefreshToken((value) => value + 1);
+    }, INCIDENT_REFRESH_FALLBACK_MS);
+    return () => window.clearInterval(timer);
+  }, [incidentPage]);
 
   useEffect(() => () => {
     incidentSelectionRequestRef.current += 1;
