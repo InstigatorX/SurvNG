@@ -2359,6 +2359,11 @@ def _audit_ai_context(
     effective = {
         "mode": effective_mode,
         "sensitivity": active_config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
+        "stationary_object_tolerance": (
+            active_config.motion_qualification.stationary_object_tolerance
+            if override.stationary_object_tolerance == "inherit"
+            else override.stationary_object_tolerance
+        ),
         "frame_width": override.frame_width or active_config.motion_qualification.frame_width,
         "borderline_rescue_enabled": (
             active_config.motion_qualification.borderline_rescue_enabled
@@ -2533,6 +2538,7 @@ def _audit_ai_context(
             "visual_backup_cooldown_seconds": [5, 300],
             "visual_backup_max_triggers_5m": [1, 30],
             "sensitivity": ["high", "balanced", "low"],
+            "stationary_object_tolerance": ["low", "balanced", "high"],
             "analysis_preset": ["adaptive", "modular", "classic"],
         },
     }

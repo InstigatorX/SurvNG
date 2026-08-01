@@ -105,12 +105,17 @@ class AppConfigTest(unittest.TestCase):
         })
 
         self.assertEqual(config.motion_qualification.frame_width, 320)
+        self.assertEqual(config.motion_qualification.stationary_object_tolerance, "balanced")
         self.assertEqual(config.motion_qualification.camera_mode_background_fps, 2.0)
         self.assertEqual(config.motion_qualification.visual_backup_warmup_seconds, 10.0)
         self.assertEqual(config.motion_qualification.visual_backup_grace_seconds, 1.5)
         self.assertEqual(config.motion_qualification.visual_backup_min_score, 0.70)
         self.assertEqual(config.motion_qualification.visual_backup_min_consecutive, 3)
         self.assertEqual(config.cameras[0].motion_qualification.frame_width, 480)
+        self.assertEqual(
+            config.cameras[0].motion_qualification.stationary_object_tolerance,
+            "inherit",
+        )
         self.assertTrue(config.motion_qualification.borderline_rescue_enabled)
         self.assertEqual(config.motion_qualification.borderline_margin, 0.03)
         self.assertFalse(config.motion_qualification.mog2_audit_enabled)

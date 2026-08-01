@@ -655,6 +655,27 @@ class AdaptiveMotionScoringStage:
 
     def process(self, context: MotionContext) -> MotionContext:
         sensitivity = str(context.configuration.get("sensitivity") or "balanced")
+        stationary_tolerance = str(
+            context.configuration.get("stationary_object_tolerance") or ""
+        )
+        stationary_thresholds = {
+            "low": (0.006, 0.015),
+            "balanced": (0.01, 0.025),
+            "high": (0.02, 0.05),
+        }
+        stationary_displacement_ratio, stationary_path_ratio = (
+            stationary_thresholds.get(
+                stationary_tolerance,
+                (self.stationary_displacement_ratio, self.stationary_path_ratio),
+            )
+        )
+        context.debug.values["stationary_object_tolerance"] = (
+            stationary_tolerance or "custom"
+        )
+        context.debug.values["stationary_displacement_ratio"] = (
+            stationary_displacement_ratio
+        )
+        context.debug.values["stationary_path_ratio"] = stationary_path_ratio
         base_threshold = MOTION_SCORE_THRESHOLDS.get(sensitivity, MOTION_SCORE_THRESHOLDS["balanced"])
         scene_noise = float(context.debug.values.get("scene_noise", 4.0))
         night = context.debug.values.get("scene_mode") == "night"
@@ -697,9 +718,9 @@ class AdaptiveMotionScoringStage:
                 )
                 stationary_foreground = (
                     candidate_features["persistence"] >= 0.4
-                    and candidate_features["path_length"] < self.stationary_path_ratio
+                    and candidate_features["path_length"] < stationary_path_ratio
                     and candidate_features["net_displacement"]
-                    < self.stationary_displacement_ratio
+                    < stationary_displacement_ratio
                 )
                 micro_jitter = (
                     candidate_features["median_area_ratio"] < self.micro_area_ratio

@@ -994,6 +994,7 @@ function defaultCamera(cameras, seed = {}) {
     motion_qualification: {
       mode: seed.motion_qualification?.mode || "inherit",
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
+      stationary_object_tolerance: seed.motion_qualification?.stationary_object_tolerance || "inherit",
       frame_width: seed.motion_qualification?.frame_width ?? null,
       borderline_rescue_enabled: seed.motion_qualification?.borderline_rescue_enabled ?? null,
       borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
@@ -1050,6 +1051,7 @@ const assistantTrackingAssessments = {
 const assistantSettingLabels = {
   analysis_preset: "Motion analysis style",
   sensitivity: "Motion sensitivity",
+  stationary_object_tolerance: "Stationary object tolerance",
   frame_width: "Motion analysis image size",
   borderline_rescue_enabled: "Second look at borderline motion",
   borderline_margin: "Borderline motion range",
@@ -6889,6 +6891,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     <option value="balanced">Balanced</option>
                     <option value="low">Low</option>
                   </select></label>
+                  <label>Stationary object tolerance<select value={selectedCamera.motion_qualification?.stationary_object_tolerance || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "stationary_object_tolerance"], event.target.value)}>
+                    <option value="inherit">Use global setting</option>
+                    <option value="low">Low</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="high">High</option>
+                  </select><small>Raise this when parked objects are repeatedly treated as movement. High may ignore very slow or distant movement.</small></label>
                   <label>Analysis Width<select value={selectedCamera.motion_qualification?.frame_width ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "frame_width"], event.target.value ? Number(event.target.value) : null)}>
                     <option value="">Use global setting</option>
                     <option value="320">320 px</option>
@@ -7253,6 +7261,7 @@ function Mog2TrackOverlay({ tracks, bounds }) {
 
 const motionAiSettingLabels = {
   analysis_preset: "Motion analysis method",
+  stationary_object_tolerance: "Stationary object tolerance",
 };
 
 function formatMotionAiValue(setting, value) {
@@ -8108,6 +8117,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <summary>Advanced motion tuning</summary>
           <div className="field-row">
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
+          <label>Stationary object tolerance<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Low</option><option value="balanced">Balanced</option><option value="high">High</option></select><small>How much outline jitter a stable foreground object may have before it counts as movement. Use High for cameras repeatedly reacting to parked vehicles.</small></label>
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
           <label>ONVIF background upkeep<select value={String(config.motion_qualification?.camera_mode_background_fps ?? 2)} onChange={(event) => updateConfig(["motion_qualification", "camera_mode_background_fps"], Number(event.target.value))}><option value="1">Low CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Faster adaptation (3 frames/sec)</option><option value="5">Maximum adaptation (5 frames/sec)</option></select><small>When camera alerts trigger motion, SurvNG maintains the visual background at this lower rate. Trigger validation still analyzes the full buffered window.</small></label>

@@ -180,6 +180,40 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(result.scoring.reason, "stationary_foreground")
         self.assertEqual(result.scoring.features["net_displacement"], 0.0)
 
+    def test_stationary_object_tolerance_selects_safe_scoring_thresholds(self) -> None:
+        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "tolerance",
+            [MotionStageConfig("scoring", "adaptive_motion_score")],
+            initial_artifacts={"tracked_objects", "processed_frame_history"},
+        )
+        try:
+            for tolerance, expected in {
+                "low": (0.006, 0.015),
+                "balanced": (0.01, 0.025),
+                "high": (0.02, 0.05),
+            }.items():
+                result = scorer.process(MotionContext(
+                    camera_id="tolerance",
+                    captured_at=100.0,
+                    original_frame=None,
+                    configuration={
+                        "sensitivity": "balanced",
+                        "stationary_object_tolerance": tolerance,
+                    },
+                    runtime=scorer.runtime,
+                    processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+                ))
+                self.assertEqual(
+                    result.debug.values["stationary_displacement_ratio"],
+                    expected[0],
+                )
+                self.assertEqual(
+                    result.debug.values["stationary_path_ratio"],
+                    expected[1],
+                )
+        finally:
+            scorer.close()
+
     def test_small_subpixel_jitter_is_not_credible_motion(self) -> None:
         frames: list[np.ndarray] = []
         for index in range(10):

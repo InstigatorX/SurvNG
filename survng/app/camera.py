@@ -442,6 +442,7 @@ class CameraWorker:
         main_age = max(0.0, now - main_frame_clock) if main_frame_clock is not None else None
         connected = bool(enabled and live_age is not None and live_age <= FRAME_STALE_SECONDS)
         mode, sensitivity, frame_width = self._motion_settings()
+        stationary_object_tolerance = self._stationary_object_tolerance()
         rescue_enabled, rescue_margin = self._motion_rescue_settings()
         with self._motion_stats_lock:
             motion_stats = dict(self._motion_stats)
@@ -493,6 +494,7 @@ class CameraWorker:
                 **motion_stats,
                 "mode": mode,
                 "sensitivity": sensitivity,
+                "stationary_object_tolerance": stationary_object_tolerance,
                 "frame_width": frame_width,
                 "camera_mode_background_fps": self.motion_config.camera_mode_background_fps,
                 "visual_backup": {
@@ -1174,6 +1176,12 @@ class CameraWorker:
         frame_width = int(override.frame_width or self.motion_config.frame_width)
         return mode, sensitivity, frame_width
 
+    def _stationary_object_tolerance(self) -> str:
+        override = self.camera.motion_qualification.stationary_object_tolerance
+        if override == "inherit":
+            return self.motion_config.stationary_object_tolerance
+        return override
+
     def _trigger_mode(self) -> str:
         return resolved_trigger_mode(self._motion_settings()[0])
 
@@ -1628,6 +1636,7 @@ class CameraWorker:
                 "camera_id": self.camera.id,
                 "mode": mode,
                 "sensitivity": sensitivity,
+                "stationary_object_tolerance": self._stationary_object_tolerance(),
                 "frame_width": frame_width,
                 "motion_zones": [
                     zone.model_dump(mode="python")

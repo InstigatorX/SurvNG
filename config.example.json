@@ -30,6 +30,7 @@
   "motion_qualification": {
     "mode": "camera",
     "sensitivity": "balanced",
+    "stationary_object_tolerance": "balanced",
     "frame_width": 320,
     "sample_fps": 5.0,
     "window_seconds": 1.6,

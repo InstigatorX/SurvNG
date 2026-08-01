@@ -24,6 +24,7 @@ StructuredResponse = TypeVar("StructuredResponse", bound=BaseModel)
 ALLOWED_GLOBAL_SETTINGS = {
     "analysis_preset",
     "sensitivity",
+    "stationary_object_tolerance",
     "frame_width",
     "sample_fps",
     "window_seconds",
@@ -43,6 +44,7 @@ ALLOWED_GLOBAL_SETTINGS = {
 ALLOWED_CAMERA_SETTINGS = {
     "analysis_preset",
     "sensitivity",
+    "stationary_object_tolerance",
     "frame_width",
     "borderline_rescue_enabled",
     "borderline_margin",
@@ -73,6 +75,7 @@ class AuditAiChange(BaseModel):
     scope: Literal["global", "camera"]
     setting: Literal[
         "sensitivity",
+        "stationary_object_tolerance",
         "frame_width",
         "sample_fps",
         "window_seconds",
@@ -117,10 +120,10 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         if normalized not in {"adaptive", "modular", "classic"}:
             raise ValueError("analysis_preset must be adaptive, modular, or classic")
         return normalized
-    if setting == "sensitivity":
+    if setting in {"sensitivity", "stationary_object_tolerance"}:
         normalized = str(value)
         if normalized not in {"high", "balanced", "low"}:
-            raise ValueError("sensitivity must be high, balanced, or low")
+            raise ValueError(f"{setting} must be high, balanced, or low")
         return normalized
     if setting == "borderline_rescue_enabled":
         if not isinstance(value, bool):
@@ -230,6 +233,9 @@ classic analysis, and prefer adaptive unless telemetry shows a compatibility pro
 validator selection, agreement policy, and fail-open behavior are operator-owned safety settings:
 explain relevant evidence, but never recommend changing their topology. Do not recommend lowering
 sensitivity merely because an object exists.
+Use stationary_object_tolerance only when repeated evidence shows a stable foreground object with
+minor outline or centroid jitter; prefer a camera-scoped increase and do not use it to suppress
+genuine slow or distant travel.
 Do not invent settings, alter model confidence, or recommend values outside the supplied bounds.
 Return only the requested JSON structure."""
 
