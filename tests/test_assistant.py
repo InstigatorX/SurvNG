@@ -274,14 +274,15 @@ class AssistantApiTest(unittest.TestCase):
             )
 
         self.assertEqual(evidence.kind, "recent_activity_summary")
-        self.assertEqual(evidence.data["incident_count"], 2)
+        self.assertEqual(evidence.data["incident_count"], 1)
         self.assertEqual(evidence.data["object_incident_count"], 1)
-        self.assertEqual(evidence.data["trigger_counts"], {"camera": 1, "visual_backup": 1})
+        self.assertNotIn("motion_only_incident_count", evidence.data)
+        self.assertEqual(evidence.data["trigger_counts"], {"visual_backup": 1})
         self.assertNotIn("image_url", evidence.client_payload())
         self.assertEqual(
             main._assistant_activity_followups(evidence),
             [
-                "What happened on front-door in the last 2 hours?",
+                "What happened on gate in the last 2 hours?",
                 "Show me the object incidents from the last 2 hours",
                 "Which incidents did the visual motion check rescue in the last 2 hours?",
             ],

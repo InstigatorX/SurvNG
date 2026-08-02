@@ -345,7 +345,8 @@ Tool guidance:
 - summarize_recent_activity: one compact, non-visual activity digest. Use this instead of
   search_incidents when the user asks what happened, requests an overview/summary, or asks about
   activity during a recent time window. Do not also request search_incidents for the same summary.
-  Use ISO-8601 start_at/end_at with offsets and the same event filters as search_incidents.
+  Use ISO-8601 start_at/end_at with offsets. This digest covers object incidents only and excludes
+  motion-only incidents. Use search_incidents if the user explicitly asks to find motion-only events.
 - trace_across_cameras: build a chronological investigation around an explicit/current incident,
   or a bounded timeline for a known face_name or object_label. Use event_id when an anchor exists.
   Confirmed face identities are strong links. Durable appearance similarity from the same ReID
@@ -373,9 +374,10 @@ concise, useful, and natural. Prefer everyday terms such as camera alert, visual
 object recognition, and follow-up tracking. Introduce technical names such as ONVIF, EMA, ReID,
 or temporal consensus only when they materially explain the answer, and define them briefly.
 When recent_activity_summary evidence is supplied, answer in 3-4 sentences unless the user asks
-for more detail. Summarize patterns and notable activity; do not enumerate every incident. Offer
+for more detail. Summarize object-incident patterns and notable activity; do not enumerate every
+incident or discuss motion-only incidents. Offer
 2-3 short, evidence-based follow-up questions that drill into the busiest camera, object activity,
-motion-only activity, or visual-backup rescues when those categories are present.
+or visual-backup rescues when those categories are present.
 Return JSON only."""
 
 INCIDENT_VISUAL_PROMPT = """You are a conservative SurvNG incident visual reviewer. Compare the

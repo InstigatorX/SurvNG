@@ -4588,7 +4588,7 @@ def _assistant_recent_activity_summary(
     ]
     summaries = _filter_incident_summaries(
         _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS),
-        call.event_type,
+        "object",
         call.camera_id,
         call.object_label,
         call.zone,
@@ -4601,7 +4601,6 @@ def _assistant_recent_activity_summary(
                 result[value] = result.get(value, 0) + 1
         return dict(sorted(result.items(), key=lambda item: (-item[1], item[0])))
 
-    object_incidents = [item for item in summaries if item.get("has_objects")]
     duration_minutes = max(0, round((end - start).total_seconds() / 60))
     camera_ids = {str(item.get("camera_id") or "") for item in summaries}
     recent = [
@@ -4628,12 +4627,11 @@ def _assistant_recent_activity_summary(
             "end_at": end.isoformat(),
             "duration_minutes": duration_minutes,
             "incident_count": len(summaries),
-            "object_incident_count": len(object_incidents),
-            "motion_only_incident_count": len(summaries) - len(object_incidents),
+            "object_incident_count": len(summaries),
             "camera_counts": counts([str(item.get("camera_id") or "") for item in summaries]),
             "object_label_counts": counts([
                 str(label)
-                for item in object_incidents
+                for item in summaries
                 for label in item.get("labels") or []
             ]),
             "zone_counts": counts([
@@ -4647,7 +4645,7 @@ def _assistant_recent_activity_summary(
             "recent_notable_incidents": recent,
             "filters": {
                 "camera_id": call.camera_id,
-                "event_type": call.event_type,
+                "event_type": "object",
                 "object_label": call.object_label,
                 "zone": call.zone,
             },
@@ -4677,8 +4675,6 @@ def _assistant_activity_followups(evidence: AssistantEvidence) -> list[str]:
     triggers = data.get("trigger_counts") or {}
     if any(key in triggers for key in ("adaptive", "visual_backup", "adaptive/visual_backup")):
         followups.append(f"Which incidents did the visual motion check rescue in the {period}?")
-    if int(data.get("motion_only_incident_count") or 0) and len(followups) < 3:
-        followups.append(f"Summarize the motion-only activity from the {period}")
     return followups[:3]
 
 
