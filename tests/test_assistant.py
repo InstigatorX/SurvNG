@@ -161,7 +161,7 @@ class AssistantProviderTest(unittest.TestCase):
             with self.assertRaisesRegex(AuditAiError, "not supplied"):
                 self.provider.answer(self.request, evidence, "deep")
 
-    def test_answer_requires_matching_inline_and_structured_citations(self) -> None:
+    def test_answer_uses_valid_inline_citations(self) -> None:
         response = json.dumps({
             "answer": "The detector was delayed [E1].",
             "citations": ["E1"],
@@ -173,6 +173,24 @@ class AssistantProviderTest(unittest.TestCase):
 
         self.assertEqual(answer.citations, ["E1"])
         self.assertEqual(complete.call_args.kwargs["model_override"], "deep-model")
+
+    def test_answer_normalizes_harmless_structured_citation_mismatch(self) -> None:
+        response = json.dumps({
+            "answer": "There were several recent incidents [E-activity].",
+            "citations": [],
+            "suggestions": [],
+        })
+        evidence = [AssistantEvidence(
+            "E-activity",
+            "recent_activity_summary",
+            "Recent activity",
+            "Several incidents",
+            {},
+        )]
+        with patch.object(self.provider, "_complete_json", return_value=response):
+            answer = self.provider.answer(self.request, evidence)
+
+        self.assertEqual(answer.citations, ["E-activity"])
 
     def test_invalid_provider_json_is_reported_as_provider_error(self) -> None:
         with patch.object(self.provider, "_complete_json", return_value="not json"):
@@ -218,6 +236,57 @@ class IncidentVisualReviewerTest(unittest.TestCase):
 
 
 class AssistantApiTest(unittest.TestCase):
+    def test_recent_activity_summary_returns_one_non_visual_aggregate(self) -> None:
+        from survng.app import main
+
+        summaries = [
+            {
+                "representative_event_id": 12,
+                "camera_id": "gate",
+                "start_at": "2026-08-02T20:10:00+00:00",
+                "has_objects": True,
+                "labels": ["car"],
+                "zones": ["driveway"],
+                "trigger_source": "visual_backup",
+            },
+            {
+                "representative_event_id": 11,
+                "camera_id": "front-door",
+                "start_at": "2026-08-02T20:00:00+00:00",
+                "has_objects": False,
+                "labels": [],
+                "zones": [],
+                "trigger_source": "camera",
+            },
+        ]
+        call = AssistantToolCall(
+            name="summarize_recent_activity",
+            start_at="2026-08-02T19:00:00+00:00",
+            end_at="2026-08-02T21:00:00+00:00",
+        )
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(between_compact=lambda _start, _end: [])
+        )
+
+        with patch.object(main, "_incident_rows", return_value=summaries):
+            evidence = main._assistant_recent_activity_summary(
+                call, "America/New_York", active_manager
+            )
+
+        self.assertEqual(evidence.kind, "recent_activity_summary")
+        self.assertEqual(evidence.data["incident_count"], 2)
+        self.assertEqual(evidence.data["object_incident_count"], 1)
+        self.assertEqual(evidence.data["trigger_counts"], {"camera": 1, "visual_backup": 1})
+        self.assertNotIn("image_url", evidence.client_payload())
+        self.assertEqual(
+            main._assistant_activity_followups(evidence),
+            [
+                "What happened on front-door in the last 2 hours?",
+                "Show me the object incidents from the last 2 hours",
+                "Which incidents did the visual motion check rescue in the last 2 hours?",
+            ],
+        )
+
     def test_assistant_catalog_includes_only_safe_face_identity_fields(self) -> None:
         from survng.app import main
 
@@ -714,6 +783,29 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(response["evidence"][0]["id"], "E-system")
         planner.assert_called_once()
         self.assertEqual(responder.call_args.args[2], "deep")
+
+    def test_chat_reports_provider_failure_as_502(self) -> None:
+        from fastapi import HTTPException
+        from survng.app import main
+
+        active_config = AppConfig(audit_ai=AuditAiConfig(
+            enabled=True,
+            assistant_enabled=True,
+            provider="gemini",
+            api_key="test-key",
+        ))
+        request = AssistantChatRequest(message="What happened recently?")
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", SimpleNamespace(detector=SimpleNamespace(labels=[]))),
+            patch.object(AssistantProvider, "plan", side_effect=AuditAiError("provider failed")),
+            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(main.assistant_chat(request))
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.detail, "provider failed")
 
 
 if __name__ == "__main__":

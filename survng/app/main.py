@@ -96,6 +96,7 @@ from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
 
 config = load_config()
 manager = AppManager(config)
+LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
 SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
 RECORDING_LOOKUP_LIMIT = 20000
@@ -4566,6 +4567,121 @@ def _assistant_search_incidents(
     return evidence
 
 
+def _assistant_recent_activity_summary(
+    call: AssistantToolCall,
+    time_zone: str,
+    active_manager: AppManager,
+) -> AssistantEvidence:
+    try:
+        selected_zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        selected_zone = ZoneInfo("America/New_York")
+    now = datetime.now(timezone.utc)
+    start = _assistant_parse_datetime(call.start_at, selected_zone) or now - timedelta(hours=24)
+    end = _assistant_parse_datetime(call.end_at, selected_zone) or now
+    if end <= start:
+        start, end = end, start
+    start = max(start, end - timedelta(days=31))
+    rows = [
+        _event_row(row)
+        for row in active_manager.events.between_compact(start.isoformat(), end.isoformat())
+    ]
+    summaries = _filter_incident_summaries(
+        _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS),
+        call.event_type,
+        call.camera_id,
+        call.object_label,
+        call.zone,
+    )
+
+    def counts(values: list[str]) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for value in values:
+            if value:
+                result[value] = result.get(value, 0) + 1
+        return dict(sorted(result.items(), key=lambda item: (-item[1], item[0])))
+
+    object_incidents = [item for item in summaries if item.get("has_objects")]
+    duration_minutes = max(0, round((end - start).total_seconds() / 60))
+    camera_ids = {str(item.get("camera_id") or "") for item in summaries}
+    recent = [
+        {
+            "event_id": int(item.get("representative_event_id") or 0),
+            "camera_id": str(item.get("camera_id") or ""),
+            "started_at": item.get("start_at"),
+            "labels": list(item.get("labels") or []),
+            "zones": list(item.get("zones") or []),
+            "trigger_source": item.get("trigger_source") or "camera",
+        }
+        for item in summaries[:8]
+    ]
+    return AssistantEvidence(
+        evidence_id="E-activity",
+        kind="recent_activity_summary",
+        title="Recent activity",
+        summary=(
+            f"{len(summaries)} incidents across {len(camera_ids - {''})} cameras "
+            f"during the last {duration_minutes} minutes."
+        ),
+        data={
+            "start_at": start.isoformat(),
+            "end_at": end.isoformat(),
+            "duration_minutes": duration_minutes,
+            "incident_count": len(summaries),
+            "object_incident_count": len(object_incidents),
+            "motion_only_incident_count": len(summaries) - len(object_incidents),
+            "camera_counts": counts([str(item.get("camera_id") or "") for item in summaries]),
+            "object_label_counts": counts([
+                str(label)
+                for item in object_incidents
+                for label in item.get("labels") or []
+            ]),
+            "zone_counts": counts([
+                str(zone)
+                for item in summaries
+                for zone in item.get("zones") or []
+            ]),
+            "trigger_counts": counts([
+                str(item.get("trigger_source") or "camera") for item in summaries
+            ]),
+            "recent_notable_incidents": recent,
+            "filters": {
+                "camera_id": call.camera_id,
+                "event_type": call.event_type,
+                "object_label": call.object_label,
+                "zone": call.zone,
+            },
+        },
+        href="/incidents",
+    )
+
+
+def _assistant_activity_followups(evidence: AssistantEvidence) -> list[str]:
+    data = evidence.data
+    minutes = max(1, int(data.get("duration_minutes") or 0))
+    if minutes % 1440 == 0:
+        count = minutes // 1440
+        period = f"last {count} day{'s' if count != 1 else ''}"
+    elif minutes % 60 == 0:
+        count = minutes // 60
+        period = f"last {count} hour{'s' if count != 1 else ''}"
+    else:
+        period = f"last {minutes} minutes"
+    followups: list[str] = []
+    camera_counts = data.get("camera_counts") or {}
+    if camera_counts:
+        busiest = next(iter(camera_counts))
+        followups.append(f"What happened on {busiest} in the {period}?")
+    if int(data.get("object_incident_count") or 0):
+        followups.append(f"Show me the object incidents from the {period}")
+    triggers = data.get("trigger_counts") or {}
+    if any(key in triggers for key in ("adaptive", "visual_backup", "adaptive/visual_backup")):
+        followups.append(f"Which incidents did the visual motion check rescue in the {period}?")
+    if int(data.get("motion_only_incident_count") or 0) and len(followups) < 3:
+        followups.append(f"Summarize the motion-only activity from the {period}")
+    return followups[:3]
+
+
 def _assistant_prioritize_trace_candidates(
     candidate_summaries: list[dict[str, Any]],
     appearance_matches: list[dict[str, Any]],
@@ -4907,6 +5023,12 @@ def _assistant_execute_tool(
             request.context.time_zone,
             active_manager,
         )
+    if call.name == "summarize_recent_activity":
+        return [_assistant_recent_activity_summary(
+            call,
+            request.context.time_zone,
+            active_manager,
+        )]
     if call.name == "trace_across_cameras":
         return _assistant_trace_across_cameras(call, request, active_manager)
     return []
@@ -4969,10 +5091,19 @@ async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
                     seen.add(item.evidence_id)
                     evidence.append(item)
         answer = provider.answer(request, evidence, plan.reasoning_tier)
+        activity = next(
+            (item for item in evidence if item.kind == "recent_activity_summary"),
+            None,
+        )
+        suggestions = (
+            _assistant_activity_followups(activity)
+            if activity is not None
+            else answer.suggestions
+        )
         return {
             "message": answer.answer,
             "citations": answer.citations,
-            "suggestions": answer.suggestions,
+            "suggestions": suggestions,
             "evidence": [item.client_payload() for item in evidence],
             "tools": [call.name for call in plan.tool_calls],
             "reasoning_tier": plan.reasoning_tier,
