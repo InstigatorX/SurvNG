@@ -4,6 +4,7 @@ import os
 import tempfile
 import time
 import unittest
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -74,17 +75,131 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(args[-2:], ["-i", "pipe:0"])
         self.assertNotIn("h264", args)
 
-    def test_persistent_non_monotonic_dts_restarts_recorder(self) -> None:
+    def test_persistent_non_monotonic_dts_schedules_epoch_rollover(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
             process = Mock(
                 pid=1234,
                 stderr=iter(["Non-monotonic DTS\n"] * 12),
             )
-            with patch.object(recorder, "_kill_pid") as kill_pid:
-                recorder._monitor_ffmpeg_stderr(("upper-garage", "live"), process)
+            recorder._monitor_ffmpeg_stderr(("upper-garage", "live"), process)
 
-        kill_pid.assert_called_once_with(1234)
+            health = recorder.timestamp_health()[("upper-garage", "live")]
+            self.assertTrue(health["rollover_pending"])
+            self.assertEqual(health["discontinuities"], 1)
+            self.assertEqual(health["last_reason"], "non_monotonic_dts")
+            self.assertTrue(recorder._watchdog_wake.is_set())
+
+    def test_ffmpeg_8_invalid_timestamp_pairs_are_coalesced_into_one_rollover(self) -> None:
+        lines = []
+        for index in range(20):
+            lines.extend([
+                f"[vist#0:0/h264 @ 0x1] DTS {index}, next:999 st:0 invalid dropping\n",
+                f"[vist#0:0/h264 @ 0x1] PTS {index}, next:999 invalid dropping st:0\n",
+            ])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            process = Mock(pid=4321, stderr=iter(lines))
+
+            with self.assertLogs("survng.app.recorder", level="WARNING") as captured:
+                recorder._monitor_ffmpeg_stderr(("gate", "main"), process)
+
+            health = recorder.timestamp_health()[("gate", "main")]
+
+        self.assertEqual(health["discontinuities"], 1)
+        self.assertEqual(health["last_reason"], "invalid_dts")
+        self.assertEqual(
+            sum("scheduling an epoch rollover" in line for line in captured.output),
+            1,
+        )
+        self.assertFalse(any("invalid dropping" in line for line in captured.output))
+
+    def test_ffmpeg_8_pts_only_discontinuity_still_schedules_recovery(self) -> None:
+        lines = [
+            f"[vist#0:0/h264 @ 0x1] PTS {index}, next:999 invalid dropping st:0\n"
+            for index in range(12)
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder._monitor_ffmpeg_stderr(
+                ("gate", "main"),
+                Mock(pid=4321, stderr=iter(lines)),
+            )
+            health = recorder.timestamp_health()[("gate", "main")]
+
+        self.assertTrue(health["rollover_pending"])
+        self.assertEqual(health["last_reason"], "invalid_pts")
+
+    def test_reconcile_applies_timestamp_rollover_to_only_the_expected_process(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+        )
+        key = ("gate", "main")
+        old_process = Mock(pid=1234)
+        old_process.poll.return_value = None
+        replacement = Mock(pid=5678)
+        replacement.poll.return_value = None
+        item = (old_process, None, Mock(), Mock())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder.processes[key] = item
+            recorder._request_timestamp_rollover(key, old_process.pid, "invalid_dts")
+
+            def stop(_camera_id, _source):
+                recorder.processes.pop(key, None)
+
+            def start(_camera, _source):
+                recorder.processes[key] = (replacement, None, Mock(), Mock())
+
+            with patch.object(recorder, "stop", side_effect=stop) as stop_recorder, patch.object(
+                recorder,
+                "start",
+                side_effect=start,
+            ) as start_recorder, patch.object(recorder, "cleanup_duplicate_recorders"):
+                recorder.reconcile({camera.id: camera})
+
+            health = recorder.timestamp_health()[key]
+
+        stop_recorder.assert_called_once_with("gate", "main")
+        start_recorder.assert_called_once_with(camera, "main")
+        self.assertEqual(health["epoch_rollovers"], 1)
+        self.assertFalse(health["rollover_pending"])
+
+    def test_timestamp_rollovers_are_rate_limited_without_repeating_log_flood(self) -> None:
+        key = ("gate", "main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder._timestamp_rollover_history[key] = deque([time.monotonic()] * 3)
+
+            with self.assertLogs("survng.app.recorder", level="ERROR") as captured:
+                requested = recorder._request_timestamp_rollover(key, 1234, "invalid_dts")
+            health = recorder.timestamp_health()[key]
+
+        self.assertTrue(requested)
+        self.assertEqual(health["rate_limited"], 1)
+        self.assertFalse(health["rollover_pending"])
+        self.assertEqual(sum("rate-limited" in line for line in captured.output), 1)
+
+    def test_stale_timestamp_rollover_cannot_restart_a_replacement_process(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+        key = ("gate", "main")
+        replacement = Mock(pid=5678)
+        replacement.poll.return_value = None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            recorder.processes[key] = (replacement, None, Mock(), Mock())
+            recorder._timestamp_rollover_pending[key] = (1234, "invalid_dts")
+
+            with patch.object(recorder, "stop") as stop_recorder, patch.object(
+                recorder,
+                "start",
+            ) as start_recorder, patch.object(recorder, "cleanup_duplicate_recorders"):
+                recorder.reconcile({camera.id: camera})
+
+        stop_recorder.assert_not_called()
+        start_recorder.assert_not_called()
 
     def test_disabled_camera_is_excluded_from_watchdog_wanted_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

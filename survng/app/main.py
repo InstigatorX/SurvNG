@@ -1973,6 +1973,7 @@ def telemetry(hours: int = 24) -> dict:
             "frame_fresh": bool(status.get("frame_fresh")),
             "last_frame_age_seconds": status.get("last_frame_age_seconds"),
             "recording": bool(status.get("recording") or status.get("sub_recording")),
+            "recording_timestamps": dict(status.get("recording_timestamp_health") or {}),
             "detection_enabled": bool(status.get("detection_enabled")),
             "onvif": {
                 "enabled": bool(status.get("onvif_enabled")),

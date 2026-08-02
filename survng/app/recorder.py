@@ -35,6 +35,8 @@ LOGGER = logging.getLogger(__name__)
 RECORDING_FINALIZE_GRACE_SECONDS = 2.0
 DTS_WARNING_WINDOW_SECONDS = 5.0
 DTS_WARNING_RESTART_COUNT = 12
+TIMESTAMP_ROLLOVER_LIMIT = 3
+TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,11 @@ class Recorder:
         self.owner_token = f"survng-{os.getpid()}"
         self._lock = threading.Lock()
         self._watchdog_stop = threading.Event()
+        self._watchdog_wake = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
+        self._timestamp_rollover_pending: dict[RecorderKey, tuple[int, str]] = {}
+        self._timestamp_rollover_history: dict[RecorderKey, deque[float]] = {}
+        self._timestamp_health: dict[RecorderKey, dict[str, object]] = {}
         self._index_stop = threading.Event()
         self._index_wake = threading.Event()
         self._index_thread: threading.Thread | None = None
@@ -369,6 +375,8 @@ class Recorder:
         if process.stderr is None:
             return
         dts_warnings: deque[float] = deque()
+        rollover_requested = False
+        last_invalid_dts_at: float | None = None
         for raw_line in process.stderr:
             line = (
                 raw_line.decode("utf-8", errors="replace").strip()
@@ -377,21 +385,107 @@ class Recorder:
             )
             if not line:
                 continue
-            if "Non-monotonic DTS" in line:
+            warning_kind = self._timestamp_warning_kind(line)
+            if warning_kind is not None:
+                # FFmpeg 8 normally reports one DTS line and one paired PTS line.
+                # Count the DTS as the packet signal and suppress its immediate
+                # PTS twin. A PTS-only stream still remains eligible for recovery.
                 now = time.monotonic()
+                if (
+                    warning_kind == "invalid_pts"
+                    and last_invalid_dts_at is not None
+                    and now - last_invalid_dts_at < 0.25
+                ):
+                    continue
+                if warning_kind == "invalid_dts":
+                    last_invalid_dts_at = now
+                if rollover_requested:
+                    continue
                 dts_warnings.append(now)
                 while dts_warnings and now - dts_warnings[0] > DTS_WARNING_WINDOW_SECONDS:
                     dts_warnings.popleft()
                 if len(dts_warnings) >= DTS_WARNING_RESTART_COUNT:
-                    LOGGER.warning(
-                        "Recorder %s/%s detected persistent non-monotonic DTS; restarting FFmpeg",
-                        key[0],
-                        key[1],
+                    rollover_requested = self._request_timestamp_rollover(
+                        key,
+                        process.pid,
+                        warning_kind,
                     )
-                    self._kill_pid(process.pid)
-                    return
                 continue
             LOGGER.warning("Recorder FFmpeg %s/%s: %s", key[0], key[1], line)
+
+    @staticmethod
+    def _timestamp_warning_kind(line: str) -> str | None:
+        if "Non-monotonic DTS" in line:
+            return "non_monotonic_dts"
+        if " invalid dropping" not in line:
+            return None
+        if "] DTS " in line:
+            return "invalid_dts"
+        if "] PTS " in line:
+            return "invalid_pts"
+        return None
+
+    def _request_timestamp_rollover(
+        self,
+        key: RecorderKey,
+        process_pid: int,
+        reason: str,
+    ) -> bool:
+        now_monotonic = time.monotonic()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        limited = False
+        with self._lock:
+            existing = self._timestamp_rollover_pending.get(key)
+            if existing is not None and existing[0] == process_pid:
+                return True
+            history = self._timestamp_rollover_history.setdefault(key, deque())
+            while history and now_monotonic - history[0] > TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS:
+                history.popleft()
+            health = self._timestamp_health.setdefault(
+                key,
+                {
+                    "discontinuities": 0,
+                    "epoch_rollovers": 0,
+                    "rollover_failures": 0,
+                    "rate_limited": 0,
+                    "last_discontinuity_at": None,
+                    "last_rollover_at": None,
+                    "last_reason": "",
+                },
+            )
+            health["discontinuities"] = int(health["discontinuities"]) + 1
+            health["last_discontinuity_at"] = now_iso
+            health["last_reason"] = reason
+            if len(history) >= TIMESTAMP_ROLLOVER_LIMIT:
+                health["rate_limited"] = int(health["rate_limited"]) + 1
+                limited = True
+            else:
+                self._timestamp_rollover_pending[key] = (process_pid, reason)
+        if limited:
+            LOGGER.error(
+                "Recorder %s/%s timestamp recovery rate-limited after %d rollovers in %.0f seconds",
+                key[0],
+                key[1],
+                TIMESTAMP_ROLLOVER_LIMIT,
+                TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS,
+            )
+            return True
+        LOGGER.warning(
+            "Recorder %s/%s detected persistent timestamp discontinuity (%s); scheduling an epoch rollover",
+            key[0],
+            key[1],
+            reason,
+        )
+        self._watchdog_wake.set()
+        return True
+
+    def timestamp_health(self) -> dict[RecorderKey, dict[str, object]]:
+        with self._lock:
+            pending = set(self._timestamp_rollover_pending)
+            return {
+                key: {**values, "rollover_pending": key in pending}
+                for key, values in self._timestamp_health.items()
+            }
 
     def _camera_dir(self, camera_id: str, source: str = "main") -> Path:
         source = "main" if source == "main" else "live"
@@ -515,6 +609,7 @@ class Recorder:
                 else:
                     setattr(self, thread_name, None)
         self._watchdog_stop.set()
+        self._watchdog_wake.set()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=2)
             if self._watchdog_thread.is_alive():
@@ -545,6 +640,7 @@ class Recorder:
 
     def start_watchdog(self, cameras: list[CameraConfig], interval: float = 15.0) -> None:
         self._watchdog_stop.clear()
+        self._watchdog_wake.clear()
         if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
             return
         camera_map = {camera.id: camera for camera in cameras if camera.record or camera.record_sub}
@@ -565,7 +661,11 @@ class Recorder:
         return wanted
 
     def _watchdog(self, camera_map: dict[str, CameraConfig], interval: float) -> None:
-        while not self._watchdog_stop.wait(interval):
+        while not self._watchdog_stop.is_set():
+            self._watchdog_wake.wait(interval)
+            self._watchdog_wake.clear()
+            if self._watchdog_stop.is_set():
+                break
             try:
                 self.reconcile(camera_map)
             except Exception:
@@ -573,6 +673,7 @@ class Recorder:
 
     def reconcile(self, camera_map: dict[str, CameraConfig]) -> None:
         wanted = self._wanted_keys(camera_map)
+        self._apply_timestamp_rollovers(wanted)
         with self._lock:
             active_items = dict(self.processes)
         for key, item in active_items.items():
@@ -588,6 +689,52 @@ class Recorder:
             if key not in active_keys:
                 self.start(camera, key[1])
         self.cleanup_duplicate_recorders(set(wanted))
+
+    def _apply_timestamp_rollovers(self, wanted: dict[RecorderKey, CameraConfig]) -> None:
+        with self._lock:
+            pending = list(self._timestamp_rollover_pending.items())
+        for key, (expected_pid, reason) in pending:
+            camera = wanted.get(key)
+            with self._lock:
+                item = self.processes.get(key)
+                current_pid = item[0].pid if item is not None else None
+                if camera is None or current_pid != expected_pid:
+                    self._timestamp_rollover_pending.pop(key, None)
+                    continue
+                self._timestamp_rollover_pending.pop(key, None)
+            LOGGER.info(
+                "Recorder %s/%s beginning controlled timestamp epoch rollover (%s)",
+                key[0],
+                key[1],
+                reason,
+            )
+            self.stop(key[0], key[1])
+            self.start(camera, key[1])
+            now_monotonic = time.monotonic()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                history = self._timestamp_rollover_history.setdefault(key, deque())
+                history.append(now_monotonic)
+                health = self._timestamp_health[key]
+                replacement = self.processes.get(key)
+                recovered = replacement is not None and replacement[0].poll() is None
+                if recovered:
+                    health["epoch_rollovers"] = int(health["epoch_rollovers"]) + 1
+                    health["last_rollover_at"] = now_iso
+                else:
+                    health["rollover_failures"] = int(health["rollover_failures"]) + 1
+            if recovered:
+                LOGGER.info(
+                    "Recorder %s/%s completed timestamp epoch rollover",
+                    key[0],
+                    key[1],
+                )
+            else:
+                LOGGER.error(
+                    "Recorder %s/%s could not start its replacement after timestamp epoch rollover",
+                    key[0],
+                    key[1],
+                )
 
     def cleanup_duplicate_recorders(self, keys: set[RecorderKey]) -> None:
         owned = self._owned_ffmpeg_recorders(keys)

@@ -5846,6 +5846,21 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
   );
 }
 
+function formatRecorderTimestampHealth(sources) {
+  const entries = Object.entries(sources || {});
+  if (!entries.length) return "Stable · no discontinuities";
+  return entries.map(([source, health]) => {
+    const details = [
+      `${Number(health.discontinuities || 0)} jump${Number(health.discontinuities || 0) === 1 ? "" : "s"}`,
+      `${Number(health.epoch_rollovers || 0)} recovered`,
+    ];
+    if (health.rollover_pending) details.push("recovery pending");
+    if (Number(health.rollover_failures || 0)) details.push(`${health.rollover_failures} failed`);
+    if (Number(health.rate_limited || 0)) details.push(`${health.rate_limited} rate-limited`);
+    return `${source}: ${details.join(", ")}`;
+  }).join(" · ");
+}
+
 function TelemetryViewer({ data, cameraId, timeZone }) {
   if (!data) return <div className="empty-state">Waiting for telemetry...</div>;
   const selected = cameraId ? data.cameras?.find((camera) => camera.id === cameraId) : null;
@@ -5940,6 +5955,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
               <dl>
                 <div><dt>Last frame</dt><dd>{formatAge(camera.last_frame_age_seconds)}</dd></div>
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
+                <div><dt>Recorder clock recovery</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
                 <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>
                 <div><dt>ONVIF notices / motion</dt><dd>{camera.onvif.notifications} / {camera.onvif.motion_events}</dd></div>

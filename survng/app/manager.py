@@ -1041,6 +1041,7 @@ class AppManager:
             if camera.record_sub and camera.live_stream_url:
                 recording_keys.add((camera.id, "live"))
         recordings = self.recorder.status(recording_keys)
+        timestamp_health = self.recorder.timestamp_health()
         return [
             {
                 **worker.status(),
@@ -1052,6 +1053,11 @@ class AppManager:
                     and (camera_config[camera_id].record or camera_config[camera_id].record_sub)
                 ),
                 "record_sub_enabled": bool(camera_config.get(camera_id) and camera_config[camera_id].record_sub),
+                "recording_timestamp_health": {
+                    source: dict(timestamp_health[(camera_id, source)])
+                    for source in ("main", "live")
+                    if (camera_id, source) in timestamp_health
+                },
             }
             for camera_id, worker in self.workers.items()
         ]

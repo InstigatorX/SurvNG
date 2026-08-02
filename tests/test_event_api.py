@@ -208,6 +208,13 @@ class EventApiSerializationTest(unittest.TestCase):
                     "name": "Gate",
                     "connected": True,
                     "recording": True,
+                    "recording_timestamp_health": {
+                        "main": {
+                            "discontinuities": 2,
+                            "epoch_rollovers": 2,
+                            "rollover_pending": False,
+                        }
+                    },
                     "detection_enabled": True,
                     "onvif_enabled": True,
                     "onvif_connected": True,
@@ -250,6 +257,10 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_triggers"], 4)
             self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_onvif_matches"], 3)
             self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_rate_limited"], 2)
+            self.assertEqual(
+                payload["cameras"][0]["recording_timestamps"]["main"]["epoch_rollovers"],
+                2,
+            )
             self.assertEqual(payload["cameras"][0]["tracking"]["reid_attempts"], 7)
             self.assertEqual(payload["cameras"][0]["tracking"]["reid_recoveries"], 2)
             self.assertEqual(

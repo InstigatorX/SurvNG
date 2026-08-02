@@ -363,6 +363,8 @@ For ONVIF, use the camera host, ONVIF port, username, and password. Many Reolink
 
 Use `stream_url` for the main/high-resolution stream and `live_stream_url` for the optional low-latency live preview/substream. SurvNG records the main stream continuously. ONVIF motion events trigger object detection by sampling five high-resolution frames from the recorded main stream around the event timestamp. Spatially consistent detections are combined across those frames, confidence uses the median instead of the highest outlier, and only labels meeting the configured confirmation count become object incidents. The default is two matching frames; optional per-class overrides can require stronger or weaker evidence. The representative confirmed frame becomes the event snapshot.
 
+Recorder timestamp handling is discontinuity-aware. Persistent regressing or rebased FFmpeg timestamps are coalesced into one diagnostic event and cause only the affected camera/source to begin a new recording epoch. The old recorder is finalized before its replacement starts, replacement health is verified, and recovery is rate-limited to prevent restart loops. Per-source discontinuity, rollover, failure, and rate-limit counters are exposed with camera status and under Admin > Telemetry.
+
 ## Object Detection
 
 Set `model_path` to an OpenVINO-readable model, such as `best.onnx` or an OpenVINO IR `.xml` file. Set `labels_path` to a newline-delimited class file such as `classes.txt`.
