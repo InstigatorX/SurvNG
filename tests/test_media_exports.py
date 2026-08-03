@@ -434,6 +434,7 @@ class MediaExportTest(unittest.TestCase):
             gate = store.create({
                 "kind": "recording", "camera_id": "gate", "source": "main",
                 "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+                "label": "Driveway arrival", "origin": "assistant",
             })
             foyer = store.create({
                 "kind": "timelapse", "camera_id": "foyer", "source": "live",
@@ -446,8 +447,40 @@ class MediaExportTest(unittest.TestCase):
             active = store.list(status="active")
 
             self.assertEqual([row["id"] for row in protected], [gate["id"]])
+            self.assertEqual(protected[0]["label"], "Driveway arrival")
+            self.assertEqual(protected[0]["origin"], "assistant")
             self.assertEqual([row["id"] for row in active], [foyer["id"]])
             self.assertEqual(store.count(kind="timelapse"), 1)
+            summary = store.summary()
+            self.assertEqual(summary["total"], 2)
+            self.assertEqual(summary["active"], 1)
+            self.assertEqual(summary["protected"], 1)
+
+    def test_batch_updates_labels_protection_and_deletes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu",
+            )
+            jobs = [manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0 + index, "end_epoch": 110.0 + index,
+                "options": {},
+            }) for index in range(2)]
+            for job in jobs:
+                manager.store.update(str(job["id"]), status="completed")
+
+            renamed = manager.set_label(str(jobs[0]["id"]), "Front gate clip")
+            protected = manager.batch([str(job["id"]) for job in jobs], "protect")
+            deleted = manager.batch([str(job["id"]) for job in jobs], "delete")
+
+            self.assertEqual(renamed["label"], "Front gate clip")
+            self.assertEqual(len(protected["results"]), 2)
+            self.assertTrue(all(item["protected"] for item in protected["results"]))
+            self.assertEqual(len(deleted["results"]), 2)
+            self.assertEqual(manager.count(), 0)
 
 
 if __name__ == "__main__":

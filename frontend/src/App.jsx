@@ -4921,6 +4921,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [exportRange, setExportRange] = useState(null);
   const [exportKind, setExportKind] = useState("recording");
   const [exportOptions, setExportOptions] = useState({ interval: 30, fps: 30, clipHeight: 0, timelapseHeight: 720 });
+  const [exportLabel, setExportLabel] = useState("");
   const [exportJob, setExportJob] = useState(null);
   const [exportError, setExportError] = useState("");
   const [exportSubmitting, setExportSubmitting] = useState(false);
@@ -5030,6 +5031,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     setExportRange(null);
     setExportJob(null);
     setExportError("");
+    setExportLabel("");
   }, [activeCameraId, date, source]);
 
   useEffect(() => {
@@ -5055,6 +5057,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           clipHeight: active.kind === "recording" ? Number(active.options?.height) || 0 : 0,
           timelapseHeight: active.kind === "timelapse" ? Number(active.options?.height) || 720 : 720,
         });
+        setExportLabel(active.label || "");
         setExportJob(active);
       })
       .catch((error) => {
@@ -5471,6 +5474,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     setExportRange({ start, end });
     setExportJob(null);
     setExportError("");
+    setExportLabel("");
   }
 
   const exportActive = Boolean(exportJob && ["queued", "running", "cancelling"].includes(exportJob.status));
@@ -5492,6 +5496,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           sample_interval_seconds: exportOptions.interval,
           output_fps: exportOptions.fps,
           height: exportKind === "timelapse" ? exportOptions.timelapseHeight : exportOptions.clipHeight,
+          label: exportLabel.trim(),
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -5603,6 +5608,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 <span><b>Length</b>{formatDuration(exportRange.end - exportRange.start)}</span>
               </div>
               <div className="recordings-v2-export-options">
+                <label className="export-name-field"><span>Name</span><input value={exportLabel} onChange={(event) => setExportLabel(event.target.value)} placeholder="Optional export name" maxLength="120" disabled={Boolean(exportJob)} /></label>
                 {exportKind === "timelapse" ? <>
                   <label><span>Capture every</span><select value={exportOptions.interval} onChange={(event) => setExportOptions((current) => ({ ...current, interval: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="5">5 sec</option><option value="10">10 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="300">5 min</option></select></label>
                   <label><span>Playback</span><select value={exportOptions.fps} onChange={(event) => setExportOptions((current) => ({ ...current, fps: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
@@ -5623,7 +5629,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/recordings/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Export Center</a> : null}
                 {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
                 {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
-                {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); }}>New export</button> : null}
+                {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); setExportLabel(""); }}>New export</button> : null}
               </div>
             </section>
           ) : null}
@@ -5710,17 +5716,23 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   const [protectedOnly, setProtectedOnly] = useState(false);
   const [exportsList, setExportsList] = useState([]);
   const [total, setTotal] = useState(0);
+  const [summary, setSummary] = useState({});
+  const [limit, setLimit] = useState(50);
   const [selectedId, setSelectedId] = useState("");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [editLabel, setEditLabel] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [actionBusy, setActionBusy] = useState("");
   const [revision, setRevision] = useState(0);
 
-  const filteredExports = useMemo(() => (
-    cameraId ? exportsList.filter((item) => item.camera_id === cameraId) : exportsList
-  ), [cameraId, exportsList]);
+  const filteredExports = exportsList;
   const selected = filteredExports.find((item) => item.id === selectedId) || filteredExports[0] || null;
-  const activeCount = exportsList.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length;
+  const activeCount = Math.max(
+    Number(summary.active) || 0,
+    exportsList.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length,
+  );
   const readyBytes = exportsList
     .filter((item) => item.status === "completed")
     .reduce((sum, item) => sum + (Number(item.size_bytes) || 0), 0);
@@ -5741,7 +5753,8 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ limit: "200" });
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cameraId) params.set("camera_id", cameraId);
     if (kind !== "all") params.set("kind", kind);
     if (status !== "all") params.set("status", status);
     if (protectedOnly) params.set("protected", "true");
@@ -5764,7 +5777,27 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [kind, protectedOnly, revision, status]);
+  }, [cameraId, kind, limit, protectedOnly, revision, status]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/exports/summary", { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Export summary failed (${response.status})`);
+        return response.json();
+      })
+      .then(setSummary)
+      .catch((loadError) => {
+        if (loadError.name !== "AbortError") setError(loadError.message || "Unable to load export summary");
+      });
+    return () => controller.abort();
+  }, [revision]);
+
+  useEffect(() => {
+    setLimit(50);
+    setSelectedIds([]);
+    setSelectionMode(false);
+  }, [cameraId, kind, protectedOnly, status]);
 
   useEffect(() => {
     const interval = window.setInterval(() => setRevision((current) => current + 1), activeCount ? 2_000 : 15_000);
@@ -5776,6 +5809,10 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       setSelectedId(filteredExports[0]?.id || "");
     }
   }, [filteredExports, selectedId]);
+
+  useEffect(() => {
+    setEditLabel(selected?.label || "");
+  }, [selected?.id, selected?.label]);
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -5806,8 +5843,62 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `Protection update failed (${response.status})`);
       setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
+      setRevision((current) => current + 1);
     } catch (actionError) {
       setError(actionError.message || "Unable to update export protection");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  async function saveExportLabel(item) {
+    if (!item?.id || actionBusy) return;
+    setActionBusy(item.id);
+    setError("");
+    try {
+      const response = await fetch(`/api/exports/${encodeURIComponent(item.id)}/metadata`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: editLabel.trim() }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Rename failed (${response.status})`);
+      setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
+    } catch (actionError) {
+      setError(actionError.message || "Unable to rename export");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  function toggleExportSelection(itemId) {
+    setSelectedIds((current) => current.includes(itemId)
+      ? current.filter((id) => id !== itemId)
+      : [...current, itemId]);
+  }
+
+  async function runBatchAction(action) {
+    if (!selectedIds.length || actionBusy) return;
+    if (action === "delete" && !window.confirm(`Permanently delete ${selectedIds.length} selected export${selectedIds.length === 1 ? "" : "s"}? Protected selections will also be deleted.`)) return;
+    setActionBusy("batch");
+    setError("");
+    try {
+      const response = await fetch("/api/exports/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedIds, action }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Batch action failed (${response.status})`);
+      if (payload.errors?.length) {
+        setError(`${payload.errors.length} export${payload.errors.length === 1 ? "" : "s"} could not be updated`);
+      }
+      setSelectedIds([]);
+      setSelectionMode(false);
+      setSelectedId("");
+      setRevision((current) => current + 1);
+    } catch (actionError) {
+      setError(actionError.message || "Unable to update selected exports");
     } finally {
       setActionBusy("");
     }
@@ -5833,6 +5924,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       } else {
         setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
       }
+      setRevision((current) => current + 1);
     } catch (actionError) {
       setError(actionError.message || "Unable to remove export");
     } finally {
@@ -5845,11 +5937,11 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
       <aside className="recordings-v2-cameras export-center-cameras" aria-label="Export cameras">
         <RecordingSectionSwitcher mode="exports" cameraId={cameraId} />
         <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}>
-          <Film size={16} /><span>All exports</span><i className={exportsList.length ? "online" : ""} />
+          <Film size={16} /><span>All exports</span><i className={Number(summary.total) ? "online" : ""} />
         </button>
         {cameras.map((camera) => (
           <button key={camera.id} type="button" className={camera.id === cameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
-            <Camera size={16} /><span>{camera.name}</span><i className={exportsList.some((item) => item.camera_id === camera.id) ? "online" : ""} />
+            <Camera size={16} /><span>{camera.name}</span><i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
           </button>
         ))}
       </aside>
@@ -5860,9 +5952,10 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
             <label>Type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All exports</option><option value="recording">Video clips</option><option value="timelapse">Timelapses</option></select></label>
             <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Any status</option><option value="completed">Ready</option><option value="active">In progress</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label>
             <button type="button" className={protectedOnly ? "active" : ""} onClick={() => setProtectedOnly((current) => !current)}><ShieldCheck size={15} />Protected</button>
+            <button type="button" className={selectionMode ? "active" : ""} onClick={() => { setSelectionMode((current) => !current); setSelectedIds([]); }}><Check size={15} />Select</button>
             <button type="button" onClick={() => setRevision((current) => current + 1)} disabled={loading}><RefreshCcw className={loading ? "spin" : ""} size={15} />Refresh</button>
           </div>
-          <span>{filteredExports.length.toLocaleString()} shown · {total.toLocaleString()} matching · {formatBytes(readyBytes)}</span>
+          <span>{filteredExports.length.toLocaleString()} shown · {total.toLocaleString()} matching · {Number(summary.total || 0).toLocaleString()} overall · {formatBytes(Number(summary.bytes) || readyBytes)} / {formatBytes(Number(summary.max_storage_bytes))}</span>
         </header>
 
         <section className="export-center-review">
@@ -5873,7 +5966,8 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
           </div>
           <aside className="export-center-details">
             {selected ? <>
-              <header><div><strong>{selected.kind === "timelapse" ? "Timelapse" : "Video clip"}</strong><span className={`export-status ${selected.status}`}>{exportStatusLabel(selected.status)}</span></div><small>{selected.output_name || `${selected.camera_id} export`}</small></header>
+              <header><div><strong>{selected.label || (selected.kind === "timelapse" ? "Timelapse" : "Video clip")}</strong><span className={`export-status ${selected.status}`}>{exportStatusLabel(selected.status)}</span></div><small>{selected.output_name || `${selected.camera_id} export`}</small></header>
+              <div className="export-center-rename"><input value={editLabel} onChange={(event) => setEditLabel(event.target.value)} placeholder="Add a useful name" maxLength="120" /><button type="button" onClick={() => saveExportLabel(selected)} disabled={actionBusy === selected.id || editLabel.trim() === (selected.label || "")}><Save size={14} />Save</button></div>
               <dl>
                 <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selected.camera_id)?.name || selected.camera_id}</dd></div>
                 <div><dt>Stream</dt><dd>{selected.source === "live" ? "Sub" : "Main"}</dd></div>
@@ -5884,6 +5978,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
                 {selected.kind === "timelapse" ? <div><dt>Timelapse</dt><dd>Every {formatDuration(Number(selected.options?.sample_interval_seconds) || 30)} · {Number(selected.options?.output_fps) || 30} FPS</dd></div> : null}
                 <div><dt>File size</dt><dd>{formatBytes(Number(selected.size_bytes))}</dd></div>
                 <div><dt>Created</dt><dd>{formatDateTime(selected.created_at, timeZone)}</dd></div>
+                <div><dt>Created by</dt><dd>{selected.origin === "assistant" ? "SurvNG Assistant" : "Recording viewer"}</dd></div>
                 <div><dt>Retention</dt><dd>{selected.protected ? "Protected" : selected.expires_at ? `Until ${formatDateTime(selected.expires_at, timeZone)}` : "While active"}</dd></div>
               </dl>
               <div className="export-center-actions">
@@ -5896,15 +5991,17 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
         </section>
 
         {error ? <div className="export-center-error"><CircleAlert size={15} />{error}</div> : null}
+        {selectionMode ? <section className="export-center-batch" aria-label="Selected export actions"><strong>{selectedIds.length} selected</strong><button type="button" onClick={() => runBatchAction("protect")} disabled={!selectedIds.length || Boolean(actionBusy)}><ShieldCheck size={14} />Protect</button><button type="button" onClick={() => runBatchAction("unprotect")} disabled={!selectedIds.length || Boolean(actionBusy)}><ShieldCheck size={14} />Unprotect</button><button type="button" className="danger" onClick={() => runBatchAction("delete")} disabled={!selectedIds.length || Boolean(actionBusy)}><Trash2 size={14} />Delete</button><button type="button" onClick={() => { setSelectedIds([]); setSelectionMode(false); }}>Done</button></section> : null}
         <section className="export-center-library" aria-label="Saved exports">
           {filteredExports.map((item) => (
-            <button key={item.id} type="button" className={`${item.id === selected?.id ? "active" : ""} ${item.status}`} onClick={() => setSelectedId(item.id)}>
+            <button key={item.id} type="button" className={`${item.id === selected?.id && !selectionMode ? "active" : ""} ${selectedIds.includes(item.id) ? "selected" : ""} ${item.status}`} onClick={() => selectionMode ? toggleExportSelection(item.id) : setSelectedId(item.id)} aria-pressed={selectionMode ? selectedIds.includes(item.id) : undefined}>
               <span className="export-center-card-icon">{item.kind === "timelapse" ? <Clock3 size={23} /> : <Film size={23} />}</span>
-              <span className="export-center-card-copy"><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{item.kind === "timelapse" ? "Timelapse" : "Video clip"} · {formatDateTime(Number(item.start_epoch), timeZone)}</small><small>{formatDuration(Number(item.end_epoch) - Number(item.start_epoch))} · {formatBytes(Number(item.size_bytes))}</small></span>
+              <span className="export-center-card-copy"><strong>{item.label || cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{item.label ? `${cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id} · ` : ""}{item.kind === "timelapse" ? "Timelapse" : "Video clip"} · {formatDateTime(Number(item.start_epoch), timeZone)}</small><small>{formatDuration(Number(item.end_epoch) - Number(item.start_epoch))} · {formatBytes(Number(item.size_bytes))}</small></span>
               <span className={`export-center-card-status ${item.status}`}>{item.protected ? <ShieldCheck size={13} /> : null}{exportStatusLabel(item.status)}</span>
             </button>
           ))}
           {loading && !filteredExports.length ? <div className="export-center-loading"><RefreshCcw className="spin" size={20} />Loading exports</div> : null}
+          {!loading && exportsList.length < total && limit < 1000 ? <button type="button" className="export-center-load-more" onClick={() => setLimit((current) => Math.min(1000, current + 50))}><Plus size={18} /><span>Load older</span><small>{(total - exportsList.length).toLocaleString()} remaining</small></button> : null}
         </section>
       </section>
     </main>

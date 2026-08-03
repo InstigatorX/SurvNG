@@ -288,6 +288,7 @@ class AssistantApiTest(unittest.TestCase):
                 "output_fps": 30,
                 "height": 720,
             },
+            "origin": "assistant",
         })
 
     def test_ambiguous_export_request_asks_for_missing_details_without_queueing(self) -> None:

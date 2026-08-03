@@ -173,6 +173,8 @@ class RecordingApiTest(unittest.TestCase):
                 "output_fps": 24,
                 "height": 1080,
             },
+            "label": "",
+            "origin": "manual",
         })
 
     def test_media_export_rejects_overlong_clip_before_queueing(self) -> None:
@@ -264,6 +266,51 @@ class RecordingApiTest(unittest.TestCase):
 
         export_manager.set_protected.assert_called_once_with("job-1", True)
         self.assertTrue(payload["protected"])
+
+    def test_export_metadata_and_summary_apis_use_shared_manager(self) -> None:
+        export_manager = Mock()
+        export_manager.set_label.return_value = {
+            "id": "job-1", "label": "Gate delivery", "download_url": "",
+        }
+        export_manager.summary.return_value = {
+            "total": 3, "bytes": 1024, "protected": 1,
+        }
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            renamed = main.update_media_export_metadata(
+                "job-1", main.MediaExportMetadataRequest(label=" Gate delivery ")
+            )
+            summary = main.media_export_summary()
+
+        export_manager.set_label.assert_called_once_with("job-1", " Gate delivery ")
+        self.assertEqual(renamed["label"], "Gate delivery")
+        self.assertEqual(summary["protected"], 1)
+
+    def test_export_batch_api_rewrites_public_media_urls(self) -> None:
+        export_manager = Mock()
+        export_manager.batch.return_value = {
+            "action": "protect",
+            "results": [{
+                "id": "job-1",
+                "protected": True,
+                "download_url": "/api/exports/job-1/download",
+                "media_url": "/api/exports/job-1/media",
+            }],
+            "errors": [],
+        }
+
+        with patch.object(main.config, "base_path", "/survng"), patch.object(
+            main, "_media_export_manager", return_value=export_manager
+        ):
+            payload = main.batch_media_exports(main.MediaExportBatchRequest(
+                ids=["job-1"], action="protect"
+            ))
+
+        export_manager.batch.assert_called_once_with(["job-1"], "protect")
+        self.assertEqual(
+            payload["results"][0]["media_url"],
+            "/survng/api/exports/job-1/media",
+        )
 
     def test_protected_export_delete_requires_force(self) -> None:
         export_manager = Mock()

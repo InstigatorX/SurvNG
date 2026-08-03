@@ -6886,6 +6886,26 @@ section.detection-settings-card {
   white-space: nowrap;
 }
 
+.export-center-rename {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+}
+
+.export-center-rename input,
+.export-center-rename button {
+  min-width: 0;
+  min-height: 32px;
+  font-size: 10px;
+}
+
+.export-center-rename button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-inline: 8px;
+}
+
 .export-status,
 .export-center-card-status {
   display: inline-flex;
@@ -6985,6 +7005,32 @@ section.detection-settings-card {
   padding: 7px 9px;
 }
 
+.export-center-batch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(94, 234, 212, .4);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--active) 42%, var(--panel));
+  padding: 6px 8px;
+}
+
+.export-center-batch strong {
+  margin-right: auto;
+  font-size: 11px;
+}
+
+.export-center-batch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 9px;
+  font-size: 10px;
+}
+
+.export-center-batch button.danger { color: var(--danger); }
+
 .export-center-library {
   display: flex;
   align-items: stretch;
@@ -7016,6 +7062,12 @@ section.detection-settings-card {
 .export-center-library > button.active {
   border-color: rgba(94, 234, 212, .58);
   background: color-mix(in srgb, var(--active) 70%, var(--panel));
+}
+
+.export-center-library > button.selected {
+  border-color: #5eead4;
+  background: color-mix(in srgb, var(--active) 82%, var(--panel));
+  box-shadow: inset 0 0 0 1px rgba(94, 234, 212, .38);
 }
 
 .export-center-card-icon {
@@ -7056,6 +7108,21 @@ section.detection-settings-card {
   font-size: 11px;
   font-weight: 800;
 }
+
+.export-center-library > button.export-center-load-more {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto auto;
+  align-content: center;
+  justify-items: center;
+  flex-basis: 128px;
+  gap: 4px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.export-center-load-more span { color: var(--ink); font-size: 10px; font-weight: 850; }
+.export-center-load-more small { font-size: 9px; }
 
 .recordings-v2-player {
   position: relative;
@@ -7570,6 +7637,18 @@ section.detection-settings-card {
   font-size: 11px;
 }
 
+.recordings-v2-export-options .export-name-field {
+  flex: 1 1 230px;
+  max-width: 360px;
+}
+
+.recordings-v2-export-options input {
+  width: 100%;
+  min-height: 30px;
+  padding-block: 3px;
+  font-size: 11px;
+}
+
 .recordings-v2-export-status {
   display: grid;
   grid-column: 1 / -1;
@@ -7941,6 +8020,9 @@ section.detection-settings-card {
     min-height: 126px;
     max-height: 126px;
   }
+
+  .export-center-batch { flex-wrap: wrap; }
+  .export-center-batch strong { flex: 1 0 100%; }
 }
 
 

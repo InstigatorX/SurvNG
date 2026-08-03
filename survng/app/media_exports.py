@@ -71,7 +71,9 @@ class MediaExportStore:
                     finished_at TEXT NOT NULL DEFAULT '',
                     expires_at TEXT NOT NULL DEFAULT '',
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    protected INTEGER NOT NULL DEFAULT 0
+                    protected INTEGER NOT NULL DEFAULT 0,
+                    label TEXT NOT NULL DEFAULT '',
+                    origin TEXT NOT NULL DEFAULT 'manual'
                 )
                 """
             )
@@ -82,6 +84,14 @@ class MediaExportStore:
             if "protected" not in columns:
                 connection.execute(
                     "ALTER TABLE media_exports ADD COLUMN protected INTEGER NOT NULL DEFAULT 0"
+                )
+            if "label" not in columns:
+                connection.execute(
+                    "ALTER TABLE media_exports ADD COLUMN label TEXT NOT NULL DEFAULT ''"
+                )
+            if "origin" not in columns:
+                connection.execute(
+                    "ALTER TABLE media_exports ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
                 )
             connection.execute(
                 "UPDATE media_exports SET status = 'failed', phase = 'Interrupted by restart', "
@@ -98,8 +108,8 @@ class MediaExportStore:
                 """
                 INSERT INTO media_exports (
                     id, kind, camera_id, source, start_epoch, end_epoch,
-                    options_json, status, phase, progress, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Queued', 0, ?)
+                    options_json, status, phase, progress, created_at, label, origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Queued', 0, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -110,6 +120,8 @@ class MediaExportStore:
                     payload["end_epoch"],
                     json.dumps(payload.get("options") or {}, separators=(",", ":")),
                     created_at,
+                    str(payload.get("label") or "")[:120],
+                    str(payload.get("origin") or "manual")[:32],
                 ),
             )
         return self.get(job_id) or {}
@@ -138,7 +150,7 @@ class MediaExportStore:
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM media_exports{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (*parameters, max(1, min(int(limit), 200)), max(0, int(offset))),
+                (*parameters, max(1, min(int(limit), 1000)), max(0, int(offset))),
             ).fetchall()
         return [self._row(row) for row in rows]
 
@@ -202,7 +214,7 @@ class MediaExportStore:
         allowed = {
             "status", "phase", "progress", "output_path", "output_name", "size_bytes",
             "error", "started_at", "finished_at", "expires_at", "cancel_requested",
-            "protected",
+            "protected", "label",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -242,6 +254,28 @@ class MediaExportStore:
                 "WHERE status = 'completed'"
             ).fetchone()
         return int(row[0] if row else 0)
+
+    def summary(self) -> dict[str, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN status IN ('queued', 'running', 'cancelling') THEN 1 ELSE 0 END) AS active,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN protected = 1 THEN 1 ELSE 0 END) AS protected,
+                    COALESCE(SUM(CASE WHEN status = 'completed' THEN size_bytes ELSE 0 END), 0) AS bytes,
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND protected = 1 THEN size_bytes ELSE 0 END), 0) AS protected_bytes
+                FROM media_exports
+                """
+            ).fetchone()
+        if row is None:
+            return {
+                "total": 0, "completed": 0, "active": 0, "failed": 0,
+                "protected": 0, "bytes": 0, "protected_bytes": 0,
+            }
+        return {key: int(row[key] or 0) for key in row.keys()}
 
     def terminal_without_expiry(self) -> list[dict[str, object]]:
         with self._connect() as connection:
@@ -416,6 +450,52 @@ class MediaExportManager:
             expires_at=expires_at,
         )
         return self.get(job_id) or {}
+
+    def set_label(self, job_id: str, label: str) -> dict[str, object]:
+        if self.store.get(job_id) is None:
+            raise KeyError(job_id)
+        self.store.update(job_id, label=str(label or "").strip()[:120])
+        return self.get(job_id) or {}
+
+    def batch(self, job_ids: list[str], action: str) -> dict[str, object]:
+        results: list[dict[str, object]] = []
+        errors: list[dict[str, str]] = []
+        for job_id in dict.fromkeys(str(value) for value in job_ids):
+            try:
+                if action == "protect":
+                    results.append(self.set_protected(job_id, True))
+                elif action == "unprotect":
+                    results.append(self.set_protected(job_id, False))
+                elif action == "delete":
+                    results.append(self.cancel_or_delete(job_id, force=True))
+                else:
+                    raise ValueError(f"unsupported batch action: {action}")
+            except KeyError:
+                errors.append({"id": job_id, "error": "export not found"})
+            except RuntimeError as exc:
+                errors.append({"id": job_id, "error": str(exc)[:200]})
+        return {"action": action, "results": results, "errors": errors}
+
+    def summary(self) -> dict[str, object]:
+        payload: dict[str, object] = self.store.summary()
+        payload.update({
+            "retention_hours": self.retention_hours,
+            "max_storage_bytes": self.max_storage_bytes,
+        })
+        try:
+            usage = shutil.disk_usage(self.exports_dir)
+            payload.update({
+                "filesystem_total_bytes": usage.total,
+                "filesystem_used_bytes": usage.used,
+                "filesystem_free_bytes": usage.free,
+            })
+        except OSError:
+            payload.update({
+                "filesystem_total_bytes": 0,
+                "filesystem_used_bytes": 0,
+                "filesystem_free_bytes": 0,
+            })
+        return payload
 
     def output_path(self, job_id: str) -> tuple[Path, str]:
         job = self.store.get(job_id)

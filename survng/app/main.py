@@ -1136,10 +1136,20 @@ class MediaExportRequest(BaseModel):
     output_fps: int = Field(default=30, ge=1, le=60)
     width: int = Field(default=1280, ge=320, le=3840)
     height: int = Field(default=0, ge=0, le=2160)
+    label: str = Field(default="", max_length=120)
 
 
 class MediaExportProtectionRequest(BaseModel):
     protected: bool
+
+
+class MediaExportMetadataRequest(BaseModel):
+    label: str = Field(default="", max_length=120)
+
+
+class MediaExportBatchRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=100)
+    action: str = Field(pattern=r"^(protect|unprotect|delete)$")
 
 
 @app.get("/api/retention/status")
@@ -4715,6 +4725,7 @@ def _assistant_media_export_evidence(
             "start_epoch": start.timestamp(),
             "end_epoch": end.timestamp(),
             "options": options,
+            "origin": "assistant",
         })
     except RuntimeError as exc:
         LOGGER.warning("assistant could not queue media export: %s", exc)
@@ -6415,6 +6426,8 @@ def create_media_export(request: MediaExportRequest) -> dict[str, object]:
             "start_epoch": request.start_epoch,
             "end_epoch": request.end_epoch,
             "options": options,
+            "label": request.label.strip(),
+            "origin": "manual",
         })
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
@@ -6445,7 +6458,7 @@ def list_media_exports(
         "protected": protected,
     }
     jobs = export_manager.list(
-        max(1, min(limit, 200)),
+        max(1, min(limit, 1000)),
         offset=max(0, offset),
         **filters,
     )
@@ -6453,8 +6466,29 @@ def list_media_exports(
         "exports": [_public_media_export(job) for job in jobs],
         "total": export_manager.count(**filters),
         "offset": max(0, offset),
-        "limit": max(1, min(limit, 200)),
+        "limit": max(1, min(limit, 1000)),
     }
+
+
+@app.get("/api/exports/summary")
+def media_export_summary() -> dict[str, object]:
+    return _media_export_manager().summary()
+
+
+@app.post("/api/exports/batch")
+def batch_media_exports(request: MediaExportBatchRequest) -> dict[str, object]:
+    return _public_media_export_batch(
+        _media_export_manager().batch(request.ids, request.action)
+    )
+
+
+def _public_media_export_batch(payload: dict[str, object]) -> dict[str, object]:
+    result = dict(payload)
+    result["results"] = [
+        _public_media_export(job)
+        for job in list(payload.get("results") or [])
+    ]
+    return result
 
 
 @app.get("/api/exports/{job_id}")
@@ -6502,6 +6536,19 @@ def protect_media_export(
     try:
         return _public_media_export(
             _media_export_manager().set_protected(job_id, request.protected)
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="export not found") from None
+
+
+@app.patch("/api/exports/{job_id}/metadata")
+def update_media_export_metadata(
+    job_id: str,
+    request: MediaExportMetadataRequest,
+) -> dict[str, object]:
+    try:
+        return _public_media_export(
+            _media_export_manager().set_label(job_id, request.label)
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="export not found") from None

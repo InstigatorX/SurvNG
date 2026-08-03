@@ -23,6 +23,8 @@ try {
     created_at: "2026-08-03T20:00:00+00:00",
     expires_at: "2026-08-04T20:00:00+00:00",
     protected: false,
+    label: "",
+    origin: "manual",
     download_url: "/survng/api/exports/clip-1/download",
     media_url: "/survng/api/exports/clip-1/media",
     options: { height: 1080 },
@@ -41,6 +43,8 @@ try {
     created_at: "2026-08-03T19:00:00+00:00",
     expires_at: "",
     protected: false,
+    label: "",
+    origin: "assistant",
     download_url: "",
     media_url: "",
     options: { height: 720 },
@@ -67,6 +71,41 @@ try {
     return route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ exports: filtered, total: filtered.length, offset: 0, limit: 200 }),
+    });
+  });
+  await page.route("**/api/exports/summary", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      total: exportsList.length,
+      completed: exportsList.filter((item) => item.status === "completed").length,
+      active: exportsList.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length,
+      protected: exportsList.filter((item) => item.protected).length,
+      bytes: exportsList.reduce((sum, item) => sum + item.size_bytes, 0),
+      protected_bytes: exportsList.filter((item) => item.protected).reduce((sum, item) => sum + item.size_bytes, 0),
+      retention_hours: 24,
+      max_storage_bytes: 20 * 1024 * 1024 * 1024,
+    }),
+  }));
+  await page.route("**/api/exports/clip-1/metadata", async (route) => {
+    const request = JSON.parse(route.request().postData() || "{}");
+    exportsList = exportsList.map((item) => item.id === "clip-1" ? { ...item, label: request.label } : item);
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(exportsList.find((item) => item.id === "clip-1")),
+    });
+  });
+  await page.route("**/api/exports/batch", async (route) => {
+    const request = JSON.parse(route.request().postData() || "{}");
+    exportsList = exportsList.map((item) => request.ids.includes(item.id)
+      ? { ...item, protected: request.action === "protect" ? true : request.action === "unprotect" ? false : item.protected }
+      : item);
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        action: request.action,
+        results: exportsList.filter((item) => request.ids.includes(item.id)),
+        errors: [],
+      }),
     });
   });
   await page.route("**/api/exports/clip-1/protection", async (route) => {
@@ -104,9 +143,21 @@ try {
     "/survng/api/exports/clip-1/download",
   );
 
+  const name = page.getByPlaceholder("Add a useful name");
+  await name.fill("Gate delivery");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByText("Gate delivery", { exact: true }).first().waitFor({ state: "visible" });
+
   await page.getByRole("button", { name: "Protect", exact: true }).click();
   await page.getByRole("button", { name: "Unprotect" }).waitFor({ state: "visible" });
   await page.getByText("Protected", { exact: true }).last().waitFor({ state: "visible" });
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  const cards = page.locator(".export-center-library > button:not(.export-center-load-more)");
+  await cards.nth(0).click();
+  await cards.nth(1).click();
+  await page.locator(".export-center-batch").getByRole("button", { name: "Protect", exact: true }).click();
+  await page.locator(".export-center-batch").waitFor({ state: "detached" });
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete" }).click();
