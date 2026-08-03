@@ -6644,7 +6644,9 @@ section.detection-settings-card {
 .recordings-v2-page {
   display: grid;
   grid-template-columns: 190px minmax(0, 1fr);
+  height: calc(100dvh - 76px);
   min-height: calc(100dvh - 76px);
+  overflow: hidden;
   border-top: 1px solid var(--line);
   background: var(--canvas);
 }
@@ -6696,10 +6698,10 @@ section.detection-settings-card {
 
 .recordings-v2-workspace {
   display: grid;
-  grid-template-rows: auto auto minmax(52px, auto);
+  grid-template-rows: minmax(260px, 1fr) auto clamp(110px, 14dvh, 160px);
   min-width: 0;
   min-height: 0;
-  padding: 12px;
+  padding: 8px;
 }
 
 .recordings-v2-player {
@@ -6707,8 +6709,8 @@ section.detection-settings-card {
   display: grid;
   place-items: center;
   width: 100%;
-  height: min(66dvh, 760px);
-  min-height: 320px;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--line);
   background: #050708;
@@ -6720,7 +6722,7 @@ section.detection-settings-card {
   display: block;
   width: 100%;
   height: 100%;
-  max-height: calc(100dvh - 250px);
+  max-height: none;
   object-fit: contain;
   background: #050708;
 }
@@ -6818,10 +6820,10 @@ section.detection-settings-card {
 
 .recordings-v2-controls {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid var(--line);
   border-top: 0;
-  padding: 26px 12px 10px;
+  padding: 5px 8px 6px;
 }
 
 .recordings-v2-player-source {
@@ -6877,15 +6879,24 @@ section.detection-settings-card {
 .recordings-v2-date {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .recordings-v2-date input {
-  width: 150px;
+  width: 132px;
+  min-height: 30px;
+  padding-block: 3px;
+  font-size: 11px;
+}
+
+.recordings-v2-date button {
+  min-height: 30px;
+  padding-inline: 8px;
+  font-size: 11px;
 }
 
 .recordings-v2-timeline {
+  height: 48px;
   padding-top: 0;
 }
 
@@ -6976,7 +6987,7 @@ section.detection-settings-card {
 .recordings-v2-track output {
   position: absolute;
   z-index: 6;
-  top: -31px;
+  top: -30px;
   transform: translateX(-50%);
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -7270,9 +7281,10 @@ section.detection-settings-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   border-bottom: 1px solid var(--line);
-  padding: 6px 8px;
+  min-height: 38px;
+  padding: 3px 6px;
 }
 
 .recordings-v2-incidents-toolbar > span {
@@ -7287,7 +7299,7 @@ section.detection-settings-card {
 .recordings-v2-incidents-tools {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -7425,7 +7437,9 @@ section.detection-settings-card {
   .recordings-v2-page {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
+    height: auto;
     min-height: calc(100dvh - 52px);
+    overflow: visible;
   }
 
   .recordings-v2-cameras {
@@ -7443,12 +7457,13 @@ section.detection-settings-card {
   }
 
   .recordings-v2-workspace {
-    grid-template-rows: auto auto minmax(46px, auto);
+    align-content: start;
+    grid-template-rows: auto auto minmax(140px, auto);
     padding: 0;
   }
 
   .recordings-v2-player video {
-    max-height: calc(100dvh - 260px);
+    max-height: none;
   }
 
   .recordings-v2-player {
@@ -7457,8 +7472,8 @@ section.detection-settings-card {
   }
 
   .recordings-v2-controls {
-    gap: 7px;
-    padding: 24px 7px 8px;
+    gap: 6px;
+    padding: 5px 7px 6px;
   }
 
   .recordings-v2-date {
@@ -7506,7 +7521,12 @@ section.detection-settings-card {
 
   .recordings-v2-incidents-tools {
     width: 100%;
-    justify-content: space-between;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .recordings-v2-date {
+    width: 100%;
   }
 
   .recordings-v2-incidents-toolbar > span {

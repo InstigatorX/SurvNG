@@ -5546,17 +5546,17 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               </div>
             </section>
           ) : null}
-          <div className="recordings-v2-date">
-            <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={16} /></button>
-            <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
-            <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={16} /></button>
-            <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
-          </div>
         </div>
 
         <div className="recordings-v2-incidents">
           <div className="recordings-v2-incidents-toolbar">
             <div className="recordings-v2-incidents-tools">
+              <div className="recordings-v2-date">
+                <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={15} /></button>
+                <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
+                <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
+                <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+              </div>
               <div className="recordings-v2-event-filter" aria-label="Recording incident type">
                 <button type="button" className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}><CircleDot size={14} />Object</button>
                 <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion</button>
