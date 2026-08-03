@@ -122,6 +122,14 @@ class CameraWorker:
         self._source_frame_at: dict[str, str] = {}
         self._source_frame_epoch: dict[str, float] = {}
         self._source_frame_monotonic: dict[str, float] = {}
+        self._source_frame_times: dict[str, deque[float]] = {
+            "live": deque(maxlen=600),
+            "main": deque(maxlen=600),
+        }
+        self._source_capture_stats: dict[str, dict[str, int]] = {
+            "live": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0},
+            "main": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0},
+        }
         self._source_last_access: dict[str, float] = {}
         self._source_errors: dict[str, str] = {}
         tracking_buffer_size = max(
@@ -435,6 +443,21 @@ class CameraWorker:
             main_error = self._source_errors.get("main", "")
             motion_buffered_frames = len(self._motion_frames)
             motion_frame_shape = list(self._motion_frames[-1][1].shape) if self._motion_frames else None
+            capture_stats: dict[str, dict[str, int | float]] = {}
+            sample_now = time.monotonic()
+            for source in ("live", "main"):
+                times = self._source_frame_times[source]
+                while times and sample_now - times[0] > 10.0:
+                    times.popleft()
+                fps = (
+                    (len(times) - 1) / max(0.001, times[-1] - times[0])
+                    if len(times) >= 2 and sample_now - times[-1] <= FRAME_STALE_SECONDS
+                    else 0.0
+                )
+                capture_stats[source] = {
+                    **self._source_capture_stats[source],
+                    "fps": round(fps, 2),
+                }
         evidence_status = self.motion_evidence.status()
         mog2_status = evidence_status.get("mog2", {})
         now = time.monotonic()
@@ -461,6 +484,7 @@ class CameraWorker:
             "main_last_frame_at": main_frame_at,
             "last_error": self.last_error,
             "main_last_error": main_error,
+            "capture_stats": capture_stats,
             "onvif_enabled": self.camera.onvif.enabled,
             "onvif_connected": self.onvif.connected,
             "onvif_last_event_at": self.onvif.last_event_at,
@@ -2239,15 +2263,25 @@ class CameraWorker:
                     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     if not opened or not capture.isOpened():
                         failure_reason = "failed to open stream"
+                        with self._frame_lock:
+                            self._source_capture_stats[source]["open_failures"] += 1
                         self._set_source_error(source, failure_reason)
                     else:
+                        with self._frame_lock:
+                            source_stats = self._source_capture_stats[source]
+                            if source_stats["frames_received"] > 0:
+                                source_stats["reconnects"] += 1
                         self._set_source_error(source, "")
                         while not self._stop.is_set() and not stop_event.is_set():
                             if self._source_is_idle(source):
                                 return
                             ok, frame = capture.read()
                             if not ok:
+                                if self._stop.is_set() or stop_event.is_set():
+                                    break
                                 failure_reason = "stream read failed"
+                                with self._frame_lock:
+                                    self._source_capture_stats[source]["read_failures"] += 1
                                 self._set_source_error(source, failure_reason)
                                 break
                             if self._stop.is_set() or stop_event.is_set():
@@ -2261,6 +2295,8 @@ class CameraWorker:
                                 self._source_frame_at[source] = stamp
                                 self._source_frame_epoch[source] = frame_epoch
                                 self._source_frame_monotonic[source] = frame_clock
+                                self._source_frame_times[source].append(frame_clock)
+                                self._source_capture_stats[source]["frames_received"] += 1
                                 if source == "live":
                                     self.last_frame_at = stamp
                             if source == "live":

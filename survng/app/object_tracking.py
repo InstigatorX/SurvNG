@@ -938,6 +938,12 @@ class ObjectTrackingSession:
             "last_reid_error": "",
             "appearance_vectors_indexed": 0,
             "appearance_index_error": "",
+            "capacity_requests": 0,
+            "capacity_waits": 0,
+            "capacity_timeouts": 0,
+            "capacity_wait_seconds_total": 0.0,
+            "capacity_wait_seconds_max": 0.0,
+            "capacity_wait_seconds_last": 0.0,
         }
 
     def start(
@@ -1069,7 +1075,43 @@ class ObjectTrackingSession:
         initial_frame: np.ndarray | None,
         stop: threading.Event,
     ) -> None:
+        wait_started = time.monotonic()
         acquired = self.limiter.acquire(blocking=False)
+        if not acquired and self.config.capacity_wait_seconds > 0:
+            wait_deadline = wait_started + self.config.capacity_wait_seconds
+            while not acquired and not stop.is_set():
+                remaining = wait_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                acquired = self.limiter.acquire(timeout=min(0.1, remaining))
+        capacity_wait_seconds = max(0.0, time.monotonic() - wait_started)
+        with self._lock:
+            requests = int(self._status.get("capacity_requests") or 0) + 1
+            waits = int(self._status.get("capacity_waits") or 0)
+            timeouts = int(self._status.get("capacity_timeouts") or 0)
+            wait_total = float(self._status.get("capacity_wait_seconds_total") or 0.0)
+            wait_max = float(self._status.get("capacity_wait_seconds_max") or 0.0)
+            if capacity_wait_seconds >= 0.01:
+                waits += 1
+                wait_total += capacity_wait_seconds
+                wait_max = max(wait_max, capacity_wait_seconds)
+            if not acquired and not stop.is_set():
+                timeouts += 1
+            self._status = {
+                **self._status,
+                "capacity_requests": requests,
+                "capacity_waits": waits,
+                "capacity_timeouts": timeouts,
+                "capacity_wait_seconds_total": round(wait_total, 3),
+                "capacity_wait_seconds_max": round(wait_max, 3),
+                "capacity_wait_seconds_last": round(capacity_wait_seconds, 3),
+            }
+        if stop.is_set() and not acquired:
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                    self._event_id = None
+            return
         if not acquired:
             skipped = {
                 "implementation": self.config.implementation,
@@ -1078,6 +1120,8 @@ class ObjectTrackingSession:
                 "lost_timeout_seconds": self.config.lost_timeout_seconds,
                 "frames_processed": 0,
                 "catchup_frames_processed": 0,
+                "capacity_wait_seconds": round(capacity_wait_seconds, 3),
+                "capacity_wait_limit_seconds": self.config.capacity_wait_seconds,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "tracks": [],
             }
@@ -1092,7 +1136,12 @@ class ObjectTrackingSession:
                 )
             self._set_status(enabled=True, active=False, event_id=event_id, last_error="tracking capacity is busy")
             self._publish_safely(event_id, skipped)
-            LOGGER.info("object tracking skipped for %s event %d: capacity busy", self.camera.id, event_id)
+            LOGGER.info(
+                "object tracking skipped for %s event %d: capacity busy after %.3fs",
+                self.camera.id,
+                event_id,
+                capacity_wait_seconds,
+            )
             with self._lock:
                 if self._thread is threading.current_thread():
                     self._thread = None
@@ -1101,6 +1150,12 @@ class ObjectTrackingSession:
         tracker: ObjectTrackerBackend | None = None
         frames_processed = 0
         try:
+            with self._lock:
+                # Capacity waiting must not consume the useful tracking window.
+                self._deadline = max(
+                    self._deadline,
+                    time.monotonic() + self.config.max_session_seconds,
+                )
             self._frame_width = 0
             self._frame_height = 0
             self._catchup_frames_processed = 0
@@ -1137,7 +1192,15 @@ class ObjectTrackingSession:
                 detected["_tracking_first_seen_at"] = seed_epoch
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
             self._set_status(enabled=True, active=True, event_id=event_id, last_error="")
-            self._persist(event_id, tracker, captured_at, initial_tracked, frames_processed, "active")
+            self._persist(
+                event_id,
+                tracker,
+                captured_at,
+                initial_tracked,
+                frames_processed,
+                "active",
+                capacity_wait_seconds=capacity_wait_seconds,
+            )
             interval = 1.0 / self.config.sample_fps
             consecutive_failures = 0
 
@@ -1382,6 +1445,7 @@ class ObjectTrackingSession:
         tracked_objects: list[dict[str, Any]] | None,
         frames_processed: int,
         state: str,
+        capacity_wait_seconds: float | None = None,
     ) -> None:
         tracks = tracker.summaries(captured_at)
         diagnostics_method = getattr(tracker, "diagnostics", None)
@@ -1400,6 +1464,15 @@ class ObjectTrackingSession:
             "implementation": self.config.implementation,
             "state": state,
             "sample_fps": self.config.sample_fps,
+            "capacity_wait_seconds": round(
+                float(
+                    capacity_wait_seconds
+                    if capacity_wait_seconds is not None
+                    else self._status.get("capacity_wait_seconds_last") or 0.0
+                ),
+                3,
+            ),
+            "capacity_wait_limit_seconds": self.config.capacity_wait_seconds,
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,
@@ -1539,6 +1612,11 @@ class ObjectTrackingSession:
             "implementation": self.config.implementation,
             "state": "failed",
             "sample_fps": self.config.sample_fps,
+            "capacity_wait_seconds": round(
+                float(self._status.get("capacity_wait_seconds_last") or 0.0),
+                3,
+            ),
+            "capacity_wait_limit_seconds": self.config.capacity_wait_seconds,
             "lost_timeout_seconds": self.config.lost_timeout_seconds,
             "frames_processed": frames_processed,
             "catchup_frames_processed": self._catchup_frames_processed,

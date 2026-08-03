@@ -5834,6 +5834,13 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
     }
     return null;
   };
+  const firstAt = history[0]?.sampled_at ? new Date(history[0].sampled_at).getTime() : 0;
+  const lastAt = history.at(-1)?.sampled_at ? new Date(history.at(-1).sampled_at).getTime() : 0;
+  const formatBoundary = (value) => (
+    lastAt - firstAt >= 24 * 60 * 60 * 1000
+      ? formatDateTime(value, timeZone)
+      : formatTimeOnly(value, timeZone)
+  );
   return (
     <article className="telemetry-trend">
       <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values">{series.map((item) => <span className={item.className || ""} key={item.key}><i />{item.label} {latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</span>)}</div></header>
@@ -5841,7 +5848,7 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
         <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
         {series.map((item) => <polyline className={item.className || ""} key={item.key} points={pointsFor(item.key)} />)}
       </svg>
-      <footer><time>{history[0] ? formatTimeOnly(history[0].sampled_at, timeZone) : "Now"}</time><span>{history.length} sample{history.length === 1 ? "" : "s"}</span><time>{history.at(-1) ? formatTimeOnly(history.at(-1).sampled_at, timeZone) : "Now"}</time></footer>
+      <footer><time>{history[0] ? formatBoundary(history[0].sampled_at) : "Now"}</time><span>{history.length} sample{history.length === 1 ? "" : "s"}</span><time>{history.at(-1) ? formatBoundary(history.at(-1).sampled_at) : "Now"}</time></footer>
     </article>
   );
 }
@@ -5874,6 +5881,17 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const serviceMemory = data.system?.service_memory || {};
   const hourly = activity?.hourly || [];
   const history = data.history || [];
+  const runtimeShort = data.runtime_history?.short || [];
+  const runtimeLong = data.runtime_history?.long || [];
+  const capacityShort = data.tracking_capacity_history?.short || [];
+  const capacityLong = data.tracking_capacity_history?.long || [];
+  const trackingCapacity = data.tracking_capacity || {};
+  const capacityTotals = capacityShort.reduce((total, point) => ({
+    attempts: total.attempts + Number(point.attempts || 0),
+    waited: total.waited + Number(point.waited || 0),
+    skipped: total.skipped + Number(point.skipped || 0),
+    waitMax: Math.max(total.waitMax, Number(point.wait_seconds_max || 0)),
+  }), { attempts: 0, waited: 0, skipped: 0, waitMax: 0 });
   const maxHourly = Math.max(1, ...hourly.map((item) => Number(item.events) || 0));
   const topLabels = Object.entries(lastDay.labels || {}).sort((left, right) => right[1] - left[1]).slice(0, 5);
   const shownCameras = selected ? [selected] : (data.cameras || []);
@@ -5885,6 +5903,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         <article><span>Object detector</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{formatRate(runtime.detection_fps)} · queue {runtime.queue_depth || 0} · {Number(runtime.failed_inferences || 0).toLocaleString()} failures since restart</small></article>
         <article><span>GPU · SurvNG inference</span><strong>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : gpu.available ? "Sampling…" : "Unavailable"}</strong><small>{formatBytes(gpu.resident_bytes)} resident · {gpu.current_frequency_mhz || 0}/{gpu.maximum_frequency_mhz || 0} MHz</small></article>
         <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
+        <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} active now · {capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
       </div>
 
       <section className="telemetry-section">
@@ -5901,6 +5920,26 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           ))}
         </div>
         <div className="telemetry-legend"><span><i /> Events</span><span><i className="objects" /> Object incidents</span></div>
+      </section>
+
+      <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>Tracking capacity</h3><p>Immediate sessions, bounded waits, and capacity timeouts. EMA-rescued object incidents use the same tracking pool.</p></div></div>
+        <div className="telemetry-trend-grid">
+          <TelemetryTrend title="Tracking demand · 2 hours" description="One-minute view of burst contention" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Sessions", className: "rate" }, { key: "waited", label: "Waited", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
+          <TelemetryTrend title="Capacity wait · 2 hours" description="Longest wait in each minute" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)}s`} series={[{ key: "wait_seconds_max", label: "Longest", className: "warning" }, { key: "wait_seconds_average", label: "Average", className: "secondary" }]} />
+          <TelemetryTrend title="Concurrent tracking · 2 hours" description={`Peak active sessions; configured limit ${trackingCapacity.limit || 0}`} history={runtimeShort} timeZone={timeZone} maximum={Math.max(1, Number(trackingCapacity.limit || 0))} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "tracking_active_max", label: "Active", className: "secondary" }]} />
+          <TelemetryTrend title="Tracking demand · 7 days" description="15-minute long-term view" history={capacityLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Sessions", className: "rate" }, { key: "waited", label: "Waited", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
+        </div>
+      </section>
+
+      <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>Camera stream health{selected ? ` · ${selected.name}` : ""}</h3><p>Background samples continue when this page is closed. Read failures are decoder/camera delivery failures; motion-analysis drops are internal queue pressure. Main-stream FPS is zero while its on-demand capture is idle.</p></div></div>
+        <div className="telemetry-trend-grid">
+          <TelemetryTrend title="Decoded FPS · 2 hours" description={selected ? "Selected camera" : "Average across cameras"} history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
+          <TelemetryTrend title="Dropped work · 2 hours" description="Capture failures and motion queue drops per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
+          <TelemetryTrend title="Decoded FPS · 7 days" description="15-minute averages" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
+          <TelemetryTrend title="Dropped work · 7 days" description="Capture failures and motion queue drops per 15 minutes" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
+        </div>
       </section>
 
       <section className="telemetry-section">
@@ -5956,13 +5995,18 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Last frame</dt><dd>{formatAge(camera.last_frame_age_seconds)}</dd></div>
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
                 <div><dt>Recorder clock recovery</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
+                <div><dt>Decoded FPS · live / main</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)} / {Number(camera.capture?.main?.fps || 0).toFixed(1)}</dd></div>
+                <div><dt>Capture read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
                 <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>
                 <div><dt>ONVIF notices / motion</dt><dd>{camera.onvif.notifications} / {camera.onvif.motion_events}</dd></div>
                 <div><dt>ONVIF errors / renewals</dt><dd>{camera.onvif.poll_errors + camera.onvif.poll_timeouts + camera.onvif.renewal_errors} / {camera.onvif.renewals}</dd></div>
                 <div><dt>Motion passed / rejected</dt><dd>{camera.motion.passed} / {camera.motion.rejected}</dd></div>
                 <div><dt>Motion suppressed / dropped</dt><dd>{camera.motion.suppressed} / {camera.motion.dropped}</dd></div>
+                <div><dt>Motion analysis frames dropped</dt><dd>{camera.motion.analysis_frames_dropped || 0}</dd></div>
                 <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>
+                <div><dt>Tracking waits / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {camera.tracking?.capacity_timeouts || 0}</dd></div>
+                <div><dt>Longest tracking wait</dt><dd>{Number(camera.tracking?.capacity_wait_seconds_max || 0).toFixed(1)}s</dd></div>
                 <div><dt>ReID checks avoided</dt><dd>{camera.tracking?.reid_avoided_geometry_matches || 0}</dd></div>
                 <div><dt>ReID latency / failures</dt><dd>{formatMilliseconds(camera.tracking?.reid_average_ms)} / {camera.tracking?.reid_failures || 0}</dd></div>
                 <div><dt>ReID checks by object</dt><dd>{Object.keys(camera.tracking?.reid_attempts_by_label || {}).length ? Object.entries(camera.tracking.reid_attempts_by_label).map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
@@ -5972,7 +6016,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           ))}
         </div>
       </section>
-      <p className="telemetry-footnote">“Events” are stored camera events. “Object incidents” contain at least one incident-eligible detection; “objects” counts those detections individually. History survives restarts.</p>
+      <p className="telemetry-footnote">“Events” are stored camera events. “Object incidents” contain at least one incident-eligible detection; “objects” counts those detections individually. Camera-health samples are retained for eight days; tracking-capacity history comes from incident records and survives restarts.</p>
     </div>
   );
 }
@@ -6238,7 +6282,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     setTelemetryLoading(true);
     setTelemetryError("");
     try {
-      const response = await fetch("/api/telemetry?hours=24");
+      const params = new URLSearchParams({ hours: "24" });
+      if (telemetryCamera) params.set("camera_id", telemetryCamera);
+      const response = await fetch(`/api/telemetry?${params.toString()}`);
       if (!response.ok) throw new Error(`Telemetry failed to load (${response.status})`);
       setTelemetry(await response.json());
     } catch (error) {
@@ -6253,7 +6299,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     void loadTelemetry();
     const timer = window.setInterval(() => void loadTelemetry(), 10000);
     return () => window.clearInterval(timer);
-  }, [settingsTab]);
+  }, [settingsTab, telemetryCamera]);
 
   async function loadMaintenance() {
     try {
@@ -8063,6 +8109,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Maximum duration<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after initial detection.</small></label>
           <label>Lost-object grace<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Seconds to retain an obstructed object.</small></label>
           <label>Camera limit<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Maximum simultaneous tracking sessions.</small></label>
+          <label>Wait for tracking capacity<input type="number" min="0" max="30" step="0.5" value={config.detector?.tracking?.capacity_wait_seconds ?? 5} onChange={(event) => updateConfig(["detector", "tracking", "capacity_wait_seconds"], Number(event.target.value))} /><small>Wait briefly for a busy tracking slot, then recover the gap from recordings. Zero skips immediately.</small></label>
           </div>
         <details className="detection-compact-details">
           <summary>Association tuning</summary>

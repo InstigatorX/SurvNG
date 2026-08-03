@@ -150,6 +150,8 @@ GPU_SAMPLE: dict[str, object] = {"at": 0.0, "pids": (), "engines": {}}
 TELEMETRY_HISTORY_LOCK = threading.Lock()
 TELEMETRY_HISTORY: deque[dict[str, object]] = deque(maxlen=360)
 TELEMETRY_HISTORY_STATE: dict[str, float] = {"last_sample_at": 0.0}
+TELEMETRY_PERSISTED_CACHE_LOCK = threading.Lock()
+TELEMETRY_PERSISTED_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
 
 
@@ -1945,8 +1947,41 @@ def _record_telemetry_history(sample: dict[str, object], sampled_at: float) -> l
         return [dict(item) for item in TELEMETRY_HISTORY]
 
 
+def _persisted_telemetry_history(camera_id: str) -> dict[str, Any]:
+    """Cache database-backed graph series for one sampling interval."""
+    cache_key = (id(manager.events), camera_id)
+    now = time.monotonic()
+    with TELEMETRY_PERSISTED_CACHE_LOCK:
+        cached = TELEMETRY_PERSISTED_CACHE.get(cache_key)
+        if cached is not None and now - float(cached["at"]) < 55.0:
+            return cached["value"]
+    value = {
+        "runtime": {
+            "short": manager.events.runtime_telemetry_history(
+                hours=2, bucket_minutes=1, camera_id=camera_id
+            ),
+            "long": manager.events.runtime_telemetry_history(
+                hours=168, bucket_minutes=15, camera_id=camera_id
+            ),
+        },
+        "tracking": {
+            "short": manager.events.tracking_capacity_activity(
+                hours=2, bucket_minutes=1, camera_id=camera_id
+            ),
+            "long": manager.events.tracking_capacity_activity(
+                hours=168, bucket_minutes=15, camera_id=camera_id
+            ),
+        },
+    }
+    with TELEMETRY_PERSISTED_CACHE_LOCK:
+        if len(TELEMETRY_PERSISTED_CACHE) >= 32:
+            TELEMETRY_PERSISTED_CACHE.clear()
+        TELEMETRY_PERSISTED_CACHE[cache_key] = {"at": now, "value": value}
+    return value
+
+
 @app.get("/api/telemetry")
-def telemetry(hours: int = 24) -> dict:
+def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     """Operational history and runtime counters for the Config telemetry view."""
     storage_path = manager.storage_dir
     storage_path.mkdir(parents=True, exist_ok=True)
@@ -1955,6 +1990,10 @@ def telemetry(hours: int = 24) -> dict:
     detector = manager.detector_status()
     gpu = _gpu_status(detector)
     activity = manager.events.telemetry_activity(hours=hours)
+    camera_id = str(camera_id or "").strip()[:128]
+    persisted_history = _persisted_telemetry_history(camera_id)
+    runtime_history = persisted_history["runtime"]
+    tracking_capacity_history = persisted_history["tracking"]
     per_camera_activity = activity.get("by_camera", {})
     load_1m, load_5m, load_15m = os.getloadavg()
     memory = _linux_memory_status()
@@ -1996,6 +2035,7 @@ def telemetry(hours: int = 24) -> dict:
                 "rejected": int(motion.get("audit_rejected") or 0),
                 "suppressed": int(motion.get("suppressed") or 0),
                 "dropped": int(motion.get("dropped_triggers") or 0),
+                "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
                 "queue_depth": int(motion.get("queue_depth") or 0),
                 "visual_backup_candidates": int(motion.get("visual_backup_candidates") or 0),
                 "visual_backup_triggers": int(motion.get("visual_backup_triggers") or 0),
@@ -2008,6 +2048,12 @@ def telemetry(hours: int = 24) -> dict:
                 "active": bool(tracking.get("active")),
                 "frames_processed": int(tracking.get("frames_processed") or 0),
                 "track_count": int(tracking.get("track_count") or 0),
+                "capacity_requests": int(tracking.get("capacity_requests") or 0),
+                "capacity_waits": int(tracking.get("capacity_waits") or 0),
+                "capacity_timeouts": int(tracking.get("capacity_timeouts") or 0),
+                "capacity_wait_seconds_total": float(tracking.get("capacity_wait_seconds_total") or 0.0),
+                "capacity_wait_seconds_max": float(tracking.get("capacity_wait_seconds_max") or 0.0),
+                "capacity_wait_seconds_last": float(tracking.get("capacity_wait_seconds_last") or 0.0),
                 "reid_attempts": int(tracking.get("reid_attempts") or 0),
                 "reid_successes": int(tracking.get("reid_successes") or 0),
                 "reid_failures": int(tracking.get("reid_failures") or 0),
@@ -2021,6 +2067,7 @@ def telemetry(hours: int = 24) -> dict:
                 ),
                 "reid_avoided_by_label": dict(tracking.get("reid_avoided_by_label") or {}),
             },
+            "capture": dict(status.get("capture_stats") or {}),
             "activity": per_camera_activity.get(
                 camera_id,
                 {
@@ -2067,6 +2114,16 @@ def telemetry(hours: int = 24) -> dict:
         "detector": detector,
         "gpu": gpu,
         "history": history,
+        "runtime_history": runtime_history,
+        "tracking_capacity_history": tracking_capacity_history,
+        "tracking_capacity": {
+            "limit": int(config.detector.tracking.max_active_cameras),
+            "wait_seconds": float(config.detector.tracking.capacity_wait_seconds),
+            "active": sum(1 for item in cameras if item["tracking"]["active"]),
+            "requests_since_restart": sum(item["tracking"]["capacity_requests"] for item in cameras),
+            "waits_since_restart": sum(item["tracking"]["capacity_waits"] for item in cameras),
+            "timeouts_since_restart": sum(item["tracking"]["capacity_timeouts"] for item in cameras),
+        },
         "activity": activity,
         "cameras": cameras,
     }

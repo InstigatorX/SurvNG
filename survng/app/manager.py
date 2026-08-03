@@ -1005,14 +1005,20 @@ class AppManager:
 
         def monitor() -> None:
             previous: dict[str, tuple] = {}
+            telemetry_sample_at = 0.0
             while not self._state_monitor_stop.is_set():
                 try:
-                    for status in self.statuses():
+                    statuses = self.statuses()
+                    for status in statuses:
                         camera_id = str(status.get("id") or "")
                         fingerprint = self._camera_state_fingerprint(status)
                         if camera_id and previous.get(camera_id) != fingerprint:
                             previous[camera_id] = fingerprint
                             self.state_events.publish("camera_state", status)
+                    now = time.monotonic()
+                    if now - telemetry_sample_at >= 60.0:
+                        self.events.record_runtime_telemetry(statuses)
+                        telemetry_sample_at = now
                 except Exception:
                     LOGGER.exception("camera state monitor failed")
                 self._state_monitor_stop.wait(1.0)

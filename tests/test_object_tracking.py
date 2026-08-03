@@ -810,7 +810,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
         session = ObjectTrackingSession(
             camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
-            config=ObjectTrackingConfig(),
+            config=ObjectTrackingConfig(capacity_wait_seconds=0.05),
             detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
             frame_provider=lambda: None,
             update_event=update_event,
@@ -831,7 +831,52 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         limiter.release()
 
         self.assertEqual(updates[-1]["state"], "skipped_capacity")
+        self.assertGreaterEqual(updates[-1]["capacity_wait_seconds"], 0.04)
+        self.assertEqual(session.status()["capacity_timeouts"], 1)
         self.assertFalse(session.running())
+
+    def test_capacity_wait_admits_session_and_preserves_tracking_window(self) -> None:
+        active = threading.Event()
+        updates: list[dict] = []
+        limiter = threading.BoundedSemaphore(1)
+        self.assertTrue(limiter.acquire(blocking=False))
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if tracking["state"] == "active":
+                active.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                sample_fps=5.0,
+                max_session_seconds=3.0,
+                capacity_wait_seconds=0.5,
+            ),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=update_event,
+            publisher=None,
+            limiter=limiter,
+        )
+        session.set_accepting(True)
+        started_at = time.monotonic()
+        self.assertTrue(session.start(
+            42,
+            datetime.now(timezone.utc),
+            [detection("person", 0.9, (10, 10, 40, 80))],
+        ))
+        time.sleep(0.08)
+        limiter.release()
+
+        self.assertTrue(active.wait(1.0))
+        self.assertGreaterEqual(updates[0]["capacity_wait_seconds"], 0.06)
+        self.assertGreaterEqual(session._deadline - time.monotonic(), 2.8)
+        self.assertEqual(session.status()["capacity_waits"], 1)
+        self.assertEqual(session.status()["capacity_timeouts"], 0)
+        self.assertGreaterEqual(time.monotonic() - started_at, 0.06)
+        session.stop()
 
     def test_does_not_reprocess_same_captured_frame(self) -> None:
         duplicate_seen = threading.Event()

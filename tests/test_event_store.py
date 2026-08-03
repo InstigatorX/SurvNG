@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -118,6 +118,83 @@ class EventStoreTest(unittest.TestCase):
 
             self.assertEqual(store.telemetry_activity(hours=0, now=now)["hours"], 1)
             self.assertEqual(store.telemetry_activity(hours=999, now=now)["hours"], 168)
+
+    def test_runtime_telemetry_persists_fps_and_counter_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            first_at = datetime.fromisoformat("2026-08-02T12:00:00+00:00")
+
+            def status(read_failures: int, analysis_drops: int, fps: float) -> list[dict]:
+                return [{
+                    "id": "gate",
+                    "connected": True,
+                    "last_frame_age_seconds": 0.1,
+                    "main_last_frame_age_seconds": 0.2,
+                    "capture_stats": {
+                        "live": {"fps": fps, "read_failures": read_failures, "open_failures": 0},
+                        "main": {"fps": fps / 2, "read_failures": 0, "open_failures": 0},
+                    },
+                    "motion_qualification": {"analysis_frames_dropped": analysis_drops},
+                    "object_tracking": {"active": False},
+                }]
+
+            store.record_runtime_telemetry(status(2, 3, 10.0), sampled_at=first_at)
+            store.record_runtime_telemetry(
+                status(4, 8, 12.0),
+                sampled_at=first_at + timedelta(minutes=1),
+            )
+            history = store.runtime_telemetry_history(
+                hours=2,
+                bucket_minutes=1,
+                camera_id="gate",
+                now=first_at + timedelta(minutes=2),
+            )
+
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[-1]["live_fps"], 12.0)
+            self.assertEqual(history[-1]["main_fps"], 6.0)
+            self.assertEqual(history[-1]["capture_read_failures"], 2)
+            self.assertEqual(history[-1]["analysis_frames_dropped"], 5)
+
+    def test_tracking_capacity_history_includes_waits_and_legacy_skips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            now = datetime.fromisoformat("2026-08-02T12:30:00+00:00")
+            store.add_event(
+                "gate",
+                "motion",
+                created_at="2026-08-02T12:01:00+00:00",
+                objects_json=json.dumps([{
+                    "status": "object_tracking",
+                    "object_tracking": {
+                        "state": "complete",
+                        "capacity_wait_seconds": 2.5,
+                    },
+                }]),
+            )
+            store.add_event(
+                "gate",
+                "motion",
+                created_at="2026-08-02T12:02:00+00:00",
+                objects_json=json.dumps([{
+                    "status": "object_tracking",
+                    "object_tracking": {"state": "skipped_capacity"},
+                }]),
+            )
+
+            history = store.tracking_capacity_activity(
+                hours=1,
+                bucket_minutes=15,
+                camera_id="gate",
+                now=now,
+            )
+            active = [point for point in history if point["attempts"]]
+
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["attempts"], 2)
+            self.assertEqual(active[0]["waited"], 1)
+            self.assertEqual(active[0]["skipped"], 1)
+            self.assertEqual(active[0]["wait_seconds_average"], 2.5)
 
     def test_motion_effectiveness_separates_visual_filters_from_state_deduplication(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

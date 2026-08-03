@@ -201,7 +201,11 @@ class EventApiSerializationTest(unittest.TestCase):
             fake_manager = SimpleNamespace(
                 storage_dir=root,
                 database_dir=root,
-                events=SimpleNamespace(telemetry_activity=Mock(return_value=activity)),
+                events=SimpleNamespace(
+                    telemetry_activity=Mock(return_value=activity),
+                    runtime_telemetry_history=Mock(return_value=[]),
+                    tracking_capacity_activity=Mock(return_value=[]),
+                ),
                 detector_status=Mock(return_value={"runtime": {"total_inferences": 8}}),
                 statuses=Mock(return_value=[{
                     "id": "gate",
@@ -272,6 +276,8 @@ class EventApiSerializationTest(unittest.TestCase):
                 5,
             )
             fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
+            self.assertEqual(fake_manager.events.runtime_telemetry_history.call_count, 2)
+            self.assertEqual(fake_manager.events.tracking_capacity_activity.call_count, 2)
 
     def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:
         catalog = main.object_tracking_catalog()

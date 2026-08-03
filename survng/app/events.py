@@ -66,6 +66,17 @@ class EventStore:
             )
             conn.execute(
                 """
+                create table if not exists runtime_telemetry_samples (
+                    sampled_at text primary key,
+                    payload_json text not null
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_runtime_telemetry_sampled_at on runtime_telemetry_samples(sampled_at)"
+            )
+            conn.execute(
+                """
                 create table if not exists motion_audits (
                     id integer primary key autoincrement,
                     event_id integer,
@@ -702,6 +713,232 @@ class EventStore:
             "hourly": hourly,
             "by_camera": cameras,
         }
+
+    def record_runtime_telemetry(
+        self,
+        camera_statuses: list[dict[str, Any]],
+        *,
+        sampled_at: datetime | None = None,
+    ) -> None:
+        """Persist one compact camera-health sample per UTC minute for seven days."""
+        current = sampled_at or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        cameras: dict[str, Any] = {}
+        for status in camera_statuses:
+            camera_id = str(status.get("id") or "")
+            if not camera_id:
+                continue
+            motion = status.get("motion_qualification") or {}
+            tracking = status.get("object_tracking") or {}
+            cameras[camera_id] = {
+                "connected": bool(status.get("connected")),
+                "frame_age_seconds": status.get("last_frame_age_seconds"),
+                "main_frame_age_seconds": status.get("main_last_frame_age_seconds"),
+                "capture": status.get("capture_stats") or {},
+                "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
+                "tracking_active": bool(tracking.get("active")),
+            }
+        payload = json.dumps({"cameras": cameras}, separators=(",", ":"), allow_nan=False)
+        cutoff = current - timedelta(days=8)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "insert or replace into runtime_telemetry_samples (sampled_at, payload_json) values (?, ?)",
+                (current.isoformat(), payload),
+            )
+            conn.execute(
+                "delete from runtime_telemetry_samples where sampled_at < ?",
+                (cutoff.isoformat(),),
+            )
+
+    def runtime_telemetry_history(
+        self,
+        *,
+        hours: int,
+        bucket_minutes: int,
+        camera_id: str = "",
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        bounded_hours = max(1, min(int(hours), 24 * 8))
+        bucket_seconds = max(60, min(int(bucket_minutes), 60) * 60)
+        start = current - timedelta(hours=bounded_hours)
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "select sampled_at, payload_json from runtime_telemetry_samples where sampled_at >= ? order by sampled_at",
+                (start.isoformat(),),
+            ).fetchall()
+
+        buckets: dict[int, dict[str, Any]] = {}
+        previous_counters: dict[str, dict[str, int]] = {}
+        for row in rows:
+            try:
+                sampled = datetime.fromisoformat(str(row["sampled_at"]).replace("Z", "+00:00"))
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            cameras = payload.get("cameras") if isinstance(payload, dict) else {}
+            if not isinstance(cameras, dict):
+                continue
+            if camera_id:
+                selected = (
+                    [(camera_id, cameras[camera_id])]
+                    if isinstance(cameras.get(camera_id), dict)
+                    else []
+                )
+            else:
+                selected = [
+                    (key, value)
+                    for key, value in cameras.items()
+                    if isinstance(value, dict)
+                ]
+            bucket_epoch = int(sampled.timestamp() // bucket_seconds) * bucket_seconds
+            bucket = buckets.setdefault(bucket_epoch, {
+                "sampled_at": datetime.fromtimestamp(bucket_epoch, timezone.utc).isoformat(),
+                "live_fps_total": 0.0,
+                "main_fps_total": 0.0,
+                "live_fps_samples": 0,
+                "main_fps_samples": 0,
+                "tracking_active_max": 0,
+                "capture_read_failures": 0,
+                "capture_open_failures": 0,
+                "analysis_frames_dropped": 0,
+            })
+            live_values: list[float] = []
+            main_values: list[float] = []
+            active = 0
+            for selected_id, item in selected:
+                capture = item.get("capture") or {}
+                live = capture.get("live") or {}
+                main = capture.get("main") or {}
+                live_fps = float(live.get("fps") or 0.0)
+                main_fps = float(main.get("fps") or 0.0)
+                if camera_id or bool(item.get("connected")):
+                    live_values.append(live_fps)
+                if camera_id or main_fps > 0:
+                    main_values.append(main_fps)
+                active += int(bool(item.get("tracking_active")))
+                counters = {
+                    "capture_read_failures": int(live.get("read_failures") or 0) + int(main.get("read_failures") or 0),
+                    "capture_open_failures": int(live.get("open_failures") or 0) + int(main.get("open_failures") or 0),
+                    "analysis_frames_dropped": int(item.get("analysis_frames_dropped") or 0),
+                }
+                previous = previous_counters.get(selected_id)
+                if previous is not None:
+                    for key, value in counters.items():
+                        bucket[key] += max(0, value - previous[key]) if value >= previous[key] else max(0, value)
+                previous_counters[selected_id] = counters
+            if live_values:
+                bucket["live_fps_total"] += sum(live_values) / len(live_values)
+                bucket["live_fps_samples"] += 1
+            if main_values:
+                bucket["main_fps_total"] += sum(main_values) / len(main_values)
+                bucket["main_fps_samples"] += 1
+            if selected:
+                bucket["tracking_active_max"] = max(bucket["tracking_active_max"], active)
+
+        result: list[dict[str, Any]] = []
+        for bucket_epoch in sorted(buckets):
+            bucket = buckets[bucket_epoch]
+            live_samples = max(1, int(bucket["live_fps_samples"]))
+            main_samples = max(1, int(bucket["main_fps_samples"]))
+            result.append({
+                "sampled_at": bucket["sampled_at"],
+                "live_fps": round(float(bucket["live_fps_total"]) / live_samples, 2),
+                "main_fps": round(float(bucket["main_fps_total"]) / main_samples, 2),
+                "tracking_active_max": int(bucket["tracking_active_max"]),
+                "capture_read_failures": int(bucket["capture_read_failures"]),
+                "capture_open_failures": int(bucket["capture_open_failures"]),
+                "analysis_frames_dropped": int(bucket["analysis_frames_dropped"]),
+            })
+        return result
+
+    def tracking_capacity_activity(
+        self,
+        *,
+        hours: int,
+        bucket_minutes: int,
+        camera_id: str = "",
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        bounded_hours = max(1, min(int(hours), 24 * 31))
+        bucket_seconds = max(60, min(int(bucket_minutes), 60) * 60)
+        start = current - timedelta(hours=bounded_hours)
+        query = "select camera_id, created_at, objects_json from events where created_at >= ?"
+        parameters: list[Any] = [start.isoformat()]
+        if camera_id:
+            query += " and camera_id = ?"
+            parameters.append(camera_id)
+        query += " order by created_at, id"
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(query, parameters).fetchall()
+        buckets: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                objects = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            created = created.astimezone(timezone.utc)
+            tracking = next((
+                item.get("object_tracking")
+                for item in objects
+                if isinstance(item, dict)
+                and item.get("status") == "object_tracking"
+                and isinstance(item.get("object_tracking"), dict)
+            ), None) if isinstance(objects, list) else None
+            if not tracking:
+                continue
+            bucket_epoch = int(created.timestamp() // bucket_seconds) * bucket_seconds
+            bucket = buckets.setdefault(bucket_epoch, {
+                "sampled_at": datetime.fromtimestamp(bucket_epoch, timezone.utc).isoformat(),
+                "attempts": 0,
+                "waited": 0,
+                "skipped": 0,
+                "wait_seconds_total": 0.0,
+                "wait_seconds_max": 0.0,
+            })
+            wait_seconds = max(0.0, float(tracking.get("capacity_wait_seconds") or 0.0))
+            bucket["attempts"] += 1
+            bucket["waited"] += int(wait_seconds >= 0.01)
+            bucket["skipped"] += int(tracking.get("state") == "skipped_capacity")
+            bucket["wait_seconds_total"] += wait_seconds
+            bucket["wait_seconds_max"] = max(bucket["wait_seconds_max"], wait_seconds)
+        first_bucket = int(start.timestamp() // bucket_seconds) * bucket_seconds
+        last_bucket = int(current.timestamp() // bucket_seconds) * bucket_seconds
+        result: list[dict[str, Any]] = []
+        for bucket_epoch in range(first_bucket, last_bucket + 1, bucket_seconds):
+            bucket = buckets.get(bucket_epoch, {
+                "sampled_at": datetime.fromtimestamp(bucket_epoch, timezone.utc).isoformat(),
+                "attempts": 0,
+                "waited": 0,
+                "skipped": 0,
+                "wait_seconds_total": 0.0,
+                "wait_seconds_max": 0.0,
+            })
+            wait_total = float(bucket["wait_seconds_total"])
+            result.append({
+                "sampled_at": bucket["sampled_at"],
+                "attempts": int(bucket["attempts"]),
+                "waited": int(bucket["waited"]),
+                "skipped": int(bucket["skipped"]),
+                "wait_seconds_average": round(
+                    wait_total / max(1, int(bucket["waited"])),
+                    3,
+                ),
+                "wait_seconds_max": round(float(bucket["wait_seconds_max"]), 3),
+            })
+        return result
 
     def add_motion_audit(
         self,

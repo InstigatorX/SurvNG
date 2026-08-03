@@ -278,6 +278,7 @@ class ObjectTrackingConfig(BaseModel):
     match_iou_threshold: float = Field(default=0.20, ge=0.05, le=0.90)
     match_center_distance_ratio: float = Field(default=0.65, ge=0.1, le=2.0)
     max_active_cameras: int = Field(default=2, ge=1, le=16)
+    capacity_wait_seconds: float = Field(default=5.0, ge=0.0, le=30.0)
     max_tracks_per_session: int = Field(default=100, ge=1, le=1000)
     reid_enabled: bool = False
     reid_model_path: str = Field(default="", max_length=4096)

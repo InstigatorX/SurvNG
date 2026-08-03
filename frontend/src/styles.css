@@ -5721,6 +5721,9 @@ section.detection-settings-card {
 .telemetry-trend-values .process-memory i { background: #facc15; }
 .telemetry-trend-values .storage i { background: #fb7185; }
 .telemetry-trend-values .rate i { background: #22d3a6; }
+.telemetry-trend-values .secondary i { background: #60a5fa; }
+.telemetry-trend-values .warning i { background: #f59e0b; }
+.telemetry-trend-values .danger i { background: #ef4444; }
 
 .telemetry-trend svg {
   display: block;
@@ -5750,6 +5753,9 @@ section.detection-settings-card {
 .telemetry-trend svg polyline.process-memory { stroke: #facc15; }
 .telemetry-trend svg polyline.storage { stroke: #fb7185; }
 .telemetry-trend svg polyline.rate { stroke: #22d3a6; }
+.telemetry-trend svg polyline.secondary { stroke: #60a5fa; }
+.telemetry-trend svg polyline.warning { stroke: #f59e0b; }
+.telemetry-trend svg polyline.danger { stroke: #ef4444; }
 
 .telemetry-trend footer {
   display: flex;
