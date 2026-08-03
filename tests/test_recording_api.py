@@ -99,6 +99,45 @@ class RecordingApiTest(unittest.TestCase):
         for call in recorder.recording_availability_between.call_args_list:
             self.assertIs(call.kwargs["discover_missing"], False)
 
+    def test_recording_day_groups_events_into_thumbnail_incidents(self) -> None:
+        recorder = Mock()
+        recorder.recording_availability_between.return_value = {
+            "ranges": [{"start_epoch": 100.0, "end_epoch": 200.0}],
+            "segment_count": 10,
+        }
+        events = [
+            {
+                "id": 8,
+                "camera_id": "gate",
+                "kind": "object",
+                "created_at": "1970-01-01T00:02:10+00:00",
+                "snapshot_path": "snapshots/gate/8.jpg",
+                "objects_json": '[{"label":"car","confidence":0.91}]',
+            },
+            {
+                "id": 7,
+                "camera_id": "gate",
+                "kind": "motion",
+                "created_at": "1970-01-01T00:02:00+00:00",
+                "snapshot_path": "snapshots/gate/7.jpg",
+                "objects_json": "[]",
+            },
+        ]
+        manager = SimpleNamespace(
+            camera=lambda _camera_id: object(),
+            recorder=recorder,
+            events=SimpleNamespace(for_camera_range=lambda *_args, **_kwargs: events),
+        )
+
+        with patch.object(main, "manager", manager):
+            payload = main.recording_day("gate", 100.0, 200.0, "main")
+
+        self.assertEqual(len(payload["events"]), 2)
+        self.assertEqual(len(payload["incidents"]), 1)
+        self.assertTrue(payload["incidents"][0]["has_objects"])
+        self.assertEqual(payload["incidents"][0]["labels"], ["car"])
+        self.assertEqual(payload["incidents"][0]["representative_event_id"], 8)
+
     def test_recording_updates_requests_async_edge_refresh_then_reads_index_only(self) -> None:
         recorder = Mock()
         recorder.recording_availability_between.return_value = {

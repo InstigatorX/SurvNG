@@ -6093,6 +6093,7 @@ def recording_day(
         datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
         limit=5000,
     )
+    public_events = [_event_row(event) for event in events]
     return {
         "camera_id": camera_id,
         "source": selected_source,
@@ -6101,7 +6102,11 @@ def recording_day(
         "recordings": availability["ranges"],
         "availability": availability["ranges"],
         "recording_count": availability["segment_count"],
-        "events": [_event_row(event) for event in events],
+        "events": public_events,
+        "incidents": [
+            _incident_list_payload(incident)
+            for incident in _incident_rows(public_events)
+        ],
         "available_sources": available_sources,
     }
 
@@ -6140,7 +6145,11 @@ def recording_updates(
     if not math.isfinite(after_epoch):
         raise HTTPException(status_code=400, detail="invalid recording update position")
     selected_source = recording_source(source)
-    overlap_seconds = max(5.0, float(config.recording_segment_seconds) * 2)
+    overlap_seconds = max(
+        5.0,
+        float(config.recording_segment_seconds) * 2,
+        float(DEFAULT_INCIDENT_GAP_SECONDS) * 2,
+    )
     update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
     # Keep NFS directory enumeration off the request thread. The index worker
     # services this wake-up immediately and the next lightweight update poll
@@ -6163,13 +6172,18 @@ def recording_updates(
         datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
         limit=1000,
     )
+    public_events = [_event_row(event) for event in events]
     return {
         "camera_id": camera_id,
         "source": selected_source,
         "start_epoch": update_start,
         "end_epoch": end_epoch,
         "availability": availability["ranges"],
-        "events": [_event_row(event) for event in events],
+        "events": public_events,
+        "incidents": [
+            _incident_list_payload(incident)
+            for incident in _incident_rows(public_events)
+        ],
     }
 
 

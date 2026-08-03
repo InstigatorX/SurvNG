@@ -4774,6 +4774,20 @@ function mergeRecordingEvents(current, updates) {
     .slice(-5000);
 }
 
+function recordingIncidentEpoch(incident) {
+  const direct = Number(incident?.start_epoch);
+  if (Number.isFinite(direct)) return direct;
+  const parsed = new Date(incident?.start_at || incident?.created_at || "").getTime() / 1000;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function recordingIncidentEndEpoch(incident) {
+  const direct = Number(incident?.last_epoch);
+  if (Number.isFinite(direct)) return direct;
+  const parsed = new Date(incident?.end_at || incident?.created_at || "").getTime() / 1000;
+  return Number.isFinite(parsed) ? parsed : recordingIncidentEpoch(incident);
+}
+
 function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const queryAt = Number(initialQuery.get("at"));
@@ -4797,6 +4811,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [recordings, setRecordings] = useState([]);
   const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
+  const [eventFilter, setEventFilter] = useState("object");
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4821,9 +4836,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       page: "recordings",
       camera_id: activeCameraId,
       recording_epoch: Number(playhead) || initialEpoch || dayStart,
-      filters: { date, source },
+      filters: { date, source, event_type: eventFilter },
     });
-  }, [activeCameraId, date, dayStart, initialEpoch, onAssistantContextChange, playhead, source]);
+  }, [activeCameraId, date, dayStart, eventFilter, initialEpoch, onAssistantContextChange, playhead, source]);
 
   const timeline = useMemo(() => {
     let mediaOffset = 0;
@@ -4866,14 +4881,20 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     return epochToPlaybackMediaTime(initialEpoch);
   }, [manifestUrl, playbackTimeline]);
 
+  const filteredEvents = useMemo(() => events
+    .filter((event) => eventFilter === "object" ? Boolean(event.has_objects) : !event.has_objects)
+    .map((event) => ({ ...event, incident_epoch: recordingIncidentEpoch(event) }))
+    .filter((event) => Number.isFinite(event.incident_epoch))
+    .sort((left, right) => left.incident_epoch - right.incident_epoch), [eventFilter, events]);
+
   const nearbyEvents = useMemo(() => {
-    if (!Number.isFinite(playhead)) return events.slice(0, 20);
-    return events
-      .map((event) => ({ ...event, distance: Math.abs(new Date(event.created_at).getTime() / 1000 - playhead) }))
-      .filter((event) => event.distance <= 15 * 60)
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .slice(0, 24);
-  }, [events, playhead]);
+    if (!Number.isFinite(playhead)) return [];
+    return filteredEvents
+      .map((event) => ({ ...event, distance: Math.abs(event.incident_epoch - playhead) }))
+      .filter((event) => event.distance <= 30 * 60)
+      .sort((left, right) => left.incident_epoch - right.incident_epoch)
+      .slice(0, 36);
+  }, [filteredEvents, playhead]);
 
   function snapToRecording(epoch) {
     if (!timeline.length) return null;
@@ -5033,7 +5054,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           return;
         }
         setRecordings(nextAvailability);
-        setEvents(payload.events || []);
+        setEvents(payload.incidents || payload.events || []);
       })
       .catch((error) => {
         if (error.name !== "AbortError") {
@@ -5072,7 +5093,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         if (additions.length) {
           setRecordings((current) => mergeRecordingAvailability(current, additions));
         }
-        const eventUpdates = payload.events || [];
+        const eventUpdates = payload.incidents || payload.events || [];
         if (eventUpdates.length) {
           setEvents((current) => mergeRecordingEvents(current, eventUpdates));
         }
@@ -5340,30 +5361,92 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             startEpoch={dayStart}
             endEpoch={dayEnd}
             recordings={timeline}
+            events={filteredEvents}
             playhead={playhead ?? dayStart}
+            timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
           />
         </div>
 
-        <div className="recordings-v2-events">
-          {nearbyEvents.length ? nearbyEvents.map((event) => (
-            <button key={event.id} type="button" onClick={() => playAt(new Date(event.created_at).getTime() / 1000, true)}>
-              <time>{formatTimeOnly(event.created_at, timeZone)}</time>
-              <span>{event.labels?.length ? event.labels.join(", ") : "motion"}</span>
-            </button>
-          )) : <div className="recordings-v2-no-events"><Radar size={17} />No events near this time</div>}
+        <div className="recordings-v2-incidents">
+          <div className="recordings-v2-incidents-toolbar">
+            <div className="recordings-v2-event-filter" aria-label="Recording incident type">
+              <button type="button" className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}><CircleDot size={14} />Object</button>
+              <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion</button>
+            </div>
+            <span>{filteredEvents.length.toLocaleString()} {eventFilter} incident{filteredEvents.length === 1 ? "" : "s"} this day · showing near current time</span>
+          </div>
+          <div className="recordings-v2-events">
+            {nearbyEvents.length ? nearbyEvents.map((event) => (
+              <button
+                key={event.id}
+                type="button"
+                className={event.has_objects ? "object" : "motion"}
+                onClick={() => playAt(event.incident_epoch, true)}
+                title={`${formatDateTime(event.incident_epoch, timeZone)} · ${event.labels?.length ? event.labels.join(", ") : "Motion"}`}
+              >
+                <span className="recordings-v2-event-image">
+                  <Radar size={20} />
+                  {event.snapshot_path ? <img src={eventThumbnailUrl(event, 240, 72)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+                </span>
+                <span className="recordings-v2-event-caption">
+                  <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
+                  <b>{event.labels?.length ? event.labels.join(", ") : "Motion"}</b>
+                </span>
+              </button>
+            )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents within 30 minutes of this time</div>}
+          </div>
         </div>
       </section>
     </main>
   );
 }
 
-function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek }) {
+function RecordingTimeline({ startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
   const draftRef = useRef(offset);
   const dragRef = useRef(null);
+  const ticks = useMemo(() => {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const partFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const items = [];
+    const first = Math.ceil(startEpoch / (15 * 60)) * 15 * 60;
+    for (let epoch = first; epoch < endEpoch; epoch += 15 * 60) {
+      const parts = partFormatter.formatToParts(new Date(epoch * 1000));
+      const minute = Number(parts.find((item) => item.type === "minute")?.value || 0);
+      const kind = minute === 0 ? "hour" : minute === 30 ? "half" : "quarter";
+      items.push({
+        epoch,
+        kind,
+        label: kind === "hour" ? formatter.format(new Date(epoch * 1000)).replace(":00", "") : "",
+      });
+    }
+    return items;
+  }, [endEpoch, startEpoch, timeZone]);
+  const eventMarkers = useMemo(() => (events || []).map((event) => {
+    const start = recordingIncidentEpoch(event);
+    const end = recordingIncidentEndEpoch(event);
+    if (!Number.isFinite(start) || start >= endEpoch || (Number.isFinite(end) && end < startEpoch)) return null;
+    const boundedStart = Math.max(startEpoch, start);
+    const boundedEnd = Math.min(endEpoch, Math.max(boundedStart + 1, Number.isFinite(end) ? end : start + 1));
+    return {
+      id: event.id,
+      hasObjects: Boolean(event.has_objects),
+      left: ((boundedStart - startEpoch) / duration) * 100,
+      width: ((boundedEnd - boundedStart) / duration) * 100,
+    };
+  }).filter(Boolean), [duration, endEpoch, events, startEpoch]);
   useEffect(() => {
     if (dragRef.current) return;
     draftRef.current = offset;
@@ -5433,6 +5516,13 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
   return (
     <div className="recordings-v2-timeline">
       <div className="recordings-v2-track">
+        <div className="recordings-v2-ticks" aria-hidden="true">
+          {ticks.map((tick) => (
+            <span className={tick.kind} key={tick.epoch} style={{ left: `${((tick.epoch - startEpoch) / duration) * 100}%` }}>
+              {tick.label ? <small>{tick.label}</small> : null}
+            </span>
+          ))}
+        </div>
         {recordings.map((item) => (
           <span
             key={`${item.start_epoch}:${item.end_epoch}`}
@@ -5442,8 +5532,11 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, playhead, onSeek 
             }}
           />
         ))}
+        <div className="recordings-v2-event-markers" aria-hidden="true">
+          {eventMarkers.map((event) => <b key={event.id} className={event.hasObjects ? "object" : "motion"} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
+        </div>
         <i style={{ left: `${percent}%` }} />
-        <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatDayClock(draft)}</output>
+        <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + draft, timeZone)}</output>
         <input
           type="range"
           min="0"
