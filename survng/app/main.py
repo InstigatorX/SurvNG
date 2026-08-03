@@ -986,6 +986,11 @@ def recordings_page() -> HTMLResponse:
     return frontend_response("recordings.html")
 
 
+@app.get("/recordings/exports")
+def recording_exports_page() -> HTMLResponse:
+    return frontend_response("recordings.html")
+
+
 @app.get("/config")
 def config_page() -> HTMLResponse:
     return frontend_response("config.html")
@@ -1131,6 +1136,10 @@ class MediaExportRequest(BaseModel):
     output_fps: int = Field(default=30, ge=1, le=60)
     width: int = Field(default=1280, ge=320, le=3840)
     height: int = Field(default=0, ge=0, le=2160)
+
+
+class MediaExportProtectionRequest(BaseModel):
+    protected: bool
 
 
 @app.get("/api/retention/status")
@@ -6367,8 +6376,9 @@ def recording_day(
 
 def _public_media_export(job: dict[str, object]) -> dict[str, object]:
     payload = dict(job)
-    if payload.get("download_url"):
-        payload["download_url"] = public_url(str(payload["download_url"]))
+    for key in ("download_url", "media_url"):
+        if payload.get(key):
+            payload[key] = public_url(str(payload[key]))
     return payload
 
 
@@ -6412,9 +6422,39 @@ def create_media_export(request: MediaExportRequest) -> dict[str, object]:
 
 
 @app.get("/api/exports")
-def list_media_exports(limit: int = 50) -> dict[str, object]:
-    jobs = _media_export_manager().list(max(1, min(limit, 200)))
-    return {"exports": [_public_media_export(job) for job in jobs]}
+def list_media_exports(
+    limit: int = 50,
+    offset: int = 0,
+    camera_id: str = "",
+    kind: str = "",
+    status: str = "",
+    protected: bool | None = None,
+) -> dict[str, object]:
+    if kind and kind not in {"recording", "timelapse"}:
+        raise HTTPException(status_code=400, detail="invalid export kind")
+    if status and status not in {
+        "queued", "running", "cancelling", "completed", "failed", "cancelled",
+        "active", "terminal",
+    }:
+        raise HTTPException(status_code=400, detail="invalid export status")
+    export_manager = _media_export_manager()
+    filters = {
+        "camera_id": camera_id,
+        "kind": kind,
+        "status": status,
+        "protected": protected,
+    }
+    jobs = export_manager.list(
+        max(1, min(limit, 200)),
+        offset=max(0, offset),
+        **filters,
+    )
+    return {
+        "exports": [_public_media_export(job) for job in jobs],
+        "total": export_manager.count(**filters),
+        "offset": max(0, offset),
+        "limit": max(1, min(limit, 200)),
+    }
 
 
 @app.get("/api/exports/{job_id}")
@@ -6441,12 +6481,45 @@ def download_media_export(job_id: str) -> FileResponse:
     )
 
 
-@app.delete("/api/exports/{job_id}", status_code=202)
-def delete_media_export(job_id: str) -> dict[str, object]:
+@app.get("/api/exports/{job_id}/media")
+def play_media_export(job_id: str) -> FileResponse:
     try:
-        return _public_media_export(_media_export_manager().cancel_or_delete(job_id))
+        path, _name = _media_export_manager().output_path(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="completed export not found") from None
+    return FileResponse(
+        path,
+        media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@app.patch("/api/exports/{job_id}/protection")
+def protect_media_export(
+    job_id: str,
+    request: MediaExportProtectionRequest,
+) -> dict[str, object]:
+    try:
+        return _public_media_export(
+            _media_export_manager().set_protected(job_id, request.protected)
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="export not found") from None
+
+
+@app.delete("/api/exports/{job_id}", status_code=202)
+def delete_media_export(job_id: str, force: bool = False) -> dict[str, object]:
+    try:
+        return _public_media_export(
+            _media_export_manager().cancel_or_delete(job_id, force=force)
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="export not found") from None
+    except PermissionError:
+        raise HTTPException(
+            status_code=409,
+            detail="protected exports require explicit forced deletion",
+        ) from None
 
 
 @app.get("/api/cameras/{camera_id}/recordings/window")

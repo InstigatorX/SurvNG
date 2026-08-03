@@ -70,10 +70,19 @@ class MediaExportStore:
                     started_at TEXT NOT NULL DEFAULT '',
                     finished_at TEXT NOT NULL DEFAULT '',
                     expires_at TEXT NOT NULL DEFAULT '',
-                    cancel_requested INTEGER NOT NULL DEFAULT 0
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    protected INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(media_exports)").fetchall()
+            }
+            if "protected" not in columns:
+                connection.execute(
+                    "ALTER TABLE media_exports ADD COLUMN protected INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 "UPDATE media_exports SET status = 'failed', phase = 'Interrupted by restart', "
                 "error = 'export interrupted by server restart', finished_at = ? "
@@ -110,13 +119,77 @@ class MediaExportStore:
             row = connection.execute("SELECT * FROM media_exports WHERE id = ?", (job_id,)).fetchone()
         return self._row(row) if row else None
 
-    def list(self, limit: int = 50) -> list[dict[str, object]]:
+    def list(
+        self,
+        limit: int = 50,
+        *,
+        offset: int = 0,
+        camera_id: str = "",
+        kind: str = "",
+        status: str = "",
+        protected: bool | None = None,
+    ) -> list[dict[str, object]]:
+        where, parameters = self._filters(
+            camera_id=camera_id,
+            kind=kind,
+            status=status,
+            protected=protected,
+        )
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM media_exports ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(int(limit), 200)),),
+                f"SELECT * FROM media_exports{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*parameters, max(1, min(int(limit), 200)), max(0, int(offset))),
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def count(
+        self,
+        *,
+        camera_id: str = "",
+        kind: str = "",
+        status: str = "",
+        protected: bool | None = None,
+    ) -> int:
+        where, parameters = self._filters(
+            camera_id=camera_id,
+            kind=kind,
+            status=status,
+            protected=protected,
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM media_exports{where}", parameters
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    @staticmethod
+    def _filters(
+        *,
+        camera_id: str = "",
+        kind: str = "",
+        status: str = "",
+        protected: bool | None = None,
+    ) -> tuple[str, tuple[object, ...]]:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if camera_id:
+            clauses.append("camera_id = ?")
+            parameters.append(camera_id)
+        if kind:
+            clauses.append("kind = ?")
+            parameters.append(kind)
+        if status:
+            if status == "active":
+                clauses.append("status IN ('queued', 'running', 'cancelling')")
+            elif status == "terminal":
+                clauses.append("status IN ('completed', 'failed', 'cancelled')")
+            else:
+                clauses.append("status = ?")
+                parameters.append(status)
+        if protected is not None:
+            clauses.append("protected = ?")
+            parameters.append(1 if protected else 0)
+        return (f" WHERE {' AND '.join(clauses)}" if clauses else "", tuple(parameters))
 
     def queued_ids(self) -> list[str]:
         with self._connect() as connection:
@@ -129,6 +202,7 @@ class MediaExportStore:
         allowed = {
             "status", "phase", "progress", "output_path", "output_name", "size_bytes",
             "error", "started_at", "finished_at", "expires_at", "cancel_requested",
+            "protected",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -148,7 +222,7 @@ class MediaExportStore:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM media_exports WHERE status IN ('completed', 'failed', 'cancelled') "
-                "AND expires_at != '' AND expires_at < ?",
+                "AND protected = 0 AND expires_at != '' AND expires_at < ?",
                 (now_iso,),
             ).fetchall()
         return [self._row(row) for row in rows]
@@ -156,15 +230,24 @@ class MediaExportStore:
     def completed_oldest_first(self) -> list[dict[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM media_exports WHERE status = 'completed' ORDER BY created_at"
+                "SELECT * FROM media_exports WHERE status = 'completed' "
+                "AND protected = 0 ORDER BY created_at"
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def completed_size_bytes(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM media_exports "
+                "WHERE status = 'completed'"
+            ).fetchone()
+        return int(row[0] if row else 0)
 
     def terminal_without_expiry(self) -> list[dict[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM media_exports WHERE status IN ('completed', 'failed', 'cancelled') "
-                "AND expires_at = ''"
+                "AND protected = 0 AND expires_at = ''"
             ).fetchall()
         return [self._row(row) for row in rows]
 
@@ -176,6 +259,7 @@ class MediaExportStore:
         except (TypeError, json.JSONDecodeError):
             payload["options"] = {}
         payload["cancel_requested"] = bool(payload.get("cancel_requested"))
+        payload["protected"] = bool(payload.get("protected"))
         return payload
 
 
@@ -254,8 +338,42 @@ class MediaExportManager:
         self._enqueue(str(job["id"]))
         return self.public_job(job)
 
-    def list(self, limit: int = 50) -> list[dict[str, object]]:
-        return [self.public_job(job) for job in self.store.list(limit)]
+    def list(
+        self,
+        limit: int = 50,
+        *,
+        offset: int = 0,
+        camera_id: str = "",
+        kind: str = "",
+        status: str = "",
+        protected: bool | None = None,
+    ) -> list[dict[str, object]]:
+        return [
+            self.public_job(job)
+            for job in self.store.list(
+                limit,
+                offset=offset,
+                camera_id=camera_id,
+                kind=kind,
+                status=status,
+                protected=protected,
+            )
+        ]
+
+    def count(
+        self,
+        *,
+        camera_id: str = "",
+        kind: str = "",
+        status: str = "",
+        protected: bool | None = None,
+    ) -> int:
+        return self.store.count(
+            camera_id=camera_id,
+            kind=kind,
+            status=status,
+            protected=protected,
+        )
 
     def active_jobs(self) -> list[dict[str, object]]:
         return [job for job in self.list(100) if job.get("status") in ACTIVE_STATUSES]
@@ -264,7 +382,7 @@ class MediaExportManager:
         job = self.store.get(job_id)
         return self.public_job(job) if job else None
 
-    def cancel_or_delete(self, job_id: str) -> dict[str, object]:
+    def cancel_or_delete(self, job_id: str, *, force: bool = False) -> dict[str, object]:
         job = self.store.get(job_id)
         if job is None:
             raise KeyError(job_id)
@@ -277,9 +395,27 @@ class MediaExportManager:
                     if self._active_process is not None:
                         self._terminate_process(self._active_process)
             return self.get(job_id) or {}
+        if bool(job.get("protected")) and not force:
+            raise PermissionError(job_id)
         self._delete_job_files(job)
         self.store.delete(job_id)
         return {"id": job_id, "deleted": True}
+
+    def set_protected(self, job_id: str, protected: bool) -> dict[str, object]:
+        job = self.store.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        expires_at = ""
+        if not protected and str(job.get("status") or "") not in ACTIVE_STATUSES:
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)
+            ).isoformat()
+        self.store.update(
+            job_id,
+            protected=1 if protected else 0,
+            expires_at=expires_at,
+        )
+        return self.get(job_id) or {}
 
     def output_path(self, job_id: str) -> tuple[Path, str]:
         job = self.store.get(job_id)
@@ -295,6 +431,7 @@ class MediaExportManager:
     def public_job(self, job: dict[str, object]) -> dict[str, object]:
         payload = {key: value for key, value in job.items() if key != "output_path"}
         payload["download_url"] = f"/api/exports/{job['id']}/download" if job.get("status") == "completed" else ""
+        payload["media_url"] = f"/api/exports/{job['id']}/media" if job.get("status") == "completed" else ""
         return payload
 
     def cleanup(self) -> None:
@@ -303,7 +440,10 @@ class MediaExportManager:
             self._delete_job_files(job)
             self.store.delete(str(job["id"]))
         completed = self.store.completed_oldest_first()
-        total = sum(int(job.get("size_bytes") or 0) for job in completed)
+        # Protected files still consume the export storage budget. Delete only
+        # unprotected jobs, but account for all completed output so protection
+        # cannot silently expand the configured quota.
+        total = self.store.completed_size_bytes()
         for job in completed:
             if total <= self.max_storage_bytes:
                 break

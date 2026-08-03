@@ -8,6 +8,7 @@
     "test:storage": "node tests/storage.mjs",
     "test:assistant-storage": "node tests/assistant-storage.mjs",
     "test:assistant-export": "node tests/assistant-export.mjs",
+    "test:export-center": "node tests/export-center.mjs",
     "test:recordings-soak": "node tests/recordings-soak.mjs",
     "test:recording-playback": "node tests/recording-playback.mjs",
     "test:object-tracks": "node tests/object-track-replay.mjs",

@@ -219,9 +219,62 @@ class RecordingApiTest(unittest.TestCase):
                 "id": "job-1",
                 "status": "completed",
                 "download_url": "/api/exports/job-1/download",
+                "media_url": "/api/exports/job-1/media",
             })
 
         self.assertEqual(payload["download_url"], "/survng/api/exports/job-1/download")
+        self.assertEqual(payload["media_url"], "/survng/api/exports/job-1/media")
+
+    def test_export_library_api_applies_filters_and_reports_total(self) -> None:
+        export_manager = Mock()
+        export_manager.list.return_value = [{"id": "job-1", "download_url": ""}]
+        export_manager.count.return_value = 7
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            payload = main.list_media_exports(
+                limit=25,
+                offset=5,
+                camera_id="gate",
+                kind="timelapse",
+                status="completed",
+                protected=True,
+            )
+
+        expected_filters = {
+            "camera_id": "gate",
+            "kind": "timelapse",
+            "status": "completed",
+            "protected": True,
+        }
+        export_manager.list.assert_called_once_with(25, offset=5, **expected_filters)
+        export_manager.count.assert_called_once_with(**expected_filters)
+        self.assertEqual(payload["total"], 7)
+        self.assertEqual(payload["offset"], 5)
+
+    def test_export_protection_api_updates_manager(self) -> None:
+        export_manager = Mock()
+        export_manager.set_protected.return_value = {
+            "id": "job-1", "protected": True, "download_url": "",
+        }
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            payload = main.protect_media_export(
+                "job-1", main.MediaExportProtectionRequest(protected=True)
+            )
+
+        export_manager.set_protected.assert_called_once_with("job-1", True)
+        self.assertTrue(payload["protected"])
+
+    def test_protected_export_delete_requires_force(self) -> None:
+        export_manager = Mock()
+        export_manager.cancel_or_delete.side_effect = PermissionError("job-1")
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            with self.assertRaises(HTTPException) as protected:
+                main.delete_media_export("job-1")
+
+        self.assertEqual(protected.exception.status_code, 409)
+        export_manager.cancel_or_delete.assert_called_once_with("job-1", force=False)
 
     def test_recording_updates_requests_async_edge_refresh_then_reads_index_only(self) -> None:
         recorder = Mock()

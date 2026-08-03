@@ -6661,6 +6661,37 @@ section.detection-settings-card {
   overflow-y: auto;
 }
 
+.recordings-section-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.recordings-section-switcher a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.recordings-section-switcher a.active {
+  border-color: rgba(15, 118, 110, .48);
+  background: var(--active);
+  color: var(--active-ink);
+}
+
 .recordings-v2-cameras button {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 8px;
@@ -6702,6 +6733,328 @@ section.detection-settings-card {
   min-width: 0;
   min-height: 0;
   padding: 8px;
+}
+
+.export-center-workspace {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+}
+
+.export-center-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 6px 8px;
+}
+
+.export-center-toolbar > span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-center-filters {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.export-center-filters label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.export-center-filters select,
+.export-center-filters button {
+  min-height: 30px;
+  font-size: 11px;
+}
+
+.export-center-filters select { width: 118px; }
+
+.export-center-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+}
+
+.export-center-filters button.active {
+  border-color: rgba(15, 118, 110, .48);
+  background: var(--active);
+  color: var(--active-ink);
+}
+
+.export-center-review {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.export-center-player {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 260px;
+  place-items: center;
+  overflow: hidden;
+  background: #050708;
+}
+
+.export-center-player video {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center top;
+  background: #050708;
+}
+
+.export-center-empty,
+.export-center-job-state {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  max-width: 460px;
+  color: var(--muted);
+  padding: 28px;
+  text-align: center;
+}
+
+.export-center-empty strong,
+.export-center-job-state strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.export-center-job-state.failed { color: var(--danger); }
+
+.export-center-details {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  padding: 13px;
+}
+
+.export-center-details header {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.export-center-details header > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.export-center-details header > div > strong { font-size: 15px; }
+
+.export-center-details header small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-status,
+.export-center-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: var(--control-muted);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+  padding: 4px 7px;
+  white-space: nowrap;
+}
+
+.export-status.completed,
+.export-center-card-status.completed { background: rgba(36, 180, 126, .15); color: #51d6a2; }
+.export-status.running,
+.export-status.queued,
+.export-center-card-status.running,
+.export-center-card-status.queued { background: rgba(20, 184, 166, .16); color: #6ee7d5; }
+.export-status.failed,
+.export-center-card-status.failed { background: rgba(194, 65, 93, .15); color: #ff9bb0; }
+
+.export-center-details dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.export-center-details dl div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 7px 0;
+}
+
+.export-center-details dt {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.export-center-details dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.export-center-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.export-center-actions a,
+.export-center-actions button {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--control);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 850;
+  padding: 6px 9px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.export-center-actions a.primary {
+  border-color: rgba(94, 234, 212, .42);
+  background: var(--active);
+  color: var(--active-ink);
+}
+
+.export-center-actions button.danger { color: var(--danger); }
+
+.export-center-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(194, 65, 93, .38);
+  border-radius: 5px;
+  background: rgba(194, 65, 93, .1);
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 750;
+  padding: 7px 9px;
+}
+
+.export-center-library {
+  display: flex;
+  align-items: stretch;
+  gap: 7px;
+  min-height: 116px;
+  max-height: 150px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 7px;
+  scrollbar-width: thin;
+}
+
+.export-center-library > button {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  flex: 0 0 230px;
+  gap: 5px 8px;
+  min-width: 0;
+  border-color: var(--line);
+  background: var(--panel-soft);
+  padding: 9px;
+  text-align: left;
+}
+
+.export-center-library > button.active {
+  border-color: rgba(94, 234, 212, .58);
+  background: color-mix(in srgb, var(--active) 70%, var(--panel));
+}
+
+.export-center-card-icon {
+  display: grid;
+  grid-row: 1 / 3;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--control-muted);
+  color: var(--muted);
+}
+
+.export-center-card-copy {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+}
+
+.export-center-card-copy strong,
+.export-center-card-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-center-card-copy strong { color: var(--ink); font-size: 11px; }
+.export-center-card-copy small { color: var(--muted); font-size: 9px; }
+.export-center-card-status { justify-self: start; }
+
+.export-center-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  padding: 20px;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .recordings-v2-player {
@@ -7450,6 +7803,18 @@ section.detection-settings-card {
     overflow-y: hidden;
   }
 
+  .recordings-section-switcher {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    grid-template-columns: 72px 72px;
+    margin: 0 2px 0 0;
+    border: 0;
+    border-right: 1px solid var(--line);
+    padding: 0 7px 0 0;
+    background: var(--canvas);
+  }
+
   .recordings-v2-cameras button {
     min-height: 34px;
   }
@@ -7533,6 +7898,48 @@ section.detection-settings-card {
 
   .recordings-v2-ticks small {
     display: none;
+  }
+
+  .export-center-page { min-height: calc(100dvh - 52px); }
+
+  .export-center-workspace {
+    grid-template-rows: auto auto auto;
+    padding: 6px;
+  }
+
+  .export-center-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .export-center-filters {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .export-center-filters label { flex: 1 1 130px; }
+  .export-center-filters select { width: 100%; }
+
+  .export-center-review {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: visible;
+  }
+
+  .export-center-player {
+    min-height: 220px;
+    max-height: 52dvh;
+  }
+
+  .export-center-details {
+    max-height: none;
+    overflow: visible;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .export-center-library {
+    min-height: 126px;
+    max-height: 126px;
   }
 }
 

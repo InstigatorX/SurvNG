@@ -4871,6 +4871,16 @@ function recordingIncidentEndEpoch(incident) {
   return Number.isFinite(parsed) ? parsed : recordingIncidentEpoch(incident);
 }
 
+function RecordingSectionSwitcher({ mode, cameraId = "" }) {
+  const query = cameraId ? `?camera=${encodeURIComponent(cameraId)}` : "";
+  return (
+    <div className="recordings-section-switcher" aria-label="Recording section">
+      <a className={mode === "history" ? "active" : ""} href={appUrl(`/recordings${query}`)}><Film size={14} />History</a>
+      <a className={mode === "exports" ? "active" : ""} href={appUrl(`/recordings/exports${query}`)}><Download size={14} />Exports</a>
+    </div>
+  );
+}
+
 function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
   const queryAt = Number(initialQuery.get("at"));
@@ -5042,7 +5052,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         setExportOptions({
           interval: Number(active.options?.sample_interval_seconds) || 30,
           fps: Number(active.options?.output_fps) || 30,
-          width: Number(active.options?.width) || 1280,
+          clipHeight: active.kind === "recording" ? Number(active.options?.height) || 0 : 0,
+          timelapseHeight: active.kind === "timelapse" ? Number(active.options?.height) || 720 : 720,
         });
         setExportJob(active);
       })
@@ -5508,6 +5519,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   return (
     <main className="recordings-v2-page">
       <aside className="recordings-v2-cameras" aria-label="Cameras">
+        <RecordingSectionSwitcher mode="history" cameraId={activeCameraId} />
         {cameras.map((camera) => (
           <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
             <Camera size={16} />
@@ -5608,6 +5620,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
               <div className="recordings-v2-export-actions">
                 {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={exportJob.download_url}><Download size={15} />Download</a> : null}
+                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/recordings/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Export Center</a> : null}
                 {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
                 {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
                 {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); }}>New export</button> : null}
@@ -5672,6 +5685,227 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
           </div>
         </div>
+      </section>
+    </main>
+  );
+}
+
+function exportStatusLabel(status) {
+  return ({
+    queued: "Queued",
+    running: "Creating",
+    cancelling: "Cancelling",
+    completed: "Ready",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  })[status] || String(status || "Unknown");
+}
+
+function ExportCenterPage({ timeZone, onAssistantContextChange }) {
+  const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
+  const [cameras, setCameras] = useState([]);
+  const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
+  const [kind, setKind] = useState("all");
+  const [status, setStatus] = useState("all");
+  const [protectedOnly, setProtectedOnly] = useState(false);
+  const [exportsList, setExportsList] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [selectedId, setSelectedId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [actionBusy, setActionBusy] = useState("");
+  const [revision, setRevision] = useState(0);
+
+  const filteredExports = useMemo(() => (
+    cameraId ? exportsList.filter((item) => item.camera_id === cameraId) : exportsList
+  ), [cameraId, exportsList]);
+  const selected = filteredExports.find((item) => item.id === selectedId) || filteredExports[0] || null;
+  const activeCount = exportsList.filter((item) => ["queued", "running", "cancelling"].includes(item.status)).length;
+  const readyBytes = exportsList
+    .filter((item) => item.status === "completed")
+    .reduce((sum, item) => sum + (Number(item.size_bytes) || 0), 0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/cameras", { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Camera status failed (${response.status})`);
+        return response.json();
+      })
+      .then(setCameras)
+      .catch((loadError) => {
+        if (loadError.name !== "AbortError") setError(loadError.message || "Unable to load cameras");
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ limit: "200" });
+    if (kind !== "all") params.set("kind", kind);
+    if (status !== "all") params.set("status", status);
+    if (protectedOnly) params.set("protected", "true");
+    setLoading(true);
+    setError("");
+    fetch(`/api/exports?${params.toString()}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || `Export list failed (${response.status})`);
+        return payload;
+      })
+      .then((payload) => {
+        setExportsList(payload.exports || []);
+        setTotal(Number(payload.total) || 0);
+      })
+      .catch((loadError) => {
+        if (loadError.name !== "AbortError") setError(loadError.message || "Unable to load exports");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [kind, protectedOnly, revision, status]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setRevision((current) => current + 1), activeCount ? 2_000 : 15_000);
+    return () => window.clearInterval(interval);
+  }, [activeCount]);
+
+  useEffect(() => {
+    if (!selectedId || !filteredExports.some((item) => item.id === selectedId)) {
+      setSelectedId(filteredExports[0]?.id || "");
+    }
+  }, [filteredExports, selectedId]);
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (cameraId) params.set("camera", cameraId);
+    window.history.replaceState(null, "", appUrl(`/recordings/exports${params.size ? `?${params.toString()}` : ""}`));
+  }, [cameraId]);
+
+  useEffect(() => {
+    onAssistantContextChange?.({
+      page: "recordings",
+      view: "exports",
+      camera_id: cameraId || selected?.camera_id || "",
+      export_id: selected?.id || "",
+      filters: { kind, status, protected: protectedOnly },
+    });
+  }, [cameraId, kind, onAssistantContextChange, protectedOnly, selected?.camera_id, selected?.id, status]);
+
+  async function setExportProtection(item, nextProtected) {
+    if (!item?.id || actionBusy) return;
+    setActionBusy(item.id);
+    setError("");
+    try {
+      const response = await fetch(`/api/exports/${encodeURIComponent(item.id)}/protection`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ protected: nextProtected }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Protection update failed (${response.status})`);
+      setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
+    } catch (actionError) {
+      setError(actionError.message || "Unable to update export protection");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  async function removeExport(item) {
+    if (!item?.id || actionBusy) return;
+    const active = ["queued", "running", "cancelling"].includes(item.status);
+    const prompt = active
+      ? `Cancel this ${item.kind === "timelapse" ? "timelapse" : "video export"}?`
+      : `Permanently delete ${item.output_name || "this export"}?${item.protected ? " It is currently protected." : ""}`;
+    if (!window.confirm(prompt)) return;
+    setActionBusy(item.id);
+    setError("");
+    try {
+      const force = item.protected && !active ? "?force=true" : "";
+      const response = await fetch(`/api/exports/${encodeURIComponent(item.id)}${force}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Delete failed (${response.status})`);
+      if (payload.deleted) {
+        setExportsList((current) => current.filter((candidate) => candidate.id !== item.id));
+        setSelectedId("");
+      } else {
+        setExportsList((current) => current.map((candidate) => candidate.id === payload.id ? payload : candidate));
+      }
+    } catch (actionError) {
+      setError(actionError.message || "Unable to remove export");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  return (
+    <main className="recordings-v2-page export-center-page">
+      <aside className="recordings-v2-cameras export-center-cameras" aria-label="Export cameras">
+        <RecordingSectionSwitcher mode="exports" cameraId={cameraId} />
+        <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}>
+          <Film size={16} /><span>All exports</span><i className={exportsList.length ? "online" : ""} />
+        </button>
+        {cameras.map((camera) => (
+          <button key={camera.id} type="button" className={camera.id === cameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
+            <Camera size={16} /><span>{camera.name}</span><i className={exportsList.some((item) => item.camera_id === camera.id) ? "online" : ""} />
+          </button>
+        ))}
+      </aside>
+
+      <section className="export-center-workspace">
+        <header className="export-center-toolbar">
+          <div className="export-center-filters">
+            <label>Type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All exports</option><option value="recording">Video clips</option><option value="timelapse">Timelapses</option></select></label>
+            <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Any status</option><option value="completed">Ready</option><option value="active">In progress</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></label>
+            <button type="button" className={protectedOnly ? "active" : ""} onClick={() => setProtectedOnly((current) => !current)}><ShieldCheck size={15} />Protected</button>
+            <button type="button" onClick={() => setRevision((current) => current + 1)} disabled={loading}><RefreshCcw className={loading ? "spin" : ""} size={15} />Refresh</button>
+          </div>
+          <span>{filteredExports.length.toLocaleString()} shown · {total.toLocaleString()} matching · {formatBytes(readyBytes)}</span>
+        </header>
+
+        <section className="export-center-review">
+          <div className="export-center-player">
+            {selected?.status === "completed" && selected.media_url ? <video key={selected.id} src={selected.media_url} controls playsInline preload="metadata" /> : null}
+            {!selected && !loading ? <div className="export-center-empty"><Film size={30} /><strong>No exports match these filters</strong><span>Create a clip or timelapse from recording history or ask the SurvNG Assistant.</span></div> : null}
+            {selected && selected.status !== "completed" ? <div className={`export-center-job-state ${selected.status}`}><RefreshCcw className={["queued", "running", "cancelling"].includes(selected.status) ? "spin" : ""} size={30} /><strong>{selected.phase || exportStatusLabel(selected.status)}</strong><span>{selected.error || `${Math.round(Number(selected.progress) || 0)}% complete`}</span></div> : null}
+          </div>
+          <aside className="export-center-details">
+            {selected ? <>
+              <header><div><strong>{selected.kind === "timelapse" ? "Timelapse" : "Video clip"}</strong><span className={`export-status ${selected.status}`}>{exportStatusLabel(selected.status)}</span></div><small>{selected.output_name || `${selected.camera_id} export`}</small></header>
+              <dl>
+                <div><dt>Camera</dt><dd>{cameras.find((camera) => camera.id === selected.camera_id)?.name || selected.camera_id}</dd></div>
+                <div><dt>Stream</dt><dd>{selected.source === "live" ? "Sub" : "Main"}</dd></div>
+                <div><dt>From</dt><dd>{formatDateTime(Number(selected.start_epoch), timeZone)}</dd></div>
+                <div><dt>To</dt><dd>{formatDateTime(Number(selected.end_epoch), timeZone)}</dd></div>
+                <div><dt>Duration</dt><dd>{formatDuration(Number(selected.end_epoch) - Number(selected.start_epoch))}</dd></div>
+                <div><dt>Resolution</dt><dd>{Number(selected.options?.height) > 0 ? `${Number(selected.options.height)}p` : Number(selected.options?.width) > 0 ? `${Number(selected.options.width)}px wide (legacy)` : "Original"}</dd></div>
+                {selected.kind === "timelapse" ? <div><dt>Timelapse</dt><dd>Every {formatDuration(Number(selected.options?.sample_interval_seconds) || 30)} · {Number(selected.options?.output_fps) || 30} FPS</dd></div> : null}
+                <div><dt>File size</dt><dd>{formatBytes(Number(selected.size_bytes))}</dd></div>
+                <div><dt>Created</dt><dd>{formatDateTime(selected.created_at, timeZone)}</dd></div>
+                <div><dt>Retention</dt><dd>{selected.protected ? "Protected" : selected.expires_at ? `Until ${formatDateTime(selected.expires_at, timeZone)}` : "While active"}</dd></div>
+              </dl>
+              <div className="export-center-actions">
+                {selected.status === "completed" && selected.download_url ? <a className="primary" href={selected.download_url}><Download size={15} />Download</a> : null}
+                {selected.status === "completed" ? <button type="button" onClick={() => setExportProtection(selected, !selected.protected)} disabled={actionBusy === selected.id}><ShieldCheck size={15} />{selected.protected ? "Unprotect" : "Protect"}</button> : null}
+                <button type="button" className="danger" onClick={() => removeExport(selected)} disabled={actionBusy === selected.id || selected.status === "cancelling"}><Trash2 size={15} />{["queued", "running"].includes(selected.status) ? "Cancel" : "Delete"}</button>
+              </div>
+            </> : null}
+          </aside>
+        </section>
+
+        {error ? <div className="export-center-error"><CircleAlert size={15} />{error}</div> : null}
+        <section className="export-center-library" aria-label="Saved exports">
+          {filteredExports.map((item) => (
+            <button key={item.id} type="button" className={`${item.id === selected?.id ? "active" : ""} ${item.status}`} onClick={() => setSelectedId(item.id)}>
+              <span className="export-center-card-icon">{item.kind === "timelapse" ? <Clock3 size={23} /> : <Film size={23} />}</span>
+              <span className="export-center-card-copy"><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{item.kind === "timelapse" ? "Timelapse" : "Video clip"} · {formatDateTime(Number(item.start_epoch), timeZone)}</small><small>{formatDuration(Number(item.end_epoch) - Number(item.start_epoch))} · {formatBytes(Number(item.size_bytes))}</small></span>
+              <span className={`export-center-card-status ${item.status}`}>{item.protected ? <ShieldCheck size={13} /> : null}{exportStatusLabel(item.status)}</span>
+            </button>
+          ))}
+          {loading && !filteredExports.length ? <div className="export-center-loading"><RefreshCcw className="spin" size={20} />Loading exports</div> : null}
+        </section>
       </section>
     </main>
   );
@@ -9629,6 +9863,7 @@ function App() {
   const [theme, setTheme] = useStoredState("survng.theme", "auto");
   const [recordingContext, setRecordingContext] = useState(null);
   const pathname = appPathname();
+  const isExportCenter = pathname.startsWith("/recordings/exports");
   const page = pathname.startsWith("/config")
     ? "config"
     : pathname.startsWith("/recordings")
@@ -9650,7 +9885,9 @@ function App() {
       {page === "config"
         ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
         : page === "recordings"
-          ? <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+          ? isExportCenter
+            ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+            : <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
           : page === "incidents"
             ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
             : page === "faces"

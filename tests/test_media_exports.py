@@ -367,6 +367,88 @@ class MediaExportTest(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertIsNone(manager.get(str(job["id"])))
 
+    def test_protected_export_survives_expiry_and_storage_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage",
+                root / "database",
+                recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu",
+                max_storage_bytes=1,
+            )
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            output = manager.recording_dir / "protected.mp4"
+            output.write_bytes(b"protected-media")
+            manager.store.update(
+                str(job["id"]),
+                status="completed",
+                output_path=str(output),
+                output_name=output.name,
+                size_bytes=output.stat().st_size,
+                expires_at="2000-01-01T00:00:00+00:00",
+            )
+
+            protected = manager.set_protected(str(job["id"]), True)
+            manager.cleanup()
+
+            self.assertTrue(protected["protected"])
+            self.assertEqual(protected["expires_at"], "")
+            self.assertTrue(output.exists())
+            self.assertIsNotNone(manager.get(str(job["id"])))
+
+    def test_protected_export_requires_force_for_manual_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu",
+            )
+            job = manager.store.create({
+                "kind": "timelapse", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            output = manager.timelapse_dir / "protected.mp4"
+            output.write_bytes(b"media")
+            manager.store.update(
+                str(job["id"]), status="completed", output_path=str(output),
+                output_name=output.name, size_bytes=5,
+            )
+            manager.set_protected(str(job["id"]), True)
+
+            with self.assertRaises(PermissionError):
+                manager.cancel_or_delete(str(job["id"]))
+            result = manager.cancel_or_delete(str(job["id"]), force=True)
+
+            self.assertTrue(result["deleted"])
+            self.assertFalse(output.exists())
+
+    def test_export_store_filters_and_counts_library_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = MediaExportStore(Path(temporary))
+            gate = store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            foyer = store.create({
+                "kind": "timelapse", "camera_id": "foyer", "source": "live",
+                "start_epoch": 200.0, "end_epoch": 220.0, "options": {},
+            })
+            store.update(str(gate["id"]), status="completed", protected=1)
+            store.update(str(foyer["id"]), status="running")
+
+            protected = store.list(camera_id="gate", protected=True)
+            active = store.list(status="active")
+
+            self.assertEqual([row["id"] for row in protected], [gate["id"]])
+            self.assertEqual([row["id"] for row in active], [foyer["id"]])
+            self.assertEqual(store.count(kind="timelapse"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
