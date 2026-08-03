@@ -83,6 +83,19 @@ class ConfigReloadTest(unittest.TestCase):
 
         self.assertEqual(tasks, [])
 
+    def test_active_media_export_blocks_manager_reload(self) -> None:
+        active = Mock()
+        exports = Mock()
+        exports.active_jobs.return_value = [{"kind": "timelapse", "status": "running"}]
+
+        with (
+            patch.object(main.STORAGE_MAINTENANCE, "status", return_value={"status": "idle"}),
+            patch.object(main, "MEDIA_EXPORTS", exports),
+        ):
+            tasks = main._active_storage_tasks(active)
+
+        self.assertEqual(tasks, ["media timelapse export"])
+
     def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {

@@ -72,6 +72,7 @@ from .motion_pipeline import (
     resolve_motion_pipeline_graphs,
 )
 from .motion_ai_review import aggregate_motion_ai_review
+from .media_exports import MediaExportManager
 from .go2rtc import Go2RtcError
 from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
@@ -161,6 +162,8 @@ TELEMETRY_HISTORY_STATE: dict[str, float] = {"last_sample_at": 0.0}
 TELEMETRY_PERSISTED_CACHE_LOCK = threading.Lock()
 TELEMETRY_PERSISTED_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
+MEDIA_EXPORTS_LOCK = threading.Lock()
+MEDIA_EXPORTS: MediaExportManager | None = None
 
 
 class RecordingPrewarmCancelled(Exception):
@@ -607,6 +610,11 @@ def _active_storage_tasks(active_manager: AppManager) -> list[str]:
     if maintenance.get("status") in {"running", "cancelling"}:
         mode = str(maintenance.get("mode") or "maintenance").replace("_", " ")
         tasks.append(f"storage {mode}")
+    if MEDIA_EXPORTS is not None:
+        exports = MEDIA_EXPORTS.active_jobs()
+        if exports:
+            kinds = sorted({str(job.get("kind") or "media") for job in exports})
+            tasks.append(f"media {'/'.join(kinds)} export")
     return tasks
 
 
@@ -844,6 +852,7 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     early_onvif_thread: threading.Thread | None = None
     early_onvif_lock = threading.Lock()
+    media_exports: MediaExportManager | None = None
 
     def release_onvif_before_server_drain() -> None:
         nonlocal early_onvif_thread
@@ -881,6 +890,8 @@ async def lifespan(app: FastAPI):
         )
     manager.start_all()
     try:
+        media_exports = _media_export_manager()
+        media_exports.start()
         _start_face_observation_sync()
         _start_recording_prewarmer()
         yield
@@ -895,20 +906,26 @@ async def lifespan(app: FastAPI):
                 )
         finally:
             try:
-                _stop_recording_prewarmer()
+                if media_exports is not None and not media_exports.stop(timeout=10.0):
+                    logging.getLogger("uvicorn.error").warning(
+                        "media export worker did not stop before application shutdown"
+                    )
             finally:
                 try:
-                    with MANAGER_RELOAD_LOCK:
-                        manager.stop_all()
+                    _stop_recording_prewarmer()
                 finally:
-                    if early_onvif_thread is not None and early_onvif_thread.is_alive():
-                        early_onvif_thread.join()
                     try:
-                        manager.detector.stop_resource_tracker()
-                    except Exception:
-                        logging.getLogger("uvicorn.error").exception(
-                            "final multiprocessing resource tracker cleanup failed"
-                        )
+                        with MANAGER_RELOAD_LOCK:
+                            manager.stop_all()
+                    finally:
+                        if early_onvif_thread is not None and early_onvif_thread.is_alive():
+                            early_onvif_thread.join()
+                        try:
+                            manager.detector.stop_resource_tracker()
+                        except Exception:
+                            logging.getLogger("uvicorn.error").exception(
+                                "final multiprocessing resource tracker cleanup failed"
+                            )
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
@@ -1103,6 +1120,17 @@ class RecordingRetentionRequest(BaseModel):
     apply: bool = False
 
 
+class MediaExportRequest(BaseModel):
+    kind: str = Field(default="recording", pattern=r"^(recording|timelapse)$")
+    camera_id: str = Field(min_length=1, max_length=128)
+    source: str = Field(default="main", pattern=r"^(main|live)$")
+    start_epoch: float
+    end_epoch: float
+    sample_interval_seconds: float = Field(default=30.0, ge=1.0, le=3600.0)
+    output_fps: int = Field(default=30, ge=1, le=60)
+    width: int = Field(default=1280, ge=320, le=3840)
+
+
 @app.get("/api/retention/status")
 def recording_retention_status() -> dict:
     return manager.recorder.retention_status()
@@ -1270,6 +1298,45 @@ def _ffmpeg_vaapi_info() -> dict:
 def _hardware_acceleration_mode() -> str:
     mode = str(getattr(config, "hardware_acceleration", "auto") or "auto").lower()
     return mode if mode in {"auto", "vaapi", "qsv", "off"} else "auto"
+
+
+def _media_export_hardware_backend() -> str:
+    """Resolve the configured, currently usable H.264 export encoder."""
+    mode = _hardware_acceleration_mode()
+    if mode == "off":
+        return "cpu"
+    if mode in {"auto", "vaapi"}:
+        info = _ffmpeg_vaapi_info()
+        if info.get("available") and "h264_vaapi" in set(info.get("encoders") or []):
+            return "vaapi"
+        if mode == "vaapi":
+            return "cpu"
+    if mode in {"auto", "qsv"}:
+        info = _ffmpeg_qsv_info()
+        if info.get("available") and "h264_qsv" in set(info.get("encoders") or []):
+            return "qsv"
+    return "cpu"
+
+
+def _media_export_hardware_device(backend: str) -> str:
+    info = _ffmpeg_qsv_info() if backend == "qsv" else _ffmpeg_vaapi_info()
+    devices = info.get("render_devices") or []
+    return str(devices[0]) if devices else str(info.get("device") or "")
+
+
+def _media_export_manager() -> MediaExportManager:
+    global MEDIA_EXPORTS
+    with MEDIA_EXPORTS_LOCK:
+        if MEDIA_EXPORTS is None:
+            MEDIA_EXPORTS = MediaExportManager(
+                storage_dir=manager.storage_dir,
+                database_dir=manager.database_dir,
+                recorder=lambda: manager.recorder,
+                ffmpeg_path=lambda: config.ffmpeg_path,
+                hardware_backend=_media_export_hardware_backend,
+                hardware_device=_media_export_hardware_device,
+            )
+        return MEDIA_EXPORTS
 
 
 def _probe_video_codec(path: Path) -> str:
@@ -6117,6 +6184,80 @@ def recording_day(
         ],
         "available_sources": available_sources,
     }
+
+
+def _public_media_export(job: dict[str, object]) -> dict[str, object]:
+    payload = dict(job)
+    if payload.get("download_url"):
+        payload["download_url"] = public_url(str(payload["download_url"]))
+    return payload
+
+
+@app.post("/api/exports", status_code=202)
+def create_media_export(request: MediaExportRequest) -> dict[str, object]:
+    _require_recording_camera(request.camera_id)
+    maximum = 24 * 60 * 60 if request.kind == "recording" else 7 * 24 * 60 * 60
+    _validate_recording_range(
+        request.start_epoch,
+        request.end_epoch,
+        maximum,
+        f"invalid {request.kind} export range",
+    )
+    options: dict[str, object] = {}
+    if request.kind == "timelapse":
+        options = {
+            "sample_interval_seconds": request.sample_interval_seconds,
+            "output_fps": request.output_fps,
+            "width": request.width,
+        }
+    try:
+        job = _media_export_manager().create({
+            "kind": request.kind,
+            "camera_id": request.camera_id,
+            "source": recording_source(request.source),
+            "start_epoch": request.start_epoch,
+            "end_epoch": request.end_epoch,
+            "options": options,
+        })
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return _public_media_export(job)
+
+
+@app.get("/api/exports")
+def list_media_exports(limit: int = 50) -> dict[str, object]:
+    jobs = _media_export_manager().list(max(1, min(limit, 200)))
+    return {"exports": [_public_media_export(job) for job in jobs]}
+
+
+@app.get("/api/exports/{job_id}")
+def get_media_export(job_id: str) -> dict[str, object]:
+    job = _media_export_manager().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="export not found")
+    return _public_media_export(job)
+
+
+@app.get("/api/exports/{job_id}/download")
+def download_media_export(job_id: str) -> FileResponse:
+    try:
+        path, name = _media_export_manager().output_path(job_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="completed export not found") from None
+    return FileResponse(
+        path,
+        filename=name,
+        media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@app.delete("/api/exports/{job_id}", status_code=202)
+def delete_media_export(job_id: str) -> dict[str, object]:
+    try:
+        return _public_media_export(_media_export_manager().cancel_or_delete(job_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="export not found") from None
 
 
 @app.get("/api/cameras/{camera_id}/recordings/window")

@@ -4833,6 +4833,12 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [manifestRetryToken, setManifestRetryToken] = useState(0);
   const [recordingIndexRevision, setRecordingIndexRevision] = useState(0);
   const [followTarget, setFollowTarget] = useState(null);
+  const [exportRange, setExportRange] = useState(null);
+  const [exportKind, setExportKind] = useState("recording");
+  const [exportOptions, setExportOptions] = useState({ interval: 30, fps: 30, width: 1280 });
+  const [exportJob, setExportJob] = useState(null);
+  const [exportError, setExportError] = useState("");
+  const [exportSubmitting, setExportSubmitting] = useState(false);
 
   const activeCameraId = cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
@@ -4905,6 +4911,71 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       .filter((event) => event.distance <= maximumDistance)
       .sort((left, right) => left.incident_epoch - right.incident_epoch)
   }, [filteredEvents, incidentRangeHours, playhead]);
+
+  useEffect(() => {
+    if (!exportJob?.id || !["queued", "running", "cancelling"].includes(exportJob.status)) return undefined;
+    let stopped = false;
+    let timer = null;
+    const refresh = async () => {
+      try {
+        const response = await fetch(appUrl(`/api/exports/${exportJob.id}`));
+        if (!response.ok) throw new Error(`Export status failed (${response.status})`);
+        const next = await response.json();
+        if (!stopped) {
+          setExportJob(next);
+          if (["queued", "running", "cancelling"].includes(next.status)) {
+            timer = window.setTimeout(refresh, 1000);
+          }
+        }
+      } catch (error) {
+        if (!stopped) {
+          setExportError(error.message || "Unable to refresh export status");
+          timer = window.setTimeout(refresh, 2500);
+        }
+      }
+    };
+    timer = window.setTimeout(refresh, 700);
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [exportJob?.id, exportJob?.status]);
+
+  useEffect(() => {
+    setExportRange(null);
+    setExportJob(null);
+    setExportError("");
+  }, [activeCameraId, date, source]);
+
+  useEffect(() => {
+    if (!activeCameraId) return undefined;
+    const controller = new AbortController();
+    fetch(appUrl("/api/exports?limit=100"), { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Export history failed (${response.status})`);
+        return response.json();
+      })
+      .then((payload) => {
+        const active = (payload.exports || []).find((job) => (
+          job.camera_id === activeCameraId
+          && job.source === source
+          && ["queued", "running", "cancelling"].includes(job.status)
+        ));
+        if (!active || controller.signal.aborted) return;
+        setExportKind(active.kind === "timelapse" ? "timelapse" : "recording");
+        setExportRange({ start: Number(active.start_epoch), end: Number(active.end_epoch) });
+        setExportOptions({
+          interval: Number(active.options?.sample_interval_seconds) || 30,
+          fps: Number(active.options?.output_fps) || 30,
+          width: Number(active.options?.width) || 1280,
+        });
+        setExportJob(active);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") console.warn("Unable to restore active export", error);
+      });
+    return () => controller.abort();
+  }, [activeCameraId, date, source]);
 
   function snapToRecording(epoch) {
     if (!timeline.length) return null;
@@ -5300,6 +5371,65 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     setDate(next > today ? today : next);
   }
 
+  function toggleExport() {
+    if (exportJob && ["queued", "running", "cancelling"].includes(exportJob.status)) return;
+    if (exportRange) {
+      setExportRange(null);
+      setExportJob(null);
+      setExportError("");
+      return;
+    }
+    const center = Number.isFinite(playhead) ? playhead : timeline[0]?.start_epoch ?? dayStart;
+    const start = Math.max(dayStart, center - 5 * 60);
+    const end = Math.min(dayEnd, Math.max(start + 30, center + 5 * 60));
+    setExportRange({ start, end });
+    setExportJob(null);
+    setExportError("");
+  }
+
+  const exportActive = Boolean(exportJob && ["queued", "running", "cancelling"].includes(exportJob.status));
+
+  async function startExport() {
+    if (!activeCameraId || !exportRange || exportSubmitting) return;
+    setExportSubmitting(true);
+    setExportError("");
+    try {
+      const response = await fetch(appUrl("/api/exports"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: exportKind,
+          camera_id: activeCameraId,
+          source,
+          start_epoch: exportRange.start,
+          end_epoch: exportRange.end,
+          sample_interval_seconds: exportOptions.interval,
+          output_fps: exportOptions.fps,
+          width: exportOptions.width,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Export failed (${response.status})`);
+      setExportJob(payload);
+    } catch (error) {
+      setExportError(error.message || "Unable to start export");
+    } finally {
+      setExportSubmitting(false);
+    }
+  }
+
+  async function cancelExport() {
+    if (!exportJob?.id) return;
+    try {
+      const response = await fetch(appUrl(`/api/exports/${exportJob.id}`), { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `Cancel failed (${response.status})`);
+      setExportJob(payload.deleted ? null : payload);
+    } catch (error) {
+      setExportError(error.message || "Unable to cancel export");
+    }
+  }
+
   return (
     <main className="recordings-v2-page">
       <aside className="recordings-v2-cameras" aria-label="Cameras">
@@ -5355,6 +5485,14 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
             <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
           </div>
+          <button
+            type="button"
+            className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`}
+            onClick={toggleExport}
+            disabled={!timeline.length || exportActive}
+          >
+            <Download size={15} />{exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
+          </button>
         </div>
 
         <div className="recordings-v2-controls">
@@ -5371,7 +5509,43 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
+            exportRange={exportRange}
+            onExportRangeChange={exportJob ? null : setExportRange}
           />
+          {exportRange ? (
+            <section className="recordings-v2-export-panel" aria-label="Export recording">
+              <div className="recordings-v2-export-kind" role="group" aria-label="Export type">
+                <button type="button" className={exportKind === "recording" ? "active" : ""} onClick={() => setExportKind("recording")} disabled={Boolean(exportJob)}>Video clip</button>
+                <button type="button" className={exportKind === "timelapse" ? "active" : ""} onClick={() => setExportKind("timelapse")} disabled={Boolean(exportJob)}>Timelapse</button>
+              </div>
+              <div className="recordings-v2-export-range-label">
+                <span><b>Start</b>{formatDateTime(exportRange.start, timeZone)}</span>
+                <span><b>End</b>{formatDateTime(exportRange.end, timeZone)}</span>
+                <span><b>Length</b>{formatDuration(exportRange.end - exportRange.start)}</span>
+              </div>
+              {exportKind === "timelapse" ? (
+                <div className="recordings-v2-export-options">
+                  <label><span>Capture every</span><select value={exportOptions.interval} onChange={(event) => setExportOptions((current) => ({ ...current, interval: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="5">5 sec</option><option value="10">10 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="300">5 min</option></select></label>
+                  <label><span>Playback</span><select value={exportOptions.fps} onChange={(event) => setExportOptions((current) => ({ ...current, fps: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
+                  <label><span>Resolution</span><select value={exportOptions.width} onChange={(event) => setExportOptions((current) => ({ ...current, width: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="640">640 wide</option><option value="1280">1280 wide</option><option value="1920">1920 wide</option></select></label>
+                </div>
+              ) : <p>Creates a fast, original-quality clip without re-encoding. Gaps or stream-format changes are delivered as separate files in one download.</p>}
+              {exportJob ? (
+                <div className={`recordings-v2-export-status ${exportJob.status}`}>
+                  <span><b>{exportJob.phase || exportJob.status}</b><small>{Math.round(Number(exportJob.progress) || 0)}%</small></span>
+                  <i><b style={{ width: `${Math.max(0, Math.min(100, Number(exportJob.progress) || 0))}%` }} /></i>
+                  {exportJob.error ? <em>{exportJob.error}</em> : null}
+                </div>
+              ) : null}
+              {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
+              <div className="recordings-v2-export-actions">
+                {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={exportJob.download_url}><Download size={15} />Download</a> : null}
+                {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
+                {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
+                {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); }}>New export</button> : null}
+              </div>
+            </section>
+          ) : null}
           <div className="recordings-v2-date">
             <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={16} /></button>
             <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
@@ -5427,7 +5601,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek }) {
+function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek, exportRange, onExportRangeChange }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
@@ -5449,6 +5623,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
   const localPreviewRef = useRef(null);
   const localPreviewCanvasRef = useRef(null);
   const localPreviewTargetRef = useRef(null);
+  const exportDragRef = useRef(null);
   const ticks = useMemo(() => {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone,
@@ -5786,6 +5961,48 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
     else commit(pointerValue(event, drag));
   }
 
+  function exportEpochAtPointer(event, drag) {
+    const pointerX = Math.max(0, Math.min(drag.width, event.clientX - drag.left));
+    return startEpoch + (pointerX / drag.width) * duration;
+  }
+
+  function updateExportHandle(kind, epoch) {
+    if (!exportRange) return;
+    const minimumGap = 1;
+    const next = kind === "start"
+      ? { ...exportRange, start: Math.max(startEpoch, Math.min(exportRange.end - minimumGap, epoch)) }
+      : { ...exportRange, end: Math.min(endEpoch, Math.max(exportRange.start + minimumGap, epoch)) };
+    onExportRangeChange?.(next);
+  }
+
+  function startExportDrag(kind, event) {
+    const track = event.currentTarget.parentElement;
+    const rect = track?.getBoundingClientRect();
+    if (!rect?.width) return;
+    exportDragRef.current = { kind, pointerId: event.pointerId, left: rect.left, width: rect.width };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function moveExportDrag(event) {
+    const drag = exportDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    updateExportHandle(drag.kind, exportEpochAtPointer(event, drag));
+    event.preventDefault();
+  }
+
+  function finishExportDrag(event) {
+    const drag = exportDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    updateExportHandle(drag.kind, exportEpochAtPointer(event, drag));
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    exportDragRef.current = null;
+    event.preventDefault();
+  }
+
+  const exportStartPercent = exportRange ? ((exportRange.start - startEpoch) / duration) * 100 : 0;
+  const exportEndPercent = exportRange ? ((exportRange.end - startEpoch) / duration) * 100 : 0;
+
   return (
     <div className="recordings-v2-timeline">
       <div className="recordings-v2-track">
@@ -5808,6 +6025,37 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
         <div className="recordings-v2-event-markers" aria-hidden="true">
           {eventMarkers.map((event) => <b key={event.id} className={event.hasObjects ? "object" : "motion"} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
+        {exportRange ? (
+          <>
+            <div
+              className="recordings-v2-export-selection"
+              style={{ left: `${exportStartPercent}%`, width: `${Math.max(0, exportEndPercent - exportStartPercent)}%` }}
+              aria-hidden="true"
+            />
+            <button
+              type="button"
+              className="recordings-v2-export-handle start"
+              style={{ left: `${exportStartPercent}%` }}
+              onPointerDown={(event) => startExportDrag("start", event)}
+              onPointerMove={moveExportDrag}
+              onPointerUp={finishExportDrag}
+              onPointerCancel={finishExportDrag}
+              disabled={!onExportRangeChange}
+              aria-label={`Export start ${formatTimeOnly(exportRange.start, timeZone)}`}
+            ><span>IN</span></button>
+            <button
+              type="button"
+              className="recordings-v2-export-handle end"
+              style={{ left: `${exportEndPercent}%` }}
+              onPointerDown={(event) => startExportDrag("end", event)}
+              onPointerMove={moveExportDrag}
+              onPointerUp={finishExportDrag}
+              onPointerCancel={finishExportDrag}
+              disabled={!onExportRangeChange}
+              aria-label={`Export end ${formatTimeOnly(exportRange.end, timeZone)}`}
+            ><span>OUT</span></button>
+          </>
+        ) : null}
         {localPreviewEnabled && previewManifestUrl ? (
           <ShakaVideo
             ref={localPreviewRef}

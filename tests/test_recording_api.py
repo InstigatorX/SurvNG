@@ -138,6 +138,69 @@ class RecordingApiTest(unittest.TestCase):
         self.assertEqual(payload["incidents"][0]["labels"], ["car"])
         self.assertEqual(payload["incidents"][0]["representative_event_id"], 8)
 
+    def test_create_media_export_uses_shared_manager_and_configured_source(self) -> None:
+        export_manager = Mock()
+        export_manager.create.return_value = {
+            "id": "job-1",
+            "status": "queued",
+            "download_url": "",
+        }
+        manager = SimpleNamespace(camera=lambda camera_id: object() if camera_id == "gate" else None)
+        request = main.MediaExportRequest(
+            kind="timelapse",
+            camera_id="gate",
+            source="live",
+            start_epoch=100.0,
+            end_epoch=400.0,
+            sample_interval_seconds=10,
+            output_fps=24,
+            width=1920,
+        )
+
+        with patch.object(main, "manager", manager), patch.object(main, "_media_export_manager", return_value=export_manager):
+            payload = main.create_media_export(request)
+
+        self.assertEqual(payload["id"], "job-1")
+        export_manager.create.assert_called_once_with({
+            "kind": "timelapse",
+            "camera_id": "gate",
+            "source": "live",
+            "start_epoch": 100.0,
+            "end_epoch": 400.0,
+            "options": {
+                "sample_interval_seconds": 10.0,
+                "output_fps": 24,
+                "width": 1920,
+            },
+        })
+
+    def test_media_export_rejects_overlong_clip_before_queueing(self) -> None:
+        export_manager = Mock()
+        manager = SimpleNamespace(camera=lambda _camera_id: object())
+        request = main.MediaExportRequest(
+            kind="recording",
+            camera_id="gate",
+            start_epoch=100.0,
+            end_epoch=100.0 + 24 * 60 * 60 + 1,
+        )
+
+        with patch.object(main, "manager", manager), patch.object(main, "_media_export_manager", return_value=export_manager):
+            with self.assertRaises(HTTPException) as invalid:
+                main.create_media_export(request)
+
+        self.assertEqual(invalid.exception.status_code, 400)
+        export_manager.create.assert_not_called()
+
+    def test_public_media_export_applies_proxy_base_path_to_download(self) -> None:
+        with patch.object(main.config, "base_path", "/survng"):
+            payload = main._public_media_export({
+                "id": "job-1",
+                "status": "completed",
+                "download_url": "/api/exports/job-1/download",
+            })
+
+        self.assertEqual(payload["download_url"], "/survng/api/exports/job-1/download")
+
     def test_recording_updates_requests_async_edge_refresh_then_reads_index_only(self) -> None:
         recorder = Mock()
         recorder.recording_availability_between.return_value = {
