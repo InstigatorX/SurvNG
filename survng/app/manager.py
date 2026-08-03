@@ -152,12 +152,15 @@ class AppManager:
         self._lifecycle_lock = threading.RLock()
         self._runtime_state_lock = threading.Lock()
         self._runtime_state_path = self.storage_dir / "runtime_state.json"
-        runtime_state = self._load_runtime_state()
-        self._recording_enabled = self._boolean_preferences(runtime_state, "recording_enabled")
-        self._detection_enabled = self._boolean_preferences(runtime_state, "detection_enabled")
-        persisted_camera_enabled = self._boolean_preferences(runtime_state, "camera_enabled")
+        # A fresh SurvNG process always starts from the safe, deterministic
+        # operational default. Home-automation policies can reapply their
+        # desired runtime state after MQTT reports that the server is running.
+        # In-process configuration reloads preserve current preferences through
+        # apply_runtime_preferences() before the replacement manager starts.
+        self._recording_enabled: dict[str, bool] = {}
+        self._detection_enabled: dict[str, bool] = {}
         self._camera_enabled = {
-            camera.id: persisted_camera_enabled.get(camera.id, True)
+            camera.id: True
             for camera in config.cameras
         }
         self._stopping = False
@@ -265,24 +268,6 @@ class AppManager:
                 continue
             seen.add(camera.id)
             yield camera
-
-    def _load_runtime_state(self) -> dict:
-        try:
-            payload = json.loads(self._runtime_state_path.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, dict) else {}
-        except (OSError, ValueError, TypeError):
-            return {}
-
-    @staticmethod
-    def _boolean_preferences(payload: dict, key: str) -> dict[str, bool]:
-        values = payload.get(key, {})
-        if not isinstance(values, dict):
-            return {}
-        return {
-            str(camera_id): enabled
-            for camera_id, enabled in values.items()
-            if isinstance(enabled, bool)
-        }
 
     def _save_runtime_state(self) -> None:
         with self._runtime_state_lock:
@@ -441,6 +426,11 @@ class AppManager:
                 return
             self._stopping = False
             try:
+                # Replace any state left by the previous process with the
+                # preferences this manager will actually apply. On a full
+                # service start these are all-on defaults; reload candidates
+                # receive the active manager's preferences before this point.
+                self._save_runtime_state()
                 self.detector.start()
                 self.faces.start()
                 cameras = list(self._unique_cameras())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import tempfile
 import unittest
@@ -362,14 +363,37 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         self.assertEqual(manager.runtime_preferences(), previous)
 
-    def test_invalid_runtime_state_values_do_not_enable_features(self) -> None:
-        self.assertEqual(
-            AppManager._boolean_preferences(
-                {"recording_enabled": {"gate": "false", "foyer": False}},
-                "recording_enabled",
-            ),
-            {"foyer": False},
-        )
+    def test_fresh_process_ignores_saved_runtime_state_and_defaults_all_controls_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "runtime_state.json").write_text(
+                json.dumps({
+                    "recording_enabled": {"gate": False},
+                    "detection_enabled": {"gate": False},
+                    "camera_enabled": {"gate": False},
+                }),
+                encoding="utf-8",
+            )
+            manager = AppManager(AppConfig(
+                storage_dir=tmpdir,
+                cameras=[CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url="rtsp://camera/main",
+                )],
+            ))
+
+            self.assertEqual(
+                manager.runtime_preferences(),
+                {
+                    "recording_enabled": {},
+                    "detection_enabled": {},
+                    "camera_enabled": {"gate": True},
+                },
+            )
+            self.assertTrue(manager.recording_enabled("gate"))
+            self.assertTrue(manager.detection_enabled("gate"))
+
+            manager.stop_all()
 
     def test_runtime_preference_write_failure_rolls_back_memory(self) -> None:
         manager = manager_with_mocks()
@@ -403,6 +427,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.start_all()
 
+        manager._save_runtime_state.assert_called_once_with()
         manager.workers["gate"].start.assert_not_called()
         manager.recorder.set_camera_enabled.assert_called_with("gate", False)
         manager.mqtt.publish_camera_state.assert_called_with("gate", False)
