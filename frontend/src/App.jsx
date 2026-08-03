@@ -5811,6 +5811,7 @@ function MotionDecisionEditor({
 }
 
 function TelemetryTrend({ title, description, history, series, timeZone, maximum = null, valueFormatter = (value) => `${value}` }) {
+  const [hoverIndex, setHoverIndex] = useState(null);
   const numericValue = (raw) => {
     if (raw == null || raw === "") return null;
     const value = Number(raw);
@@ -5827,6 +5828,15 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
     const y = height - Math.min(height, (Math.max(0, value) / top) * height);
     return `${x.toFixed(2)},${y.toFixed(2)}`;
   }).filter(Boolean).join(" ");
+  const coordinatesFor = (key, index) => {
+    const value = numericValue(history[index]?.[key]);
+    if (value == null) return null;
+    return {
+      value,
+      x: history.length <= 1 ? width : (index / (history.length - 1)) * width,
+      y: height - Math.min(height, (Math.max(0, value) / top) * height),
+    };
+  };
   const latestValue = (key) => {
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const value = numericValue(history[index]?.[key]);
@@ -5841,13 +5851,50 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
       ? formatDateTime(value, timeZone)
       : formatTimeOnly(value, timeZone)
   );
+  const selectedIndex = Number.isInteger(hoverIndex) && hoverIndex >= 0 && hoverIndex < history.length
+    ? hoverIndex
+    : null;
+  const selectedPoint = selectedIndex == null ? null : history[selectedIndex];
+  const selectedX = selectedIndex == null
+    ? 0
+    : (history.length <= 1 ? width : (selectedIndex / (history.length - 1)) * width);
+  const tooltipAlignment = selectedX < 25 ? "start" : selectedX > 75 ? "end" : "center";
+  const updateHover = (event) => {
+    if (!history.length) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
+    setHoverIndex(Math.round(ratio * Math.max(0, history.length - 1)));
+  };
   return (
-    <article className="telemetry-trend">
+    <article className={`telemetry-trend${selectedPoint ? " has-tooltip" : ""}`}>
       <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values">{series.map((item) => <span className={item.className || ""} key={item.key}><i />{item.label} {latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</span>)}</div></header>
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${title} trend`}>
-        <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
-        {series.map((item) => <polyline className={item.className || ""} key={item.key} points={pointsFor(item.key)} />)}
-      </svg>
+      <div
+        className="telemetry-trend-chart"
+        onPointerMove={updateHover}
+        onPointerDown={updateHover}
+        onPointerLeave={(event) => {
+          if (event.pointerType === "mouse") setHoverIndex(null);
+        }}
+      >
+        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${title} trend`}>
+          <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
+          {series.map((item) => <polyline className={item.className || ""} key={item.key} points={pointsFor(item.key)} />)}
+          {selectedPoint ? <line className="telemetry-trend-cursor" x1={selectedX} y1="0" x2={selectedX} y2={height} /> : null}
+          {selectedPoint ? series.map((item) => {
+            const coordinates = coordinatesFor(item.key, selectedIndex);
+            return coordinates ? <ellipse className={`telemetry-trend-point ${item.className || ""}`} key={item.key} cx={coordinates.x} cy={coordinates.y} rx="0.75" ry="1.4" /> : null;
+          }) : null}
+        </svg>
+        {selectedPoint ? (
+          <div className={`telemetry-trend-tooltip ${tooltipAlignment}`} style={{ left: `${selectedX}%` }} role="status">
+            <time>{formatDateTime(selectedPoint.sampled_at, timeZone)}</time>
+            {series.map((item) => {
+              const value = numericValue(selectedPoint[item.key]);
+              return <span className={item.className || ""} key={item.key}><i />{item.label}<strong>{value == null ? "--" : valueFormatter(value, item.key)}</strong></span>;
+            })}
+          </div>
+        ) : null}
+      </div>
       <footer><time>{history[0] ? formatBoundary(history[0].sampled_at) : "Now"}</time><span>{history.length} sample{history.length === 1 ? "" : "s"}</span><time>{history.at(-1) ? formatBoundary(history.at(-1).sampled_at) : "Now"}</time></footer>
     </article>
   );
@@ -5895,15 +5942,26 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const maxHourly = Math.max(1, ...hourly.map((item) => Number(item.events) || 0));
   const topLabels = Object.entries(lastDay.labels || {}).sort((left, right) => right[1] - left[1]).slice(0, 5);
   const shownCameras = selected ? [selected] : (data.cameras || []);
+  const selectedCapture = selected?.capture || {};
+  const selectedReadFailures = [selectedCapture.live, selectedCapture.main]
+    .reduce((total, source) => total + Number(source?.read_failures || 0), 0);
+  const selectedOpenFailures = [selectedCapture.live, selectedCapture.main]
+    .reduce((total, source) => total + Number(source?.open_failures || 0), 0);
   return (
     <div className="telemetry-viewer">
       <div className="telemetry-summary-grid">
         <article><span>Events · last hour</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
         <article><span>Object incidents · 24h</span><strong>{Number(lastDay.object_incidents || 0).toLocaleString()}</strong><small>{Number(lastDay.objects || 0).toLocaleString()} eligible object detections</small></article>
-        <article><span>Object detector</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{formatRate(runtime.detection_fps)} · queue {runtime.queue_depth || 0} · {Number(runtime.failed_inferences || 0).toLocaleString()} failures since restart</small></article>
-        <article><span>GPU · SurvNG inference</span><strong>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : gpu.available ? "Sampling…" : "Unavailable"}</strong><small>{formatBytes(gpu.resident_bytes)} resident · {gpu.current_frequency_mhz || 0}/{gpu.maximum_frequency_mhz || 0} MHz</small></article>
-        <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
-        <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} active now · {capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
+        {selected ? <>
+          <article><span>Live stream</span><strong>{selected.connected ? "Online" : "Offline"}</strong><small>{Number(selectedCapture.live?.fps || 0).toFixed(1)} FPS · last frame {formatAge(selected.last_frame_age_seconds)}</small></article>
+          <article><span>Capture failures · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} read · {selectedOpenFailures.toLocaleString()} open</small></article>
+          <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
+        </> : <>
+          <article><span>Object detector</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{formatRate(runtime.detection_fps)} · queue {runtime.queue_depth || 0} · {Number(runtime.failed_inferences || 0).toLocaleString()} failures since restart</small></article>
+          <article><span>GPU · SurvNG inference</span><strong>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : gpu.available ? "Sampling…" : "Unavailable"}</strong><small>{formatBytes(gpu.resident_bytes)} resident · {gpu.current_frequency_mhz || 0}/{gpu.maximum_frequency_mhz || 0} MHz</small></article>
+          <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
+          <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} active now · {capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
+        </>}
       </div>
 
       <section className="telemetry-section">
@@ -5923,18 +5981,18 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
       </section>
 
       <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>Tracking capacity</h3><p>Immediate sessions, bounded waits, and capacity timeouts. EMA-rescued object incidents use the same tracking pool.</p></div></div>
-        <div className="telemetry-trend-grid">
+        <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} tracking` : "Tracking capacity"}</h3><p>{selected ? "Tracking sessions, waits, and timeouts for this camera." : "Immediate sessions, bounded waits, and capacity timeouts. EMA-rescued object incidents use the same tracking pool."}</p></div></div>
+        <div className="telemetry-trend-grid two-column">
           <TelemetryTrend title="Tracking demand · 2 hours" description="One-minute view of burst contention" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Sessions", className: "rate" }, { key: "waited", label: "Waited", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
           <TelemetryTrend title="Capacity wait · 2 hours" description="Longest wait in each minute" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)}s`} series={[{ key: "wait_seconds_max", label: "Longest", className: "warning" }, { key: "wait_seconds_average", label: "Average", className: "secondary" }]} />
-          <TelemetryTrend title="Concurrent tracking · 2 hours" description={`Peak active sessions; configured limit ${trackingCapacity.limit || 0}`} history={runtimeShort} timeZone={timeZone} maximum={Math.max(1, Number(trackingCapacity.limit || 0))} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "tracking_active_max", label: "Active", className: "secondary" }]} />
+          <TelemetryTrend title={selected ? "Tracking active · 2 hours" : "Concurrent tracking · 2 hours"} description={selected ? "Whether this camera held a tracking slot" : `Peak active sessions; configured limit ${trackingCapacity.limit || 0}`} history={runtimeShort} timeZone={timeZone} maximum={selected ? 1 : Math.max(1, Number(trackingCapacity.limit || 0))} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "tracking_active_max", label: "Active", className: "secondary" }]} />
           <TelemetryTrend title="Tracking demand · 7 days" description="15-minute long-term view" history={capacityLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Sessions", className: "rate" }, { key: "waited", label: "Waited", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
         </div>
       </section>
 
       <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>Camera stream health{selected ? ` · ${selected.name}` : ""}</h3><p>Background samples continue when this page is closed. Read failures are decoder/camera delivery failures; motion-analysis drops are internal queue pressure. Main-stream FPS is zero while its on-demand capture is idle.</p></div></div>
-        <div className="telemetry-trend-grid">
+        <div className="telemetry-trend-grid two-column">
           <TelemetryTrend title="Decoded FPS · 2 hours" description={selected ? "Selected camera" : "Average across cameras"} history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
           <TelemetryTrend title="Dropped work · 2 hours" description="Capture failures and motion queue drops per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
           <TelemetryTrend title="Decoded FPS · 7 days" description="15-minute averages" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
@@ -5942,7 +6000,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         </div>
       </section>
 
-      <section className="telemetry-section">
+      {!selected ? <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>System trends</h3><p>Rolling one-hour history sampled while Telemetry is active.</p></div></div>
         <div className="telemetry-trend-grid">
           <TelemetryTrend title="Host pressure" description="Normalized 1-minute CPU load and memory use" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
@@ -5952,10 +6010,10 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <TelemetryTrend title="Storage use" description="Recording filesystem" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "storage_used_percent", label: "Used", className: "storage" }]} />
           <TelemetryTrend title="Detection rate" description="Completed inference requests" history={history} timeZone={timeZone} valueFormatter={(value) => formatRate(value)} series={[{ key: "detection_fps", label: "Rate", className: "rate" }]} />
         </div>
-      </section>
+      </section> : null}
 
-      <div className="telemetry-system-grid">
-        <section className="telemetry-section">
+      <div className={`telemetry-system-grid${selected ? " camera-only" : ""}`}>
+        {!selected ? <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>System</h3><p>Current host and SurvNG process health.</p></div></div>
           <dl className="telemetry-details">
             <div><dt>SurvNG uptime</dt><dd>{formatDuration(data.system?.uptime_seconds || 0)}</dd></div>
@@ -5973,7 +6031,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>GPU engines</dt><dd>{Object.keys(gpu.engine_utilization || {}).length ? Object.entries(gpu.engine_utilization).map(([name, value]) => `${name} ${value}%`).join(" · ") : "Collecting second sample"}</dd></div>
             <div><dt>Inference since restart</dt><dd>{Number(runtime.total_inferences || 0).toLocaleString()} total · {Number(runtime.object_hit_inferences || 0).toLocaleString()} with objects</dd></div>
           </dl>
-        </section>
+        </section> : null}
         <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} activity` : "Object activity"}</h3><p>Counts from persisted event history.</p></div></div>
           <dl className="telemetry-details">
