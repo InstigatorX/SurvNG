@@ -251,7 +251,7 @@ class EventApiSerializationTest(unittest.TestCase):
             )
 
             with patch.object(main, "manager", fake_manager), patch.object(main.os, "getloadavg", return_value=(1.0, 0.5, 0.25)):
-                payload = main.telemetry(hours=24)
+                payload = main.telemetry(hours=24, camera_id="gate")
 
             self.assertEqual(payload["activity"], activity)
             self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
@@ -278,6 +278,10 @@ class EventApiSerializationTest(unittest.TestCase):
             fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
             self.assertEqual(fake_manager.events.runtime_telemetry_history.call_count, 2)
             self.assertEqual(fake_manager.events.tracking_capacity_activity.call_count, 2)
+            for call in fake_manager.events.runtime_telemetry_history.call_args_list:
+                self.assertEqual(call.kwargs["camera_id"], "gate")
+            for call in fake_manager.events.tracking_capacity_activity.call_args_list:
+                self.assertEqual(call.kwargs["camera_id"], "gate")
 
     def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:
         catalog = main.object_tracking_catalog()

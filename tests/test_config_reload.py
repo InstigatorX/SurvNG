@@ -96,6 +96,24 @@ class ConfigReloadTest(unittest.TestCase):
 
         self.assertEqual(tasks, ["media timelapse export"])
 
+    def test_active_media_export_blocks_ffmpeg_hot_reconfiguration(self) -> None:
+        active = Mock()
+        exports = Mock()
+        exports.active_jobs.return_value = [{"kind": "recording", "status": "running"}]
+        main.config = AppConfig(ffmpeg_path="/old/ffmpeg")
+        main.manager = active
+
+        with (
+            patch.object(main, "MEDIA_EXPORTS", exports),
+            patch.object(main, "save_config") as save,
+            self.assertRaisesRegex(main.StorageTasksActiveError, "media recording export"),
+        ):
+            main.apply_config_update(AppConfig(ffmpeg_path="/new/ffmpeg"))
+
+        save.assert_not_called()
+        active.reconfigure_recorders.assert_not_called()
+        self.assertEqual(main.config.ffmpeg_path, "/old/ffmpeg")
+
     def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {

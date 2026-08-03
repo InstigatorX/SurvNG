@@ -779,6 +779,11 @@ def apply_config_update(
             for field_name in sorted(RECORDER_CONFIG_FIELDS)
             if getattr(previous_config, field_name) != getattr(effective_config, field_name)
         ]
+        if recorder_changes and MEDIA_EXPORTS is not None:
+            active_exports = MEDIA_EXPORTS.active_jobs()
+            if active_exports:
+                kinds = sorted({str(job.get("kind") or "media") for job in active_exports})
+                raise StorageTasksActiveError([f"media {'/'.join(kinds)} export"])
         if persist:
             save_config(effective_config, assign_ids=False)
         manager.config = effective_config
@@ -2086,8 +2091,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     detector = manager.detector_status()
     gpu = _gpu_status(detector)
     activity = manager.events.telemetry_activity(hours=hours)
-    camera_id = str(camera_id or "").strip()[:128]
-    persisted_history = _persisted_telemetry_history(camera_id)
+    selected_camera_id = str(camera_id or "").strip()[:128]
+    persisted_history = _persisted_telemetry_history(selected_camera_id)
     runtime_history = persisted_history["runtime"]
     tracking_capacity_history = persisted_history["tracking"]
     per_camera_activity = activity.get("by_camera", {})
@@ -2099,12 +2104,12 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     generated_at = datetime.now(timezone.utc).isoformat()
     cameras = []
     for status in camera_statuses:
-        camera_id = str(status.get("id") or "")
+        status_camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
         tracking = status.get("object_tracking") or {}
         cameras.append({
-            "id": camera_id,
-            "name": status.get("name") or camera_id,
+            "id": status_camera_id,
+            "name": status.get("name") or status_camera_id,
             "connected": bool(status.get("connected")),
             "frame_fresh": bool(status.get("frame_fresh")),
             "last_frame_age_seconds": status.get("last_frame_age_seconds"),
@@ -2165,7 +2170,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             },
             "capture": dict(status.get("capture_stats") or {}),
             "activity": per_camera_activity.get(
-                camera_id,
+                status_camera_id,
                 {
                     "last_hour": {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}},
                     "last_24h": {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}},
@@ -6640,6 +6645,13 @@ def recording_updates(
         float(DEFAULT_INCIDENT_GAP_SECONDS) * 2,
     )
     update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
+    # Object analysis and tracking can finish after the recording edge moves.
+    # Re-read a wider event window so late-persisted incidents still appear in
+    # an already-open recording page without widening the recording-index scan.
+    event_update_start = max(
+        start_epoch,
+        min(end_epoch, after_epoch) - max(overlap_seconds, 5 * 60.0),
+    )
     # Keep NFS directory enumeration off the request thread. The index worker
     # services this wake-up immediately and the next lightweight update poll
     # observes newly finalized segments.
@@ -6657,7 +6669,7 @@ def recording_updates(
     )
     events = manager.events.for_camera_range(
         camera_id,
-        datetime.fromtimestamp(update_start, timezone.utc).isoformat(),
+        datetime.fromtimestamp(event_update_start, timezone.utc).isoformat(),
         datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
         limit=1000,
     )

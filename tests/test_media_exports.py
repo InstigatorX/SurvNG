@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from survng.app.media_exports import MediaExportManager, MediaExportStore
 
@@ -33,6 +33,24 @@ class FakeRecorder:
 
 
 class MediaExportTest(unittest.TestCase):
+    def test_worker_can_restart_without_consuming_stale_shutdown_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu",
+            )
+
+            manager.start()
+            self.assertTrue(manager.stop())
+            manager.start()
+            try:
+                self.assertIsNotNone(manager._thread)
+                self.assertTrue(manager._thread.is_alive())
+            finally:
+                self.assertTrue(manager.stop())
+
     def test_store_persists_jobs_and_marks_interrupted_work_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -481,6 +499,87 @@ class MediaExportTest(unittest.TestCase):
             self.assertTrue(all(item["protected"] for item in protected["results"]))
             self.assertEqual(len(deleted["results"]), 2)
             self.assertEqual(manager.count(), 0)
+
+    def test_queue_full_failure_receives_retention_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu",
+            )
+            for index in range(100):
+                manager._queue.put_nowait(f"occupied-{index}")
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+
+            with self.assertRaises(RuntimeError):
+                manager._enqueue(str(job["id"]))
+
+            failed = manager.store.get(str(job["id"]))
+            self.assertEqual(failed["status"], "failed")
+            self.assertTrue(failed["expires_at"])
+
+    def test_cancel_after_render_prevents_export_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            segment = root / "segment.mp4"
+            segment.write_bytes(b"source")
+            recorder = FakeRecorder([{
+                "path": str(segment), "start_epoch": 100.0,
+                "end_epoch": 110.0, "duration_seconds": 10.0,
+            }])
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: recorder,
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            cancel = threading.Event()
+
+            def finish_then_cancel(*_args: object) -> tuple[Path, list[dict[str, float]]]:
+                output = root / "rendered.mp4"
+                output.write_bytes(b"rendered")
+                cancel.set()
+                return output, []
+
+            manager._build_recording = finish_then_cancel  # type: ignore[method-assign]
+            with self.assertRaises(InterruptedError):
+                manager._execute(job, cancel)
+
+            self.assertFalse(any(manager.recording_dir.iterdir()))
+
+    def test_manifest_failure_removes_published_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            segment = root / "segment.mp4"
+            segment.write_bytes(b"source")
+            recorder = FakeRecorder([{
+                "path": str(segment), "start_epoch": 100.0,
+                "end_epoch": 110.0, "duration_seconds": 10.0,
+            }])
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: recorder,
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 110.0, "options": {},
+            })
+            rendered = root / "rendered.mp4"
+            rendered.write_bytes(b"rendered")
+            manager._build_recording = lambda *_args: (rendered, [])  # type: ignore[method-assign]
+            manager._write_manifest = Mock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
+
+            with self.assertRaises(OSError):
+                manager._execute(job, threading.Event())
+
+            self.assertFalse(any(manager.recording_dir.iterdir()))
+            self.assertFalse(any(manager.manifest_dir.iterdir()))
 
 
 if __name__ == "__main__":

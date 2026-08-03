@@ -6876,10 +6876,21 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
   const top = maximum || Math.max(1, ...values) * 1.12;
   const width = 100;
   const height = 42;
+  const sampleTimes = history.map((point) => new Date(point?.sampled_at || 0).getTime());
+  const firstAt = Number.isFinite(sampleTimes[0]) ? sampleTimes[0] : 0;
+  const lastAt = Number.isFinite(sampleTimes.at(-1)) ? sampleTimes.at(-1) : firstAt;
+  const timeSpan = Math.max(0, lastAt - firstAt);
+  const xForIndex = (index) => {
+    if (history.length <= 1) return width;
+    const sampledAt = sampleTimes[index];
+    return timeSpan > 0 && Number.isFinite(sampledAt)
+      ? ((sampledAt - firstAt) / timeSpan) * width
+      : (index / (history.length - 1)) * width;
+  };
   const pointsFor = (key) => history.map((point, index) => {
     const value = numericValue(point[key]);
     if (value == null) return null;
-    const x = history.length <= 1 ? width : (index / (history.length - 1)) * width;
+    const x = xForIndex(index);
     const y = height - Math.min(height, (Math.max(0, value) / top) * height);
     return `${x.toFixed(2)},${y.toFixed(2)}`;
   }).filter(Boolean).join(" ");
@@ -6888,7 +6899,7 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
     if (value == null) return null;
     return {
       value,
-      x: history.length <= 1 ? width : (index / (history.length - 1)) * width,
+      x: xForIndex(index),
       y: height - Math.min(height, (Math.max(0, value) / top) * height),
     };
   };
@@ -6899,8 +6910,6 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
     }
     return null;
   };
-  const firstAt = history[0]?.sampled_at ? new Date(history[0].sampled_at).getTime() : 0;
-  const lastAt = history.at(-1)?.sampled_at ? new Date(history.at(-1).sampled_at).getTime() : 0;
   const formatBoundary = (value) => (
     lastAt - firstAt >= 24 * 60 * 60 * 1000
       ? formatDateTime(value, timeZone)
@@ -6912,13 +6921,24 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
   const selectedPoint = selectedIndex == null ? null : history[selectedIndex];
   const selectedX = selectedIndex == null
     ? 0
-    : (history.length <= 1 ? width : (selectedIndex / (history.length - 1)) * width);
+    : xForIndex(selectedIndex);
   const tooltipAlignment = selectedX < 25 ? "start" : selectedX > 75 ? "end" : "center";
   const updateHover = (event) => {
     if (!history.length) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
-    setHoverIndex(Math.round(ratio * Math.max(0, history.length - 1)));
+    if (timeSpan <= 0) {
+      setHoverIndex(Math.round(ratio * Math.max(0, history.length - 1)));
+      return;
+    }
+    const targetTime = firstAt + ratio * timeSpan;
+    let nearestIndex = 0;
+    for (let index = 1; index < sampleTimes.length; index += 1) {
+      if (Math.abs(sampleTimes[index] - targetTime) < Math.abs(sampleTimes[nearestIndex] - targetTime)) {
+        nearestIndex = index;
+      }
+    }
+    setHoverIndex(nearestIndex);
   };
   return (
     <article className={`telemetry-trend${selectedPoint ? " has-tooltip" : ""}`}>

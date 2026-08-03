@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import struct
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -329,10 +330,12 @@ class RecordingApiTest(unittest.TestCase):
             "ranges": [{"start_epoch": 180.0, "end_epoch": 200.0}],
             "segment_count": 2,
         }
+        events = Mock()
+        events.for_camera_range.return_value = []
         manager = SimpleNamespace(
             camera=lambda _camera_id: object(),
             recorder=recorder,
-            events=SimpleNamespace(for_camera_range=lambda *_args, **_kwargs: []),
+            events=events,
         )
 
         with patch.object(main, "manager", manager):
@@ -349,6 +352,25 @@ class RecordingApiTest(unittest.TestCase):
             recorder.recording_availability_between.call_args.kwargs["discover_missing"],
             False,
         )
+        event_start = datetime.fromisoformat(events.for_camera_range.call_args.args[1]).timestamp()
+        self.assertEqual(event_start, 100.0)
+
+    def test_recording_updates_keep_five_minute_overlap_for_late_incidents(self) -> None:
+        recorder = Mock()
+        recorder.recording_availability_between.return_value = {
+            "ranges": [], "segment_count": 0,
+        }
+        events = Mock()
+        events.for_camera_range.return_value = []
+        manager = SimpleNamespace(
+            camera=lambda _camera_id: object(), recorder=recorder, events=events,
+        )
+
+        with patch.object(main, "manager", manager):
+            main.recording_updates("gate", 100.0, 1000.0, 900.0, "main")
+
+        event_start = datetime.fromisoformat(events.for_camera_range.call_args.args[1]).timestamp()
+        self.assertEqual(event_start, 600.0)
 
     def test_recording_preview_uses_quantized_local_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -341,6 +341,9 @@ class MediaExportManager:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        # A stopped worker can leave its shutdown sentinel and stale job IDs in
+        # memory. SQLite is authoritative when a manager is started again.
+        self._queue = queue.Queue(maxsize=100)
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="media-export-worker", daemon=False)
         self._thread.start()
@@ -410,7 +413,9 @@ class MediaExportManager:
         )
 
     def active_jobs(self) -> list[dict[str, object]]:
-        return [job for job in self.list(100) if job.get("status") in ACTIVE_STATUSES]
+        # The bounded queue can hold 100 jobs in addition to the active worker.
+        # Query by status so lifecycle guards cannot miss the oldest running job.
+        return self.list(1000, status="active")
 
     def get(self, job_id: str) -> dict[str, object] | None:
         job = self.store.get(job_id)
@@ -548,7 +553,16 @@ class MediaExportManager:
         try:
             self._queue.put_nowait(job_id)
         except queue.Full as exc:
-            self.store.update(job_id, status="failed", phase="Queue full", error="export queue is full", finished_at=_utc_now())
+            self.store.update(
+                job_id,
+                status="failed",
+                phase="Queue full",
+                error="export queue is full",
+                finished_at=_utc_now(),
+                expires_at=(
+                    datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)
+                ).isoformat(),
+            )
             raise RuntimeError("export queue is full") from exc
 
     def _run(self) -> None:
@@ -614,13 +628,19 @@ class MediaExportManager:
         if cancel.is_set() or self._stop.is_set():
             raise InterruptedError
         work = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=self.work_dir))
+        final_path: Path | None = None
         try:
             if job["kind"] == "recording":
                 output, gaps = self._build_recording(job, rows, work, cancel)
             else:
                 output, gaps = self._build_timelapse(job, rows, work, cancel)
+            if cancel.is_set() or self._stop.is_set():
+                raise InterruptedError
             self.store.update(job_id, phase="Finalizing", progress=92)
-            final_path, output_name = self._publish(job, output)
+            final_path, output_name = self._publish(job, output, cancel)
+            if cancel.is_set() or self._stop.is_set():
+                final_path.unlink(missing_ok=True)
+                raise InterruptedError
             manifest = {
                 "job_id": job_id,
                 "kind": job["kind"],
@@ -634,6 +654,8 @@ class MediaExportManager:
                 "output_name": output_name,
             }
             self._write_manifest(job_id, manifest)
+            if cancel.is_set() or self._stop.is_set():
+                raise InterruptedError
             expires = datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)
             self.store.update(
                 job_id,
@@ -646,6 +668,12 @@ class MediaExportManager:
                 finished_at=_utc_now(),
                 expires_at=expires.isoformat(),
             )
+            final_path = None
+        except BaseException:
+            if final_path is not None:
+                final_path.unlink(missing_ok=True)
+            (self.manifest_dir / f"{job_id}.json").unlink(missing_ok=True)
+            raise
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -1128,7 +1156,12 @@ class MediaExportManager:
                 groups[-1].append(row)
         return groups, gaps
 
-    def _publish(self, job: dict[str, object], source: Path) -> tuple[Path, str]:
+    def _publish(
+        self,
+        job: dict[str, object],
+        source: Path,
+        cancel: threading.Event,
+    ) -> tuple[Path, str]:
         timestamp = datetime.fromtimestamp(float(job["start_epoch"]), timezone.utc).strftime("%Y%m%d-%H%M%S")
         camera = _safe_component(str(job["camera_id"]))
         suffix = source.suffix.lower() if source.suffix else ".mp4"
@@ -1136,15 +1169,31 @@ class MediaExportManager:
         destination_dir = self.recording_dir if job["kind"] == "recording" else self.timelapse_dir
         final = destination_dir / f"{job['id']}-{name}"
         partial = final.with_suffix(final.suffix + ".partial")
-        shutil.copyfile(source, partial)
-        os.replace(partial, final)
+        try:
+            with source.open("rb") as source_handle, partial.open("wb") as destination_handle:
+                while True:
+                    if cancel.is_set() or self._stop.is_set():
+                        raise InterruptedError
+                    chunk = source_handle.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    destination_handle.write(chunk)
+            if cancel.is_set() or self._stop.is_set():
+                raise InterruptedError
+            os.replace(partial, final)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
         return final, name
 
     def _write_manifest(self, job_id: str, payload: dict[str, object]) -> None:
         final = self.manifest_dir / f"{job_id}.json"
         temporary = final.with_suffix(".json.partial")
-        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, final)
+        try:
+            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, final)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _delete_job_files(self, job: dict[str, object]) -> None:
         raw = str(job.get("output_path") or "")
