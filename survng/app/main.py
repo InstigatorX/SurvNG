@@ -50,6 +50,7 @@ from .audit_ai import (
     validate_tuning_value,
 )
 from .assistant import (
+    AssistantAnswer,
     AssistantChatRequest,
     AssistantEvidence,
     AssistantProvider,
@@ -1129,6 +1130,7 @@ class MediaExportRequest(BaseModel):
     sample_interval_seconds: float = Field(default=30.0, ge=1.0, le=3600.0)
     output_fps: int = Field(default=30, ge=1, le=60)
     width: int = Field(default=1280, ge=320, le=3840)
+    height: int = Field(default=0, ge=0, le=2160)
 
 
 @app.get("/api/retention/status")
@@ -4124,7 +4126,8 @@ def _assistant_configuration_evidence(active_config: AppConfig) -> AssistantEvid
                 assistant_provider.model_for_tier("deep")
                 != assistant_provider.model_for_tier("fast")
             ),
-            "assistant_read_only": True,
+            "assistant_read_only": False,
+            "supported_actions": ["create_media_export"],
         },
         "recording": {
             "segment_seconds": active_config.recording_segment_seconds,
@@ -4610,6 +4613,168 @@ def _assistant_parse_datetime(value: str, selected_zone: ZoneInfo) -> datetime |
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=selected_zone)
     return parsed.astimezone(timezone.utc)
+
+
+def _assistant_media_export_evidence(
+    call: AssistantToolCall,
+    request: AssistantChatRequest,
+    active_config: AppConfig,
+) -> AssistantEvidence:
+    try:
+        selected_zone = ZoneInfo(request.context.time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        selected_zone = ZoneInfo("America/New_York")
+    export_kind = call.export_kind
+    camera_id = call.camera_id or request.context.camera_id
+    camera = camera_by_id(active_config, camera_id) if camera_id else None
+    start = _assistant_parse_datetime(call.start_at, selected_zone)
+    end = _assistant_parse_datetime(call.end_at, selected_zone)
+    questions: list[str] = []
+    suggestions: list[str] = []
+    if not export_kind:
+        questions.append("Should this be a normal video clip or a timelapse?")
+        suggestions.extend(["Make it a timelapse", "Make it a normal video clip"])
+    if camera is None:
+        if camera_id:
+            questions.append(f"I couldn't find a camera named {camera_id}. Which camera should I use?")
+        else:
+            questions.append("Which camera should I use?")
+        suggestions.extend(camera.name for camera in active_config.cameras[:4])
+    if start is None and end is None:
+        questions.append("What date and start/end times should the export cover?")
+    elif start is None:
+        questions.append("What time should the export start?")
+    elif end is None:
+        questions.append("What time should the export end?")
+    if questions:
+        question = " ".join(questions)
+        return AssistantEvidence(
+            evidence_id="E-export-clarification",
+            kind="media_export_clarification",
+            title="More export details needed",
+            summary=question,
+            data={"questions": questions, "suggestions": list(dict.fromkeys(suggestions))[:4]},
+            href="/recordings",
+            client_data={"questions": questions},
+        )
+
+    assert camera is not None and start is not None and end is not None
+    if end <= start:
+        return AssistantEvidence(
+            evidence_id="E-export-clarification",
+            kind="media_export_clarification",
+            title="Export times need correction",
+            summary="The end time must be after the start time. What start and end times should I use?",
+            data={
+                "questions": ["What corrected start and end times should I use?"],
+                "suggestions": [],
+            },
+            href="/recordings",
+        )
+    maximum = timedelta(days=1 if export_kind == "recording" else 7)
+    if end - start > maximum:
+        label = "24 hours" if export_kind == "recording" else "7 days"
+        return AssistantEvidence(
+            evidence_id="E-export-clarification",
+            kind="media_export_clarification",
+            title="Export range is too long",
+            summary=f"That {export_kind} exceeds the {label} limit. What shorter range should I use?",
+            data={
+                "questions": [f"What range within {label} should I use?"],
+                "suggestions": [],
+            },
+            href="/recordings",
+        )
+
+    source = recording_source(call.source or "main")
+    options: dict[str, object] = {"height": call.height or 0}
+    if export_kind == "timelapse":
+        options = {
+            "sample_interval_seconds": call.sample_interval_seconds or 30.0,
+            "output_fps": call.output_fps or 30,
+            **(
+                {"height": call.height or 720}
+                if call.height is not None or call.width is None
+                else {"width": call.width}
+            ),
+        }
+    try:
+        job = _media_export_manager().create({
+            "kind": export_kind,
+            "camera_id": camera.id,
+            "source": source,
+            "start_epoch": start.timestamp(),
+            "end_epoch": end.timestamp(),
+            "options": options,
+        })
+    except RuntimeError as exc:
+        LOGGER.warning("assistant could not queue media export: %s", exc)
+        return AssistantEvidence(
+            evidence_id="E-export-clarification",
+            kind="media_export_clarification",
+            title="Export could not be queued",
+            summary="The export queue is unavailable right now. Please try again shortly.",
+            data={"questions": [], "suggestions": ["Try the export again"]},
+            href="/recordings",
+        )
+    job_id = str(job["id"])
+    local_start = start.astimezone(selected_zone)
+    local_end = end.astimezone(selected_zone)
+    kind_label = "timelapse" if export_kind == "timelapse" else "video clip"
+    summary = (
+        f"Queued a {kind_label} for {camera.name} from "
+        f"{local_start.strftime('%b %-d, %-I:%M %p')} to {local_end.strftime('%b %-d, %-I:%M %p')}."
+    )
+    return AssistantEvidence(
+        evidence_id=f"E-export-{job_id[:12]}",
+        kind="media_export_job",
+        title=f"{camera.name} {kind_label}",
+        summary=summary,
+        data={
+            "job_id": job_id,
+            "kind": export_kind,
+            "camera_id": camera.id,
+            "source": source,
+            "start_at": start.isoformat(),
+            "end_at": end.isoformat(),
+            "status": job.get("status"),
+            "options": options,
+        },
+        href=(
+            f"/recordings?camera={quote(camera.id, safe='')}&at={start.timestamp():.3f}"
+            f"&source={source}"
+        ),
+        client_data={
+            "media_export": {
+                "id": job_id,
+                "kind": export_kind,
+                "camera_id": camera.id,
+                "source": source,
+                "start_at": start.isoformat(),
+                "end_at": end.isoformat(),
+                "status": str(job.get("status") or "queued"),
+                "phase": str(job.get("phase") or "Queued"),
+                "progress": float(job.get("progress") or 0),
+            },
+        },
+    )
+
+
+def _assistant_media_export_answer(evidence: AssistantEvidence) -> AssistantAnswer:
+    if evidence.kind == "media_export_clarification":
+        return AssistantAnswer(
+            answer=f"{evidence.summary} [{evidence.evidence_id}]",
+            citations=[evidence.evidence_id],
+            suggestions=list(evidence.data.get("suggestions") or [])[:4],
+        )
+    return AssistantAnswer(
+        answer=(
+            f"I started the requested export. It will appear here when the MP4 is ready, "
+            f"and you can leave this panel open while it runs. [{evidence.evidence_id}]"
+        ),
+        citations=[evidence.evidence_id],
+        suggestions=[],
+    )
 
 
 def _assistant_search_incidents(
@@ -5159,6 +5324,8 @@ def _assistant_execute_tool(
         )]
     if call.name == "trace_across_cameras":
         return _assistant_trace_across_cameras(call, request, active_manager)
+    if call.name == "create_media_export":
+        return [_assistant_media_export_evidence(call, request, active_config)]
     return []
 
 
@@ -5177,7 +5344,8 @@ def assistant_status() -> dict[str, Any]:
         "provider": ai.provider,
         "fast_model": provider.model_for_tier("fast"),
         "reasoning_model": provider.model_for_tier("deep"),
-        "read_only": True,
+        "read_only": False,
+        "media_exports": True,
     }
 
 
@@ -5218,7 +5386,18 @@ async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
                 if item.evidence_id not in seen:
                     seen.add(item.evidence_id)
                     evidence.append(item)
-        answer = provider.answer(request, evidence, plan.reasoning_tier)
+        media_export = next(
+            (
+                item for item in evidence
+                if item.kind in {"media_export_job", "media_export_clarification"}
+            ),
+            None,
+        )
+        answer = (
+            _assistant_media_export_answer(media_export)
+            if media_export is not None
+            else provider.answer(request, evidence, plan.reasoning_tier)
+        )
         activity = next(
             (item for item in evidence if item.kind == "recent_activity_summary"),
             None,
@@ -5236,7 +5415,7 @@ async def assistant_chat(request: AssistantChatRequest) -> dict[str, Any]:
             "tools": [call.name for call in plan.tool_calls],
             "reasoning_tier": plan.reasoning_tier,
             "model": provider.model_for_tier(plan.reasoning_tier),
-            "read_only": True,
+            "read_only": False,
         }
 
     try:
@@ -6204,7 +6383,15 @@ def create_media_export(request: MediaExportRequest) -> dict[str, object]:
         f"invalid {request.kind} export range",
     )
     options: dict[str, object] = {}
-    if request.kind == "timelapse":
+    if request.kind == "recording":
+        options = {"height": request.height}
+    elif request.height > 0:
+        options = {
+            "sample_interval_seconds": request.sample_interval_seconds,
+            "output_fps": request.output_fps,
+            "height": request.height,
+        }
+    else:
         options = {
             "sample_interval_seconds": request.sample_interval_seconds,
             "output_fps": request.output_fps,

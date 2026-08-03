@@ -5,6 +5,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from survng.app.media_exports import MediaExportManager, MediaExportStore
 
@@ -148,6 +150,29 @@ class MediaExportTest(unittest.TestCase):
             self.assertFalse(manager._valid_video_output(output))
             self.assertFalse(manager._valid_media_container(output))
 
+    def test_video_validation_decodes_one_frame_without_scanning_entire_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "/config/ffmpeg",
+                hardware_backend=lambda: "cpu",
+            )
+            output = root / "long-export.mp4"
+            output.write_bytes(bytes(2048))
+            manager._valid_media_container = lambda _path: True  # type: ignore[method-assign]
+
+            with patch(
+                "survng.app.media_exports.subprocess.run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run:
+                valid = manager._valid_video_output(output)
+
+            self.assertTrue(valid)
+            command = run.call_args.args[0]
+            self.assertNotIn("-count_frames", command)
+            self.assertEqual(command[command.index("-frames:v") + 1], "1")
+
     def test_worker_publishes_single_compatible_mp4_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -167,9 +192,12 @@ class MediaExportTest(unittest.TestCase):
                 hardware_backend=lambda: "cpu",
             )
 
-            def fake_run(command: list[str], cancel: threading.Event, timeout: float) -> None:
+            def fake_run(
+                command: list[str], cancel: threading.Event, timeout: float, *, process_name: str = ""
+            ) -> None:
                 self.assertFalse(cancel.is_set())
                 self.assertGreater(timeout, 0)
+                self.assertEqual(process_name, "survng-export")
                 Path(command[-1]).write_bytes(b"export")
 
             manager._run_process = fake_run  # type: ignore[method-assign]
@@ -229,6 +257,20 @@ class MediaExportTest(unittest.TestCase):
             self.assertIn("aac", qsv)
             self.assertEqual(qsv[qsv.index("-af") + 1], "asetpts=PTS-STARTPTS")
 
+    def test_height_resolution_preserves_camera_aspect_ratio_with_even_dimensions(self) -> None:
+        self.assertEqual(
+            MediaExportManager._target_dimensions({"width": 2560, "height": 1920}, 1080),
+            (1440, 1080),
+        )
+        self.assertEqual(
+            MediaExportManager._target_dimensions({"width": 1920, "height": 1080}, 720),
+            (1280, 720),
+        )
+        self.assertEqual(
+            MediaExportManager._target_dimensions({"width": 896, "height": 672}, 0),
+            (896, 672),
+        )
+
     def test_recording_with_multiple_spans_is_joined_as_one_mp4(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -251,8 +293,11 @@ class MediaExportTest(unittest.TestCase):
             }
             commands: list[list[str]] = []
 
-            def fake_run(command: list[str], _cancel: threading.Event, timeout: float) -> None:
+            def fake_run(
+                command: list[str], _cancel: threading.Event, timeout: float, *, process_name: str = ""
+            ) -> None:
                 self.assertGreater(timeout, 0)
+                self.assertEqual(process_name, "survng-export")
                 commands.append(command)
                 Path(command[-1]).write_bytes(b"export")
 
@@ -271,6 +316,29 @@ class MediaExportTest(unittest.TestCase):
             self.assertEqual(len(commands), 3)
             self.assertEqual(commands[-1][commands[-1].index("-c") + 1], "copy")
             self.assertEqual(gaps[0]["duration_seconds"], 10.0)
+
+    def test_media_encoder_uses_role_specific_executable_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ffmpeg = root / "ffmpeg"
+            ffmpeg.write_bytes(b"binary")
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: str(ffmpeg),
+                hardware_backend=lambda: "cpu",
+            )
+
+            export_command = manager._named_process_command(
+                [str(ffmpeg), "-version"], "survng-export"
+            )
+            timelapse_command = manager._named_process_command(
+                [str(ffmpeg), "-version"], "survng-timelapse"
+            )
+
+            self.assertEqual(Path(export_command[0]).name, "survng-export")
+            self.assertEqual(Path(timelapse_command[0]).name, "survng-timelapse")
+            self.assertEqual(Path(export_command[0]).resolve(), ffmpeg.resolve())
+            self.assertEqual(Path(timelapse_command[0]).resolve(), ffmpeg.resolve())
 
     def test_cancel_or_delete_removes_completed_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

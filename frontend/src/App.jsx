@@ -763,6 +763,19 @@ function formatTimeOnly(value, timeZone) {
   }).format(date);
 }
 
+function formatExportHandleTime(value, timeZone) {
+  if (!value) return "--:--:--";
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+}
+
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return "--";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -1072,6 +1085,12 @@ function AssistantPanel({ pageContext, timeZone }) {
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
   const [error, setError] = useState("");
   const bodyRef = useRef(null);
+  const activeExportIds = [...new Set(messages.flatMap((message) =>
+    (message.evidence || [])
+      .map((item) => item.details?.media_export)
+      .filter((job) => job?.id && ["queued", "running", "cancelling"].includes(job.status))
+      .map((job) => job.id)
+  ))].sort().join(",");
 
   useEffect(() => {
     writeAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY, messages);
@@ -1090,6 +1109,55 @@ function AssistantPanel({ pageContext, timeZone }) {
     const body = bodyRef.current;
     if (body) body.scrollTop = body.scrollHeight;
   }, [messages, busy, open]);
+
+  useEffect(() => {
+    if (!open || !activeExportIds) return undefined;
+    let cancelled = false;
+    const ids = activeExportIds.split(",").filter(Boolean);
+    async function refreshExports() {
+      const updates = await Promise.all(ids.map(async (id) => {
+        try {
+          const response = await fetch(`/api/exports/${encodeURIComponent(id)}`);
+          return response.ok ? await response.json() : null;
+        } catch {
+          return null;
+        }
+      }));
+      if (cancelled) return;
+      const byId = new Map(updates.filter(Boolean).map((job) => [job.id, job]));
+      if (!byId.size) return;
+      setMessages((current) => current.map((message) => ({
+        ...message,
+        evidence: (message.evidence || []).map((item) => {
+          const previous = item.details?.media_export;
+          const update = previous?.id ? byId.get(previous.id) : null;
+          if (!update) return item;
+          return {
+            ...item,
+            details: {
+              ...item.details,
+              media_export: {
+                ...previous,
+                status: update.status,
+                phase: update.phase,
+                progress: update.progress,
+                error: update.error,
+                output_name: update.output_name,
+                size_bytes: update.size_bytes,
+                download_url: update.download_url,
+              },
+            },
+          };
+        }),
+      })));
+    }
+    refreshExports();
+    const timer = window.setInterval(refreshExports, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeExportIds, open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -1193,7 +1261,7 @@ function AssistantPanel({ pageContext, timeZone }) {
       </button>
       {open ? <aside className="assistant-drawer" role="dialog" aria-label="SurvNG Assistant">
         <header className="assistant-head">
-          <div><strong><Sparkles size={17} /> SurvNG Assistant</strong><small>Grounded analysis · changes require confirmation</small></div>
+          <div><strong><Sparkles size={17} /> SurvNG Assistant</strong><small>Grounded analysis · exports on request</small></div>
           <div>
             <button type="button" onClick={clearConversation} aria-label="Clear assistant conversation" title="Clear conversation"><Trash2 size={16} /></button>
             <button type="button" onClick={() => setOpenValue("false")} aria-label="Close SurvNG Assistant"><X size={17} /></button>
@@ -1209,11 +1277,12 @@ function AssistantPanel({ pageContext, timeZone }) {
           {!messages.length ? <div className="assistant-welcome">
             <Sparkles size={26} />
             <strong>What would you like to know?</strong>
-            <p>I can search incidents, trace related activity across cameras, visually review a selected incident, inspect camera health, and explain active settings.</p>
+            <p>I can search incidents, trace related activity, review a selected incident, inspect camera health, explain settings, and create recording exports or timelapses.</p>
             <div>
               {[
                 "Is everything healthy?",
                 ...(pageContext?.incident_event_id ? ["Trace this incident across cameras", "Visually analyze this incident"] : []),
+                ...(pageContext?.camera_id ? [`Create a timelapse for ${pageContext.camera_id} from 8 AM to 8 PM yesterday`] : []),
                 "Find person incidents from the last 24 hours",
               ].map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
             </div>
@@ -1228,6 +1297,12 @@ function AssistantPanel({ pageContext, timeZone }) {
                 {item.details?.timeline ? <div className="assistant-timeline">
                   {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <div key={match.event_id}><span>{formatDateTime(match.start_at)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></div>) : <small>No related incidents were found in this time window.</small>}
                   <p>{item.details.timeline.limitations?.[3]}</p>
+                </div> : null}
+                {item.details?.media_export ? <div className={`assistant-media-export ${item.details.media_export.status}`}>
+                  <div><strong>{item.details.media_export.phase || item.details.media_export.status}</strong><span>{Math.round(Number(item.details.media_export.progress) || 0)}%</span></div>
+                  <i><b style={{ width: `${Math.max(0, Math.min(100, Number(item.details.media_export.progress) || 0))}%` }} /></i>
+                  {item.details.media_export.error ? <small>{item.details.media_export.error}</small> : null}
+                  {item.details.media_export.status === "completed" && item.details.media_export.download_url ? <a className="assistant-export-download" href={item.details.media_export.download_url}><Download size={14} />Download MP4</a> : null}
                 </div> : null}
                 {item.details?.advice ? <div className="assistant-visual-review">
                   <div><strong>{assistantVisualVerdicts[item.details.advice.verdict] || "The image is inconclusive"}</strong><span>{Math.round(Number(item.details.advice.confidence || 0) * 100)}%</span></div>
@@ -4835,7 +4910,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [followTarget, setFollowTarget] = useState(null);
   const [exportRange, setExportRange] = useState(null);
   const [exportKind, setExportKind] = useState("recording");
-  const [exportOptions, setExportOptions] = useState({ interval: 30, fps: 30, width: 1280 });
+  const [exportOptions, setExportOptions] = useState({ interval: 30, fps: 30, clipHeight: 0, timelapseHeight: 720 });
   const [exportJob, setExportJob] = useState(null);
   const [exportError, setExportError] = useState("");
   const [exportSubmitting, setExportSubmitting] = useState(false);
@@ -5405,7 +5480,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           end_epoch: exportRange.end,
           sample_interval_seconds: exportOptions.interval,
           output_fps: exportOptions.fps,
-          width: exportOptions.width,
+          height: exportKind === "timelapse" ? exportOptions.timelapseHeight : exportOptions.clipHeight,
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -5515,13 +5590,14 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 <span><b>End</b>{formatDateTime(exportRange.end, timeZone)}</span>
                 <span><b>Length</b>{formatDuration(exportRange.end - exportRange.start)}</span>
               </div>
-              {exportKind === "timelapse" ? (
-                <div className="recordings-v2-export-options">
+              <div className="recordings-v2-export-options">
+                {exportKind === "timelapse" ? <>
                   <label><span>Capture every</span><select value={exportOptions.interval} onChange={(event) => setExportOptions((current) => ({ ...current, interval: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="5">5 sec</option><option value="10">10 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="300">5 min</option></select></label>
                   <label><span>Playback</span><select value={exportOptions.fps} onChange={(event) => setExportOptions((current) => ({ ...current, fps: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
-                  <label><span>Resolution</span><select value={exportOptions.width} onChange={(event) => setExportOptions((current) => ({ ...current, width: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="640">640 wide</option><option value="1280">1280 wide</option><option value="1920">1920 wide</option></select></label>
-                </div>
-              ) : <p>Creates one broadly compatible H.264 MP4. Recording gaps are skipped and source-format changes are joined automatically.</p>}
+                </> : null}
+                <label><span>Resolution</span><select value={exportKind === "timelapse" ? exportOptions.timelapseHeight : exportOptions.clipHeight} onChange={(event) => setExportOptions((current) => ({ ...current, [exportKind === "timelapse" ? "timelapseHeight" : "clipHeight"]: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="0">Original</option><option value="2160">2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option></select></label>
+              </div>
+              {exportKind === "recording" ? <p>Creates one broadly compatible H.264 MP4. Width follows the camera aspect ratio; gaps are skipped and source-format changes are joined automatically.</p> : <p>Resolution is the output height; width follows the camera aspect ratio.</p>}
               {exportJob ? (
                 <div className={`recordings-v2-export-status ${exportJob.status}`}>
                   <span><b>{exportJob.phase || exportJob.status}</b><small>{Math.round(Number(exportJob.progress) || 0)}%</small></span>
@@ -6042,7 +6118,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
               onPointerCancel={finishExportDrag}
               disabled={!onExportRangeChange}
               aria-label={`Export start ${formatTimeOnly(exportRange.start, timeZone)}`}
-            ><span>IN</span></button>
+            ><span>{formatExportHandleTime(exportRange.start, timeZone)}</span></button>
             <button
               type="button"
               className="recordings-v2-export-handle end"
@@ -6053,7 +6129,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
               onPointerCancel={finishExportDrag}
               disabled={!onExportRangeChange}
               aria-label={`Export end ${formatTimeOnly(exportRange.end, timeZone)}`}
-            ><span>OUT</span></button>
+            ><span>{formatExportHandleTime(exportRange.end, timeZone)}</span></button>
           </>
         ) : null}
         {localPreviewEnabled && previewManifestUrl ? (

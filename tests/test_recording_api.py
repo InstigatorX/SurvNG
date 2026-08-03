@@ -155,6 +155,7 @@ class RecordingApiTest(unittest.TestCase):
             sample_interval_seconds=10,
             output_fps=24,
             width=1920,
+            height=1080,
         )
 
         with patch.object(main, "manager", manager), patch.object(main, "_media_export_manager", return_value=export_manager):
@@ -170,7 +171,7 @@ class RecordingApiTest(unittest.TestCase):
             "options": {
                 "sample_interval_seconds": 10.0,
                 "output_fps": 24,
-                "width": 1920,
+                "height": 1080,
             },
         })
 
@@ -190,6 +191,27 @@ class RecordingApiTest(unittest.TestCase):
 
         self.assertEqual(invalid.exception.status_code, 400)
         export_manager.create.assert_not_called()
+
+    def test_timelapse_api_keeps_legacy_width_when_height_is_not_supplied(self) -> None:
+        export_manager = Mock()
+        export_manager.create.return_value = {"id": "legacy-width", "status": "queued"}
+        manager = SimpleNamespace(camera=lambda _camera_id: object())
+        request = main.MediaExportRequest(
+            kind="timelapse",
+            camera_id="gate",
+            start_epoch=100.0,
+            end_epoch=400.0,
+            width=1920,
+        )
+
+        with patch.object(main, "manager", manager), patch.object(
+            main, "_media_export_manager", return_value=export_manager
+        ):
+            main.create_media_export(request)
+
+        options = export_manager.create.call_args.args[0]["options"]
+        self.assertEqual(options["width"], 1920)
+        self.assertNotIn("height", options)
 
     def test_public_media_export_applies_proxy_base_path_to_download(self) -> None:
         with patch.object(main.config, "base_path", "/survng"):

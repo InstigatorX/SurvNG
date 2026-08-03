@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import ValidationError
 
@@ -49,6 +49,13 @@ class AssistantModelsTest(unittest.TestCase):
                     for _ in range(20)
                 ],
             )
+
+    def test_plan_rejects_multiple_export_actions(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "only one media export"):
+            AssistantPlan(tool_calls=[
+                AssistantToolCall(name="create_media_export", export_kind="recording"),
+                AssistantToolCall(name="create_media_export", export_kind="timelapse"),
+            ])
 
     def test_evidence_sanitizer_removes_secrets_paths_and_urls(self) -> None:
         sanitized = sanitize_assistant_data({
@@ -141,6 +148,12 @@ class AssistantProviderTest(unittest.TestCase):
                 "minimum_confidence": None,
                 "face_name": "",
                 "limit": 12,
+                "export_kind": "",
+                "source": "",
+                "sample_interval_seconds": None,
+                "output_fps": None,
+                "width": None,
+                "height": None,
             }],
         })
         with patch.object(self.provider, "_complete_json", return_value=response) as complete:
@@ -236,6 +249,96 @@ class IncidentVisualReviewerTest(unittest.TestCase):
 
 
 class AssistantApiTest(unittest.TestCase):
+    def test_complete_timelapse_request_queues_export_with_safe_defaults(self) -> None:
+        from survng.app import main
+
+        active_config = AppConfig(cameras=[
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+        ])
+        request = AssistantChatRequest(
+            message="Create a Gate timelapse from 8 AM to 8 PM yesterday",
+            context={"time_zone": "America/New_York"},
+        )
+        call = AssistantToolCall(
+            name="create_media_export",
+            export_kind="timelapse",
+            camera_id="gate",
+            start_at="2026-08-02T08:00:00-04:00",
+            end_at="2026-08-02T20:00:00-04:00",
+        )
+        export_manager = Mock()
+        export_manager.create.return_value = {
+            "id": "job-1234567890", "status": "queued", "phase": "Queued", "progress": 0,
+        }
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            evidence = main._assistant_media_export_evidence(call, request, active_config)
+
+        self.assertEqual(evidence.kind, "media_export_job")
+        self.assertEqual(evidence.client_data["media_export"]["id"], "job-1234567890")
+        self.assertIn("camera=gate", evidence.href)
+        export_manager.create.assert_called_once_with({
+            "kind": "timelapse",
+            "camera_id": "gate",
+            "source": "main",
+            "start_epoch": 1785672000.0,
+            "end_epoch": 1785715200.0,
+            "options": {
+                "sample_interval_seconds": 30.0,
+                "output_fps": 30,
+                "height": 720,
+            },
+        })
+
+    def test_ambiguous_export_request_asks_for_missing_details_without_queueing(self) -> None:
+        from survng.app import main
+
+        active_config = AppConfig(cameras=[
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+        ])
+        request = AssistantChatRequest(message="Create an export")
+        call = AssistantToolCall(name="create_media_export")
+        export_manager = Mock()
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            evidence = main._assistant_media_export_evidence(call, request, active_config)
+
+        self.assertEqual(evidence.kind, "media_export_clarification")
+        self.assertIn("normal video clip or a timelapse", evidence.summary)
+        self.assertIn("Which camera", evidence.summary)
+        self.assertIn("start/end times", evidence.summary)
+        self.assertIn("Make it a timelapse", evidence.data["suggestions"])
+        export_manager.create.assert_not_called()
+
+    def test_export_request_uses_page_camera_when_planner_leaves_camera_blank(self) -> None:
+        from survng.app import main
+
+        active_config = AppConfig(cameras=[
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+        ])
+        request = AssistantChatRequest(
+            message="Make a clip for this camera",
+            context={"camera_id": "gate", "time_zone": "America/New_York"},
+        )
+        call = AssistantToolCall(
+            name="create_media_export",
+            export_kind="recording",
+            start_at="2026-08-02T08:00:00-04:00",
+            end_at="2026-08-02T08:10:00-04:00",
+            source="live",
+        )
+        export_manager = Mock()
+        export_manager.create.return_value = {
+            "id": "job-page-camera", "status": "queued", "phase": "Queued", "progress": 0,
+        }
+
+        with patch.object(main, "_media_export_manager", return_value=export_manager):
+            evidence = main._assistant_media_export_evidence(call, request, active_config)
+
+        self.assertEqual(evidence.data["camera_id"], "gate")
+        self.assertEqual(evidence.data["source"], "live")
+        self.assertEqual(export_manager.create.call_args.args[0]["options"], {"height": 0})
+
     def test_recent_activity_summary_returns_one_non_visual_aggregate(self) -> None:
         from survng.app import main
 
@@ -784,6 +887,48 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(response["evidence"][0]["id"], "E-system")
         planner.assert_called_once()
         self.assertEqual(responder.call_args.args[2], "deep")
+
+    def test_chat_returns_deterministic_export_confirmation_without_second_ai_call(self) -> None:
+        from survng.app import main
+
+        active_config = AppConfig(audit_ai=AuditAiConfig(
+            enabled=True,
+            assistant_enabled=True,
+            provider="gemini",
+            api_key="test-key",
+            model="fast-model",
+        ))
+        active_manager = SimpleNamespace(detector=SimpleNamespace(labels=[]))
+        request = AssistantChatRequest(message="Create the timelapse")
+        plan = AssistantPlan(
+            reasoning_tier="fast",
+            tool_calls=[AssistantToolCall(name="create_media_export", export_kind="timelapse")],
+        )
+        evidence = AssistantEvidence(
+            "E-export-job123",
+            "media_export_job",
+            "Gate timelapse",
+            "Queued a Gate timelapse.",
+            {"job_id": "job123"},
+            "/recordings",
+            client_data={"media_export": {"id": "job123", "status": "queued"}},
+        )
+
+        with (
+            patch.object(main, "config", active_config),
+            patch.object(main, "manager", active_manager),
+            patch.object(AssistantProvider, "plan", return_value=plan),
+            patch.object(AssistantProvider, "answer") as responder,
+            patch.object(main, "_assistant_execute_tool", return_value=[evidence]),
+            patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
+        ):
+            response = asyncio.run(main.assistant_chat(request))
+
+        self.assertIn("started the requested export", response["message"])
+        self.assertEqual(response["citations"], ["E-export-job123"])
+        self.assertEqual(response["tools"], ["create_media_export"])
+        self.assertFalse(response["read_only"])
+        responder.assert_not_called()
 
     def test_chat_reports_provider_failure_as_502(self) -> None:
         from fastapi import HTTPException

@@ -7124,6 +7124,7 @@ section.detection-settings-card {
   font-weight: 900;
   line-height: 1;
   padding: 3px 4px;
+  white-space: nowrap;
 }
 
 .recordings-v2-export-handle:disabled {
@@ -8903,6 +8904,57 @@ section.detection-settings-card {
   gap: 5px;
   border-top: 1px solid var(--line);
   padding: 8px;
+}
+
+.assistant-media-export {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  padding: 8px;
+}
+
+.assistant-media-export > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.assistant-media-export > div span,
+.assistant-media-export > small {
+  color: var(--muted);
+}
+
+.assistant-media-export > i {
+  display: block;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.assistant-media-export > i > b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.assistant-export-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  border: 1px solid rgba(94, 234, 212, .42);
+  border-radius: 6px;
+  background: rgba(15, 118, 110, .22);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 800;
+  text-decoration: none;
 }
 
 .assistant-timeline > div {

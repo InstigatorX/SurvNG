@@ -440,8 +440,10 @@ class MediaExportManager:
         if not groups:
             raise RuntimeError("no continuous recording spans exist in the selected range")
         profiles = [self._probe_source(Path(str(group[0]["path"]))) for group in groups]
-        target_width = max(2, int(profiles[0]["width"]) // 2 * 2)
-        target_height = max(2, int(profiles[0]["height"]) // 2 * 2)
+        options = dict(job.get("options") or {})
+        target_width, target_height = self._target_dimensions(
+            profiles[0], int(options.get("height") or 0)
+        )
         target_fps = max(1.0, min(float(profiles[0]["fps"]), 60.0))
         include_audio = all(bool(profile["has_audio"]) for profile in profiles)
         backend = self._hardware_backend()
@@ -475,7 +477,12 @@ class MediaExportManager:
                         phase=f"Rendering clip {index} of {len(groups)} ({backend_name})",
                         progress=8 + (72 * (index - 1) / len(groups)),
                     )
-                    self._run_process(command, cancel, timeout=max(300.0, min(3600.0, duration * 2.0)))
+                    self._run_process(
+                        command,
+                        cancel,
+                        timeout=max(300.0, min(3600.0, duration * 2.0)),
+                        process_name="survng-export",
+                    )
                 except RuntimeError as exc:
                     last_error = str(exc)
                     if backend_name != "cpu":
@@ -511,10 +518,15 @@ class MediaExportManager:
             "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
             "-movflags", "+faststart", "-y", str(output),
         ]
-        self._run_process(command, cancel, timeout=max(120.0, sum(
-            max(0.0, float(group[-1]["end_epoch"]) - float(group[0]["start_epoch"]))
-            for group in groups
-        ) * 0.25))
+        self._run_process(
+            command,
+            cancel,
+            timeout=max(120.0, sum(
+                max(0.0, float(group[-1]["end_epoch"]) - float(group[0]["start_epoch"]))
+                for group in groups
+            ) * 0.25),
+            process_name="survng-export",
+        )
         if not self._valid_video_output(output):
             raise RuntimeError("recording export could not join its compatible video spans")
         return output, gaps
@@ -605,6 +617,28 @@ class MediaExportManager:
         except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"unable to inspect source recording: {exc}") from exc
 
+    @staticmethod
+    def _target_dimensions(
+        profile: dict[str, object], requested_height: int = 0
+    ) -> tuple[int, int]:
+        source_width = max(2, int(profile.get("width") or 0))
+        source_height = max(2, int(profile.get("height") or 0))
+        target_height = (
+            source_height
+            if requested_height <= 0
+            else max(2, min(int(requested_height), 2160))
+        )
+        target_height = max(2, round(target_height / 2) * 2)
+        target_width = max(
+            2,
+            round((source_width / source_height) * target_height / 2) * 2,
+        )
+        if target_width > 7680:
+            scale = 7680 / target_width
+            target_width = 7680
+            target_height = max(2, round(target_height * scale / 2) * 2)
+        return target_width, target_height
+
     def _build_timelapse(
         self,
         job: dict[str, object],
@@ -618,7 +652,19 @@ class MediaExportManager:
         options = dict(job.get("options") or {})
         interval = max(1.0, min(float(options.get("sample_interval_seconds") or 30.0), 3600.0))
         output_fps = max(1, min(int(options.get("output_fps") or 30), 60))
-        width = max(320, min(int(options.get("width") or 1280), 3840))
+        profile = self._probe_source(Path(str(groups[0][0]["path"])))
+        requested_height = int(options.get("height") or 0)
+        if requested_height > 0:
+            target_width, target_height = self._target_dimensions(profile, requested_height)
+            scale_filter = (
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+            )
+        else:
+            # Existing API clients may still select a width. Preserve that
+            # contract while the UI and assistant use industry-standard height.
+            width = max(320, min(int(options.get("width") or 1280), 3840))
+            scale_filter = f"scale='min({width},iw)':-2,setsar=1"
         # A concat demuxer collapses recording gaps. That is desirable for a
         # timelapse: missing source time does not become a frozen video span.
         local_start, available_duration = concatenated_clip_timing(
@@ -633,7 +679,7 @@ class MediaExportManager:
             f"trim=start={local_start:.6f}:duration={available_duration:.6f},"
             "setpts=PTS-STARTPTS,"
             f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval:.6f})',"
-            f"scale='min({width},iw)':-2,settb=AVTB,setpts=N/({output_fps}*TB)"
+            f"{scale_filter},settb=AVTB,setpts=N/({output_fps}*TB)"
         )
         backend = self._hardware_backend()
         commands = self._timelapse_commands(backend, concat, output, filters, output_fps)
@@ -642,7 +688,12 @@ class MediaExportManager:
             output.unlink(missing_ok=True)
             try:
                 self.store.update(str(job["id"]), phase=f"Encoding timelapse ({backend_name})", progress=12)
-                self._run_process(command, cancel, timeout=max(300.0, available_duration * 0.4))
+                self._run_process(
+                    command,
+                    cancel,
+                    timeout=max(300.0, available_duration * 0.4),
+                    process_name="survng-timelapse",
+                )
             except RuntimeError as exc:
                 last_error = str(exc)
                 if backend_name != "cpu":
@@ -700,28 +751,22 @@ class MediaExportManager:
 
     def _valid_video_output(self, path: Path) -> bool:
         try:
-            if not path.is_file() or path.stat().st_size < 1024:
+            if not self._valid_media_container(path):
                 return False
-            ffmpeg = Path(self._ffmpeg_path())
-            sibling = ffmpeg.with_name("ffprobe")
-            ffprobe = str(sibling) if ffmpeg.name == "ffmpeg" and sibling.is_file() else "ffprobe"
-            probe = subprocess.run(
+            # Decode one real frame instead of using ffprobe -count_frames,
+            # which scans the entire file and falsely times out on long exports.
+            decode = subprocess.run(
                 [
-                    ffprobe, "-v", "error", "-select_streams", "v:0",
-                    "-count_frames", "-show_entries", "stream=nb_read_frames,duration",
-                    "-of", "json", str(path),
+                    self._ffmpeg_path(), "-v", "error", "-i", str(path),
+                    "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-",
                 ],
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=15,
             )
-            if probe.returncode != 0:
-                return False
-            payload = json.loads(probe.stdout or "{}")
-            stream = next(iter(payload.get("streams") or []), {})
-            return int(stream.get("nb_read_frames") or 0) > 0
-        except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return decode.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     def _valid_media_container(self, path: Path) -> bool:
@@ -748,10 +793,42 @@ class MediaExportManager:
         except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
             return False
 
-    def _run_process(self, command: list[str], cancel: threading.Event, timeout: float) -> None:
+    def _named_process_command(self, command: list[str], process_name: str) -> list[str]:
+        if not command or not process_name:
+            return command
+        executable = command[0]
+        resolved = shutil.which(executable) if not Path(executable).is_absolute() else executable
+        if not resolved:
+            return command
+        names_dir = self.work_dir / ".process-names"
+        named_executable = names_dir / _safe_component(process_name)
+        target = Path(resolved).resolve()
+        try:
+            names_dir.mkdir(parents=True, exist_ok=True)
+            if named_executable.is_symlink() and named_executable.resolve() != target:
+                named_executable.unlink()
+            elif named_executable.exists() and not named_executable.is_symlink():
+                LOGGER.warning("media process name path is not a symlink: %s", named_executable)
+                return command
+            if not named_executable.exists():
+                named_executable.symlink_to(target)
+            return [str(named_executable), *command[1:]]
+        except OSError as exc:
+            LOGGER.warning("could not assign media process name %s: %s", process_name, exc)
+            return command
+
+    def _run_process(
+        self,
+        command: list[str],
+        cancel: threading.Event,
+        timeout: float,
+        *,
+        process_name: str = "survng-export",
+    ) -> None:
+        named_command = self._named_process_command(command, process_name)
         with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr_file:
             process = subprocess.Popen(
-                command,
+                named_command,
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_file,
                 text=True,
