@@ -7,6 +7,25 @@ export function playbackRowsCoverEpoch(rows, epoch) {
   });
 }
 
+export function playbackMediaTimeForEpoch(rows, epoch) {
+  if (!Number.isFinite(epoch) || !Array.isArray(rows)) return null;
+  const row = rows.find((candidate) => {
+    const start = Number(candidate?.start_epoch);
+    const end = Number(candidate?.end_epoch);
+    return Number.isFinite(start) && Number.isFinite(end) && start <= epoch && epoch < end;
+  });
+  if (!row) return null;
+  const start = Number(row.start_epoch);
+  const end = Number(row.end_epoch);
+  const mediaStart = Number(row.media_start);
+  const mediaEnd = Number(row.media_end);
+  if (!Number.isFinite(mediaStart)) return null;
+  const maximum = Number.isFinite(mediaEnd)
+    ? Math.max(mediaStart, mediaEnd - 0.01)
+    : mediaStart + Math.max(0, end - start - 0.01);
+  return Math.max(mediaStart, Math.min(maximum, mediaStart + epoch - start));
+}
+
 export function describePlaybackError(error) {
   const details = [];
   const code = Number(error?.code);

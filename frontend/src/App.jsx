@@ -81,7 +81,7 @@ import {
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
-import { describePlaybackError, isUnsupportedPlaybackError, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
+import { describePlaybackError, isUnsupportedPlaybackError, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
@@ -4820,6 +4820,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [playbackDetail, setPlaybackDetail] = useState(null);
   const [events, setEvents] = useState([]);
   const [eventFilter, setEventFilter] = useState("object");
+  const [incidentRangeHours, setIncidentRangeHours] = useState(1);
   const [availableSources, setAvailableSources] = useState([]);
   const [playhead, setPlayhead] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4897,12 +4898,13 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   const nearbyEvents = useMemo(() => {
     if (!Number.isFinite(playhead)) return [];
+    if (incidentRangeHours >= 24) return filteredEvents;
+    const maximumDistance = incidentRangeHours * 30 * 60;
     return filteredEvents
       .map((event) => ({ ...event, distance: Math.abs(event.incident_epoch - playhead) }))
-      .filter((event) => event.distance <= 30 * 60)
+      .filter((event) => event.distance <= maximumDistance)
       .sort((left, right) => left.incident_epoch - right.incident_epoch)
-      .slice(0, 36);
-  }, [filteredEvents, playhead]);
+  }, [filteredEvents, incidentRangeHours, playhead]);
 
   function snapToRecording(epoch) {
     if (!timeline.length) return null;
@@ -5349,25 +5351,19 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               Play recording
             </button>
           ) : null}
+          <div className="recordings-v2-player-source" aria-label="Recording stream">
+            <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
+            <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
+          </div>
         </div>
 
         <div className="recordings-v2-controls">
-          <div className="recordings-v2-toolbar">
-            <div className="recordings-v2-source" aria-label="Recording stream">
-              <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
-              <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
-            </div>
-            <div className="recordings-v2-date">
-              <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={16} /></button>
-              <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
-              <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={16} /></button>
-              <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
-            </div>
-          </div>
-
           <RecordingTimeline
             cameraId={activeCameraId}
             source={source}
+            previewManifestUrl={manifestUrl}
+            previewStartTime={manifestStartTime}
+            previewTimeline={playbackTimeline}
             startEpoch={dayStart}
             endEpoch={dayEnd}
             recordings={timeline}
@@ -5376,15 +5372,34 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
           />
+          <div className="recordings-v2-date">
+            <button type="button" onClick={() => changeDate(addDaysToDateKey(date, -1))} aria-label="Previous day"><SkipBack size={16} /></button>
+            <input type="date" value={date} max={today} onChange={(event) => changeDate(event.target.value || today)} aria-label="Recording day" />
+            <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={16} /></button>
+            <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
+          </div>
         </div>
 
         <div className="recordings-v2-incidents">
           <div className="recordings-v2-incidents-toolbar">
-            <div className="recordings-v2-event-filter" aria-label="Recording incident type">
-              <button type="button" className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}><CircleDot size={14} />Object</button>
-              <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion</button>
+            <div className="recordings-v2-incidents-tools">
+              <div className="recordings-v2-event-filter" aria-label="Recording incident type">
+                <button type="button" className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}><CircleDot size={14} />Object</button>
+                <button type="button" className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}><Radar size={14} />Motion</button>
+              </div>
+              <label className="recordings-v2-range">
+                <span>Range</span>
+                <select value={incidentRangeHours} onChange={(event) => setIncidentRangeHours(Number(event.target.value))} aria-label="Incident thumbnail time range">
+                  <option value="1">1 hour</option>
+                  <option value="2">2 hours</option>
+                  <option value="4">4 hours</option>
+                  <option value="8">8 hours</option>
+                  <option value="12">12 hours</option>
+                  <option value="24">Full day</option>
+                </select>
+              </label>
             </div>
-            <span>{filteredEvents.length.toLocaleString()} {eventFilter} incident{filteredEvents.length === 1 ? "" : "s"} this day · showing near current time</span>
+            <span>{nearbyEvents.length.toLocaleString()} of {filteredEvents.length.toLocaleString()} {eventFilter} incident{filteredEvents.length === 1 ? "" : "s"} · {incidentRangeHours >= 24 ? "full day" : `${incidentRangeHours} hour${incidentRangeHours === 1 ? "" : "s"} around current time`}</span>
           </div>
           <div className="recordings-v2-events">
             {nearbyEvents.length ? nearbyEvents.map((event) => (
@@ -5404,7 +5419,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                   <b>{event.labels?.length ? event.labels.join(", ") : "Motion"}</b>
                 </span>
               </button>
-            )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents within 30 minutes of this time</div>}
+            )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}
           </div>
         </div>
       </section>
@@ -5412,12 +5427,15 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek }) {
+function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartTime, previewTimeline, startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
   const [scrubbing, setScrubbing] = useState(false);
-  const [preview, setPreview] = useState({ epoch: null, url: "", loading: false, gap: false, unavailable: false });
+  const [preview, setPreview] = useState({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
+  const [localPreviewEnabled, setLocalPreviewEnabled] = useState(false);
+  const [localPreviewReady, setLocalPreviewReady] = useState(false);
+  const [localPreviewFrameReady, setLocalPreviewFrameReady] = useState(false);
   const draftRef = useRef(offset);
   const dragRef = useRef(null);
   const previewTimerRef = useRef(null);
@@ -5428,6 +5446,9 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
   const previewPendingRef = useRef(null);
   const previewHideTimerRef = useRef(null);
   const previewGenerationRef = useRef(0);
+  const localPreviewRef = useRef(null);
+  const localPreviewCanvasRef = useRef(null);
+  const localPreviewTargetRef = useRef(null);
   const ticks = useMemo(() => {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone,
@@ -5490,8 +5511,17 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
     previewUrlRef.current = "";
     setScrubbing(false);
-    setPreview({ epoch: null, url: "", loading: false, gap: false, unavailable: false });
+    setLocalPreviewEnabled(false);
+    setLocalPreviewReady(false);
+    setLocalPreviewFrameReady(false);
+    localPreviewTargetRef.current = null;
+    setPreview({ epoch: null, url: "", loading: false, gap: false, unavailable: false, mode: "jpeg" });
   }, [cameraId, source, startEpoch]);
+  useEffect(() => {
+    setLocalPreviewReady(false);
+    setLocalPreviewFrameReady(false);
+    localPreviewTargetRef.current = null;
+  }, [previewManifestUrl]);
   const percent = (draft / duration) * 100;
 
   function hidePreviewAfterDelay() {
@@ -5518,6 +5548,7 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
       loading: true,
       gap: false,
       unavailable: false,
+      mode: "jpeg",
     }));
     try {
       const response = await fetch(recordingPreviewUrl(cameraId, request.epoch, source), {
@@ -5531,6 +5562,7 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
           loading: false,
           gap: true,
           unavailable: false,
+          mode: "jpeg",
         }));
       } else {
         if (!response.ok) throw new Error(`Preview failed (${response.status})`);
@@ -5547,6 +5579,7 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
           loading: false,
           gap: false,
           unavailable: false,
+          mode: "jpeg",
         });
       }
     } catch (error) {
@@ -5557,6 +5590,7 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
           loading: false,
           gap: false,
           unavailable: true,
+          mode: "jpeg",
         }));
       }
     } finally {
@@ -5565,7 +5599,7 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
       const pending = previewPendingRef.current;
       previewPendingRef.current = null;
       if (pending && pending.bucket !== request.bucket) {
-        requestPreview(pending);
+        if (!requestLocalPreview(pending)) requestPreview(pending);
       } else if (!dragRef.current) {
         setScrubbing(true);
         hidePreviewAfterDelay();
@@ -5573,10 +5607,103 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
     }
   }
 
+  function requestLocalPreview(request) {
+    const video = localPreviewRef.current;
+    const mediaTime = playbackMediaTimeForEpoch(previewTimeline, request.epoch);
+    if (!localPreviewReady || previewInFlightRef.current || !video || !Number.isFinite(mediaTime)) {
+      return false;
+    }
+    previewLastRequestRef.current = { epoch: request.bucket, at: performance.now() };
+    previewPendingRef.current = null;
+    const target = { epoch: request.epoch, mediaTime };
+    localPreviewTargetRef.current = target;
+    setPreview((current) => ({
+      ...current,
+      loading: true,
+      gap: false,
+      unavailable: false,
+      mode: localPreviewFrameReady ? "local" : current.mode,
+    }));
+    video.pause();
+    if (Math.abs(video.currentTime - mediaTime) <= 0.04 && video.readyState >= 2) {
+      publishLocalPreviewFrame(video, target);
+    } else {
+      video.currentTime = mediaTime;
+    }
+    return true;
+  }
+
+  function handleLocalPreviewReady(_player, video) {
+    video.pause();
+    setLocalPreviewReady(true);
+    const target = localPreviewTargetRef.current;
+    if (target && Number.isFinite(target.mediaTime)) video.currentTime = target.mediaTime;
+  }
+
+  function handleLocalPreviewSeeked(event) {
+    const target = localPreviewTargetRef.current;
+    if (!target || Math.abs(event.currentTarget.currentTime - target.mediaTime) > 0.08) return;
+    publishLocalPreviewFrame(event.currentTarget, target);
+  }
+
+  function publishLocalPreviewFrame(video, target) {
+    const publish = () => {
+      if (localPreviewTargetRef.current !== target || video.readyState < 2) return;
+      const canvas = localPreviewCanvasRef.current;
+      const sourceWidth = Number(video.videoWidth) || 0;
+      const sourceHeight = Number(video.videoHeight) || 0;
+      if (!canvas || !sourceWidth || !sourceHeight) return;
+      const width = Math.min(480, sourceWidth);
+      const height = Math.max(1, Math.round(sourceHeight * (width / sourceWidth)));
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      canvas.getContext("2d", { alpha: false })?.drawImage(video, 0, 0, width, height);
+      setLocalPreviewFrameReady(true);
+      setPreview((current) => ({
+        ...current,
+        epoch: target.epoch,
+        loading: false,
+        gap: false,
+        unavailable: false,
+        mode: "local",
+      }));
+      if (!dragRef.current) {
+        setScrubbing(true);
+        hidePreviewAfterDelay();
+      }
+    };
+    if (typeof video.requestVideoFrameCallback === "function") {
+      let published = false;
+      const fallback = window.setTimeout(() => {
+        if (!published) publish();
+      }, 80);
+      video.requestVideoFrameCallback(() => {
+        published = true;
+        window.clearTimeout(fallback);
+        publish();
+      });
+    } else {
+      window.requestAnimationFrame(publish);
+    }
+  }
+
+  function handleLocalPreviewError() {
+    setLocalPreviewReady(false);
+    setLocalPreviewFrameReady(false);
+    localPreviewTargetRef.current = null;
+    previewLastRequestRef.current = { epoch: null, at: 0 };
+    if (dragRef.current) schedulePreview(draftRef.current, true);
+  }
+
   function schedulePreview(value, immediate = false) {
     if (!cameraId) return;
     const requestedEpoch = startEpoch + Math.max(0, Math.min(duration, Number(value) || 0));
-    const previewBucket = Math.floor((requestedEpoch - startEpoch) / 5);
+    const localMediaTime = localPreviewReady && !previewInFlightRef.current
+      ? playbackMediaTimeForEpoch(previewTimeline, requestedEpoch)
+      : null;
+    const previewBucket = Number.isFinite(localMediaTime)
+      ? `local:${Math.floor(requestedEpoch * 2)}`
+      : `jpeg:${Math.floor((requestedEpoch - startEpoch) / 5)}`;
     if (previewLastRequestRef.current.epoch === previewBucket) {
       previewPendingRef.current = null;
       return;
@@ -5586,7 +5713,8 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
     const delay = immediate ? 0 : Math.max(0, 250 - elapsed);
     previewTimerRef.current = window.setTimeout(() => {
       previewTimerRef.current = null;
-      requestPreview({ epoch: requestedEpoch, bucket: previewBucket });
+      const request = { epoch: requestedEpoch, bucket: previewBucket };
+      if (!requestLocalPreview(request)) requestPreview(request);
     }, delay);
   }
 
@@ -5627,6 +5755,7 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
     };
     dragRef.current = drag;
     if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
+    if (previewManifestUrl) setLocalPreviewEnabled(true);
     setScrubbing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -5679,22 +5808,40 @@ function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings,
         <div className="recordings-v2-event-markers" aria-hidden="true">
           {eventMarkers.map((event) => <b key={event.id} className={event.hasObjects ? "object" : "motion"} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
-        {scrubbing ? (
-          <div
-            className={`recordings-v2-scrub-preview${preview.loading ? " loading" : ""}`}
-            style={{ left: `${Math.max(8, Math.min(92, percent))}%` }}
-            role="status"
-            aria-live="polite"
-          >
-            <div>
-              {preview.url && !preview.gap && !preview.unavailable ? <img src={preview.url} alt="Recording preview" /> : null}
-              {preview.gap ? <span><Film size={20} />No recording</span> : null}
-              {preview.unavailable ? <span><RefreshCcw size={18} />Preview unavailable</span> : null}
-              {!preview.url && !preview.gap && !preview.unavailable ? <span><RefreshCcw size={18} />Loading preview</span> : null}
-            </div>
-            <time>{formatTimeOnly(Number.isFinite(preview.epoch) ? preview.epoch : startEpoch + draft, timeZone)}</time>
-          </div>
+        {localPreviewEnabled && previewManifestUrl ? (
+          <ShakaVideo
+            ref={localPreviewRef}
+            src={previewManifestUrl}
+            mimeType="application/vnd.apple.mpegurl"
+            startTime={previewStartTime}
+            bufferingGoal={2}
+            muted
+            playsInline
+            preload="metadata"
+            className="recordings-v2-local-preview-decoder"
+            tabIndex={-1}
+            aria-label="Local recording scrub preview"
+            onReady={handleLocalPreviewReady}
+            onError={handleLocalPreviewError}
+            onSeeked={handleLocalPreviewSeeked}
+          />
         ) : null}
+        <div
+          className={`recordings-v2-scrub-preview${scrubbing ? " active" : ""}${preview.loading ? " loading" : ""}${preview.mode === "local" ? " local" : ""}`}
+          style={{ left: `${Math.max(8, Math.min(92, percent))}%` }}
+          role="status"
+          aria-live="polite"
+          aria-hidden={!scrubbing}
+        >
+          <div>
+            <canvas ref={localPreviewCanvasRef} aria-label="Decoded recording preview frame" />
+            {preview.mode === "jpeg" && preview.url && !preview.gap && !preview.unavailable ? <img src={preview.url} alt="Recording preview" /> : null}
+            {preview.mode === "jpeg" && preview.gap ? <span><Film size={20} />No recording</span> : null}
+            {preview.mode === "jpeg" && preview.unavailable ? <span><RefreshCcw size={18} />Preview unavailable</span> : null}
+            {preview.mode === "jpeg" && !preview.url && !preview.gap && !preview.unavailable ? <span><RefreshCcw size={18} />Loading preview</span> : null}
+          </div>
+          <time>{formatTimeOnly(Number.isFinite(preview.epoch) ? preview.epoch : startEpoch + draft, timeZone)}</time>
+        </div>
         <i style={{ left: `${percent}%` }} />
         <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + draft, timeZone)}</output>
         <input

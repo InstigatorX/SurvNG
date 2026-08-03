@@ -6818,30 +6818,46 @@ section.detection-settings-card {
 
 .recordings-v2-controls {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   border: 1px solid var(--line);
   border-top: 0;
-  padding: 10px 12px 14px;
+  padding: 26px 12px 10px;
 }
 
-.recordings-v2-toolbar {
+.recordings-v2-player-source {
+  position: absolute;
+  z-index: 6;
+  top: 10px;
+  left: 10px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 10px;
+  gap: 5px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 7px;
+  background: rgba(4, 12, 13, .78);
+  padding: 4px;
+  backdrop-filter: blur(8px);
 }
 
-.recordings-v2-source,
+.recordings-v2-player-source button {
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, .78);
+  padding: 4px 10px;
+}
+
+.recordings-v2-player-source button.active {
+  border-color: rgba(94, 234, 212, .4);
+  background: rgba(15, 118, 110, .78);
+  color: #fff;
+}
+
 .recordings-v2-date {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-}
-
-.recordings-v2-source button.active {
-  border-color: rgba(15, 118, 110, .45);
-  background: var(--active);
-  color: var(--active-ink);
 }
 
 .recordings-v2-date input {
@@ -6849,7 +6865,7 @@ section.detection-settings-card {
 }
 
 .recordings-v2-timeline {
-  padding-top: 24px;
+  padding-top: 0;
 }
 
 .recordings-v2-track {
@@ -6952,6 +6968,7 @@ section.detection-settings-card {
 }
 
 .recordings-v2-scrub-preview {
+  display: none;
   position: absolute;
   z-index: 12;
   bottom: calc(100% + 9px);
@@ -6965,6 +6982,10 @@ section.detection-settings-card {
   pointer-events: none;
 }
 
+.recordings-v2-scrub-preview.active {
+  display: block;
+}
+
 .recordings-v2-scrub-preview > div {
   display: grid;
   width: 100%;
@@ -6974,11 +6995,25 @@ section.detection-settings-card {
   background: #080d0f;
 }
 
-.recordings-v2-scrub-preview img {
+.recordings-v2-scrub-preview img,
+.recordings-v2-scrub-preview canvas {
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
+
+.recordings-v2-scrub-preview canvas { display: none; }
+
+.recordings-v2-local-preview-decoder {
+  display: block;
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.recordings-v2-scrub-preview.local canvas { display: block; }
 
 .recordings-v2-scrub-preview span {
   display: inline-flex;
@@ -6989,7 +7024,7 @@ section.detection-settings-card {
   font-weight: 800;
 }
 
-.recordings-v2-scrub-preview.loading img { opacity: .72; }
+.recordings-v2-scrub-preview.loading img { opacity: .82; }
 
 .recordings-v2-scrub-preview time {
   display: block;
@@ -7016,9 +7051,13 @@ section.detection-settings-card {
 }
 
 .recordings-v2-incidents {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid var(--line);
   border-top: 0;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .recordings-v2-incidents-toolbar {
@@ -7037,6 +7076,29 @@ section.detection-settings-card {
   font-weight: 720;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.recordings-v2-incidents-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.recordings-v2-range {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.recordings-v2-range select {
+  width: 102px;
+  min-height: 30px;
+  padding-block: 3px;
+  font-size: 11px;
 }
 
 .recordings-v2-event-filter {
@@ -7060,19 +7122,26 @@ section.detection-settings-card {
 
 .recordings-v2-events {
   display: flex;
+  align-items: stretch;
   gap: 7px;
+  height: 100%;
   min-height: 88px;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 7px 8px 8px;
   scrollbar-width: thin;
+  overscroll-behavior-inline: contain;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
 }
 
 .recordings-v2-events button {
   position: relative;
-  flex: 0 0 126px;
-  height: 74px;
+  flex: 0 0 auto;
+  height: 100%;
+  min-height: 68px;
   min-width: 0;
+  aspect-ratio: 16 / 9;
   overflow: hidden;
   border-color: var(--line-strong);
   border-radius: 5px;
@@ -7182,19 +7251,8 @@ section.detection-settings-card {
   }
 
   .recordings-v2-controls {
-    gap: 10px;
-    padding: 8px 7px 12px;
-  }
-
-  .recordings-v2-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .recordings-v2-source {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
+    padding: 24px 7px 8px;
   }
 
   .recordings-v2-date {
@@ -7212,14 +7270,18 @@ section.detection-settings-card {
   }
 
   .recordings-v2-events button {
-    flex-basis: 112px;
-    height: 68px;
+    min-width: 112px;
   }
 
   .recordings-v2-incidents-toolbar {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .recordings-v2-incidents-tools {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .recordings-v2-incidents-toolbar > span {
