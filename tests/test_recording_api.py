@@ -165,6 +165,62 @@ class RecordingApiTest(unittest.TestCase):
             False,
         )
 
+    def test_recording_preview_uses_quantized_local_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            source_path.write_bytes(b"recording")
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+            )
+
+            def create_preview(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                Path(command[-1]).write_bytes(b"jpeg")
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            row = {
+                "path": str(source_path),
+                "start_epoch": 100.0,
+                "end_epoch": 110.0,
+            }
+            with (
+                patch.object(main, "manager", manager),
+                patch.object(main.subprocess, "run", side_effect=create_preview) as run,
+                patch.object(main, "_maintain_recording_preview_cache"),
+            ):
+                first = main._recording_preview_path(row, 107.9)
+                second = main._recording_preview_path(row, 109.8)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first.read_bytes(), b"jpeg")
+            run.assert_called_once()
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("-ss") + 1], "5.000")
+            self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(first))
+
+    def test_recording_preview_reports_index_gap_without_storage_scan(self) -> None:
+        recorder = Mock()
+        recorder.recording_rows_between.return_value = []
+        manager = SimpleNamespace(
+            camera=lambda _camera_id: object(),
+            recorder=recorder,
+        )
+        with patch.object(main, "manager", manager):
+            with self.assertRaises(HTTPException) as missing:
+                main.recording_preview("gate", 100.0, "main")
+
+        self.assertEqual(missing.exception.status_code, 404)
+        recorder.recording_rows_between.assert_called_once_with(
+            "gate",
+            99.999,
+            100.001,
+            "main",
+            discover_missing=False,
+        )
+
     def test_fresh_recording_rows_bypass_stale_cache_and_lease_result(self) -> None:
         stale = [{"path": "/recordings/stale.mp4", "size_bytes": 2048}]
         current = [{"path": "/recordings/current.mp4", "size_bytes": 4096}]

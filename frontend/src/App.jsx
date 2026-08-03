@@ -4740,6 +4740,14 @@ function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
 }
 
+function recordingPreviewUrl(cameraId, epoch, source) {
+  const params = new URLSearchParams({
+    epoch: epoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/cameras/${cameraId}/recordings/preview.jpg?${params.toString()}`);
+}
+
 function mergeRecordingAvailability(current, updates) {
   const ranges = [...current, ...updates]
     .map((item) => ({
@@ -5358,6 +5366,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           </div>
 
           <RecordingTimeline
+            cameraId={activeCameraId}
+            source={source}
             startEpoch={dayStart}
             endEpoch={dayEnd}
             recordings={timeline}
@@ -5402,12 +5412,22 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   );
 }
 
-function RecordingTimeline({ startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek }) {
+function RecordingTimeline({ cameraId, source, startEpoch, endEpoch, recordings, events, playhead, timeZone, onSeek }) {
   const duration = Math.max(1, endEpoch - startEpoch);
   const offset = Math.max(0, Math.min(duration, playhead - startEpoch));
   const [draft, setDraft] = useState(offset);
+  const [scrubbing, setScrubbing] = useState(false);
+  const [preview, setPreview] = useState({ epoch: null, url: "", loading: false, gap: false, unavailable: false });
   const draftRef = useRef(offset);
   const dragRef = useRef(null);
+  const previewTimerRef = useRef(null);
+  const previewAbortRef = useRef(null);
+  const previewLastRequestRef = useRef({ epoch: null, at: 0 });
+  const previewUrlRef = useRef("");
+  const previewInFlightRef = useRef(false);
+  const previewPendingRef = useRef(null);
+  const previewHideTimerRef = useRef(null);
+  const previewGenerationRef = useRef(0);
   const ticks = useMemo(() => {
     const formatter = new Intl.DateTimeFormat("en-US", {
       timeZone,
@@ -5452,12 +5472,129 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, events, playhead,
     draftRef.current = offset;
     setDraft(offset);
   }, [offset]);
+  useEffect(() => () => {
+    previewGenerationRef.current += 1;
+    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
+    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
+    previewAbortRef.current?.abort();
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+  }, []);
+  useEffect(() => {
+    previewGenerationRef.current += 1;
+    previewLastRequestRef.current = { epoch: null, at: 0 };
+    previewPendingRef.current = null;
+    previewInFlightRef.current = false;
+    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
+    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
+    previewAbortRef.current?.abort();
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = "";
+    setScrubbing(false);
+    setPreview({ epoch: null, url: "", loading: false, gap: false, unavailable: false });
+  }, [cameraId, source, startEpoch]);
   const percent = (draft / duration) * 100;
 
-  function updateDraft(value) {
+  function hidePreviewAfterDelay() {
+    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
+    previewHideTimerRef.current = window.setTimeout(() => {
+      previewHideTimerRef.current = null;
+      if (!dragRef.current) setScrubbing(false);
+    }, 1400);
+  }
+
+  async function requestPreview(request) {
+    if (previewInFlightRef.current) {
+      previewPendingRef.current = request;
+      return;
+    }
+    const generation = previewGenerationRef.current;
+    previewInFlightRef.current = true;
+    previewLastRequestRef.current = { epoch: request.bucket, at: performance.now() };
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    setPreview((current) => ({
+      ...current,
+      epoch: request.epoch,
+      loading: true,
+      gap: false,
+      unavailable: false,
+    }));
+    try {
+      const response = await fetch(recordingPreviewUrl(cameraId, request.epoch, source), {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || generation !== previewGenerationRef.current) return;
+      if (response.status === 404) {
+        setPreview((current) => ({
+          ...current,
+          epoch: request.epoch,
+          loading: false,
+          gap: true,
+          unavailable: false,
+        }));
+      } else {
+        if (!response.ok) throw new Error(`Preview failed (${response.status})`);
+        const objectUrl = URL.createObjectURL(await response.blob());
+        if (controller.signal.aborted || generation !== previewGenerationRef.current) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = objectUrl;
+        setPreview({
+          epoch: request.epoch,
+          url: objectUrl,
+          loading: false,
+          gap: false,
+          unavailable: false,
+        });
+      }
+    } catch (error) {
+      if (error.name !== "AbortError" && generation === previewGenerationRef.current) {
+        setPreview((current) => ({
+          ...current,
+          epoch: request.epoch,
+          loading: false,
+          gap: false,
+          unavailable: true,
+        }));
+      }
+    } finally {
+      if (generation !== previewGenerationRef.current) return;
+      previewInFlightRef.current = false;
+      const pending = previewPendingRef.current;
+      previewPendingRef.current = null;
+      if (pending && pending.bucket !== request.bucket) {
+        requestPreview(pending);
+      } else if (!dragRef.current) {
+        setScrubbing(true);
+        hidePreviewAfterDelay();
+      }
+    }
+  }
+
+  function schedulePreview(value, immediate = false) {
+    if (!cameraId) return;
+    const requestedEpoch = startEpoch + Math.max(0, Math.min(duration, Number(value) || 0));
+    const previewBucket = Math.floor((requestedEpoch - startEpoch) / 5);
+    if (previewLastRequestRef.current.epoch === previewBucket) {
+      previewPendingRef.current = null;
+      return;
+    }
+    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
+    const elapsed = performance.now() - previewLastRequestRef.current.at;
+    const delay = immediate ? 0 : Math.max(0, 250 - elapsed);
+    previewTimerRef.current = window.setTimeout(() => {
+      previewTimerRef.current = null;
+      requestPreview({ epoch: requestedEpoch, bucket: previewBucket });
+    }, delay);
+  }
+
+  function updateDraft(value, requestPreview = false) {
     const next = Math.max(0, Math.min(duration, Number(value) || 0));
     draftRef.current = next;
     setDraft(next);
+    if (requestPreview) schedulePreview(next);
     return next;
   }
 
@@ -5489,16 +5626,19 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, events, playhead,
       precise: Math.abs(pointerX - playheadX) <= grabRadius,
     };
     dragRef.current = drag;
+    if (previewHideTimerRef.current) window.clearTimeout(previewHideTimerRef.current);
+    setScrubbing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
-    if (!drag.precise) updateDraft(pointerValue(event, drag));
+    if (!drag.precise) updateDraft(pointerValue(event, drag), true);
+    else schedulePreview(draftRef.current, true);
   }
 
   function moveDrag(event) {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    updateDraft(pointerValue(event, drag));
+    updateDraft(pointerValue(event, drag), true);
   }
 
   function finishDrag(event, cancelled = false) {
@@ -5509,6 +5649,10 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, events, playhead,
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     dragRef.current = null;
+    if (previewTimerRef.current) window.clearTimeout(previewTimerRef.current);
+    previewTimerRef.current = null;
+    if (!cancelled) schedulePreview(pointerValue(event, drag), true);
+    hidePreviewAfterDelay();
     if (cancelled) updateDraft(offset);
     else commit(pointerValue(event, drag));
   }
@@ -5535,6 +5679,22 @@ function RecordingTimeline({ startEpoch, endEpoch, recordings, events, playhead,
         <div className="recordings-v2-event-markers" aria-hidden="true">
           {eventMarkers.map((event) => <b key={event.id} className={event.hasObjects ? "object" : "motion"} style={{ left: `${event.left}%`, width: `${event.width}%` }} />)}
         </div>
+        {scrubbing ? (
+          <div
+            className={`recordings-v2-scrub-preview${preview.loading ? " loading" : ""}`}
+            style={{ left: `${Math.max(8, Math.min(92, percent))}%` }}
+            role="status"
+            aria-live="polite"
+          >
+            <div>
+              {preview.url && !preview.gap && !preview.unavailable ? <img src={preview.url} alt="Recording preview" /> : null}
+              {preview.gap ? <span><Film size={20} />No recording</span> : null}
+              {preview.unavailable ? <span><RefreshCcw size={18} />Preview unavailable</span> : null}
+              {!preview.url && !preview.gap && !preview.unavailable ? <span><RefreshCcw size={18} />Loading preview</span> : null}
+            </div>
+            <time>{formatTimeOnly(Number.isFinite(preview.epoch) ? preview.epoch : startEpoch + draft, timeZone)}</time>
+          </div>
+        ) : null}
         <i style={{ left: `${percent}%` }} />
         <output style={{ left: `${Math.max(4, Math.min(96, percent))}%` }}>{formatTimeOnly(startEpoch + draft, timeZone)}</output>
         <input

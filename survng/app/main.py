@@ -108,6 +108,14 @@ RECORDING_DAY_CACHE: dict[tuple[str, str, int, int], tuple[float, list[dict]]] =
 RECORDING_DAY_CACHE_LOCK = threading.Lock()
 RECORDING_DAY_CACHE_SECONDS = 30.0
 RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
+RECORDING_PREVIEW_INTERVAL_SECONDS = 5.0
+RECORDING_PREVIEW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+RECORDING_PREVIEW_MAX_BYTES = 256 * 1024 * 1024
+RECORDING_PREVIEW_BUILD_LIMITER = threading.BoundedSemaphore(1)
+RECORDING_PREVIEW_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+RECORDING_PREVIEW_LOCKS_GUARD = threading.Lock()
+RECORDING_PREVIEW_MAINTENANCE_LOCK = threading.Lock()
+RECORDING_PREVIEW_LAST_MAINTENANCE = 0.0
 RECORDING_CACHE_MAINTENANCE_LOCK = threading.Lock()
 RECORDING_CACHE_LAST_MAINTENANCE = 0.0
 RECORDING_CACHE_METRICS_LOCK = threading.Lock()
@@ -6132,6 +6140,37 @@ def recording_window(
     }
 
 
+@app.get("/api/cameras/{camera_id}/recordings/preview.jpg")
+def recording_preview(camera_id: str, epoch: float, source: str = "main") -> FileResponse:
+    _require_recording_camera(camera_id)
+    if not math.isfinite(epoch) or epoch <= 0:
+        raise HTTPException(status_code=400, detail="invalid recording preview time")
+    selected_source = recording_source(source)
+    rows = manager.recorder.recording_rows_between(
+        camera_id,
+        epoch - 0.001,
+        epoch + 0.001,
+        selected_source,
+        discover_missing=False,
+    )
+    row = next(
+        (
+            candidate for candidate in rows
+            if float(candidate.get("start_epoch") or 0) <= epoch
+            < float(candidate.get("end_epoch") or 0)
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="no recording exists at this time")
+    preview_path = _recording_preview_path(row, epoch)
+    return FileResponse(
+        preview_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @app.get("/api/cameras/{camera_id}/recordings/updates")
 def recording_updates(
     camera_id: str,
@@ -6422,6 +6461,148 @@ def _recording_file_response(path: Path, media_type: str) -> FileResponse:
         media_type=media_type,
         headers={"Cache-Control": "private, max-age=86400"},
     )
+
+
+def _recording_preview_path(row: dict, epoch: float) -> Path:
+    """Return a small cached JPEG near an epoch without mutating playback."""
+    source_path = _recording_storage_path(row.get("path"))
+    start_epoch = float(row.get("start_epoch") or 0)
+    end_epoch = float(row.get("end_epoch") or start_epoch)
+    if not start_epoch <= epoch < end_epoch:
+        raise HTTPException(status_code=404, detail="no recording exists at this time")
+    duration = max(0.05, end_epoch - start_epoch)
+    raw_offset = max(0.0, epoch - start_epoch)
+    preview_offset = min(
+        max(0.0, math.floor(raw_offset / RECORDING_PREVIEW_INTERVAL_SECONDS) * RECORDING_PREVIEW_INTERVAL_SECONDS),
+        max(0.0, duration - 0.05),
+    )
+    try:
+        stat = source_path.stat()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="recording file not found") from exc
+    fingerprint = (
+        f"v1:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:"
+        f"{preview_offset:.3f}:480"
+    )
+    cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
+    cache_dir = manager.database_dir / "recording-preview-cache"
+    preview_path = cache_dir / f"{cache_key}.jpg"
+    if _recording_preview_ready(preview_path, touch=True):
+        return preview_path
+
+    with RECORDING_PREVIEW_LOCKS_GUARD:
+        lock = RECORDING_PREVIEW_LOCKS.setdefault(cache_key, threading.Lock())
+    with lock:
+        if _recording_preview_ready(preview_path, touch=True):
+            return preview_path
+        if not RECORDING_PREVIEW_BUILD_LIMITER.acquire(timeout=3.0):
+            raise HTTPException(
+                status_code=429,
+                detail="recording preview generator is busy",
+                headers={"Retry-After": "1"},
+            )
+        temporary = cache_dir / f".{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg"
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            command = [
+                config.ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{preview_offset:.3f}",
+                "-i",
+                str(source_path),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-threads",
+                "1",
+                "-vf",
+                "scale='min(480,iw)':-2",
+                "-q:v",
+                "5",
+                "-y",
+                str(temporary),
+            ]
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=8,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise HTTPException(status_code=504, detail="recording preview timed out") from exc
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail="recording preview failed") from exc
+            if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+                error = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+                LOGGER.warning(
+                    "recording preview failed for %s at %.3f: %s",
+                    source_path.name,
+                    preview_offset,
+                    redact_secret_text(error[-300:]),
+                )
+                raise HTTPException(status_code=500, detail="recording preview failed")
+            os.replace(temporary, preview_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+            RECORDING_PREVIEW_BUILD_LIMITER.release()
+        _maintain_recording_preview_cache(preview_path)
+        return preview_path
+
+
+def _recording_preview_ready(path: Path, *, touch: bool = False) -> bool:
+    try:
+        ready = path.is_file() and path.stat().st_size > 0
+        if ready and touch:
+            now = time.time()
+            os.utime(path, (now, now))
+        return ready
+    except OSError:
+        return False
+
+
+def _maintain_recording_preview_cache(active_path: Path) -> None:
+    global RECORDING_PREVIEW_LAST_MAINTENANCE
+    now_monotonic = time.monotonic()
+    if now_monotonic - RECORDING_PREVIEW_LAST_MAINTENANCE < 600:
+        return
+    if not RECORDING_PREVIEW_MAINTENANCE_LOCK.acquire(blocking=False):
+        return
+    try:
+        RECORDING_PREVIEW_LAST_MAINTENANCE = now_monotonic
+        cache_dir = active_path.parent
+        now_epoch = time.time()
+        entries: list[tuple[float, int, Path]] = []
+        for path in cache_dir.glob("*.jpg"):
+            if path == active_path:
+                continue
+            try:
+                stat = path.stat()
+                if now_epoch - stat.st_mtime > RECORDING_PREVIEW_MAX_AGE_SECONDS:
+                    path.unlink(missing_ok=True)
+                else:
+                    entries.append((stat.st_mtime, stat.st_size, path))
+            except OSError:
+                continue
+        try:
+            active_size = active_path.stat().st_size
+        except OSError:
+            active_size = 0
+        total_size = sum(size for _, size, _ in entries) + active_size
+        for _modified_at, size, path in sorted(entries):
+            if total_size <= RECORDING_PREVIEW_MAX_BYTES:
+                break
+            try:
+                path.unlink(missing_ok=True)
+                total_size -= size
+            except OSError:
+                continue
+    finally:
+        RECORDING_PREVIEW_MAINTENANCE_LOCK.release()
 
 
 def _maintain_recording_cache(active_dir: Path) -> None:
