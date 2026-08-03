@@ -102,3 +102,4 @@ yolo26s-seg_openvino_model/
 core*
 core.1326837
 openvino_model/metadata.yaml
+runtime/
