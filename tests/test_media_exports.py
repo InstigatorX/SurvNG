@@ -148,7 +148,7 @@ class MediaExportTest(unittest.TestCase):
             self.assertFalse(manager._valid_video_output(output))
             self.assertFalse(manager._valid_media_container(output))
 
-    def test_worker_publishes_stream_copy_and_manifest(self) -> None:
+    def test_worker_publishes_single_compatible_mp4_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             segment = root / "segment.mp4"
@@ -173,7 +173,10 @@ class MediaExportTest(unittest.TestCase):
                 Path(command[-1]).write_bytes(b"export")
 
             manager._run_process = fake_run  # type: ignore[method-assign]
-            manager._valid_media_container = lambda _path: True  # type: ignore[method-assign]
+            manager._valid_video_output = lambda _path: True  # type: ignore[method-assign]
+            manager._probe_source = lambda _path: {  # type: ignore[method-assign]
+                "width": 1920, "height": 1080, "fps": 20.0, "has_audio": True,
+            }
             manager.start()
             try:
                 created = manager.create({
@@ -199,9 +202,75 @@ class MediaExportTest(unittest.TestCase):
             output, name = manager.output_path(str(created["id"]))
             self.assertEqual(output.read_bytes(), b"export")
             self.assertEqual(name, completed["output_name"])
+            self.assertTrue(name.endswith(".mp4"))
             self.assertTrue((manager.manifest_dir / f"{created['id']}.json").is_file())
             self.assertTrue(recorder.leases)
             self.assertEqual(recorder.request[-1], False)
+
+    def test_recording_commands_use_hardware_then_cpu_and_normalize_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "/config/ffmpeg",
+                hardware_backend=lambda: "qsv",
+                hardware_device=lambda _backend: "/dev/dri/renderD129",
+            )
+
+            commands = manager._recording_commands(
+                "qsv", root / "input.ffconcat", root / "out.mp4",
+                "scale=1920:1080,fps=20", 1.25, 10.0, True,
+            )
+
+            self.assertEqual([name for name, _command in commands], ["qsv", "cpu"])
+            qsv = commands[0][1]
+            self.assertEqual(qsv[qsv.index("-qsv_device") + 1], "/dev/dri/renderD129")
+            self.assertIn("h264_qsv", qsv)
+            self.assertIn("aac", qsv)
+            self.assertEqual(qsv[qsv.index("-af") + 1], "asetpts=PTS-STARTPTS")
+
+    def test_recording_with_multiple_spans_is_joined_as_one_mp4(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rows = []
+            for index, start in enumerate((100.0, 120.0), start=1):
+                segment = root / f"segment-{index}.mp4"
+                segment.write_bytes(b"source")
+                rows.append({
+                    "path": str(segment), "start_epoch": start,
+                    "end_epoch": start + 10.0, "duration_seconds": 10.0,
+                    "stream_fingerprint": f"revision-{index}",
+                })
+            recorder = FakeRecorder(rows)
+            manager = MediaExportManager(
+                root / "storage", root / "database", recorder=lambda: recorder,
+                ffmpeg_path=lambda: "ffmpeg", hardware_backend=lambda: "cpu",
+            )
+            manager._probe_source = lambda _path: {  # type: ignore[method-assign]
+                "width": 1280, "height": 720, "fps": 20.0, "has_audio": False,
+            }
+            commands: list[list[str]] = []
+
+            def fake_run(command: list[str], _cancel: threading.Event, timeout: float) -> None:
+                self.assertGreater(timeout, 0)
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"export")
+
+            manager._run_process = fake_run  # type: ignore[method-assign]
+            manager._valid_video_output = lambda _path: True  # type: ignore[method-assign]
+            work = root / "work"
+            work.mkdir()
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 100.0, "end_epoch": 130.0, "options": {},
+            })
+
+            output, gaps = manager._build_recording(job, rows, work, threading.Event())
+
+            self.assertEqual(output.name, "recording.mp4")
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(commands[-1][commands[-1].index("-c") + 1], "copy")
+            self.assertEqual(gaps[0]["duration_seconds"], 10.0)
 
     def test_cancel_or_delete_removes_completed_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

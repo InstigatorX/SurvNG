@@ -13,7 +13,6 @@ import tempfile
 import threading
 import time
 import uuid
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -440,6 +439,12 @@ class MediaExportManager:
         groups, gaps = self._continuous_groups(rows, float(job["start_epoch"]), float(job["end_epoch"]))
         if not groups:
             raise RuntimeError("no continuous recording spans exist in the selected range")
+        profiles = [self._probe_source(Path(str(group[0]["path"]))) for group in groups]
+        target_width = max(2, int(profiles[0]["width"]) // 2 * 2)
+        target_height = max(2, int(profiles[0]["height"]) // 2 * 2)
+        target_fps = max(1.0, min(float(profiles[0]["fps"]), 60.0))
+        include_audio = all(bool(profile["has_audio"]) for profile in profiles)
+        backend = self._hardware_backend()
         parts: list[Path] = []
         for index, group in enumerate(groups, start=1):
             if cancel.is_set() or self._stop.is_set():
@@ -452,25 +457,153 @@ class MediaExportManager:
             )
             concat = self._write_concat(group, work / f"part-{index}.ffconcat")
             output = work / f"part-{index:02d}.mp4"
-            command = [
-                self._ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
-                "-f", "concat", "-safe", "0", "-i", str(concat),
-                "-ss", f"{local_start:.3f}", "-t", f"{duration:.3f}",
-                "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
-                "-movflags", "+faststart", "-y", str(output),
-            ]
-            self._run_process(command, cancel, timeout=max(120.0, min(1800.0, duration * 0.5)))
-            if not self._valid_media_container(output):
-                raise RuntimeError("recording export produced no playable video")
+            filters = (
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                f"fps={target_fps:.6f},settb=AVTB,setpts=N/({target_fps:.6f}*TB)"
+            )
+            commands = self._recording_commands(
+                backend, concat, output, filters, local_start, duration, include_audio
+            )
+            last_error = "recording export failed"
+            encoded = False
+            for backend_name, command in commands:
+                output.unlink(missing_ok=True)
+                try:
+                    self.store.update(
+                        str(job["id"]),
+                        phase=f"Rendering clip {index} of {len(groups)} ({backend_name})",
+                        progress=8 + (72 * (index - 1) / len(groups)),
+                    )
+                    self._run_process(command, cancel, timeout=max(300.0, min(3600.0, duration * 2.0)))
+                except RuntimeError as exc:
+                    last_error = str(exc)
+                    if backend_name != "cpu":
+                        LOGGER.warning("%s recording export failed; trying fallback: %s", backend_name, last_error)
+                        continue
+                    raise
+                if self._valid_video_output(output):
+                    encoded = True
+                    break
+                last_error = f"{backend_name} recording export produced no playable video"
+                if backend_name != "cpu":
+                    LOGGER.warning("%s; trying fallback", last_error)
+                    continue
+                raise RuntimeError(last_error)
+            if not encoded:
+                raise RuntimeError(last_error)
             parts.append(output)
-            self.store.update(str(job["id"]), phase=f"Exporting part {index} of {len(groups)}", progress=10 + (75 * index / len(groups)))
+            self.store.update(
+                str(job["id"]),
+                phase=f"Rendered clip {index} of {len(groups)}",
+                progress=8 + (72 * index / len(groups)),
+            )
         if len(parts) == 1:
             return parts[0], gaps
-        archive = work / "recording-parts.zip"
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
-            for part in parts:
-                bundle.write(part, part.name)
-        return archive, gaps
+        self.store.update(str(job["id"]), phase="Joining compatible clips", progress=84)
+        concat = self._write_concat(
+            [{"path": str(part)} for part in parts], work / "recording-final.ffconcat"
+        )
+        output = work / "recording.mp4"
+        command = [
+            self._ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
+            "-f", "concat", "-safe", "0", "-i", str(concat),
+            "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+            "-movflags", "+faststart", "-y", str(output),
+        ]
+        self._run_process(command, cancel, timeout=max(120.0, sum(
+            max(0.0, float(group[-1]["end_epoch"]) - float(group[0]["start_epoch"]))
+            for group in groups
+        ) * 0.25))
+        if not self._valid_video_output(output):
+            raise RuntimeError("recording export could not join its compatible video spans")
+        return output, gaps
+
+    def _recording_commands(
+        self,
+        backend: str,
+        concat: Path,
+        output: Path,
+        filters: str,
+        local_start: float,
+        duration: float,
+        include_audio: bool,
+    ) -> list[tuple[str, list[str]]]:
+        device_args: list[str] = []
+        input_args = [
+            "-f", "concat", "-safe", "0", "-i", str(concat),
+            "-ss", f"{local_start:.6f}", "-t", f"{duration:.6f}",
+            "-map", "0:v:0",
+        ]
+        audio_args = [
+            "-map", "0:a:0", "-af", "asetpts=PTS-STARTPTS",
+            "-c:a", "aac", "-b:a", "128k",
+        ] if include_audio else ["-an"]
+        suffix = [*audio_args, "-movflags", "+faststart", "-y", str(output)]
+        commands: list[tuple[str, list[str]]] = []
+        if backend == "qsv":
+            device = self._hardware_device("qsv")
+            device_args = ["-qsv_device", device] if device else []
+            commands.append(("qsv", [
+                self._ffmpeg_path(), "-hide_banner", "-loglevel", "warning", *device_args,
+                *input_args, "-vf", filters, "-fps_mode", "cfr",
+                "-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "23",
+                "-pix_fmt", "nv12", *suffix,
+            ]))
+        elif backend == "vaapi":
+            device = self._hardware_device("vaapi") or "/dev/dri/renderD128"
+            commands.append(("vaapi", [
+                self._ffmpeg_path(), "-hide_banner", "-loglevel", "warning",
+                "-vaapi_device", device, *input_args,
+                "-vf", f"{filters},format=nv12,hwupload", "-fps_mode", "cfr",
+                "-c:v", "h264_vaapi", "-qp", "23", *suffix,
+            ]))
+        commands.append(("cpu", [
+            self._ffmpeg_path(), "-hide_banner", "-loglevel", "warning", *input_args,
+            "-vf", filters, "-fps_mode", "cfr",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", *suffix,
+        ]))
+        return commands
+
+    def _probe_source(self, path: Path) -> dict[str, object]:
+        ffmpeg = Path(self._ffmpeg_path())
+        sibling = ffmpeg.with_name("ffprobe")
+        ffprobe = str(sibling) if ffmpeg.name == "ffmpeg" and sibling.is_file() else "ffprobe"
+        try:
+            probe = subprocess.run(
+                [
+                    ffprobe, "-v", "error", "-show_entries",
+                    "stream=codec_type,width,height,avg_frame_rate,r_frame_rate",
+                    "-of", "json", str(path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+            )
+            payload = json.loads(probe.stdout or "{}") if probe.returncode == 0 else {}
+            streams = list(payload.get("streams") or [])
+            video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+            if not video:
+                raise RuntimeError("source recording contains no video stream")
+            frame_rate = str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0")
+            numerator, separator, denominator = frame_rate.partition("/")
+            fps = float(numerator) / float(denominator) if separator and float(denominator) else float(numerator)
+            if fps <= 0:
+                fps = 30.0
+            width = int(video.get("width") or 0)
+            height = int(video.get("height") or 0)
+            if width <= 0 or height <= 0:
+                raise RuntimeError("source recording has invalid video dimensions")
+            return {
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "has_audio": any(stream.get("codec_type") == "audio" for stream in streams),
+            }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"unable to inspect source recording: {exc}") from exc
 
     def _build_timelapse(
         self,

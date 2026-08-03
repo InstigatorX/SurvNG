@@ -6247,6 +6247,8 @@ def download_media_export(job_id: str) -> FileResponse:
     return FileResponse(
         path,
         filename=name,
+        # New recording exports are always MP4. Keep the legacy ZIP media type
+        # until any already-completed archive jobs expire from the export store.
         media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
         headers={"Cache-Control": "private, no-store"},
     )

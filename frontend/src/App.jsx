@@ -5485,14 +5485,6 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
             <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
           </div>
-          <button
-            type="button"
-            className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`}
-            onClick={toggleExport}
-            disabled={!timeline.length || exportActive}
-          >
-            <Download size={15} />{exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
-          </button>
         </div>
 
         <div className="recordings-v2-controls">
@@ -5529,7 +5521,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                   <label><span>Playback</span><select value={exportOptions.fps} onChange={(event) => setExportOptions((current) => ({ ...current, fps: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
                   <label><span>Resolution</span><select value={exportOptions.width} onChange={(event) => setExportOptions((current) => ({ ...current, width: Number(event.target.value) }))} disabled={Boolean(exportJob)}><option value="640">640 wide</option><option value="1280">1280 wide</option><option value="1920">1920 wide</option></select></label>
                 </div>
-              ) : <p>Creates a fast, original-quality clip without re-encoding. Gaps or stream-format changes are delivered as separate files in one download.</p>}
+              ) : <p>Creates one broadly compatible H.264 MP4. Recording gaps are skipped and source-format changes are joined automatically.</p>}
               {exportJob ? (
                 <div className={`recordings-v2-export-status ${exportJob.status}`}>
                   <span><b>{exportJob.phase || exportJob.status}</b><small>{Math.round(Number(exportJob.progress) || 0)}%</small></span>
@@ -5572,6 +5564,14 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                   <option value="24">Full day</option>
                 </select>
               </label>
+              <button
+                type="button"
+                className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`}
+                onClick={toggleExport}
+                disabled={!timeline.length || exportActive}
+              >
+                <Download size={15} />{exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
+              </button>
             </div>
             <span>{nearbyEvents.length.toLocaleString()} of {filteredEvents.length.toLocaleString()} {eventFilter} incident{filteredEvents.length === 1 ? "" : "s"} · {incidentRangeHours >= 24 ? "full day" : `${incidentRangeHours} hour${incidentRangeHours === 1 ? "" : "s"} around current time`}</span>
           </div>

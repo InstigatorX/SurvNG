@@ -6856,23 +6856,20 @@ section.detection-settings-card {
 }
 
 .recordings-v2-export-toggle {
-  position: absolute;
-  z-index: 6;
-  top: 10px;
-  right: 10px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 39px;
-  border-color: rgba(255, 255, 255, .16);
-  background: rgba(4, 12, 13, .78);
-  color: rgba(255, 255, 255, .9);
-  backdrop-filter: blur(8px);
+  min-height: 30px;
+  border-color: var(--line-strong);
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 4px 9px;
+  font-size: 11px;
 }
 
 .recordings-v2-export-toggle.active {
   border-color: rgba(94, 234, 212, .55);
-  background: rgba(15, 118, 110, .88);
+  background: rgba(15, 118, 110, .32);
   color: #fff;
 }
 
