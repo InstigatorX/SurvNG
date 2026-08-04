@@ -185,6 +185,14 @@ class RecordingRetentionServiceTest(unittest.TestCase):
 
         outcome = service.run_once(apply=True)
 
+        self.assertEqual(outcome["plan"]["reclaim"]["expired_files"], 0)
+        self.assertEqual(outcome["plan"]["reclaim"]["expired_bytes"], 0)
+        self.assertEqual(outcome["plan"]["reclaim"]["protected_expired_files"], 1)
+        self.assertEqual(
+            outcome["plan"]["reclaim"]["protected_expired_bytes"],
+            10 * GIB,
+        )
+        self.assertEqual(outcome["plan"]["reclaim"]["planned_bytes"], 0)
         self.assertEqual(outcome["result"]["deleted_files"], 0)
         self.assertTrue(old.exists())
 

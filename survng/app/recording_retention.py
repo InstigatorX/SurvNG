@@ -131,6 +131,7 @@ class RecordingRetentionService:
     def plan(self, *, now_epoch: float | None = None) -> dict[str, Any]:
         now = time.time() if now_epoch is None else float(now_epoch)
         usage = shutil.disk_usage(self.storage_dir)
+        protected_paths = self.protected_paths_provider()
         with self.connection_factory() as connection:
             totals = connection.execute(
                 """
@@ -153,19 +154,35 @@ class RecordingRetentionService:
             per_camera: list[dict[str, Any]] = []
             expired_count = 0
             expired_bytes = 0
+            protected_expired_count = 0
+            protected_expired_bytes = 0
             for row in groups:
                 camera_id = str(row["camera_id"])
                 source = "main" if str(row["source"]) == "main" else "live"
                 retention_days = self._retention_days(camera_id, source)
                 cutoff = now - retention_days * SECONDS_PER_DAY
-                expired = connection.execute(
+                expired_rows = connection.execute(
                     """
-                    SELECT count(*) AS file_count, coalesce(sum(size_bytes), 0) AS bytes
+                    SELECT path, size_bytes
                     FROM recordings
                     WHERE camera_id = ? AND source = ? AND end_epoch < ?
                     """,
                     (camera_id, source, cutoff),
-                ).fetchone()
+                ).fetchall()
+                eligible_expired_files = 0
+                eligible_expired_bytes = 0
+                group_protected_expired_files = 0
+                group_protected_expired_bytes = 0
+                for expired_row in expired_rows:
+                    row_bytes = int(expired_row["size_bytes"] or 0)
+                    if self._path_is_protected(
+                        str(expired_row["path"]), protected_paths
+                    ):
+                        group_protected_expired_files += 1
+                        group_protected_expired_bytes += row_bytes
+                    else:
+                        eligible_expired_files += 1
+                        eligible_expired_bytes += row_bytes
                 group_bytes = int(row["bytes"] or 0)
                 oldest = _optional_float(row["oldest"])
                 newest = _optional_float(row["newest"])
@@ -179,11 +196,15 @@ class RecordingRetentionService:
                     "bytes_per_day": round(bytes_per_day),
                     "retention_days": retention_days,
                     "projected_bytes": round(bytes_per_day * retention_days),
-                    "expired_files": int(expired["file_count"] or 0),
-                    "expired_bytes": int(expired["bytes"] or 0),
+                    "expired_files": eligible_expired_files,
+                    "expired_bytes": eligible_expired_bytes,
+                    "protected_expired_files": group_protected_expired_files,
+                    "protected_expired_bytes": group_protected_expired_bytes,
                 }
                 expired_count += item["expired_files"]
                 expired_bytes += item["expired_bytes"]
+                protected_expired_count += item["protected_expired_files"]
+                protected_expired_bytes += item["protected_expired_bytes"]
                 per_camera.append(item)
 
         indexed_bytes = int(totals["bytes"] or 0)
@@ -245,6 +266,8 @@ class RecordingRetentionService:
             "reclaim": {
                 "expired_files": expired_count,
                 "expired_bytes": expired_bytes,
+                "protected_expired_files": protected_expired_count,
+                "protected_expired_bytes": protected_expired_bytes,
                 "quota_bytes": quota_reclaim,
                 "free_space_bytes": free_reclaim,
                 "planned_bytes": planned_reclaim,
@@ -403,6 +426,26 @@ class RecordingRetentionService:
                         ),
                     }
                 result = self._run_cached_plan(plan, apply=apply)
+                if (
+                    apply
+                    and int(result["selected_files"]) == 0
+                    and int(result["remaining_planned_bytes"]) > 0
+                ):
+                    # The local recording index can change between the daily plan
+                    # and a cleanup pass. Refresh immediately rather than leaving
+                    # already-pruned rows advertised as reclaimable for a day.
+                    plan = self.plan()
+                    self._last_plan_monotonic = time.monotonic()
+                    self._capacity_reclaim_remaining = max(
+                        int(plan["reclaim"]["quota_bytes"]),
+                        int(plan["reclaim"]["free_space_bytes"]),
+                    )
+                    self._planned_reclaim_remaining = int(
+                        plan["reclaim"]["planned_bytes"]
+                    )
+                    result["remaining_planned_bytes"] = self._planned_reclaim_remaining
+                    result["plan_refreshed"] = True
+                    result["refreshed_at"] = plan["generated_at"]
                 should_continue = bool(
                     apply
                     and int(result["selected_files"]) >= self.config.cleanup_batch_files
@@ -416,6 +459,11 @@ class RecordingRetentionService:
                         "enabled": self.config.enabled,
                         "automatic_cleanup": self.config.automatic_cleanup,
                         "last_run_at": result["finished_at"] if apply else self._status.get("last_run_at"),
+                        "last_plan_at": (
+                            plan["generated_at"]
+                            if result.get("plan_refreshed")
+                            else self._status.get("last_plan_at")
+                        ),
                         "error": "",
                         "plan": plan,
                         "last_run": result if apply else self._status.get("last_run"),
@@ -482,6 +530,10 @@ class RecordingRetentionService:
         free_percent = usage.free / usage.total * 100 if usage.total else 0.0
         return free_percent < self.config.minimum_free_percent
 
+    @staticmethod
+    def _path_is_protected(raw_path: str, protected_paths: set[str]) -> bool:
+        return str(Path(raw_path).resolve(strict=False)) in protected_paths
+
     def _retention_days(self, camera_id: str, source: str) -> int:
         camera = self._cameras.get(camera_id)
         override = None
@@ -526,7 +578,7 @@ class RecordingRetentionService:
                 candidates.update(
                     (str(row["path"]), row)
                     for row in rows
-                    if str(Path(str(row["path"])).resolve(strict=False)) not in protected_paths
+                    if not self._path_is_protected(str(row["path"]), protected_paths)
                 )
             capacity_reclaim = (
                 max(
@@ -546,7 +598,7 @@ class RecordingRetentionService:
                     (protected_cutoff, query_limit),
                 ).fetchall()
                 for row in rows:
-                    if str(Path(str(row["path"])).resolve(strict=False)) in protected_paths:
+                    if self._path_is_protected(str(row["path"]), protected_paths):
                         continue
                     path_key = str(row["path"])
                     if path_key not in candidates:
