@@ -82,6 +82,7 @@ AssistantToolName = Literal[
     "inspect_incident",
     "analyze_incident_visual",
     "search_incidents",
+    "semantic_search_recordings",
     "summarize_recent_activity",
     "trace_across_cameras",
     "create_media_export",
@@ -149,6 +150,7 @@ class AssistantToolCall(BaseModel):
     end_at: str = Field(default="", max_length=64)
     event_type: Literal["all", "object", "motion"] = "all"
     object_label: str = Field(default="", max_length=128)
+    query: str = Field(default="", max_length=500)
     zone: str = Field(default="", max_length=128)
     minimum_confidence: float | None = Field(default=None, ge=0, le=1)
     face_name: str = Field(default="", max_length=128)
@@ -255,6 +257,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                             "inspect_incident",
                             "analyze_incident_visual",
                             "search_incidents",
+                            "semantic_search_recordings",
                             "summarize_recent_activity",
                             "trace_across_cameras",
                             "create_media_export",
@@ -266,6 +269,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                     "end_at": {"type": "string"},
                     "event_type": {"type": "string", "enum": ["all", "object", "motion"]},
                     "object_label": {"type": "string"},
+                    "query": {"type": "string"},
                     "zone": {"type": "string"},
                     "minimum_confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
                     "face_name": {"type": "string"},
@@ -279,7 +283,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                 },
                 "required": [
                     "name", "camera_id", "event_id", "start_at", "end_at", "event_type",
-                    "object_label", "zone", "minimum_confidence", "face_name", "limit",
+                    "object_label", "query", "zone", "minimum_confidence", "face_name", "limit",
                     "export_kind", "source", "sample_interval_seconds", "output_fps", "width",
                     "height",
                 ],
@@ -366,6 +370,10 @@ Tool guidance:
 - search_incidents: structured metadata search. Use ISO-8601 start_at/end_at with offsets. Resolve
   relative dates from current_time and time_zone. Default an unspecified search window to 24 hours.
   Use event_type=object when the user asks for an object/class; motion means motion-only incidents.
+- semantic_search_recordings: visual-language search for descriptions such as clothing, color,
+  vehicle appearance, carried items, or scene content that metadata cannot answer. Put the user's
+  visual description in query. It searches locally indexed object incidents, not continuous video.
+  Use camera_id and ISO-8601 start_at/end_at when supplied; otherwise default to the past 24 hours.
 - summarize_recent_activity: one compact, non-visual activity digest. Use this instead of
   search_incidents when the user asks what happened, requests an overview/summary, or asks about
   activity during a recent time window. Do not also request search_incidents for the same summary.

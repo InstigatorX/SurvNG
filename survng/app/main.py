@@ -5184,6 +5184,69 @@ def _assistant_search_incidents(
     return evidence
 
 
+def _assistant_semantic_search(
+    call: AssistantToolCall,
+    time_zone: str,
+    active_manager: AppManager,
+) -> list[AssistantEvidence]:
+    query = call.query.strip()
+    if not query:
+        return []
+    try:
+        selected_zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        selected_zone = ZoneInfo("America/New_York")
+    now = datetime.now(timezone.utc)
+    start = _assistant_parse_datetime(call.start_at, selected_zone) or now - timedelta(hours=24)
+    end = _assistant_parse_datetime(call.end_at, selected_zone) or now
+    if end <= start:
+        start, end = end, start
+    start = max(start, end - timedelta(days=31))
+    try:
+        hits = active_manager.semantic_search.search_text(
+            query,
+            camera_ids=[call.camera_id] if call.camera_id else [],
+            object_labels=[call.object_label] if call.object_label else [],
+            start_at=start.isoformat(), end_at=end.isoformat(),
+            limit=min(call.limit * 4, 200), minimum_score=-1.0,
+        )
+    except RuntimeError as exc:
+        return [AssistantEvidence(
+            evidence_id="E-semantic-status", kind="semantic_search_status",
+            title="Visual search unavailable", summary=str(exc),
+            data=active_manager.semantic_search_status(), href="/recordings?mode=search",
+        )]
+    best: dict[int, Any] = {}
+    for hit in hits:
+        best.setdefault(hit.event_id, hit)
+        if len(best) >= call.limit:
+            break
+    evidence = [AssistantEvidence(
+        evidence_id="E-semantic-search", kind="semantic_search",
+        title=f'Visual search · “{query}”',
+        summary=f"Found {len(best)} visually similar incident(s) in the indexed evidence.",
+        data={
+            "query": query, "start_at": start.isoformat(), "end_at": end.isoformat(),
+            "camera_id": call.camera_id, "object_label": call.object_label,
+            "matches": [
+                {"event_id": hit.event_id, "score": round(hit.score, 4),
+                 "source_kind": hit.source_kind, "object_label": hit.object_label}
+                for hit in best.values()
+            ],
+            "limitations": [
+                "Similarity is not identity proof.",
+                "Search currently covers indexed object incidents, not every recording frame.",
+            ],
+        },
+        href="/recordings?mode=search",
+    )]
+    for event_id in best:
+        incident = _assistant_incident_for_event(event_id, active_manager)
+        if incident is not None:
+            evidence.append(_assistant_incident_evidence(incident, event_id))
+    return evidence
+
+
 def _assistant_recent_activity_summary(
     call: AssistantToolCall,
     time_zone: str,
@@ -5635,6 +5698,10 @@ def _assistant_execute_tool(
             call,
             request.context.time_zone,
             active_manager,
+        )
+    if call.name == "semantic_search_recordings":
+        return _assistant_semantic_search(
+            call, request.context.time_zone, active_manager
         )
     if call.name == "summarize_recent_activity":
         return [_assistant_recent_activity_summary(
