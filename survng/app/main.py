@@ -1228,6 +1228,11 @@ def recordings_page() -> HTMLResponse:
     return frontend_response("recordings.html")
 
 
+@app.get("/recordings/search")
+def recording_search_page() -> HTMLResponse:
+    return frontend_response("recordings.html")
+
+
 @app.get("/recordings/exports")
 def recording_exports_page() -> HTMLResponse:
     return frontend_response("recordings.html")
