@@ -8660,7 +8660,7 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
 function motionAuditOutcome(item) {
   const visualBackup = item.category === "visual_backup";
   if (item.interpretation?.category === "visual_backup_scene_learning") return { label: "Visual backup · scene learning", className: "not-run" };
-  if (item.interpretation?.category === "object_not_motion_correlated") return { label: "Visual backup · unrelated stationary object", className: "clear" };
+  if (item.interpretation?.category === "object_not_motion_correlated") return { label: "Motion confirmed · detected object outside motion area", className: "clear" };
   if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
   if (item.interpretation?.category === "duplicate_event_cooldown") return { label: "Duplicate · cooldown", className: "not-run" };
   if (item.interpretation?.category === "filtered_before_object_detection") return { label: "Filtered before detection", className: "not-run" };
@@ -10023,7 +10023,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
             {missingMotionNotices ? <span className="motion-runtime-warning">{visualBackupEnabled ? "No recognized ONVIF motion notices since this worker started. Strong persistent visual motion can still invoke the backup detector path." : "No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident."}</span> : null}
             {visualBackupEnabled ? <>
               <span>{status.motion_qualification.visual_backup?.scene_ready ? "EMA background ready" : "EMA learning scene"} · {status.motion_qualification.visual_backup_triggers || 0} visual backups · {status.motion_qualification.visual_backup_onvif_matches || 0} strong candidates matched to camera notices · {status.motion_qualification.visual_backup_rate_limited || 0} limited</span>
-              <span>{status.motion_qualification.visual_backup_not_ready || 0} strong candidates held during scene learning · {status.motion_qualification.visual_backup_uncorrelated_objects || 0} unrelated stationary objects rejected</span>
+              <span>{status.motion_qualification.visual_backup_not_ready || 0} strong candidates held during scene learning · {status.motion_qualification.visual_backup_uncorrelated_objects || 0} detected objects outside motion areas rejected</span>
             </> : null}
             <MotionEffectiveness cameraId={status.id} mode={status.motion_qualification.mode} />
           </div>

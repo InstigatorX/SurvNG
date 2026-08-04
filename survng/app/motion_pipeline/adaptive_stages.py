@@ -848,9 +848,18 @@ class AdaptiveMotionScoringStage:
                     and candidate_features["net_displacement"]
                     < self.micro_displacement_ratio
                 )
+                # Duration alone cannot distinguish recurring scene noise from
+                # a person or vehicle that remains visible for several
+                # seconds.  Only age out a long-running track when its recent
+                # path is also contained and oscillatory.  A sustained,
+                # directional traversal remains eligible for validation.
                 persistent_scene_motion = (
                     candidate_features["persistence_seconds"]
                     > self.maximum_credible_track_seconds
+                    and candidate_features["motion_progress"] < 0.45
+                    and candidate_features["direction_consistency"] < 0.55
+                    and candidate_features["containment_radius"]
+                    < max(0.05, stationary_containment_ratio * 2.0)
                 )
                 candidate_accepted = (
                     candidate_score >= threshold

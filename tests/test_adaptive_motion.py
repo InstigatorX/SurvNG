@@ -538,7 +538,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(second.scoring.reason, "stationary_region")
         self.assertGreaterEqual(second.scoring.features["stationary_region_count"], 1)
 
-    def test_long_running_motion_becomes_scene_activity_not_a_fresh_trigger(self) -> None:
+    def test_long_running_directional_motion_remains_credible(self) -> None:
         scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "persistent",
             [MotionStageConfig("scoring", "adaptive_motion_score")],
@@ -574,6 +574,58 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         try:
             result = scorer.process(MotionContext(
                 camera_id="persistent",
+                captured_at=107.8,
+                original_frame=None,
+                configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+                runtime=scorer.runtime,
+                processed_frame_history=(np.zeros((10, 10), dtype=np.uint8),),
+                tracked_objects=[persistent],
+            ))
+        finally:
+            scorer.close()
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "qualified")
+
+    def test_long_running_contained_oscillation_becomes_scene_activity(self) -> None:
+        scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "persistent-oscillation",
+            [MotionStageConfig("scoring", "adaptive_motion_score")],
+            initial_artifacts={"tracked_objects", "processed_frame_history"},
+        )
+        path = tuple(
+            (0.4 + (0.025 if index % 2 else -0.025), 0.4)
+            for index in range(40)
+        )
+        blobs = tuple(
+            MotionBlob(
+                box=(x, y, x + 0.1, y + 0.2),
+                centroid=(x, y),
+                area_pixels=576,
+                area_ratio=0.01,
+                fill_ratio=0.7,
+                edge_distance=0.2,
+            )
+            for x, y in path
+        )
+        persistent = MotionTrack(
+            track_id=1,
+            box=blobs[-1].box,
+            path=path,
+            observations=blobs,
+            observation_frames=tuple(range(40)),
+            active_history=tuple(True for _ in blobs),
+            changed_pixels=(),
+            changed_ratios=(),
+            first_seen=100.0,
+            last_seen=107.8,
+            consecutive_started_at=100.0,
+            consecutive_frames=40,
+            size_history=tuple(0.01 for _ in blobs),
+        )
+        try:
+            result = scorer.process(MotionContext(
+                camera_id="persistent-oscillation",
                 captured_at=107.8,
                 original_frame=None,
                 configuration={"sensitivity": "balanced", "sample_fps": 5.0},

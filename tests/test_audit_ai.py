@@ -121,6 +121,10 @@ class AuditAiTest(unittest.TestCase):
         )
 
         self.assertEqual(interpretation["category"], "object_not_motion_correlated")
+        self.assertEqual(
+            interpretation["label"],
+            "Motion confirmed · detected object outside motion area",
+        )
         self.assertFalse(interpretation["object_detection_miss"])
 
     def test_startup_readiness_hold_is_not_treated_as_detector_miss(self) -> None:

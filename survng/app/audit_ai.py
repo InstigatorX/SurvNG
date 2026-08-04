@@ -258,9 +258,9 @@ def motion_audit_interpretation(
     if normalized_reason == "object_not_motion_correlated":
         return {
             "category": "object_not_motion_correlated",
-            "label": "Object unrelated to EMA motion",
+            "label": "Motion confirmed · detected object outside motion area",
             "object_detection_miss": False,
-            "explanation": "Object detection found an eligible object, but it neither overlapped the credible EMA motion nor moved across detector samples.",
+            "explanation": "EMA confirmed credible motion, but the detected object was outside that motion area and did not move across detector samples.",
         }
     if normalized_reason == "event_state_active" and not detection_ran:
         return {
