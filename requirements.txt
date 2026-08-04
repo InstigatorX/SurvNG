@@ -3,8 +3,8 @@ uvicorn[standard]>=0.38,<1
 websockets>=16,<17
 opencv-python==4.10.0.84
 openvino==2026.2.1
-transformers>=4.50,<6
-sentencepiece>=0.2,<1
+ftfy>=6.1,<7
+regex>=2024.0,<2027
 coremltools>=8,<10; platform_system=="Darwin"
 Pillow>=10,<13; platform_system=="Darwin"
 onvif-zeep==0.2.12

@@ -100,6 +100,7 @@ class SemanticSearchConfig(BaseModel):
     index_object_crops: bool = True
     max_results: int = Field(default=100, ge=10, le=500)
     backfill_batch_size: int = Field(default=25, ge=1, le=250)
+    backfill_pause_seconds: float = Field(default=0.25, ge=0.01, le=5.0)
     worker_queue_size: int = Field(default=256, ge=16, le=4096)
 
     @field_validator("model_dir", mode="before")

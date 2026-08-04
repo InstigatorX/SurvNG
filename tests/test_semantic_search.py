@@ -108,6 +108,40 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(encoder.shapes, [(100, 200, 3), (60, 100, 3)])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 2, "event_count": 1})
 
+    def test_live_events_have_priority_over_historical_backfill(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        service._queue.put_nowait((1, next(service._queue_sequence), {"id": 1}))
+
+        self.assertTrue(service.queue_event({"id": 2, "snapshot_path": "live.webp"}))
+
+        priority, _sequence, event = service._queue.get_nowait()
+        self.assertEqual(priority, 0)
+        self.assertEqual(event["id"], 2)
+
+    def test_historical_backfill_reserves_capacity_for_live_events(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, worker_queue_size=16),
+            self.index,
+            Path(self.temporary.name),
+            {},
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+
+        self.assertEqual(service._live_queue_reserve, 4)
+        for event_id in range(12):
+            service._queue.put_nowait(
+                (1, next(service._queue_sequence), {"id": event_id + 1})
+            )
+        self.assertFalse(service._history_queue_has_capacity())
+        self.assertTrue(service.queue_event({"id": 99, "snapshot_path": "live.webp"}))
+
 
 if __name__ == "__main__":
     unittest.main()

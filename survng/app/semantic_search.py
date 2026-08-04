@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import logging
 import queue
+import itertools
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
+from .openclip_tokenizer import OpenClipBpeTokenizer
 
 LOGGER = logging.getLogger("uvicorn.error")
 
@@ -429,10 +431,6 @@ class OpenVinoManifestEncoder:
 
     def __init__(self, model_dir: Path, manifest: dict[str, Any], device: str) -> None:
         from openvino import Core
-        try:
-            from transformers import AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError("semantic tokenizer runtime is not installed") from exc
         self.model_dir = Path(model_dir)
         image_spec = dict(manifest.get("image") or {})
         text_spec = dict(manifest.get("text") or {})
@@ -456,8 +454,17 @@ class OpenVinoManifestEncoder:
         core = Core()
         self._image_model = core.compile_model(str(image_model), device)
         self._text_model = core.compile_model(str(text_model), device)
-        tokenizer_path = package_path(text_spec.get("tokenizer_path"), "tokenizer")
-        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+        tokenizer_kind = str(text_spec.get("tokenizer_kind") or "openclip_bpe")
+        if tokenizer_kind != "openclip_bpe":
+            raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
+        tokenizer_path = package_path(
+            text_spec.get("tokenizer_path"),
+            "tokenizer/bpe_simple_vocab_16e6.txt.gz",
+        )
+        self._tokenizer = OpenClipBpeTokenizer(
+            tokenizer_path,
+            context_length=int(text_spec.get("max_length") or 77),
+        )
         self._image_spec = image_spec
         self._text_spec = text_spec
         preprocessing = json.dumps(
@@ -492,7 +499,11 @@ class OpenVinoManifestEncoder:
             resized = cv2.resize(
                 image,
                 (max(size, round(width * scale)), max(size, round(height * scale))),
-                interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA,
+                interpolation=(
+                    cv2.INTER_CUBIC
+                    if str(spec.get("interpolation") or "bicubic").lower() == "bicubic"
+                    else cv2.INTER_AREA
+                ),
             )
             top = max(0, (resized.shape[0] - size) // 2)
             left = max(0, (resized.shape[1] - size) // 2)
@@ -506,17 +517,14 @@ class OpenVinoManifestEncoder:
 
     def encode_text(self, texts: Sequence[str]) -> np.ndarray:
         max_length = int(self._text_spec.get("max_length") or 77)
-        tokens = self._tokenizer(
-            list(texts), padding="max_length", truncation=True,
-            max_length=max_length, return_tensors="np",
+        tokens = self._tokenizer(list(texts))
+        if tokens.shape[1] != max_length:
+            raise RuntimeError("semantic tokenizer output length does not match the manifest")
+        input_name = str(
+            self._text_spec.get("input")
+            or self._text_model.input(0).get_any_name()
         )
-        mapping = dict(self._text_spec.get("inputs") or {})
-        inputs: dict[str, np.ndarray] = {}
-        for model_input in self._text_model.inputs:
-            name = model_input.get_any_name()
-            token_name = str(mapping.get(name) or name)
-            if token_name in tokens:
-                inputs[name] = np.asarray(tokens[token_name])
+        inputs = {input_name: tokens}
         result = self._text_model(inputs)
         return normalized_matrix(self._output(self._text_model, result, str(self._text_spec.get("output") or "")))
 
@@ -533,7 +541,11 @@ class SemanticSearchService(DisabledSemanticSearch):
         self.model_dir = model_dir
         self.manifest = manifest
         self.encoder: SemanticEncoder | None = None
-        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(config.worker_queue_size)
+        self._queue: queue.PriorityQueue[tuple[int, int, dict[str, Any] | None]] = (
+            queue.PriorityQueue(config.worker_queue_size)
+        )
+        self._queue_sequence = itertools.count()
+        self._live_queue_reserve = max(1, min(16, config.worker_queue_size // 4))
         self._thread: threading.Thread | None = None
         self._backfill_thread: threading.Thread | None = None
         self._bootstrap_thread: threading.Thread | None = None
@@ -582,6 +594,12 @@ class SemanticSearchService(DisabledSemanticSearch):
         )
         self._backfill_thread.start()
 
+    def _history_queue_has_capacity(self) -> bool:
+        return (
+            self._queue.qsize()
+            < self.config.worker_queue_size - self._live_queue_reserve
+        )
+
     def _backfill(self, event_store: Any) -> None:
         before_created_at: str | None = None
         before_id: int | None = None
@@ -607,8 +625,14 @@ class SemanticSearchService(DisabledSemanticSearch):
                     if full_ready and crops_ready:
                         continue
                 while not self._stop.is_set():
+                    if not self._history_queue_has_capacity():
+                        self._stop.wait(0.1)
+                        continue
                     try:
-                        self._queue.put(dict(event), timeout=0.5)
+                        self._queue.put(
+                            (1, next(self._queue_sequence), dict(event)),
+                            timeout=0.5,
+                        )
                         break
                     except queue.Full:
                         continue
@@ -622,7 +646,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         if self.encoder is None or not event.get("snapshot_path") or not event.get("id"):
             return False
         try:
-            self._queue.put_nowait(dict(event))
+            self._queue.put_nowait((0, next(self._queue_sequence), dict(event)))
             return True
         except queue.Full:
             self._error = "index queue is full"
@@ -631,13 +655,15 @@ class SemanticSearchService(DisabledSemanticSearch):
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                event = self._queue.get(timeout=0.5)
+                priority, _sequence, event = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if event is None:
                 break
             try:
                 self._index_event(event)
+                if priority > 0:
+                    self._stop.wait(self.config.backfill_pause_seconds)
             except Exception as exc:
                 self._error = str(exc)
                 LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
@@ -707,7 +733,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._stop.set()
         self._state = "stopping"
         try:
-            self._queue.put_nowait(None)
+            self._queue.put_nowait((-1, next(self._queue_sequence), None))
         except queue.Full:
             pass
         if self._bootstrap_thread:

@@ -71,6 +71,7 @@
     "index_object_crops": true,
     "max_results": 100,
     "backfill_batch_size": 25,
+    "backfill_pause_seconds": 0.25,
     "worker_queue_size": 256
   },
   "detector": {

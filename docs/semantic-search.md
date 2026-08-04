@@ -18,24 +18,49 @@ local filesystem, then enable it under **Admin → Object Detection → Smart
 Search**. Docker installations should mount the package read-only beneath
 `/config/models`.
 
+## Build the official Apple model
+
+SurvNG includes a one-command exporter for Apple's official MobileCLIP2-B
+checkpoint. The export dependencies are needed only while building the model
+package; SurvNG's server does not load PyTorch or OpenCLIP.
+
+```bash
+.venv/bin/pip install -r requirements-semantic-export.txt
+.venv/bin/python scripts/export-mobileclip2-openvino.py \
+  --output /config/models/mobileclip2-b-openvino-fp16 \
+  --cache-dir /config/model-download-cache
+```
+
+The exporter downloads `mobileclip2_b.pt` from `apple/MobileCLIP2-B`, applies
+Apple's required inference reparameterization, creates dynamic-batch FP16
+OpenVINO image and text encoders, bundles the matching OpenCLIP BPE vocabulary,
+and compares both OpenVINO encoders with the PyTorch source. It refuses to keep
+a package if either normalized embedding falls below the required cosine
+parity. Use `--force` to intentionally replace an existing package, or
+`--checkpoint /path/to/mobileclip2_b.pt` to use an already downloaded file.
+
+The resulting package is about 288 MB. Configure its path as
+`/config/models/mobileclip2-b-openvino-fp16`, select `GPU` on an Intel GPU host,
+then enable Smart Search. Keep the included `LICENSE` with the package.
+
 ## Package layout
 
 ```text
 mobileclip2-b-openvino/
 ├── semantic_model.json
+├── VALIDATION.json
+├── LICENSE
 ├── image_encoder.xml
 ├── image_encoder.bin
 ├── text_encoder.xml
 ├── text_encoder.bin
 └── tokenizer/
-    ├── tokenizer.json
-    ├── tokenizer_config.json
-    └── special_tokens_map.json
+    └── bpe_simple_vocab_16e6.txt.gz
 ```
 
-Tokenizer files must be complete enough for
-`transformers.AutoTokenizer.from_pretrained(..., local_files_only=True)`. The
-runtime never downloads missing model or tokenizer files.
+The runtime tokenizer is a small NumPy implementation of OpenCLIP's BPE format.
+It never downloads missing model or tokenizer files and does not import
+PyTorch.
 
 Example `semantic_model.json`:
 
@@ -48,18 +73,18 @@ Example `semantic_model.json`:
   "image": {
     "input": "pixel_values",
     "output": "image_features",
-    "size": 256,
-    "mean": [0.48145466, 0.4578275, 0.40821073],
-    "std": [0.26862954, 0.26130258, 0.27577711]
+    "size": 224,
+    "interpolation": "bicubic",
+    "resize_mode": "shortest_center_crop",
+    "mean": [0.0, 0.0, 0.0],
+    "std": [1.0, 1.0, 1.0]
   },
   "text": {
-    "tokenizer_path": "tokenizer",
-    "max_length": 77,
-    "inputs": {
-      "input_ids": "input_ids",
-      "attention_mask": "attention_mask"
-    },
-    "output": "text_features"
+    "input": "input_ids",
+    "output": "text_features",
+    "tokenizer_kind": "openclip_bpe",
+    "tokenizer_path": "tokenizer/bpe_simple_vocab_16e6.txt.gz",
+    "max_length": 77
   }
 }
 ```
@@ -76,7 +101,9 @@ scene context and detailed appearance searches.
 
 Indexing runs asynchronously after camera startup. Historical incidents are
 processed in bounded batches, already-complete evidence is skipped, and live
-camera/event handling never waits for an embedding. The status endpoint is
+camera/event handling never waits for an embedding. New incidents outrank
+historical work, reserved queue capacity prevents backfill from crowding them
+out, and configurable pacing limits sustained accelerator load. The status endpoint is
 `GET /api/semantic-search/status`; search is available through
 `POST /api/semantic-search`, the Recordings **Smart Search** page, and the
 SurvNG Assistant.
