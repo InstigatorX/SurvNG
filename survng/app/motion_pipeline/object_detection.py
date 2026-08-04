@@ -101,6 +101,72 @@ class _TemporalDetectionEvidence:
         return max((_confidence(item) for item in self.winning_observations), default=0.0)
 
 
+@dataclass(frozen=True)
+class _ImageQuality:
+    score: float
+    sharpness: float
+    exposure: float
+    contrast: float
+
+
+def _image_quality(frame: Frame) -> _ImageQuality:
+    """Return bounded visual-quality signals without materially loading the CPU."""
+    if frame is None or not getattr(frame, "size", 0):
+        return _ImageQuality(0.0, 0.0, 0.0, 0.0)
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        height, width = gray.shape[:2]
+        largest = max(height, width)
+        if largest > 512:
+            scale = 512.0 / largest
+            gray = cv2.resize(
+                gray,
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        pixels = gray.astype(np.float32, copy=False)
+        laplacian_variance = float(cv2.Laplacian(gray, cv2.CV_32F).var())
+        sharpness = max(0.0, min(1.0, math.log1p(laplacian_variance) / math.log1p(1500.0)))
+        clipped = float(np.mean((pixels <= 4.0) | (pixels >= 251.0)))
+        exposure = max(0.0, min(1.0, 1.0 - clipped))
+        contrast = max(0.0, min(1.0, float(pixels.std()) / 64.0))
+        score = 0.65 * sharpness + 0.20 * exposure + 0.15 * contrast
+        return _ImageQuality(score, sharpness, exposure, contrast)
+    except (cv2.error, TypeError, ValueError):
+        return _ImageQuality(0.0, 0.0, 0.0, 0.0)
+
+
+def _sample_image_quality(
+    sample: _RecordedDetectionSample,
+    visible: list[_TemporalDetectionEvidence],
+    sample_index: int,
+) -> _ImageQuality:
+    """Prefer object-crop quality so timestamps and static scenery cannot win."""
+    regions: list[Frame] = []
+    height, width = sample.frame.shape[:2]
+    for track in visible:
+        detected = track.observations.get(sample_index)
+        box = _box(detected) if detected is not None else None
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        left = max(0, min(width, int(math.floor(x1))))
+        top = max(0, min(height, int(math.floor(y1))))
+        right = max(left, min(width, int(math.ceil(x2))))
+        bottom = max(top, min(height, int(math.ceil(y2))))
+        if right - left >= 8 and bottom - top >= 8:
+            regions.append(sample.frame[top:bottom, left:right])
+    qualities = [_image_quality(region) for region in regions]
+    if not qualities:
+        return _image_quality(sample.frame)
+    count = float(len(qualities))
+    return _ImageQuality(
+        score=sum(item.score for item in qualities) / count,
+        sharpness=sum(item.sharpness for item in qualities) / count,
+        exposure=sum(item.exposure for item in qualities) / count,
+        contrast=sum(item.contrast for item in qualities) / count,
+    )
+
 def _confidence(detected: dict[str, Any]) -> float:
     try:
         confidence = float(detected.get("confidence") or 0.0)
@@ -247,7 +313,11 @@ def _temporal_consensus(
         and any(_eligible_detection(item) for item in track.winning_observations)
     }
 
-    def sample_score(item: tuple[int, _RecordedDetectionSample]) -> tuple[int, int, float, float, float]:
+    quality_by_sample: dict[int, _ImageQuality] = {}
+
+    def sample_score(
+        item: tuple[int, _RecordedDetectionSample],
+    ) -> tuple[int, int, float, float, float, float]:
         sample_index, sample = item
         visible = [
             track
@@ -260,16 +330,20 @@ def _temporal_consensus(
             track for track in visible
             if _eligible_detection(track.observations[sample_index])
         ]
+        quality = _sample_image_quality(sample, visible, sample_index)
+        quality_by_sample[sample_index] = quality
         raw_peak = max((_confidence(detected) for detected in sample.objects if _candidate_detection(detected)), default=0.0)
         return (
             len(admitted_visible),
             len(visible),
             sum(track.aggregate_confidence for track in visible),
+            quality.score,
             raw_peak,
             -abs(sample.offset),
         )
 
     selected_index, selected = max(enumerate(samples), key=sample_score)
+    selected_quality = quality_by_sample[selected_index]
     annotated: list[dict[str, Any]] = []
     for detected in selected.objects:
         if not _candidate_detection(detected):
@@ -295,6 +369,10 @@ def _temporal_consensus(
             "temporal_samples": len(samples),
             "temporal_peak_confidence": round(track.peak_confidence, 4),
             "temporal_label_votes": track.label_votes,
+            "snapshot_quality_score": round(selected_quality.score, 4),
+            "snapshot_sharpness_score": round(selected_quality.sharpness, 4),
+            "snapshot_exposure_score": round(selected_quality.exposure, 4),
+            "snapshot_contrast_score": round(selected_quality.contrast, 4),
         }
         observation_indices = sorted(track.observations)
         if observation_indices:
@@ -538,10 +616,12 @@ class RecordedMotionObjectDetector:
                     "-frames:v",
                     "1",
                     *filter_args,
+                    "-pix_fmt",
+                    "bgr24",
                     "-f",
                     "image2pipe",
                     "-vcodec",
-                    "mjpeg",
+                    "bmp",
                     "pipe:1",
                 ]
                 try:
@@ -563,7 +643,7 @@ class RecordedMotionObjectDetector:
                 frame = cv2.imdecode(array, cv2.IMREAD_COLOR)
                 if frame is not None:
                     return frame
-                last_error = f"{backend}: mjpeg decode returned no frame"
+                last_error = f"{backend}: lossless frame decode returned no frame"
             if deadline is not None and time.monotonic() >= deadline:
                 break
         LOGGER.debug(

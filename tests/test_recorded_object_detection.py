@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 
 from survng.app.config import CameraConfig
@@ -39,6 +42,49 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_visual_quality_breaks_ties_between_equally_valid_object_frames(self) -> None:
+        checker = np.indices((80, 80)).sum(axis=0) % 2
+        sharp = np.repeat((checker * 255).astype(np.uint8)[..., None], 3, axis=2)
+        blurred = cv2.GaussianBlur(sharp, (21, 21), 0)
+        object_in_both = detected("person", 0.82, (8, 8, 72, 72))
+        samples = [
+            _RecordedDetectionSample(0.0, blurred, [dict(object_in_both)], "blurred.mp4"),
+            _RecordedDetectionSample(0.5, sharp, [dict(object_in_both)], "sharp.mp4"),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.recording_path, "sharp.mp4")
+        self.assertTrue(objects[0]["temporal_consensus"])
+        self.assertGreater(objects[0]["snapshot_sharpness_score"], 0.5)
+        self.assertGreater(objects[0]["snapshot_quality_score"], 0.5)
+
+    def test_recorded_frame_transport_is_lossless_bmp_instead_of_mjpeg(self) -> None:
+        expected = np.arange(24 * 32 * 3, dtype=np.uint8).reshape((24, 32, 3))
+        success, encoded = cv2.imencode(".bmp", expected)
+        self.assertTrue(success)
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
+            lambda: None,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "sample.mp4"
+            recording.touch()
+            completed = SimpleNamespace(returncode=0, stdout=encoded.tobytes(), stderr=b"")
+            with patch(
+                "survng.app.motion_pipeline.object_detection.subprocess.run",
+                return_value=completed,
+            ) as run:
+                actual = backend._read_recorded_frame(recording, 1.25)
+
+        self.assertTrue(np.array_equal(actual, expected))
+        command = run.call_args.args[0]
+        self.assertIn("bmp", command)
+        self.assertIn("bgr24", command)
+        self.assertNotIn("mjpeg", command)
+
     def test_per_class_confidence_sets_inference_floor_and_object_eligibility(self) -> None:
         class Detector:
             config = SimpleNamespace(
