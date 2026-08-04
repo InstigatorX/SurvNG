@@ -62,6 +62,22 @@ class SemanticSearchHit:
     score: float
 
 
+def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return actual labeled detections, excluding motion/audit metadata."""
+    raw_objects: object = event.get("objects")
+    if not isinstance(raw_objects, list):
+        try:
+            raw_objects = json.loads(str(event.get("objects_json") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            raw_objects = []
+    if not isinstance(raw_objects, list):
+        return []
+    return [
+        item for item in raw_objects
+        if isinstance(item, dict) and str(item.get("label") or "").strip()
+    ]
+
+
 class SemanticEncoder(Protocol):
     @property
     def identity(self) -> SemanticModelIdentity: ...
@@ -332,6 +348,15 @@ class SemanticIndex:
                  identity.preprocessing_fingerprint, str(source_kind)),
             ).fetchone()
         return row is not None
+
+    def delete_event(self, event_id: int) -> int:
+        """Remove semantic evidence for an event that is not object-searchable."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "delete from semantic_embeddings where event_id = ?",
+                (int(event_id),),
+            )
+        return max(0, int(cursor.rowcount or 0))
 
 
 def fingerprint_model_package(model_dir: Path) -> str:
@@ -861,8 +886,12 @@ class SemanticSearchService(DisabledSemanticSearch):
             for event in reversed(rows):
                 if self._stop.is_set():
                     return
+                event_id = int(event.get("id") or 0)
+                if not semantic_event_objects(event):
+                    if event_id > 0:
+                        self.index.delete_event(event_id)
+                    continue
                 if self.encoder:
-                    event_id = int(event.get("id") or 0)
                     full_ready = not self.config.index_full_frame or self.index.event_source_indexed(
                         event_id, self.encoder.identity, "full_frame"
                     )
@@ -890,7 +919,12 @@ class SemanticSearchService(DisabledSemanticSearch):
                 return
 
     def queue_event(self, event: dict[str, Any]) -> bool:
-        if self.encoder is None or not event.get("snapshot_path") or not event.get("id"):
+        if (
+            self.encoder is None
+            or not event.get("snapshot_path")
+            or not event.get("id")
+            or not semantic_event_objects(event)
+        ):
             return False
         try:
             self._queue.put_nowait((0, next(self._queue_sequence), dict(event)))
@@ -919,6 +953,22 @@ class SemanticSearchService(DisabledSemanticSearch):
     def _index_event(self, event: dict[str, Any]) -> None:
         if self.encoder is None:
             return
+        event_id = int(event.get("id") or 0)
+        if event_id <= 0:
+            return
+        objects = semantic_event_objects(event)
+        if not objects:
+            self.index.delete_event(event_id)
+            return
+        identity = self.encoder.identity
+        full_frame_needed = self.config.index_full_frame and not self.index.event_source_indexed(
+            event_id, identity, "full_frame"
+        )
+        object_crops_needed = self.config.index_object_crops and not self.index.event_source_indexed(
+            event_id, identity, "object_crop"
+        )
+        if not full_frame_needed and not object_crops_needed:
+            return
         try:
             path = event_snapshot_path(self._storage_dir, event)
         except FileNotFoundError:
@@ -928,29 +978,35 @@ class SemanticSearchService(DisabledSemanticSearch):
         if frame is None:
             self._skipped_missing += 1
             return
-        try:
-            objects = json.loads(str(event.get("objects_json") or "[]"))
-        except json.JSONDecodeError:
-            objects = []
-        if not isinstance(objects, list) or not objects:
-            return
         evidence: list[SemanticEvidence] = []
         images: list[np.ndarray] = []
-        if self.config.index_full_frame:
-            evidence.append(SemanticEvidence(int(event["id"]), str(event["camera_id"]), str(event["created_at"]), "full_frame", "frame", str(event["snapshot_path"])))
+        if full_frame_needed:
+            evidence.append(SemanticEvidence(event_id, str(event["camera_id"]), str(event["created_at"]), "full_frame", "frame", str(event["snapshot_path"])))
             images.append(frame)
-        if self.config.index_object_crops:
+        if object_crops_needed:
             height, width = frame.shape[:2]
             for index, item in enumerate(objects):
-                bbox = item.get("bbox") if isinstance(item, dict) else None
-                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                if not isinstance(item, dict):
                     continue
-                x1, y1, x2, y2 = (int(value) for value in bbox)
+                raw_bbox = item.get("bbox") or item.get("box")
+                if isinstance(raw_bbox, dict):
+                    bbox = tuple(raw_bbox.get(key) for key in ("x1", "y1", "x2", "y2"))
+                elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+                    bbox = tuple(raw_bbox)
+                else:
+                    continue
+                try:
+                    coordinates = tuple(float(value) for value in bbox)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not all(np.isfinite(value) for value in coordinates):
+                    continue
+                x1, y1, x2, y2 = (int(round(value)) for value in coordinates)
                 x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
                 if x2 <= x1 or y2 <= y1:
                     continue
                 label = str(item.get("label") or "").strip().lower()
-                evidence.append(SemanticEvidence(int(event["id"]), str(event["camera_id"]), str(event["created_at"]), "object_crop", f"{label}:{index}", str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
+                evidence.append(SemanticEvidence(event_id, str(event["camera_id"]), str(event["created_at"]), "object_crop", f"{label}:{index}", str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
                 images.append(frame[y1:y2, x1:x2])
         if images:
             with self._encoder_lock:

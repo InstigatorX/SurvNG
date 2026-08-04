@@ -8174,6 +8174,7 @@ def _incident_list_payload(incident: dict) -> dict:
     """Return the media-card data without expensive investigation details."""
     payload = dict(incident)
     representative_id = int(payload.get("representative_event_id") or 0)
+    representative_tracking = payload.get("object_tracking")
     payload.pop("object_tracking", None)
     payload.pop("motion_observations", None)
     payload.pop("faces", None)
@@ -8203,6 +8204,25 @@ def _incident_list_payload(incident: dict) -> dict:
         ]
 
     payload["objects"] = compact_objects(payload.get("objects"))
+
+    def compact_tracking_dimensions(tracking: object) -> dict[str, int] | None:
+        if not isinstance(tracking, dict):
+            return None
+        try:
+            width = int(tracking.get("frame_width") or 0)
+            height = int(tracking.get("frame_height") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return {"frame_width": width, "frame_height": height}
+
+    tracking_dimensions = compact_tracking_dimensions(representative_tracking)
+    if tracking_dimensions:
+        # The list view needs only the coordinate plane, not tracks or samples.
+        # Supplying it with the first payload prevents annotations from briefly
+        # scaling against the progressively resized thumbnail dimensions.
+        payload["object_tracking"] = tracking_dimensions
     compact_events: list[dict] = []
     for event in payload.get("events", []):
         event_id = int(event.get("id") or 0)
@@ -8223,6 +8243,9 @@ def _incident_list_payload(incident: dict) -> dict:
         compact_event["objects"] = (
             compact_objects(event.get("objects")) if event_id == representative_id else []
         )
+        event_tracking_dimensions = compact_tracking_dimensions(event.get("object_tracking"))
+        if event_tracking_dimensions:
+            compact_event["object_tracking"] = event_tracking_dimensions
         compact_events.append(compact_event)
     payload["events"] = compact_events
     return payload

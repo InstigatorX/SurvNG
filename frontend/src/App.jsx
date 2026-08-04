@@ -2125,11 +2125,12 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}`;
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(() => coordinateSize);
-  const [imageReady, setImageReady] = useState(false);
+  const [loadedImageKey, setLoadedImageKey] = useState("");
   const [frameSize, setFrameSize] = useState(null);
   const [objectFocused, setObjectFocused] = useState(false);
   const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
   const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
+  const imageReady = loadedImageKey === progressiveImageKey;
   const renderedImage = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
     const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
@@ -2148,8 +2149,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   useLayoutEffect(() => {
     setObjectFocused(false);
     setImageSize(coordinateSize);
-    setImageReady(false);
-  }, [event?.id, event?.snapshot_path, coordinateSize?.height, coordinateSize?.width]);
+  }, [progressiveImageKey]);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -2165,21 +2165,23 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   }, []);
 
   useLayoutEffect(() => {
-    if (coordinateSize) onImageSize?.(coordinateSize);
+    if (!coordinateSize) return;
+    setImageSize(coordinateSize);
+    onImageSize?.(coordinateSize);
   }, [coordinateSize?.height, coordinateSize?.width]);
 
-  function onImageLoad(loadEvent) {
+  function onImageLoad(loadEvent, imageKey = progressiveImageKey) {
     const image = loadEvent.currentTarget;
     if (image.naturalWidth && image.naturalHeight) {
       const size = { width: image.naturalWidth, height: image.naturalHeight };
       setImageSize(size);
-      setImageReady(true);
+      setLoadedImageKey(imageKey);
       onImageSize?.(size);
     }
   }
 
   function markProgressiveReady(stage, loadEvent) {
-    onImageLoad(loadEvent);
+    onImageLoad(loadEvent, progressiveImageKey);
     setProgressiveState((current) => ({
       ...(current.key === progressiveImageKey ? current : { key: progressiveImageKey, base: false, intermediate: false, full: false }),
       key: progressiveImageKey,
@@ -2285,7 +2287,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
                 />
               ) : null}
             </div>
-          ) : <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} />
+          ) : <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, progressiveImageKey)} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">

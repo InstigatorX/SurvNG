@@ -929,7 +929,12 @@ class EventApiSerializationTest(unittest.TestCase):
                 },
                 {
                     "status": "object_tracking",
-                    "object_tracking": {"tracks": [{"id": 1}], "samples": [{}] * 20},
+                    "object_tracking": {
+                        "frame_width": 1920,
+                        "frame_height": 1080,
+                        "tracks": [{"id": 1}],
+                        "samples": [{}] * 20,
+                    },
                 },
             ]),
             "created_at": "2026-07-30T14:00:00+00:00",
@@ -940,7 +945,10 @@ class EventApiSerializationTest(unittest.TestCase):
 
         payload = main._incident_list_payload(incident)
 
-        self.assertNotIn("object_tracking", payload)
+        self.assertEqual(payload["object_tracking"], {
+            "frame_width": 1920,
+            "frame_height": 1080,
+        })
         self.assertNotIn("faces", payload)
         self.assertNotIn("motion_observations", payload)
         self.assertEqual(payload["snapshot_path"], "available")
@@ -951,6 +959,10 @@ class EventApiSerializationTest(unittest.TestCase):
             "box": [1, 2, 30, 40],
         }])
         self.assertEqual(payload["events"][0]["id"], 7)
+        self.assertEqual(payload["events"][0]["object_tracking"], {
+            "frame_width": 1920,
+            "frame_height": 1080,
+        })
         self.assertNotIn("temporal_samples", payload["events"][0]["objects"][0])
 
     def test_incident_exposes_source_that_opened_incident(self) -> None:

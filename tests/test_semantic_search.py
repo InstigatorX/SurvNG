@@ -76,6 +76,29 @@ class SemanticIndexTest(unittest.TestCase):
             places=3,
         )
 
+    def test_motion_metadata_is_not_semantic_evidence(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        self.index.upsert(
+            [SemanticEvidence(1, "boiler", "now", "full_frame", "frame", "old.webp")],
+            [[1, 0, 0]],
+            self.identity,
+        )
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        motion_only = {
+            "id": 1,
+            "camera_id": "boiler",
+            "snapshot_path": "snapshot.webp",
+            "objects_json": '[{"status":"motion_qualification","motion_qualification":{"accepted":true}}]',
+        }
+
+        self.assertFalse(service.queue_event(motion_only))
+        service._index_event(motion_only)
+        self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 0, "event_count": 0})
+
     def test_service_indexes_full_frame_and_object_crop(self) -> None:
         from survng.app.config import SemanticSearchConfig
 
@@ -86,8 +109,10 @@ class SemanticIndexTest(unittest.TestCase):
             identity = self.identity
 
             def encode_images(self, images):
-                self.shapes = [image.shape for image in images]
-                return np.asarray([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+                self.calls = getattr(self, "calls", [])
+                self.calls.append([image.shape for image in images])
+                vectors = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                return np.asarray(vectors[:len(images)], dtype=np.float32)
 
             def encode_text(self, texts):
                 return np.asarray([[1, 0, 0]], dtype=np.float32)
@@ -104,11 +129,33 @@ class SemanticIndexTest(unittest.TestCase):
         service._index_event({
             "id": 1, "camera_id": "gate", "created_at": "now",
             "snapshot_path": "snapshot.jpg",
-            "objects_json": '[{"label":"car","bbox":[10,20,110,80]}]',
+            "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
         })
 
-        self.assertEqual(encoder.shapes, [(100, 200, 3), (60, 100, 3)])
+        self.assertEqual(encoder.calls, [[(100, 200, 3), (60, 100, 3)]])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 2, "event_count": 1})
+
+        # A second pass for the same model generation performs no inference.
+        service._index_event({
+            "id": 1, "camera_id": "gate", "created_at": "now",
+            "snapshot_path": "snapshot.jpg",
+            "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
+        })
+        self.assertEqual(len(encoder.calls), 1)
+
+        # If only crops are missing, repair them without re-encoding the frame.
+        self.index.upsert(
+            [SemanticEvidence(2, "gate", "now", "full_frame", "frame", "snapshot.jpg")],
+            [[1, 0, 0]],
+            self.identity,
+        )
+        service._index_event({
+            "id": 2, "camera_id": "gate", "created_at": "now",
+            "snapshot_path": "snapshot.jpg",
+            "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
+        })
+        self.assertEqual(encoder.calls[1], [(60, 100, 3)])
+        self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 4, "event_count": 2})
 
     def test_missing_retained_snapshot_is_counted_without_faulting_service(self) -> None:
         from survng.app.config import SemanticSearchConfig
@@ -119,7 +166,11 @@ class SemanticIndexTest(unittest.TestCase):
         service.encoder = type("Encoder", (), {"identity": self.identity})()
         service._storage_dir = Path(self.temporary.name)
 
-        service._index_event({"id": 1, "snapshot_path": "expired.webp"})
+        service._index_event({
+            "id": 1,
+            "snapshot_path": "expired.webp",
+            "objects_json": '[{"label":"person"}]',
+        })
 
         self.assertEqual(service.status()["skipped_missing_since_start"], 1)
         self.assertEqual(service.status()["error"], "")
@@ -133,7 +184,11 @@ class SemanticIndexTest(unittest.TestCase):
         service.encoder = type("Encoder", (), {"identity": self.identity})()
         service._queue.put_nowait((1, next(service._queue_sequence), {"id": 1}))
 
-        self.assertTrue(service.queue_event({"id": 2, "snapshot_path": "live.webp"}))
+        self.assertTrue(service.queue_event({
+            "id": 2,
+            "snapshot_path": "live.webp",
+            "objects_json": '[{"label":"person"}]',
+        }))
 
         priority, _sequence, event = service._queue.get_nowait()
         self.assertEqual(priority, 0)
@@ -156,7 +211,11 @@ class SemanticIndexTest(unittest.TestCase):
                 (1, next(service._queue_sequence), {"id": event_id + 1})
             )
         self.assertFalse(service._history_queue_has_capacity())
-        self.assertTrue(service.queue_event({"id": 99, "snapshot_path": "live.webp"}))
+        self.assertTrue(service.queue_event({
+            "id": 99,
+            "snapshot_path": "live.webp",
+            "objects_json": '[{"label":"person"}]',
+        }))
 
     def test_semantic_worker_uses_distinct_process_name(self) -> None:
         class FakeConnection:
