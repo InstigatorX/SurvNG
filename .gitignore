@@ -71,6 +71,8 @@ frames/
 !frontend/src/assets/**/*.webp
 
 # Local model artifacts. Keep small label/class files trackable.
+models/mobileclip2-b-openvino-fp16/
+models/.mobileclip2-download-cache/
 *.onnx
 *.pt
 *.pth

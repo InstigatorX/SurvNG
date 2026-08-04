@@ -27,8 +27,8 @@ package; SurvNG's server does not load PyTorch or OpenCLIP.
 ```bash
 .venv/bin/pip install -r requirements-semantic-export.txt
 .venv/bin/python scripts/export-mobileclip2-openvino.py \
-  --output /config/models/mobileclip2-b-openvino-fp16 \
-  --cache-dir /config/model-download-cache
+  --output models/mobileclip2-b-openvino-fp16 \
+  --cache-dir models/.mobileclip2-download-cache
 ```
 
 The exporter downloads `mobileclip2_b.pt` from `apple/MobileCLIP2-B`, applies
@@ -39,9 +39,12 @@ a package if either normalized embedding falls below the required cosine
 parity. Use `--force` to intentionally replace an existing package, or
 `--checkpoint /path/to/mobileclip2_b.pt` to use an already downloaded file.
 
-The resulting package is about 288 MB. Configure its path as
-`/config/models/mobileclip2-b-openvino-fp16`, select `GPU` on an Intel GPU host,
-then enable Smart Search. Keep the included `LICENSE` with the package.
+The resulting package is about 288 MB. A systemd installation in
+`/root/SurvNG` should configure the absolute path as
+`/root/SurvNG/models/mobileclip2-b-openvino-fp16`. Docker should mount that
+host directory read-only at `/config/models/mobileclip2-b-openvino-fp16` and
+use the container path. Select `GPU` on an Intel GPU host, then enable Smart
+Search. Keep the included `LICENSE` with the package.
 
 ## Package layout
 
