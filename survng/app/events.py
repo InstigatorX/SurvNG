@@ -719,6 +719,7 @@ class EventStore:
         camera_statuses: list[dict[str, Any]],
         *,
         sampled_at: datetime | None = None,
+        process_memory: dict[str, Any] | None = None,
     ) -> None:
         """Persist one compact camera-health sample per UTC minute for seven days."""
         current = sampled_at or datetime.now(timezone.utc)
@@ -740,7 +741,14 @@ class EventStore:
                 "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
                 "tracking_active": bool(tracking.get("active")),
             }
-        payload = json.dumps({"cameras": cameras}, separators=(",", ":"), allow_nan=False)
+        payload = json.dumps(
+            {
+                "cameras": cameras,
+                "process_memory": process_memory or {},
+            },
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         cutoff = current - timedelta(days=8)
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -751,6 +759,60 @@ class EventStore:
                 "delete from runtime_telemetry_samples where sampled_at < ?",
                 (cutoff.isoformat(),),
             )
+
+    def process_memory_history(
+        self,
+        *,
+        hours: int,
+        bucket_minutes: int,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return persisted main-process memory samples for leak diagnosis."""
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        bounded_hours = max(1, min(int(hours), 24 * 8))
+        bucket_seconds = max(60, min(int(bucket_minutes), 60) * 60)
+        start = current - timedelta(hours=bounded_hours)
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "select sampled_at, payload_json from runtime_telemetry_samples "
+                "where sampled_at >= ? order by sampled_at",
+                (start.isoformat(),),
+            ).fetchall()
+
+        buckets: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                sampled = datetime.fromisoformat(
+                    str(row["sampled_at"]).replace("Z", "+00:00")
+                )
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            memory = payload.get("process_memory") if isinstance(payload, dict) else None
+            if not isinstance(memory, dict) or not memory:
+                continue
+            malloc = memory.get("malloc")
+            malloc = malloc if isinstance(malloc, dict) else {}
+            bucket_epoch = int(sampled.timestamp() // bucket_seconds) * bucket_seconds
+            buckets[bucket_epoch] = {
+                "sampled_at": sampled.astimezone(timezone.utc).isoformat(),
+                "rss_bytes": int(memory.get("rss_bytes") or 0),
+                "anonymous_rss_bytes": int(memory.get("anonymous_rss_bytes") or 0),
+                "pss_bytes": int(memory.get("pss_bytes") or 0),
+                "private_dirty_bytes": int(memory.get("private_dirty_bytes") or 0),
+                "anonymous_huge_pages_bytes": int(
+                    memory.get("anonymous_huge_pages_bytes") or 0
+                ),
+                "malloc_allocated_bytes": int(malloc.get("allocated_bytes") or 0),
+                "malloc_free_bytes": int(malloc.get("free_bytes") or 0),
+                "malloc_mmap_bytes": int(malloc.get("mmap_bytes") or 0),
+                "threads": int(memory.get("threads") or 0),
+                "file_descriptors": int(memory.get("file_descriptors") or 0),
+            }
+        return [buckets[bucket] for bucket in sorted(buckets)]
 
     def runtime_telemetry_history(
         self,

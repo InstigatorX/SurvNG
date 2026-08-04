@@ -90,6 +90,7 @@ from .recording_media import (
     playback_segment_duration,
     resolve_stream_fingerprints,
 )
+from .process_memory import process_memory_status
 from .object_tracking import ultralytics_botsort_dependency_status
 from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .zones import apply_detection_zones, detection_threshold
@@ -2101,13 +2102,7 @@ def _linux_memory_status() -> dict[str, int | float]:
 
 
 def _process_rss_bytes() -> int:
-    try:
-        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return 0
+    return int(process_memory_status()["rss_bytes"])
 
 
 def _cgroup_memory_status(
@@ -2322,6 +2317,18 @@ def _persisted_telemetry_history(camera_id: str) -> dict[str, Any]:
                 hours=168, bucket_minutes=15, camera_id=camera_id
             ),
         },
+        "memory": (
+            {
+                "short": manager.events.process_memory_history(
+                    hours=24, bucket_minutes=5
+                ),
+                "long": manager.events.process_memory_history(
+                    hours=168, bucket_minutes=15
+                ),
+            }
+            if not camera_id
+            else {"short": [], "long": []}
+        ),
     }
     with TELEMETRY_PERSISTED_CACHE_LOCK:
         if len(TELEMETRY_PERSISTED_CACHE) >= 32:
@@ -2345,10 +2352,12 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     persisted_history = _persisted_telemetry_history(selected_camera_id)
     runtime_history = persisted_history["runtime"]
     tracking_capacity_history = persisted_history["tracking"]
+    process_memory_history = persisted_history["memory"]
     per_camera_activity = activity.get("by_camera", {})
     load_1m, load_5m, load_15m = os.getloadavg()
     memory = _linux_memory_status()
-    process_rss_bytes = _process_rss_bytes()
+    process_memory = process_memory_status()
+    process_rss_bytes = int(process_memory["rss_bytes"])
     service_memory = _cgroup_memory_status()
     cpu_count = os.cpu_count() or 1
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -2452,6 +2461,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             "load_average": {"one": round(load_1m, 2), "five": round(load_5m, 2), "fifteen": round(load_15m, 2)},
             "memory": memory,
             "process_rss_bytes": process_rss_bytes,
+            "process_memory": process_memory,
             "service_memory": service_memory,
             "storage": {
                 "path": str(storage_path),
@@ -2468,6 +2478,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
         "history": history,
         "runtime_history": runtime_history,
         "tracking_capacity_history": tracking_capacity_history,
+        "process_memory_history": process_memory_history,
         "tracking_capacity": {
             "limit": int(config.detector.tracking.max_active_cameras),
             "wait_seconds": float(config.detector.tracking.capacity_wait_seconds),
@@ -2892,6 +2903,33 @@ def _audit_ai_context(
         if override.suppression_verification_rate is None
         else override.suppression_verification_rate
     )
+    visual_backup = {
+        "grace_seconds": (
+            active_config.motion_qualification.visual_backup_grace_seconds
+            if override.visual_backup_grace_seconds is None
+            else override.visual_backup_grace_seconds
+        ),
+        "minimum_score": (
+            active_config.motion_qualification.visual_backup_min_score
+            if override.visual_backup_min_score is None
+            else override.visual_backup_min_score
+        ),
+        "minimum_consecutive": (
+            active_config.motion_qualification.visual_backup_min_consecutive
+            if override.visual_backup_min_consecutive is None
+            else override.visual_backup_min_consecutive
+        ),
+        "cooldown_seconds": (
+            active_config.motion_qualification.visual_backup_cooldown_seconds
+            if override.visual_backup_cooldown_seconds is None
+            else override.visual_backup_cooldown_seconds
+        ),
+        "maximum_triggers_5m": (
+            active_config.motion_qualification.visual_backup_max_triggers_5m
+            if override.visual_backup_max_triggers_5m is None
+            else override.visual_backup_max_triggers_5m
+        ),
+    }
     effective = {
         "mode": effective_mode,
         "sensitivity": active_config.motion_qualification.sensitivity if override.sensitivity == "inherit" else override.sensitivity,
@@ -2920,12 +2958,12 @@ def _audit_ai_context(
         "burst_quiet_seconds": active_config.motion_qualification.burst_quiet_seconds,
         "camera_mode_background_fps": active_config.motion_qualification.camera_mode_background_fps,
         "visual_backup_warmup_seconds": active_config.motion_qualification.visual_backup_warmup_seconds,
-        "visual_backup_grace_seconds": active_config.motion_qualification.visual_backup_grace_seconds,
-        "visual_backup_min_score": active_config.motion_qualification.visual_backup_min_score,
+        "visual_backup_grace_seconds": visual_backup["grace_seconds"],
+        "visual_backup_min_score": visual_backup["minimum_score"],
         "visual_backup_score_margin": active_config.motion_qualification.visual_backup_score_margin,
-        "visual_backup_min_consecutive": active_config.motion_qualification.visual_backup_min_consecutive,
-        "visual_backup_cooldown_seconds": active_config.motion_qualification.visual_backup_cooldown_seconds,
-        "visual_backup_max_triggers_5m": active_config.motion_qualification.visual_backup_max_triggers_5m,
+        "visual_backup_min_consecutive": visual_backup["minimum_consecutive"],
+        "visual_backup_cooldown_seconds": visual_backup["cooldown_seconds"],
+        "visual_backup_max_triggers_5m": visual_backup["maximum_triggers_5m"],
         "rejected_sample_rate": active_config.motion_qualification.rejected_sample_rate,
         "suppression_verification_rate": suppression_verification_rate,
         "analysis_preset": identify_analysis_preset(graphs.qualification),

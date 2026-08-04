@@ -475,6 +475,7 @@ class CameraWorker:
         mode, sensitivity, frame_width = self._motion_settings()
         stationary_object_tolerance = self._stationary_object_tolerance()
         rescue_enabled, rescue_margin = self._motion_rescue_settings()
+        visual_backup = self._visual_backup_settings()
         with self._motion_stats_lock:
             motion_stats = dict(self._motion_stats)
         return {
@@ -533,12 +534,12 @@ class CameraWorker:
                 "visual_backup": {
                     "enabled": mode == "camera_rescue",
                     "warmup_seconds": self.motion_config.visual_backup_warmup_seconds,
-                    "grace_seconds": self.motion_config.visual_backup_grace_seconds,
-                    "minimum_score": self.motion_config.visual_backup_min_score,
+                    "grace_seconds": visual_backup["grace_seconds"],
+                    "minimum_score": visual_backup["minimum_score"],
                     "score_margin": self.motion_config.visual_backup_score_margin,
-                    "minimum_consecutive": self.motion_config.visual_backup_min_consecutive,
-                    "cooldown_seconds": self.motion_config.visual_backup_cooldown_seconds,
-                    "maximum_triggers_5m": self.motion_config.visual_backup_max_triggers_5m,
+                    "minimum_consecutive": visual_backup["minimum_consecutive"],
+                    "cooldown_seconds": visual_backup["cooldown_seconds"],
+                    "maximum_triggers_5m": visual_backup["maximum_triggers_5m"],
                     "scene_ready": self._visual_backup_scene_ready,
                     "stable_samples": self._visual_backup_stable_samples,
                 },
@@ -978,8 +979,9 @@ class CameraWorker:
         if self._visual_backup_stable_since <= 0.0:
             self._visual_backup_stable_since = captured_at
         self._visual_backup_stable_samples += 1
-        required_samples = max(3, int(self.motion_config.visual_backup_min_consecutive))
-        required_seconds = max(1.5, float(self.motion_config.visual_backup_grace_seconds))
+        visual_backup = self._visual_backup_settings()
+        required_samples = max(3, int(visual_backup["minimum_consecutive"]))
+        required_seconds = max(1.5, float(visual_backup["grace_seconds"]))
         if (
             self._visual_backup_stable_samples >= required_samples
             and captured_at - self._visual_backup_stable_since >= required_seconds
@@ -998,8 +1000,9 @@ class CameraWorker:
             self._reset_visual_backup_candidate()
             return
         scene_ready = self._visual_backup_readiness(result, captured_at)
+        visual_backup = self._visual_backup_settings()
         required_score = max(
-            float(self.motion_config.visual_backup_min_score),
+            float(visual_backup["minimum_score"]),
             float(result.threshold) + float(self.motion_config.visual_backup_score_margin),
         )
         strong_candidate = bool(
@@ -1045,9 +1048,9 @@ class CameraWorker:
 
         if (
             self._visual_backup_consecutive
-            < self.motion_config.visual_backup_min_consecutive
+            < int(visual_backup["minimum_consecutive"])
             or captured_at - self._visual_backup_candidate_since
-            < self.motion_config.visual_backup_grace_seconds
+            < float(visual_backup["grace_seconds"])
         ):
             return
         with self._motion_stats_lock:
@@ -1056,7 +1059,7 @@ class CameraWorker:
                     observed_at
                     for observed_at in self._camera_motion_times
                     if 0.0 <= captured_at - observed_at
-                    <= self.motion_config.visual_backup_cooldown_seconds
+                    <= float(visual_backup["cooldown_seconds"])
                 ),
                 default=0.0,
             )
@@ -1088,7 +1091,7 @@ class CameraWorker:
             "visual_backup": True,
             "visual_backup_required_score": round(required_score, 4),
             "visual_backup_consecutive": self._visual_backup_consecutive,
-            "visual_backup_grace_seconds": self.motion_config.visual_backup_grace_seconds,
+            "visual_backup_grace_seconds": visual_backup["grace_seconds"],
         }
         fused = MotionQualificationResult(
             accepted=fused.accepted,
@@ -1157,6 +1160,7 @@ class CameraWorker:
 
     def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
         cutoff = captured_at - 300.0
+        visual_backup = self._visual_backup_settings()
         with self._motion_stats_lock:
             while (
                 self._visual_backup_trigger_times
@@ -1168,10 +1172,10 @@ class CameraWorker:
                 or (
                     self._adaptive_last_completed_at > 0.0
                     and captured_at - self._adaptive_last_completed_at
-                    < self.motion_config.visual_backup_cooldown_seconds
+                    < float(visual_backup["cooldown_seconds"])
                 )
                 or len(self._visual_backup_trigger_times)
-                >= self.motion_config.visual_backup_max_triggers_5m
+                >= int(visual_backup["maximum_triggers_5m"])
             )
             if limited:
                 self._motion_stats["visual_backup_rate_limited"] += 1
@@ -1293,6 +1297,36 @@ class CameraWorker:
         if override == "inherit":
             return self.motion_config.stationary_object_tolerance
         return override
+
+    def _visual_backup_settings(self) -> dict[str, float | int]:
+        override = self.camera.motion_qualification
+        return {
+            "grace_seconds": float(
+                self.motion_config.visual_backup_grace_seconds
+                if override.visual_backup_grace_seconds is None
+                else override.visual_backup_grace_seconds
+            ),
+            "minimum_score": float(
+                self.motion_config.visual_backup_min_score
+                if override.visual_backup_min_score is None
+                else override.visual_backup_min_score
+            ),
+            "minimum_consecutive": int(
+                self.motion_config.visual_backup_min_consecutive
+                if override.visual_backup_min_consecutive is None
+                else override.visual_backup_min_consecutive
+            ),
+            "cooldown_seconds": float(
+                self.motion_config.visual_backup_cooldown_seconds
+                if override.visual_backup_cooldown_seconds is None
+                else override.visual_backup_cooldown_seconds
+            ),
+            "maximum_triggers_5m": int(
+                self.motion_config.visual_backup_max_triggers_5m
+                if override.visual_backup_max_triggers_5m is None
+                else override.visual_backup_max_triggers_5m
+            ),
+        }
 
     def _trigger_mode(self) -> str:
         return resolved_trigger_mode(self._motion_settings()[0])

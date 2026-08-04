@@ -30,6 +30,7 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
+from .process_memory import process_memory_status
 from .semantic_search import SemanticIndex, build_semantic_search
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
@@ -1180,7 +1181,10 @@ class AppManager:
                             self.state_events.publish("camera_state", status)
                     now = time.monotonic()
                     if now - telemetry_sample_at >= 60.0:
-                        self.events.record_runtime_telemetry(statuses)
+                        self.events.record_runtime_telemetry(
+                            statuses,
+                            process_memory=process_memory_status(),
+                        )
                         telemetry_sample_at = now
                 except Exception:
                     LOGGER.exception("camera state monitor failed")

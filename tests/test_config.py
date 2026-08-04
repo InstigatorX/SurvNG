@@ -106,7 +106,14 @@ class AppConfigTest(unittest.TestCase):
                 "id": "back-middle",
                 "name": "Back Middle",
                 "stream_url": "rtsp://example.invalid/main",
-                "motion_qualification": {"frame_width": 480},
+                "motion_qualification": {
+                    "frame_width": 480,
+                    "visual_backup_grace_seconds": 2.0,
+                    "visual_backup_min_score": 0.74,
+                    "visual_backup_min_consecutive": 4,
+                    "visual_backup_cooldown_seconds": 30.0,
+                    "visual_backup_max_triggers_5m": 2,
+                },
             }],
         })
 
@@ -118,6 +125,26 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.motion_qualification.visual_backup_min_score, 0.70)
         self.assertEqual(config.motion_qualification.visual_backup_min_consecutive, 3)
         self.assertEqual(config.cameras[0].motion_qualification.frame_width, 480)
+        self.assertEqual(
+            config.cameras[0].motion_qualification.visual_backup_grace_seconds,
+            2.0,
+        )
+        self.assertEqual(
+            config.cameras[0].motion_qualification.visual_backup_min_score,
+            0.74,
+        )
+        self.assertEqual(
+            config.cameras[0].motion_qualification.visual_backup_min_consecutive,
+            4,
+        )
+        self.assertEqual(
+            config.cameras[0].motion_qualification.visual_backup_cooldown_seconds,
+            30.0,
+        )
+        self.assertEqual(
+            config.cameras[0].motion_qualification.visual_backup_max_triggers_5m,
+            2,
+        )
         self.assertEqual(
             config.cameras[0].motion_qualification.stationary_object_tolerance,
             "inherit",

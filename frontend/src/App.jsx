@@ -1029,6 +1029,11 @@ function defaultCamera(cameras, seed = {}) {
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
       stationary_object_tolerance: seed.motion_qualification?.stationary_object_tolerance || "inherit",
       frame_width: seed.motion_qualification?.frame_width ?? null,
+      visual_backup_grace_seconds: seed.motion_qualification?.visual_backup_grace_seconds ?? null,
+      visual_backup_min_score: seed.motion_qualification?.visual_backup_min_score ?? null,
+      visual_backup_min_consecutive: seed.motion_qualification?.visual_backup_min_consecutive ?? null,
+      visual_backup_cooldown_seconds: seed.motion_qualification?.visual_backup_cooldown_seconds ?? null,
+      visual_backup_max_triggers_5m: seed.motion_qualification?.visual_backup_max_triggers_5m ?? null,
       borderline_rescue_enabled: seed.motion_qualification?.borderline_rescue_enabled ?? null,
       borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
       suppression_verification_rate: seed.motion_qualification?.suppression_verification_rate ?? null,
@@ -7243,6 +7248,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const runtimeLong = data.runtime_history?.long || [];
   const capacityShort = data.tracking_capacity_history?.short || [];
   const capacityLong = data.tracking_capacity_history?.long || [];
+  const memoryShort = data.process_memory_history?.short || [];
+  const memoryLong = data.process_memory_history?.long || [];
   const trackingCapacity = data.tracking_capacity || {};
   const capacityTotals = capacityShort.reduce((total, point) => ({
     attempts: total.attempts + Number(point.attempts || 0),
@@ -7312,7 +7319,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
       </section>
 
       {!selected ? <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>System trends</h3><p>Rolling one-hour history sampled while Telemetry is active.</p></div></div>
+        <div className="telemetry-section-head"><div><h3>System trends</h3><p>Live rolling history sampled while Telemetry is active.</p></div></div>
         <div className="telemetry-trend-grid">
           <TelemetryTrend title="Host pressure" description="Normalized 1-minute CPU load and memory use" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
           <TelemetryTrend title="GPU utilization" description="SurvNG inference workers" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "gpu_utilization_percent", label: "GPU", className: "gpu" }]} />
@@ -7320,6 +7327,16 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <TelemetryTrend title="SurvNG memory" description="Application allocations versus filesystem cache" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "service_application_bytes", label: "Application", className: "process-memory" }, { key: "service_file_cache_bytes", label: "File cache", className: "storage" }]} />
           <TelemetryTrend title="Storage use" description="Recording filesystem" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "storage_used_percent", label: "Used", className: "storage" }]} />
           <TelemetryTrend title="Detection rate" description="Completed inference requests" history={history} timeZone={timeZone} valueFormatter={(value) => formatRate(value)} series={[{ key: "detection_fps", label: "Rate", className: "rate" }]} />
+        </div>
+      </section> : null}
+
+      {!selected ? <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>Memory diagnostics</h3><p>Background samples continue while this page is closed. Allocated measures glibc-owned live blocks; retained is free space held inside allocator arenas.</p></div></div>
+        <div className="telemetry-trend-grid two-column">
+          <TelemetryTrend title="Main process · 24 hours" description="Resident, anonymous, and proportionally owned memory" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "RSS", className: "process-memory" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }, { key: "pss_bytes", label: "PSS", className: "secondary" }]} />
+          <TelemetryTrend title="Native allocator · 24 hours" description="Live allocations versus reusable retained arenas and large mappings" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "malloc_allocated_bytes", label: "Allocated", className: "process-memory" }, { key: "malloc_free_bytes", label: "Retained", className: "warning" }, { key: "malloc_mmap_bytes", label: "Mapped", className: "storage" }]} />
+          <TelemetryTrend title="Main process · 7 days" description="Fifteen-minute long-term memory trend" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "RSS", className: "process-memory" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }, { key: "malloc_allocated_bytes", label: "Allocated", className: "secondary" }]} />
+          <TelemetryTrend title="Process resources · 7 days" description="Thread and file-descriptor growth can expose lifecycle leaks" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "threads", label: "Threads", className: "rate" }, { key: "file_descriptors", label: "Files", className: "warning" }]} />
         </div>
       </section> : null}
 
@@ -7334,6 +7351,9 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>Application memory</dt><dd>{formatBytes(serviceMemory.application_bytes)} <small>all workers and shared inference buffers</small></dd></div>
             <div><dt>Filesystem cache</dt><dd>{formatBytes(serviceMemory.file_cache_bytes)} <small>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)} inactive/reclaimable</small></dd></div>
             <div><dt>Main process RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
+            <div><dt>Main anonymous memory</dt><dd>{formatBytes(data.system?.process_memory?.anonymous_rss_bytes)} <small>{formatBytes(data.system?.process_memory?.malloc?.allocated_bytes)} live glibc allocations</small></dd></div>
+            <div><dt>Allocator retained</dt><dd>{formatBytes(data.system?.process_memory?.malloc?.free_bytes)} <small>reusable arena space</small></dd></div>
+            <div><dt>Threads / file descriptors</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
             <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
             <div><dt>Detector</dt><dd>{data.detector?.loaded_backend || "Not loaded"} · {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
             <div><dt>GPU</dt><dd>{gpu.available ? `${gpu.vendor} ${gpu.device_id} · ${gpu.driver || "DRM"}` : "Unavailable"}</dd></div>
@@ -8367,6 +8387,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     <option value="720">720 px</option>
                     <option value="800">800 px</option>
                   </select></label>
+                  <label>Visual confidence<input type="number" min="0" max="1" step="0.01" placeholder={`Global: ${config.motion_qualification?.visual_backup_min_score ?? 0.7}`} value={selectedCamera.motion_qualification?.visual_backup_min_score ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_min_score"], event.target.value === "" ? null : Number(event.target.value))} /><small>Leave blank to inherit. Higher values require stronger visual motion before camera-notification rescue runs detection.</small></label>
+                  <label>Strong samples<input type="number" min="2" max="10" step="1" placeholder={`Global: ${config.motion_qualification?.visual_backup_min_consecutive ?? 3}`} value={selectedCamera.motion_qualification?.visual_backup_min_consecutive ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_min_consecutive"], event.target.value === "" ? null : Number(event.target.value))} /><small>Consecutive qualifying samples required before rescue.</small></label>
+                  <label>Visual grace<input type="number" min="0" max="5" step="0.1" placeholder={`Global: ${config.motion_qualification?.visual_backup_grace_seconds ?? 1.5}s`} value={selectedCamera.motion_qualification?.visual_backup_grace_seconds ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_grace_seconds"], event.target.value === "" ? null : Number(event.target.value))} /><small>How long strong motion must persist. Leave blank to inherit.</small></label>
+                  <label>Rescue cooldown<input type="number" min="5" max="300" step="5" placeholder={`Global: ${config.motion_qualification?.visual_backup_cooldown_seconds ?? 20}s`} value={selectedCamera.motion_qualification?.visual_backup_cooldown_seconds ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_cooldown_seconds"], event.target.value === "" ? null : Number(event.target.value))} /><small>Minimum seconds between visual rescue attempts.</small></label>
+                  <label>Rescues per 5 minutes<input type="number" min="1" max="30" step="1" placeholder={`Global: ${config.motion_qualification?.visual_backup_max_triggers_5m ?? 3}`} value={selectedCamera.motion_qualification?.visual_backup_max_triggers_5m ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "visual_backup_max_triggers_5m"], event.target.value === "" ? null : Number(event.target.value))} /><small>Per-camera ceiling for visual rescue detection attempts.</small></label>
                   <label>Borderline Rescue<select value={selectedCamera.motion_qualification?.borderline_rescue_enabled == null ? "" : String(selectedCamera.motion_qualification.borderline_rescue_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "borderline_rescue_enabled"], event.target.value === "" ? null : event.target.value === "true")}>
                     <option value="">Use global setting</option>
                     <option value="true">Enabled</option>

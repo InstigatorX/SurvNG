@@ -213,6 +213,11 @@ class CameraMotionQualificationConfig(BaseModel):
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
     stationary_object_tolerance: Literal["inherit", "low", "balanced", "high"] = "inherit"
     frame_width: int | None = Field(default=None, ge=240, le=960)
+    visual_backup_grace_seconds: float | None = Field(default=None, ge=0.0, le=5.0)
+    visual_backup_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    visual_backup_min_consecutive: int | None = Field(default=None, ge=2, le=10)
+    visual_backup_cooldown_seconds: float | None = Field(default=None, ge=5.0, le=300.0)
+    visual_backup_max_triggers_5m: int | None = Field(default=None, ge=1, le=30)
     borderline_rescue_enabled: bool | None = None
     borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
     suppression_verification_rate: float | None = Field(default=None, ge=0.0, le=1.0)

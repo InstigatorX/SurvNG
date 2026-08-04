@@ -156,6 +156,42 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(history[-1]["capture_read_failures"], 2)
             self.assertEqual(history[-1]["analysis_frames_dropped"], 5)
 
+    def test_runtime_telemetry_persists_process_memory_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            sampled_at = datetime.fromisoformat("2026-08-02T12:00:00+00:00")
+            store.record_runtime_telemetry(
+                [],
+                sampled_at=sampled_at,
+                process_memory={
+                    "rss_bytes": 100,
+                    "anonymous_rss_bytes": 80,
+                    "pss_bytes": 90,
+                    "private_dirty_bytes": 70,
+                    "anonymous_huge_pages_bytes": 20,
+                    "threads": 12,
+                    "file_descriptors": 34,
+                    "malloc": {
+                        "allocated_bytes": 50,
+                        "free_bytes": 10,
+                        "mmap_bytes": 30,
+                    },
+                },
+            )
+
+            history = store.process_memory_history(
+                hours=2,
+                bucket_minutes=1,
+                now=sampled_at + timedelta(minutes=1),
+            )
+
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["rss_bytes"], 100)
+            self.assertEqual(history[0]["malloc_allocated_bytes"], 50)
+            self.assertEqual(history[0]["malloc_free_bytes"], 10)
+            self.assertEqual(history[0]["threads"], 12)
+            self.assertEqual(history[0]["file_descriptors"], 34)
+
     def test_tracking_capacity_history_includes_waits_and_legacy_skips(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

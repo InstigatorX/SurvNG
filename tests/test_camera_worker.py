@@ -152,6 +152,32 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_visual_backup_settings_use_camera_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url="rtsp://camera/main",
+                    motion_qualification={
+                        "visual_backup_grace_seconds": 2.0,
+                        "visual_backup_min_score": 0.75,
+                        "visual_backup_min_consecutive": 4,
+                        "visual_backup_cooldown_seconds": 30.0,
+                        "visual_backup_max_triggers_5m": 2,
+                    },
+                ),
+                Path(tmpdir),
+            )
+
+            self.assertEqual(worker._visual_backup_settings(), {
+                "grace_seconds": 2.0,
+                "minimum_score": 0.75,
+                "minimum_consecutive": 4,
+                "cooldown_seconds": 30.0,
+                "maximum_triggers_5m": 2,
+            })
+
     def test_tracking_pause_and_resume_preserve_camera_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(
