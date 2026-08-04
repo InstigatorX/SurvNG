@@ -16,6 +16,7 @@ from .config import (
     CameraConfig,
     CameraMotionQualificationConfig,
     DetectionZone,
+    ImageStorageConfig,
     MqttConfig,
 )
 from .events import EventStore
@@ -24,6 +25,7 @@ from .detector import objects_to_json
 from .go2rtc import Go2RtcAdapter
 from .inference import InferenceSupervisor, IsolatedFaceRecognizer, IsolatedPersonReidentifier
 from .image_cache import LocalImageCache
+from .image_storage import DurableImageWriter
 from .mqtt import MqttService
 from .object_tracking import ObjectTrackingSessionFactory
 from .motion_pipeline import (
@@ -101,6 +103,7 @@ class AppManager:
         self.database_dir = Path(config.database_dir) if config.database_dir else self.storage_dir
         self.database_dir.mkdir(parents=True, exist_ok=True)
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
+        self.image_writer = DurableImageWriter(config.image_storage)
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.detector = InferenceSupervisor(config.detector)
@@ -254,6 +257,7 @@ class AppManager:
                 motion_object_detector_factory=self.motion_object_detector_factory,
                 object_tracking_session_factory=self.object_tracking_session_factory,
                 motion_analysis_limiter=self._motion_analysis_limiter,
+                image_writer=self.image_writer,
                 onvif_cache_dir=self.database_dir / "onvif",
             )
         except BaseException:
@@ -886,6 +890,9 @@ class AppManager:
             for camera in cameras:
                 if desired_enabled[camera.id]:
                     self._start_configured_recorders(camera)
+
+    def reconfigure_image_storage(self, config: ImageStorageConfig) -> None:
+        self.image_writer.reconfigure(config)
 
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([

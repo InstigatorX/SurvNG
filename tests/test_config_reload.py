@@ -241,10 +241,33 @@ class ConfigReloadTest(unittest.TestCase):
         save.assert_called_once_with(effective, assign_ids=False)
         active.reconfigure_mqtt.assert_not_called()
         active.recorder.reconfigure_retention.assert_not_called()
+        active.reconfigure_image_storage.assert_not_called()
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
         self.assertIs(main.config, effective)
         self.assertIs(active.config, effective)
+
+    def test_image_storage_change_hot_applies_without_restarting_cameras(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.image_storage.quality = 90
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_image_storage.assert_called_once_with(effective.image_storage)
+        active.reconfigure_mqtt.assert_not_called()
+        active.recorder.reconfigure_retention.assert_not_called()
+        self.assertEqual(result["apply_mode"], "hot")
+        self.assertFalse(result["camera_workers_restarted"])
 
     def test_mqtt_change_restarts_only_mqtt(self) -> None:
         active = Mock()

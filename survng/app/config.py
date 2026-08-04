@@ -216,6 +216,11 @@ class RecordingRetentionConfig(BaseModel):
         return self
 
 
+class ImageStorageConfig(BaseModel):
+    format: Literal["webp", "jpeg"] = "webp"
+    quality: int = Field(default=95, ge=1, le=100)
+
+
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -426,6 +431,7 @@ class AppConfig(BaseModel):
     recording_cache_max_gb: float = Field(default=5.0, ge=0.5, le=100.0)
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
+    image_storage: ImageStorageConfig = Field(default_factory=ImageStorageConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)

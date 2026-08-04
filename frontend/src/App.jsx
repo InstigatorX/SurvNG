@@ -9169,6 +9169,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
           <label>Metadata Database Directory<input value={config.database_dir || ""} onChange={(event) => updateConfig(["database_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
           <label>Recording Index Directory<input value={config.recording_index_dir || ""} onChange={(event) => updateConfig(["recording_index_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
+          <div className="prewarm-setting">
+            <h4>Evidence image storage</h4>
+            <div className="field-row">
+              <label>Format<select value={config.image_storage?.format || "webp"} onChange={(event) => updateConfig(["image_storage", "format"], event.target.value)}><option value="webp">WebP (recommended)</option><option value="jpeg">JPEG</option></select></label>
+              <label>Quality<input type="number" min="1" max="100" step="1" value={config.image_storage?.quality ?? 95} onChange={(event) => updateConfig(["image_storage", "quality"], Number(event.target.value))} /></label>
+            </div>
+            <p>Controls newly saved incident and motion-audit images. Higher quality preserves more forensic detail but uses more space. Existing images are left unchanged, and live snapshots remain JPEG for compatibility.</p>
+          </div>
           <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
           <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
             <option value="auto">Auto (VAAPI preferred)</option>

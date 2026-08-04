@@ -709,6 +709,7 @@ HOT_CONFIG_FIELDS = frozenset({
     "event_clip_before_seconds",
     "event_clip_after_seconds",
     "incident_thumbnail_annotations",
+    "image_storage",
     "recording_cache_max_gb",
     "recording_cache_max_days",
     "recording_cache_prewarm",
@@ -775,6 +776,7 @@ def apply_config_update(
         changes = _hot_config_changes(previous_config, effective_config)
         mqtt_changed = previous_config.mqtt != effective_config.mqtt
         retention_changed = "retention" in changes
+        image_storage_changed = "image_storage" in changes
         recorder_changes = [
             field_name
             for field_name in sorted(RECORDER_CONFIG_FIELDS)
@@ -791,6 +793,7 @@ def apply_config_update(
         recorder_attempted = False
         mqtt_attempted = False
         retention_attempted = False
+        image_storage_attempted = False
         try:
             if recorder_changes:
                 recorder_attempted = True
@@ -804,8 +807,18 @@ def apply_config_update(
                     effective_config.retention,
                     effective_config.cameras,
                 )
+            if image_storage_changed:
+                image_storage_attempted = True
+                manager.reconfigure_image_storage(effective_config.image_storage)
         except BaseException:
             manager.config = previous_config
+            if image_storage_attempted:
+                try:
+                    manager.reconfigure_image_storage(previous_config.image_storage)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back image storage configuration"
+                    )
             if retention_attempted:
                 try:
                     manager.recorder.reconfigure_retention(
@@ -6074,7 +6087,8 @@ def zone_snapshot(camera_id: str, source: str = "live") -> Response:
             snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
         except (FileNotFoundError, PermissionError, OSError):
             continue
-        return FileResponse(snapshot_path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        media_type = mimetypes.guess_type(snapshot_path.name)[0] or "application/octet-stream"
+        return FileResponse(snapshot_path, media_type=media_type, headers={"Cache-Control": "no-store"})
     raise HTTPException(status_code=503, detail="no camera or event snapshot available")
 
 

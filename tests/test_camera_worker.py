@@ -22,8 +22,9 @@ from survng.app.camera import (
     CameraWorker,
     FRAME_STALE_SECONDS,
 )
-from survng.app.config import CameraConfig, MotionQualificationConfig, ObjectTrackingConfig
+from survng.app.config import CameraConfig, ImageStorageConfig, MotionQualificationConfig, ObjectTrackingConfig
 from survng.app.detector import objects_to_json
+from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
 from survng.app.object_tracking import ObjectTrackingSessionFactory
 from survng.app.motion_pipeline import (
@@ -131,6 +132,7 @@ def make_worker(
             limiter=threading.BoundedSemaphore(1),
         ),
         motion_analysis_limiter=threading.BoundedSemaphore(2),
+        image_writer=DurableImageWriter(ImageStorageConfig()),
     )
 
 
@@ -288,6 +290,7 @@ class CameraWorkerTest(unittest.TestCase):
             path = Path(worker._write_snapshot(frame, event_at))
 
             self.assertTrue(path.is_file())
+            self.assertEqual(path.suffix, ".webp")
             self.assertTrue(path.name.startswith("20260727-155655-123456-"))
 
     def test_isolated_qualification_telemetry_reports_replay_stage_metrics(self) -> None:

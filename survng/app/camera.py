@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
+from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
 from .object_tracking import ObjectTrackingSessionFactory
@@ -76,6 +77,7 @@ class CameraWorker:
         motion_object_detector_factory: RecordedMotionObjectDetectorFactory,
         object_tracking_session_factory: ObjectTrackingSessionFactory,
         motion_analysis_limiter: threading.BoundedSemaphore,
+        image_writer: DurableImageWriter,
         onvif_cache_dir: Path | None = None,
     ) -> None:
         self.camera = camera
@@ -88,6 +90,7 @@ class CameraWorker:
         self.motion_evidence = motion_evidence
         self.motion_pipeline_origins = dict(motion_pipeline_origins)
         self.motion_analysis_limiter = motion_analysis_limiter
+        self.image_writer = image_writer
         self.motion_debug = MotionDebugSnapshotStore()
         self._motion_debug_last_run = 0.0
         self.motion_object_detector = motion_object_detector_factory.create(
@@ -2137,9 +2140,16 @@ class CameraWorker:
         try:
             directory.mkdir(parents=True, exist_ok=True)
             stamp = event_at.strftime("%Y%m%d-%H%M%S-%f")
-            path = directory / f"{stamp}-{result.score:.3f}-{result.reason}.jpg"
-            if cv2.imwrite(str(path), frame):
-                samples = sorted(directory.glob("*.jpg"), key=lambda item: item.stat().st_mtime)
+            path = self.image_writer.write(
+                directory,
+                f"{stamp}-{result.score:.3f}-{result.reason}",
+                frame,
+            )
+            if path is not None:
+                samples = sorted(
+                    self.image_writer.stored_images(directory),
+                    key=lambda item: item.stat().st_mtime,
+                )
                 for stale in samples[:-100]:
                     stale.unlink(missing_ok=True)
                 return str(path)
@@ -2548,8 +2558,8 @@ class CameraWorker:
             captured_at = captured_at.astimezone(timezone.utc)
         event_stamp = captured_at.strftime("%Y%m%d-%H%M%S-%f")
         stamp = f"{event_stamp}-{time.time_ns() % 1_000_000_000:09d}"
-        path = self.snapshots_dir / f"{stamp}.jpg"
-        if not cv2.imwrite(str(path), frame):
-            LOGGER.warning("failed to write snapshot for %s to %s", self.camera.id, path)
+        path = self.image_writer.write(self.snapshots_dir, stamp, frame)
+        if path is None:
+            LOGGER.warning("failed to encode snapshot for %s", self.camera.id)
             return ""
         return str(path)

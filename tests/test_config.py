@@ -21,6 +21,12 @@ from survng.app.config import (
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_durable_image_storage_defaults_to_high_quality_webp(self) -> None:
+        config = AppConfig()
+
+        self.assertEqual(config.image_storage.format, "webp")
+        self.assertEqual(config.image_storage.quality, 95)
+
     def test_object_tracking_excludes_faces_by_default_and_normalizes_overrides(self) -> None:
         defaults = ObjectTrackingConfig()
         self.assertFalse(defaults.tracks_label("face"))
