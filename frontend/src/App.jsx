@@ -4947,9 +4947,70 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   return (
     <div className="recordings-section-switcher" aria-label="Recording section">
       <a className={mode === "history" ? "active" : ""} href={appUrl(`/recordings${query}`)}><Film size={14} />History</a>
+      <a className={mode === "search" ? "active" : ""} href={appUrl(`/recordings/search${query}`)}><Search size={14} />Smart Search</a>
       <a className={mode === "exports" ? "active" : ""} href={appUrl(`/recordings/exports${query}`)}><Download size={14} />Exports</a>
     </div>
   );
+}
+
+function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
+  const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
+  const [cameras, setCameras] = useState([]);
+  const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
+  const [query, setQuery] = useState(initialQuery.get("q") || "");
+  const [results, setResults] = useState([]);
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    Promise.all([fetch("/api/cameras").then((r) => r.json()), fetch("/api/semantic-search/status").then((r) => r.json())])
+      .then(([cameraRows, semanticStatus]) => { setCameras(cameraRows || []); setStatus(semanticStatus); })
+      .catch((reason) => setError(reason.message || "Could not load Smart Search."));
+  }, []);
+  useEffect(() => {
+    onAssistantContextChange?.({ page: "recordings", camera_id: cameraId, filters: { semantic_query: query } });
+  }, [cameraId, onAssistantContextChange, query]);
+
+  async function runSearch(event) {
+    event?.preventDefault();
+    if (!query.trim()) return;
+    setLoading(true); setError("");
+    try {
+      const response = await fetch("/api/semantic-search", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query.trim(), camera_ids: cameraId ? [cameraId] : [], limit: 100 }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Smart Search failed.");
+      setResults(payload.results || []);
+      const params = new URLSearchParams({ q: query.trim() });
+      if (cameraId) params.set("camera", cameraId);
+      window.history.replaceState(null, "", appUrl(`/recordings/search?${params.toString()}`));
+    } catch (reason) { setError(reason.message || "Smart Search failed."); }
+    finally { setLoading(false); }
+  }
+
+  return <main className="semantic-search-page">
+    <aside className="recordings-v2-cameras">
+      <RecordingSectionSwitcher mode="search" cameraId={cameraId} />
+      <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}><Search size={16} /><span>All cameras</span><i /></button>
+      {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => setCameraId(camera.id)}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
+    </aside>
+    <section className="semantic-search-workspace">
+      <header><div><h2>Smart Search</h2><p>Describe what you remember. SurvNG searches locally indexed incident images.</p></div><span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span></header>
+      <form onSubmit={runSearch}><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Try “person in a red jacket” or “white delivery truck”' /><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></form>
+      {error ? <div className="semantic-search-error"><CircleAlert size={17} />{error}</div> : null}
+      <div className="semantic-search-results">
+        {results.map((result) => {
+          const item = result.event || {};
+          const context = incidentRecordingContext(item);
+          return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span>{Math.round(Number(result.score || 0) * 100)}% match</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
+        })}
+        {!loading && !error && !results.length ? <div className="semantic-search-empty"><Search size={28} /><strong>Search indexed incidents by appearance</strong><span>Results link to the exact incident and recording time.</span></div> : null}
+      </div>
+    </section>
+  </main>;
 }
 
 function RecordingsPage({ timeZone, onAssistantContextChange }) {
@@ -9398,6 +9459,19 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         </details>
         </section>
 
+        <details className="detection-settings-card detection-feature-card">
+          <summary><span className="detection-settings-card-icon"><Search size={18} /></span><span><strong>Smart Search</strong><small>Find indexed incidents by describing visible details in plain language.</small></span></summary>
+          <div className="detection-feature-body detection-field-grid">
+            <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.enabled ?? false} onChange={(event) => updateConfig(["semantic_search", "enabled"], event.target.checked)} /><span>Smart Search enabled</span></label>
+            <label>Model package<input value={config.semantic_search?.model_dir ?? ""} onChange={(event) => updateConfig(["semantic_search", "model_dir"], event.target.value)} placeholder="/config/models/mobileclip2-b-openvino" /><small>A local MobileCLIP2/OpenVINO package containing semantic_model.json, both encoder models, and tokenizer assets.</small></label>
+            <label>Inference device<input value={config.semantic_search?.device ?? "GPU"} onChange={(event) => updateConfig(["semantic_search", "device"], event.target.value)} /><small>GPU is recommended on Intel systems. This does not share the object detector queue.</small></label>
+            <label>Historical batch size<input type="number" min="1" max="250" step="1" value={config.semantic_search?.backfill_batch_size ?? 25} onChange={(event) => updateConfig(["semantic_search", "backfill_batch_size"], Number(event.target.value))} /><small>How many older incidents are scheduled at a time. Existing indexed generations are skipped.</small></label>
+            <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_full_frame ?? true} onChange={(event) => updateConfig(["semantic_search", "index_full_frame"], event.target.checked)} /><span>Index whole incident image</span></label>
+            <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_object_crops ?? true} onChange={(event) => updateConfig(["semantic_search", "index_object_crops"], event.target.checked)} /><span>Index detected object crops</span></label>
+            <div className="probe-result"><strong>Model upgrades are non-destructive</strong><span>SurvNG keeps each model generation separate, builds the new index in the background, and never mixes incompatible similarity scores.</span></div>
+          </div>
+        </details>
+
         <details className="detection-settings-card detection-feature-card wide-card">
           <summary><span className="detection-settings-card-icon"><Gauge size={18} /></span><span><strong>Motion validation</strong><small>How camera and visual motion decide when object detection runs.</small></span></summary>
           <div className="detection-feature-body">
@@ -10077,6 +10151,7 @@ function App() {
   const [recordingContext, setRecordingContext] = useState(null);
   const pathname = appPathname();
   const isExportCenter = pathname.startsWith("/recordings/exports");
+  const isSemanticSearch = pathname.startsWith("/recordings/search");
   const page = pathname.startsWith("/config")
     ? "config"
     : pathname.startsWith("/recordings")
@@ -10100,6 +10175,8 @@ function App() {
         : page === "recordings"
           ? isExportCenter
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+            : isSemanticSearch
+              ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
           : page === "incidents"
             ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />

@@ -6695,12 +6695,35 @@ section.detection-settings-card {
 
 .recordings-section-switcher {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   margin-bottom: 6px;
   padding-bottom: 9px;
   border-bottom: 1px solid var(--line);
 }
+
+.semantic-search-page { display: grid; grid-template-columns: 160px minmax(0, 1fr); height: calc(100dvh - 66px); min-height: 0; }
+.semantic-search-workspace { min-width: 0; overflow: auto; padding: 18px; }
+.semantic-search-workspace > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.semantic-search-workspace h2, .semantic-search-workspace p { margin: 0; }
+.semantic-search-workspace p { color: var(--muted); margin-top: 3px; }
+.semantic-status { border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; color: var(--muted); font-size: 12px; font-weight: 800; }
+.semantic-status.ready { color: var(--active-ink); border-color: rgba(15,118,110,.5); background: var(--active); }
+.semantic-search-workspace form { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--line); background: var(--panel); border-radius: 10px; padding: 8px 10px; }
+.semantic-search-workspace form input { border: 0; background: transparent; min-width: 0; font-size: 16px; outline: 0; color: var(--text); }
+.semantic-search-workspace form button, .semantic-search-results footer a { border: 1px solid rgba(15,118,110,.5); background: var(--active); color: var(--active-ink); border-radius: 6px; padding: 8px 13px; font-weight: 800; text-decoration: none; }
+.semantic-search-results { display: grid; grid-template-columns: repeat(auto-fill,minmax(250px,1fr)); gap: 12px; margin-top: 16px; }
+.semantic-search-results article { min-width: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.semantic-search-results article > a { position: relative; display: block; aspect-ratio: 16/9; background: #050707; overflow: hidden; }
+.semantic-search-results img { width: 100%; height: 100%; object-fit: contain; }
+.semantic-search-results article > a > span { position: absolute; top: 7px; right: 7px; padding: 3px 6px; border-radius: 999px; background: rgba(4,12,12,.78); color: #fff; font-size: 11px; font-weight: 850; }
+.semantic-search-results footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; }
+.semantic-search-results footer div { display: grid; min-width: 0; }
+.semantic-search-results footer small { color: var(--muted); }
+.semantic-search-results footer a { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; padding: 6px 8px; font-size: 11px; }
+.semantic-search-empty { grid-column: 1/-1; min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+.semantic-search-error { display: flex; align-items: center; gap: 7px; color: var(--danger); margin-top: 10px; }
+@media (max-width: 760px) { .semantic-search-page { grid-template-columns: 1fr; height: auto; } .semantic-search-page .recordings-v2-cameras { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); } .semantic-search-page .recordings-section-switcher { min-width: 260px; margin: 0; } .semantic-search-page .recordings-v2-cameras button { min-width: 135px; } .semantic-search-workspace { padding: 12px; } }
 
 .recordings-section-switcher a {
   display: inline-flex;
