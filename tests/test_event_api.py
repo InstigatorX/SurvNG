@@ -42,6 +42,10 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(response["results"][0]["score"], 0.91)
         self.assertEqual(response["results"][0]["snapshot_url"], "/survng/api/events/7/snapshot.jpg")
         self.assertNotIn("objects_json", response["results"][0]["event"])
+        self.assertEqual(
+            response["results"][0]["event"],
+            {"id": 7, "camera_id": "gate", "kind": "object", "created_at": "now"},
+        )
 
     def test_motion_audit_apply_requires_bound_camera_recommendation(self) -> None:
         active_config = AppConfig(

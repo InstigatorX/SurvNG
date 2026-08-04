@@ -23,6 +23,12 @@ from .openclip_tokenizer import OpenClipBpeTokenizer
 LOGGER = logging.getLogger("uvicorn.error")
 SEMANTIC_WORKER_START_TIMEOUT_SECONDS = 60.0
 SEMANTIC_WORKER_REQUEST_TIMEOUT_SECONDS = 60.0
+MODEL_FINGERPRINT_CHUNK_SIZE = 1024 * 1024
+SEMANTIC_BACKFILL_RETRY_SECONDS = 5.0
+
+
+class SemanticInferenceError(RuntimeError):
+    """A valid worker response reporting a deterministic inference failure."""
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,74 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def semantic_object_bbox(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """Return a finite, positive detection box without assuming snapshot dimensions."""
+    raw_bbox = item.get("bbox") or item.get("box")
+    if isinstance(raw_bbox, dict):
+        raw_coordinates = tuple(raw_bbox.get(key) for key in ("x1", "y1", "x2", "y2"))
+    elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+        raw_coordinates = tuple(raw_bbox)
+    else:
+        return None
+    try:
+        coordinates = tuple(float(value) for value in raw_coordinates)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(np.isfinite(value) for value in coordinates):
+        return None
+    x1, y1, x2, y2 = coordinates
+    return coordinates if x2 > x1 and y2 > y1 else None
+
+
+def semantic_object_crop_candidates(
+    objects: Sequence[dict[str, Any]],
+    limit: int,
+) -> list[tuple[int, dict[str, Any], tuple[float, float, float, float]]]:
+    """Choose stable, highest-confidence crop candidates within the configured cap."""
+    candidates: list[
+        tuple[float, int, dict[str, Any], tuple[float, float, float, float]]
+    ] = []
+    for index, item in enumerate(objects):
+        coordinates = semantic_object_bbox(item)
+        if coordinates is None:
+            continue
+        try:
+            confidence = float(item.get("confidence") or 0)
+        except (TypeError, ValueError, OverflowError):
+            confidence = 0.0
+        candidates.append(
+            (confidence if np.isfinite(confidence) else 0.0, index, item, coordinates)
+        )
+    candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
+    return [
+        (index, item, coordinates)
+        for _confidence, index, item, coordinates in candidates[:max(0, int(limit))]
+    ]
+
+
+def semantic_crop_source_key(index: int, item: dict[str, Any]) -> str:
+    label = str(item.get("label") or "").strip().lower()
+    signature = json.dumps(
+        {
+            "bbox": semantic_object_bbox(item),
+            "width": item.get("detection_frame_width"),
+            "height": item.get("detection_frame_height"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f"{label}:{index}:{hashlib.sha256(signature).hexdigest()[:12]}"
+
+
+def positive_dimension(value: object, fallback: int) -> float:
+    try:
+        number = float(value or fallback)
+    except (TypeError, ValueError, OverflowError):
+        return float(fallback)
+    return number if np.isfinite(number) and number > 0 else float(fallback)
+
+
 class SemanticEncoder(Protocol):
     @property
     def identity(self) -> SemanticModelIdentity: ...
@@ -106,8 +180,8 @@ def normalized_matrix(value: object, *, max_dimensions: int = 8192) -> np.ndarra
 class SemanticIndex:
     """Durable multi-generation semantic evidence index.
 
-    Embeddings remain local and are stored as normalized float16 vectors. Old
-    generations remain searchable during background migration to a new model.
+    Embeddings remain local and are stored as normalized float16 vectors. Model
+    generations remain isolated so incompatible vectors are never compared.
     """
 
     MAX_CANDIDATE_ROWS = 50_000
@@ -349,6 +423,79 @@ class SemanticIndex:
             ).fetchone()
         return row is not None
 
+    def event_source_keys(
+        self,
+        event_id: int,
+        identity: SemanticModelIdentity,
+        source_kind: str,
+    ) -> set[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select source_key from semantic_embeddings
+                where event_id = ? and model_fingerprint = ?
+                    and preprocessing_fingerprint = ? and source_kind = ?
+                """,
+                (
+                    int(event_id),
+                    identity.model_fingerprint,
+                    identity.preprocessing_fingerprint,
+                    str(source_kind),
+                ),
+            ).fetchall()
+        return {str(row["source_key"]) for row in rows}
+
+    def reconcile_event_source_keys(
+        self,
+        event_id: int,
+        identity: SemanticModelIdentity,
+        source_kind: str,
+        desired_keys: set[str],
+    ) -> int:
+        """Delete stale evidence after an event's objects or crop cap changes."""
+        clauses = [
+            "event_id = ?",
+            "model_fingerprint = ?",
+            "preprocessing_fingerprint = ?",
+            "source_kind = ?",
+        ]
+        parameters: list[Any] = [
+            int(event_id),
+            identity.model_fingerprint,
+            identity.preprocessing_fingerprint,
+            str(source_kind),
+        ]
+        if desired_keys:
+            clauses.append(f"source_key not in ({','.join('?' for _ in desired_keys)})")
+            parameters.extend(sorted(desired_keys))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                f"delete from semantic_embeddings where {' and '.join(clauses)}",
+                parameters,
+            )
+        return max(0, int(cursor.rowcount or 0))
+
+    def delete_generation_source(
+        self,
+        identity: SemanticModelIdentity,
+        source_kind: str,
+    ) -> int:
+        """Remove a disabled evidence source for the active model generation."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                delete from semantic_embeddings
+                where model_fingerprint = ? and preprocessing_fingerprint = ?
+                    and source_kind = ?
+                """,
+                (
+                    identity.model_fingerprint,
+                    identity.preprocessing_fingerprint,
+                    str(source_kind),
+                ),
+            )
+        return max(0, int(cursor.rowcount or 0))
+
     def delete_event(self, event_id: int) -> int:
         """Remove semantic evidence for an event that is not object-searchable."""
         with self._lock, self._connect() as connection:
@@ -358,17 +505,28 @@ class SemanticIndex:
             )
         return max(0, int(cursor.rowcount or 0))
 
+    def indexed_event_ids(self) -> set[int]:
+        """Return event IDs with any semantic evidence, across model generations."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "select distinct event_id from semantic_embeddings"
+            ).fetchall()
+        return {int(row["event_id"]) for row in rows}
+
 
 def fingerprint_model_package(model_dir: Path) -> str:
-    """Fingerprint local model artifacts without reading multi-gigabyte weights at startup."""
+    """Fingerprint every byte of local model artifacts to prevent stale generations."""
     digest = hashlib.sha256()
     for path in sorted(item for item in Path(model_dir).rglob("*") if item.is_file()):
         relative = path.relative_to(model_dir).as_posix()
         stat = path.stat()
-        digest.update(relative.encode("utf-8"))
-        digest.update(str(stat.st_size).encode("ascii"))
+        encoded_relative = relative.encode("utf-8")
+        digest.update(len(encoded_relative).to_bytes(8, "big"))
+        digest.update(encoded_relative)
+        digest.update(stat.st_size.to_bytes(8, "big"))
         with path.open("rb") as handle:
-            digest.update(handle.read(65536))
+            while chunk := handle.read(MODEL_FINGERPRINT_CHUNK_SIZE):
+                digest.update(chunk)
     return digest.hexdigest()[:24]
 
 
@@ -490,7 +648,13 @@ def _semantic_model_identity(
 class OpenVinoManifestEncoder:
     """OpenVINO dual-encoder loaded entirely from a local model package."""
 
-    def __init__(self, model_dir: Path, manifest: dict[str, Any], device: str) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        manifest: dict[str, Any],
+        device: str,
+        identity: SemanticModelIdentity | None = None,
+    ) -> None:
         from openvino import Core
         self.model_dir = Path(model_dir)
         image_spec = dict(manifest.get("image") or {})
@@ -520,7 +684,7 @@ class OpenVinoManifestEncoder:
         )
         self._image_spec = image_spec
         self._text_spec = text_spec
-        self._identity = _semantic_model_identity(self.model_dir, manifest)
+        self._identity = identity or _semantic_model_identity(self.model_dir, manifest)
 
     @property
     def identity(self) -> SemanticModelIdentity:
@@ -595,6 +759,7 @@ def _semantic_encoder_worker_main(
     model_dir: str,
     manifest: dict[str, Any],
     device: str,
+    identity: SemanticModelIdentity | None = None,
 ) -> None:
     from .inference import _disable_worker_core_dumps, _set_worker_process_name
 
@@ -602,7 +767,9 @@ def _semantic_encoder_worker_main(
     _disable_worker_core_dumps()
     encoder: OpenVinoManifestEncoder | None = None
     try:
-        encoder = OpenVinoManifestEncoder(Path(model_dir), manifest, device)
+        encoder = OpenVinoManifestEncoder(
+            Path(model_dir), manifest, device, identity=identity
+        )
         connection.send({"type": "ready", "pid": multiprocessing.current_process().pid})
         while True:
             request = connection.recv()
@@ -681,7 +848,7 @@ class IsolatedOpenVinoManifestEncoder:
         parent, child = self._context.Pipe(duplex=True)
         process = self._context.Process(
             target=_semantic_encoder_worker_main,
-            args=(child, str(self.model_dir), self.manifest, self.device),
+            args=(child, str(self.model_dir), self.manifest, self.device, self._identity),
             name="survng-semantic-inference",
             daemon=False,
         )
@@ -766,10 +933,12 @@ class IsolatedOpenVinoManifestEncoder:
                     if int(message.get("id") or 0) != request_id:
                         raise RuntimeError("semantic inference worker response was out of sequence")
                     if message.get("type") != "result":
-                        raise RuntimeError(
+                        raise SemanticInferenceError(
                             str(message.get("error") or "semantic inference worker failed")
                         )
                     return normalized_matrix(message["value"])
+                except SemanticInferenceError:
+                    raise
                 except (BrokenPipeError, EOFError, OSError, RuntimeError):
                     self._stop_locked()
                     if attempt:
@@ -823,20 +992,22 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._skipped_missing = 0
         self._state = "stopped"
         self._encoder_lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
 
     def start(self, event_store: Any, storage_dir: Path) -> None:
-        if self._state in {"initializing", "ready"}:
-            return
-        self._storage_dir = Path(storage_dir)
-        self._stop.clear()
-        self._state = "initializing"
-        self._bootstrap_thread = threading.Thread(
-            target=self._initialize,
-            args=(event_store,),
-            name="survng-semantic-loader",
-            daemon=True,
-        )
-        self._bootstrap_thread.start()
+        with self._lifecycle_lock:
+            if self._state in {"initializing", "ready", "stopping"}:
+                return
+            self._storage_dir = Path(storage_dir)
+            self._stop.clear()
+            self._state = "initializing"
+            self._bootstrap_thread = threading.Thread(
+                target=self._initialize,
+                args=(event_store,),
+                name="survng-semantic-loader",
+                daemon=True,
+            )
+            self._bootstrap_thread.start()
 
     def _initialize(self, event_store: Any) -> None:
         try:
@@ -846,25 +1017,34 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self.config.device,
             )
         except Exception as exc:
-            self._error = str(exc)
-            self._state = "unavailable"
+            with self._lifecycle_lock:
+                if self._state == "initializing":
+                    self._error = str(exc)
+                    self._state = "unavailable"
             LOGGER.warning("semantic search unavailable: %s", exc)
             return
-        if self._stop.is_set():
+        with self._lifecycle_lock:
+            if self._stop.is_set() or self._state != "initializing":
+                should_close = True
+            else:
+                should_close = False
+                self.encoder = encoder
+                self._state = "ready"
+                self._thread = threading.Thread(
+                    target=self._run, name="survng-semantic", daemon=True
+                )
+                self._backfill_thread = threading.Thread(
+                    target=self._run_backfill,
+                    args=(event_store,),
+                    name="survng-semantic-backfill",
+                    daemon=True,
+                )
+                # Start while lifecycle publication is locked so close() can never
+                # observe an assigned but not-yet-started thread and attempt to join it.
+                self._thread.start()
+                self._backfill_thread.start()
+        if should_close:
             encoder.close()
-            self._state = "stopped"
-            return
-        self.encoder = encoder
-        self._state = "ready"
-        self._thread = threading.Thread(target=self._run, name="survng-semantic", daemon=True)
-        self._thread.start()
-        self._backfill_thread = threading.Thread(
-            target=self._backfill,
-            args=(event_store,),
-            name="survng-semantic-backfill",
-            daemon=True,
-        )
-        self._backfill_thread.start()
 
     def _history_queue_has_capacity(self) -> bool:
         return (
@@ -872,9 +1052,29 @@ class SemanticSearchService(DisabledSemanticSearch):
             < self.config.worker_queue_size - self._live_queue_reserve
         )
 
+    def _run_backfill(self, event_store: Any) -> None:
+        """Retry transient index/event-store failures without losing backfill forever."""
+        while not self._stop.is_set():
+            try:
+                self._backfill(event_store)
+                return
+            except Exception as exc:
+                self._error = str(exc)
+                LOGGER.warning("semantic historical indexing interrupted: %s", exc)
+                if self._stop.wait(SEMANTIC_BACKFILL_RETRY_SECONDS):
+                    return
+
     def _backfill(self, event_store: Any) -> None:
         before_created_at: str | None = None
         before_id: int | None = None
+        encoder = self.encoder
+        if encoder is None:
+            return
+        if not self.config.index_full_frame:
+            self.index.delete_generation_source(encoder.identity, "full_frame")
+        if not self.config.index_object_crops:
+            self.index.delete_generation_source(encoder.identity, "object_crop")
+        indexed_event_ids = self.index.indexed_event_ids()
         while not self._stop.is_set():
             rows = event_store.recent_compact(
                 self.config.backfill_batch_size,
@@ -887,16 +1087,29 @@ class SemanticSearchService(DisabledSemanticSearch):
                 if self._stop.is_set():
                     return
                 event_id = int(event.get("id") or 0)
-                if not semantic_event_objects(event):
-                    if event_id > 0:
+                objects = semantic_event_objects(event)
+                if not objects:
+                    if event_id > 0 and event_id in indexed_event_ids:
                         self.index.delete_event(event_id)
+                        indexed_event_ids.discard(event_id)
                     continue
                 if self.encoder:
                     full_ready = not self.config.index_full_frame or self.index.event_source_indexed(
                         event_id, self.encoder.identity, "full_frame"
                     )
-                    crops_ready = not self.config.index_object_crops or self.index.event_source_indexed(
+                    crop_candidates = semantic_object_crop_candidates(
+                        objects, self.config.max_object_crops_per_event
+                    )
+                    desired_crop_keys = {
+                        semantic_crop_source_key(index, item)
+                        for index, item, _coordinates in crop_candidates
+                    }
+                    existing_crop_keys = self.index.event_source_keys(
                         event_id, self.encoder.identity, "object_crop"
+                    )
+                    crops_ready = (
+                        not self.config.index_object_crops
+                        or existing_crop_keys == desired_crop_keys
                     )
                     if full_ready and crops_ready:
                         continue
@@ -964,10 +1177,25 @@ class SemanticSearchService(DisabledSemanticSearch):
         full_frame_needed = self.config.index_full_frame and not self.index.event_source_indexed(
             event_id, identity, "full_frame"
         )
-        object_crops_needed = self.config.index_object_crops and not self.index.event_source_indexed(
+        crop_candidates = semantic_object_crop_candidates(
+            objects, self.config.max_object_crops_per_event
+        )
+        desired_crop_keys = {
+            semantic_crop_source_key(index, item)
+            for index, item, _coordinates in crop_candidates
+        }
+        existing_crop_keys = self.index.event_source_keys(
             event_id, identity, "object_crop"
         )
+        object_crops_needed = (
+            self.config.index_object_crops
+            and bool(desired_crop_keys - existing_crop_keys)
+        )
         if not full_frame_needed and not object_crops_needed:
+            if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
+                self.index.reconcile_event_source_keys(
+                    event_id, identity, "object_crop", desired_crop_keys
+                )
             return
         try:
             path = event_snapshot_path(self._storage_dir, event)
@@ -981,32 +1209,27 @@ class SemanticSearchService(DisabledSemanticSearch):
         evidence: list[SemanticEvidence] = []
         images: list[np.ndarray] = []
         if full_frame_needed:
-            evidence.append(SemanticEvidence(event_id, str(event["camera_id"]), str(event["created_at"]), "full_frame", "frame", str(event["snapshot_path"])))
+            evidence.append(SemanticEvidence(event_id, str(event.get("camera_id") or ""), str(event.get("created_at") or ""), "full_frame", "frame", str(event["snapshot_path"])))
             images.append(frame)
         if object_crops_needed:
             height, width = frame.shape[:2]
-            for index, item in enumerate(objects):
-                if not isinstance(item, dict):
+            for index, item, coordinates in crop_candidates:
+                source_key = semantic_crop_source_key(index, item)
+                if source_key in existing_crop_keys:
                     continue
-                raw_bbox = item.get("bbox") or item.get("box")
-                if isinstance(raw_bbox, dict):
-                    bbox = tuple(raw_bbox.get(key) for key in ("x1", "y1", "x2", "y2"))
-                elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
-                    bbox = tuple(raw_bbox)
-                else:
-                    continue
-                try:
-                    coordinates = tuple(float(value) for value in bbox)
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                if not all(np.isfinite(value) for value in coordinates):
-                    continue
-                x1, y1, x2, y2 = (int(round(value)) for value in coordinates)
+                source_width = positive_dimension(item.get("detection_frame_width"), width)
+                source_height = positive_dimension(item.get("detection_frame_height"), height)
+                x1, y1, x2, y2 = (
+                    int(round(coordinates[0] * width / source_width)),
+                    int(round(coordinates[1] * height / source_height)),
+                    int(round(coordinates[2] * width / source_width)),
+                    int(round(coordinates[3] * height / source_height)),
+                )
                 x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
                 if x2 <= x1 or y2 <= y1:
                     continue
                 label = str(item.get("label") or "").strip().lower()
-                evidence.append(SemanticEvidence(event_id, str(event["camera_id"]), str(event["created_at"]), "object_crop", f"{label}:{index}", str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
+                evidence.append(SemanticEvidence(event_id, str(event.get("camera_id") or ""), str(event.get("created_at") or ""), "object_crop", source_key, str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
                 images.append(frame[y1:y2, x1:x2])
         if images:
             with self._encoder_lock:
@@ -1014,6 +1237,12 @@ class SemanticSearchService(DisabledSemanticSearch):
                     return
                 embeddings = self.encoder.encode_images(images)
             self._indexed += self.index.upsert(evidence, embeddings, self.encoder.identity)
+            if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
+                # Preserve prior searchable evidence until replacements have
+                # encoded successfully, then remove only stale source keys.
+                self.index.reconcile_event_source_keys(
+                    event_id, identity, "object_crop", desired_crop_keys
+                )
 
     def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
         if self.encoder is None:
@@ -1041,24 +1270,28 @@ class SemanticSearchService(DisabledSemanticSearch):
         }
 
     def close(self) -> None:
-        self._stop.set()
-        self._state = "stopping"
+        with self._lifecycle_lock:
+            if self._state == "stopped":
+                return
+            self._stop.set()
+            self._state = "stopping"
+            bootstrap_thread = self._bootstrap_thread
+            backfill_thread = self._backfill_thread
+            worker_thread = self._thread
+            encoder = self.encoder
         try:
             self._queue.put_nowait((-1, next(self._queue_sequence), None))
         except queue.Full:
             pass
-        encoder = self.encoder
         abort = getattr(encoder, "abort", None)
         if callable(abort):
             abort()
-        if self._bootstrap_thread:
-            self._bootstrap_thread.join(timeout=5.0)
-        if self._backfill_thread:
-            self._backfill_thread.join(timeout=5.0)
-        if self._thread:
-            self._thread.join(timeout=5.0)
+        for thread in (bootstrap_thread, backfill_thread, worker_thread):
+            if thread and thread is not threading.current_thread():
+                thread.join(timeout=5.0)
         with self._encoder_lock:
             if self.encoder:
                 self.encoder.close()
             self.encoder = None
-        self._state = "stopped"
+        with self._lifecycle_lock:
+            self._state = "stopped"

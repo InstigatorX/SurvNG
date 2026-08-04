@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -34,6 +34,10 @@ assert.deepEqual(incidentDetectionFrameSize({
   objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
 }), { width: 2560, height: 1920 });
 assert.deepEqual(incidentDetectionFrameSize({
+  object_tracking: { frame_width: 1280, frame_height: 720 },
+  objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
+}), { width: 2560, height: 1920 });
+assert.deepEqual(incidentTrackingFrameSize({
   object_tracking: { frame_width: 1280, frame_height: 720 },
   objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
 }), { width: 1280, height: 720 });

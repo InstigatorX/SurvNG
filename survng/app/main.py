@@ -2687,28 +2687,38 @@ def semantic_search(request: SemanticSearchRequest) -> dict[str, Any]:
     with MANAGER_RELOAD_LOCK:
         active_manager = manager
         maximum = min(request.limit, active_manager.config.semantic_search.max_results)
-        try:
-            hits = active_manager.semantic_search.search_text(
-                request.query,
-                camera_ids=request.camera_ids,
-                object_labels=request.object_labels,
-                start_at=request.start_at,
-                end_at=request.end_at,
-                limit=maximum * 4,
-                minimum_score=request.minimum_score,
-            )
-        except (RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        best_by_event: dict[int, Any] = {}
-        for hit in hits:
-            best_by_event.setdefault(hit.event_id, hit)
-            if len(best_by_event) >= maximum:
-                break
-        event_rows = {
-            int(row["id"]): _event_row(row)
-            for row in active_manager.events.get_many(list(best_by_event))
-        }
+        semantic_service = active_manager.semantic_search
+        event_store = active_manager.events
         base_path = active_manager.config.base_path
+    # Text inference may take seconds during worker recovery. The semantic
+    # service serializes inference against close(), so it need not block the
+    # global manager/config lock and unrelated API traffic.
+    try:
+        hits = semantic_service.search_text(
+            request.query,
+            camera_ids=request.camera_ids,
+            object_labels=request.object_labels,
+            start_at=request.start_at,
+            end_at=request.end_at,
+            limit=maximum * 4,
+            minimum_score=request.minimum_score,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    best_by_event: dict[int, Any] = {}
+    for hit in hits:
+        best_by_event.setdefault(hit.event_id, hit)
+        if len(best_by_event) >= maximum:
+            break
+    event_rows = {
+        int(row["id"]): {
+            "id": int(row["id"]),
+            "camera_id": str(row.get("camera_id") or ""),
+            "kind": str(row.get("kind") or ""),
+            "created_at": str(row.get("created_at") or ""),
+        }
+        for row in event_store.get_many(list(best_by_event))
+    }
     results = []
     for event_id, hit in best_by_event.items():
         event = event_rows.get(event_id)
@@ -5227,7 +5237,7 @@ def _assistant_semantic_search(
         return [AssistantEvidence(
             evidence_id="E-semantic-status", kind="semantic_search_status",
             title="Visual search unavailable", summary=str(exc),
-            data=active_manager.semantic_search_status(), href="/recordings?mode=search",
+            data=active_manager.semantic_search_status(), href="/recordings/search",
         )]
     best: dict[int, Any] = {}
     for hit in hits:
@@ -5251,7 +5261,7 @@ def _assistant_semantic_search(
                 "Search currently covers indexed object incidents, not every recording frame.",
             ],
         },
-        href="/recordings?mode=search",
+        href="/recordings/search",
     )]
     for event_id in best:
         incident = _assistant_incident_for_event(event_id, active_manager)

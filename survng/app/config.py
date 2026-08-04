@@ -98,6 +98,7 @@ class SemanticSearchConfig(BaseModel):
     device: str = Field(default="GPU", min_length=1, max_length=64)
     index_full_frame: bool = True
     index_object_crops: bool = True
+    max_object_crops_per_event: int = Field(default=24, ge=1, le=100)
     max_results: int = Field(default=100, ge=10, le=500)
     backfill_batch_size: int = Field(default=25, ge=1, le=250)
     backfill_pause_seconds: float = Field(default=0.25, ge=0.01, le=5.0)

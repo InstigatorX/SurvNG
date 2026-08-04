@@ -69,6 +69,7 @@
     "device": "GPU",
     "index_full_frame": true,
     "index_object_crops": true,
+    "max_object_crops_per_event": 24,
     "max_results": 100,
     "backfill_batch_size": 25,
     "backfill_pause_seconds": 0.25,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from survng.app.semantic_search import (
     SemanticModelIdentity,
     SemanticSearchService,
     _semantic_encoder_worker_main,
+    fingerprint_model_package,
     normalized_matrix,
 )
 
@@ -63,6 +65,18 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(self.index.coverage(self.identity)["event_count"], 1)
         self.assertEqual(self.index.coverage(other)["event_count"], 1)
         self.assertEqual(self.index.search([1, 0, 0], self.identity)[0].score, 1.0)
+
+    def test_model_fingerprint_detects_same_size_change_beyond_first_chunk(self) -> None:
+        model_dir = Path(self.temporary.name) / "model"
+        model_dir.mkdir()
+        model_file = model_dir / "weights.bin"
+        model_file.write_bytes(b"a" * (1024 * 1024 + 16))
+        before = fingerprint_model_package(model_dir)
+        with model_file.open("r+b") as handle:
+            handle.seek(1024 * 1024 + 8)
+            handle.write(b"b")
+
+        self.assertNotEqual(before, fingerprint_model_package(model_dir))
 
     def test_upsert_is_idempotent_per_generation_and_source(self) -> None:
         evidence = [SemanticEvidence(1, "gate", "now", "full_frame", "frame", "one.webp")]
@@ -157,6 +171,162 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(encoder.calls[1], [(60, 100, 3)])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 4, "event_count": 2})
 
+    def test_object_crops_are_scaled_ranked_and_bounded(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        image_path = Path(self.temporary.name) / "snapshot.jpg"
+        cv2.imwrite(str(image_path), np.full((100, 200, 3), 127, dtype=np.uint8))
+
+        class FakeEncoder:
+            identity = self.identity
+
+            def encode_images(self, images):
+                self.calls = getattr(self, "calls", [])
+                self.calls.append([image.shape for image in images])
+                if getattr(self, "fail", False):
+                    raise RuntimeError("temporary inference failure")
+                return np.asarray([[1, 0, 0]] * len(images), dtype=np.float32)
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(
+                enabled=True,
+                index_full_frame=False,
+                max_object_crops_per_event=1,
+            ),
+            self.index,
+            Path(self.temporary.name),
+            {},
+        )
+        encoder = FakeEncoder()
+        service.encoder = encoder
+        service._storage_dir = Path(self.temporary.name)
+        event = {
+            "id": 1,
+            "camera_id": "gate",
+            "created_at": "now",
+            "snapshot_path": "snapshot.jpg",
+            "objects": [
+                {"label": "person", "confidence": 0.4, "box": [0, 0, 20, 20]},
+                {
+                    "label": "car",
+                    "confidence": 0.9,
+                    "box": [10, 10, 60, 40],
+                    "detection_frame_width": 100,
+                    "detection_frame_height": 50,
+                },
+            ],
+        }
+        service._index_event(event)
+
+        self.assertEqual(encoder.calls, [[(60, 100, 3)]])
+        hit = self.index.search([1, 0, 0], self.identity)[0]
+        self.assertTrue(hit.source_key.startswith("car:1:"))
+        self.assertEqual(hit.bbox, (20, 20, 120, 80))
+
+        # Raising the cap adds only the newly eligible crop.
+        service.config.max_object_crops_per_event = 2
+        service._index_event(event)
+        self.assertEqual(encoder.calls[1], [(20, 20, 3)])
+        self.assertEqual(self.index.coverage(self.identity)["evidence_count"], 2)
+
+        # A replacement detection at the same list position replaces stale evidence.
+        event["objects"][0]["box"] = [0, 0, 30, 30]
+        previous_keys = self.index.event_source_keys(1, self.identity, "object_crop")
+        encoder.fail = True
+        with self.assertRaisesRegex(RuntimeError, "temporary inference failure"):
+            service._index_event(event)
+        self.assertEqual(
+            self.index.event_source_keys(1, self.identity, "object_crop"),
+            previous_keys,
+        )
+        encoder.fail = False
+        service._index_event(event)
+        self.assertEqual(encoder.calls[3], [(30, 30, 3)])
+        self.assertEqual(self.index.coverage(self.identity)["evidence_count"], 2)
+
+    def test_backfill_skips_noop_motion_cleanup_and_boxless_crop_retry(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        class EventStore:
+            calls = 0
+
+            def recent_compact(inner_self, *_args):
+                inner_self.calls += 1
+                if inner_self.calls > 1:
+                    return []
+                return [
+                    {"id": 2, "created_at": "old", "objects_json": "[]"},
+                    {
+                        "id": 1,
+                        "created_at": "new",
+                        "objects_json": '[{"label":"person"}]',
+                    },
+                ]
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, index_full_frame=False),
+            self.index,
+            Path(self.temporary.name),
+            {},
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        with patch.object(self.index, "delete_event", wraps=self.index.delete_event) as delete:
+            service._backfill(EventStore())
+
+        delete.assert_not_called()
+        self.assertTrue(service._queue.empty())
+
+    def test_close_during_initialization_cannot_publish_workers(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        constructing = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        class FakeEncoder:
+            def __init__(inner_self, *_args):
+                constructing.set()
+                release.wait(2.0)
+
+            def close(inner_self):
+                closed.set()
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        with patch("survng.app.semantic_search.IsolatedOpenVinoManifestEncoder", FakeEncoder):
+            service.start(object(), Path(self.temporary.name))
+            self.assertTrue(constructing.wait(1.0))
+            close_thread = threading.Thread(target=service.close)
+            close_thread.start()
+            release.set()
+            close_thread.join(3.0)
+
+        self.assertFalse(close_thread.is_alive())
+        self.assertTrue(closed.is_set())
+        self.assertEqual(service.status()["state"], "stopped")
+        self.assertIsNone(service.encoder)
+        self.assertIsNone(service._thread)
+        self.assertIsNone(service._backfill_thread)
+
+    def test_backfill_supervisor_retries_transient_failures(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        with (
+            patch.object(
+                service,
+                "_backfill",
+                side_effect=[sqlite3.OperationalError("busy"), None],
+            ) as backfill,
+            patch("survng.app.semantic_search.SEMANTIC_BACKFILL_RETRY_SECONDS", 0.001),
+        ):
+            service._run_backfill(object())
+
+        self.assertEqual(backfill.call_count, 2)
+
     def test_missing_retained_snapshot_is_counted_without_faulting_service(self) -> None:
         from survng.app.config import SemanticSearchConfig
 
@@ -232,7 +402,7 @@ class SemanticIndexTest(unittest.TestCase):
                 return
 
         class FakeEncoder:
-            def __init__(self, *_args) -> None:
+            def __init__(self, *_args, **_kwargs) -> None:
                 return
 
             def close(self) -> None:

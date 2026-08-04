@@ -50,6 +50,21 @@ class AssistantModelsTest(unittest.TestCase):
                 ],
             )
 
+    def test_semantic_search_evidence_uses_current_recordings_route(self) -> None:
+        from survng.app import main
+
+        active_manager = SimpleNamespace(
+            semantic_search=SimpleNamespace(search_text=Mock(return_value=[])),
+            semantic_search_status=Mock(return_value={"state": "ready"}),
+        )
+        evidence = main._assistant_semantic_search(
+            AssistantToolCall(name="semantic_search_recordings", query="white truck"),
+            "America/New_York",
+            active_manager,
+        )
+
+        self.assertEqual(evidence[0].href, "/recordings/search")
+
     def test_plan_rejects_multiple_export_actions(self) -> None:
         with self.assertRaisesRegex(ValidationError, "only one media export"):
             AssistantPlan(tool_calls=[
