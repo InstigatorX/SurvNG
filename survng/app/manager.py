@@ -19,7 +19,6 @@ from .config import (
     DetectionZone,
     ImageStorageConfig,
     MqttConfig,
-    ObjectTrackingConfig,
 )
 from .events import EventStore
 from .faces import FaceStore
@@ -956,6 +955,8 @@ class AppManager:
         self,
         config: DetectorConfig,
         roles: set[str],
+        *,
+        refresh_tracking: bool = False,
     ) -> None:
         """Restart selected inference roles without restarting camera workers."""
         with self._lifecycle_lock:
@@ -963,15 +964,16 @@ class AppManager:
                 raise RuntimeError("application manager is stopping")
             previous_config = self.detector.config.model_copy(deep=True)
             face_role = "face" in roles
-            reid_role = "reid" in roles
-            refresh_tracking = (
-                reid_role and previous_config.tracking != config.tracking
-            )
             inference_applied = False
             tracking_applied = False
-            if face_role:
-                self.faces.close()
+            face_queue_stop_attempted = False
             try:
+                if refresh_tracking:
+                    for worker in self.workers.values():
+                        worker.pause_object_tracking_session()
+                if face_role:
+                    face_queue_stop_attempted = True
+                    self.faces.close()
                 self.detector.reconfigure_roles(config, roles)
                 inference_applied = True
                 self.face_recognizer.config = self.detector.config
@@ -981,20 +983,47 @@ class AppManager:
                     tracking_applied = True
                 if face_role:
                     self.faces.start()
-            except BaseException:
-                if tracking_applied:
+                if "object" in roles:
                     try:
-                        self.reconfigure_object_tracking(previous_config)
+                        self._mqtt_connected()
                     except Exception:
-                        LOGGER.exception("failed to roll back ReID tracking sessions")
+                        LOGGER.exception(
+                            "MQTT discovery refresh failed after detector reconfiguration"
+                        )
+            except BaseException:
+                if refresh_tracking:
+                    for worker in self.workers.values():
+                        try:
+                            worker.pause_object_tracking_session()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to quiesce object tracking for %s during rollback",
+                                worker.camera.id,
+                            )
+                inference_restored = not inference_applied
                 if inference_applied:
                     try:
                         self.detector.reconfigure_roles(previous_config, roles)
+                        inference_restored = True
                     except Exception:
                         LOGGER.exception("failed to roll back inference roles")
+                if tracking_applied and inference_restored:
+                    try:
+                        self.reconfigure_object_tracking(previous_config)
+                    except Exception:
+                        LOGGER.exception("failed to roll back object tracking sessions")
+                elif refresh_tracking and inference_restored:
+                    for worker in self.workers.values():
+                        try:
+                            worker.resume_object_tracking_session()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to resume object tracking for %s",
+                                worker.camera.id,
+                            )
                 self.face_recognizer.config = self.detector.config
                 self.person_reidentifier.config = self.detector.config.tracking
-                if face_role:
+                if face_queue_stop_attempted:
                     try:
                         self.faces.start()
                     except Exception:

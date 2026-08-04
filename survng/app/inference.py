@@ -324,7 +324,13 @@ class _InferenceWorker:
             previous_alive = bool(
                 self._process is not None and self._process.is_alive()
             )
-            self.stop()
+            try:
+                self.stop()
+            except BaseException:
+                # A failed stop can leave the prior process alive. Keep its
+                # automatic recovery policy active because no config changed.
+                self._stopping = False
+                raise
             self.config = config
             self.start_enabled = start_enabled
             self._status = dict(initial_status)
@@ -335,20 +341,31 @@ class _InferenceWorker:
                         self._last_error
                         or f"{self.role} inference worker failed to restart"
                     )
-            except BaseException:
+            except BaseException as reconfigure_error:
+                rollback_errors: list[BaseException] = []
                 try:
                     self.stop()
+                except BaseException as exc:
+                    rollback_errors.append(exc)
                 finally:
                     self.config = previous_config
                     self.start_enabled = previous_start_enabled
                     self._status = previous_status
                     self._stopping = False
-                    if previous_alive and not self.start():
-                        LOGGER.critical(
-                            "%s inference rollback failed: %s",
-                            self.role.capitalize(),
-                            self._last_error,
-                        )
+                    if previous_alive:
+                        try:
+                            if not self.start():
+                                rollback_errors.append(InferenceUnavailable(
+                                    self._last_error
+                                    or f"{self.role} inference worker failed to restore"
+                                ))
+                        except BaseException as exc:
+                            rollback_errors.append(exc)
+                if rollback_errors:
+                    details = "; ".join(str(exc) for exc in rollback_errors)
+                    raise RuntimeError(
+                        f"{self.role} inference rollback failed: {details}"
+                    ) from reconfigure_error
                 raise
 
     def start(self) -> bool:
@@ -716,6 +733,7 @@ class _InferenceWorker:
 
 class InferenceSupervisor:
     def __init__(self, config: DetectorConfig) -> None:
+        self._config_lock = threading.RLock()
         self.config = config
         self.labels = load_detector_labels(config)
         self.enabled = bool(
@@ -781,17 +799,20 @@ class InferenceSupervisor:
     def update_runtime_config(self, config: DetectorConfig) -> None:
         """Hot-swap policy data without restarting active inference workers."""
         next_config = config.model_copy(deep=True)
-        for worker in (self._object, self._face, self._reid):
-            worker.update_config_reference(next_config)
-        self.config = next_config
-        self.labels = load_detector_labels(next_config)
-        self.enabled = bool(
+        next_labels = load_detector_labels(next_config)
+        next_enabled = bool(
             next_config.enabled
             and (
                 next_config.resolved_model_path()
                 or next_config.resolved_coreml_model_path()
             )
         )
+        with self._config_lock:
+            for worker in (self._object, self._face, self._reid):
+                worker.update_config_reference(next_config)
+            self.config = next_config
+            self.labels = next_labels
+            self.enabled = next_enabled
 
     def reconfigure_roles(
         self,
@@ -805,72 +826,98 @@ class InferenceSupervisor:
         if not roles:
             self.update_runtime_config(config)
             return
-        previous_config = self.config.model_copy(deep=True)
         next_config = config.model_copy(deep=True)
-        completed: list[str] = []
-
-        def apply_supervisor_config(value: DetectorConfig) -> None:
-            self.config = value
-            self.labels = load_detector_labels(value)
-            self.enabled = bool(
-                value.enabled
-                and (value.resolved_model_path() or value.resolved_coreml_model_path())
+        # Validate all file-backed metadata before changing supervisor or worker
+        # references. A rejected labels file must leave the active runtime intact.
+        next_labels = load_detector_labels(next_config)
+        next_enabled = bool(
+            next_config.enabled
+            and (
+                next_config.resolved_model_path()
+                or next_config.resolved_coreml_model_path()
             )
+        )
 
-        def role_settings(role: str) -> tuple[_InferenceWorker, dict[str, Any], bool]:
-            if role == "object":
-                return self._object, self._base_detector_status(), True
-            if role == "face":
+        with self._config_lock:
+            previous_config = self.config.model_copy(deep=True)
+            previous_labels = list(self.labels)
+            previous_enabled = self.enabled
+            completed: list[str] = []
+
+            def apply_supervisor_config(
+                value: DetectorConfig,
+                labels: list[str],
+                enabled: bool,
+            ) -> None:
+                self.config = value
+                self.labels = labels
+                self.enabled = enabled
+
+            def role_settings(role: str) -> tuple[_InferenceWorker, dict[str, Any], bool]:
+                if role == "object":
+                    return self._object, self._base_detector_status(), True
+                if role == "face":
+                    return (
+                        self._face,
+                        self._base_face_status(),
+                        bool(self.config.face_recognition_enabled),
+                    )
                 return (
-                    self._face,
-                    self._base_face_status(),
-                    bool(self.config.face_recognition_enabled),
+                    self._reid,
+                    self._base_reid_status(),
+                    bool(self.config.tracking.appearance_reid_enabled),
                 )
-            return (
-                self._reid,
-                self._base_reid_status(),
-                bool(self.config.tracking.appearance_reid_enabled),
-            )
 
-        apply_supervisor_config(next_config)
-        try:
-            for role in ("object", "face", "reid"):
-                if role not in roles:
-                    continue
-                worker, status, start_enabled = role_settings(role)
-                worker.reconfigure(
-                    next_config,
-                    status,
-                    start_enabled=start_enabled,
-                )
-                completed.append(role)
-            for role, worker in (
-                ("object", self._object),
-                ("face", self._face),
-                ("reid", self._reid),
-            ):
-                if role not in roles:
-                    worker.update_config_reference(next_config)
-        except BaseException:
-            apply_supervisor_config(previous_config)
-            for role in reversed(completed):
-                worker, status, start_enabled = role_settings(role)
-                try:
+            apply_supervisor_config(next_config, next_labels, next_enabled)
+            try:
+                for role in ("object", "face", "reid"):
+                    if role not in roles:
+                        continue
+                    worker, status, start_enabled = role_settings(role)
                     worker.reconfigure(
-                        previous_config,
+                        next_config,
                         status,
                         start_enabled=start_enabled,
                     )
-                except Exception:
-                    LOGGER.exception("failed to roll back %s inference role", role)
-            for role, worker in (
-                ("object", self._object),
-                ("face", self._face),
-                ("reid", self._reid),
-            ):
-                if role not in completed:
-                    worker.update_config_reference(previous_config)
-            raise
+                    completed.append(role)
+                for role, worker in (
+                    ("object", self._object),
+                    ("face", self._face),
+                    ("reid", self._reid),
+                ):
+                    if role not in roles:
+                        worker.update_config_reference(next_config)
+            except BaseException as reconfigure_error:
+                apply_supervisor_config(
+                    previous_config,
+                    previous_labels,
+                    previous_enabled,
+                )
+                rollback_failures: list[str] = []
+                for role in reversed(completed):
+                    worker, status, start_enabled = role_settings(role)
+                    try:
+                        worker.reconfigure(
+                            previous_config,
+                            status,
+                            start_enabled=start_enabled,
+                        )
+                    except Exception as exc:
+                        rollback_failures.append(f"{role}: {exc}")
+                        LOGGER.exception("failed to roll back %s inference role", role)
+                for role, worker in (
+                    ("object", self._object),
+                    ("face", self._face),
+                    ("reid", self._reid),
+                ):
+                    if role not in completed:
+                        worker.update_config_reference(previous_config)
+                if rollback_failures:
+                    raise RuntimeError(
+                        "inference rollback incomplete: "
+                        + "; ".join(rollback_failures)
+                    ) from reconfigure_error
+                raise
 
     def _base_face_status(self) -> dict[str, Any]:
         return {
@@ -1008,13 +1055,38 @@ class InferenceSupervisor:
         return status
 
     def face_status(self) -> dict[str, Any]:
-        return self._face.status()
+        status = self._face.status()
+        status["enabled"] = bool(self.config.face_recognition_enabled)
+        status["match_threshold"] = self.config.face_match_threshold
+        return status
 
     def reid_status(self) -> dict[str, Any]:
-        return self._reid.status()
+        return self._current_reid_status(self._reid.status())
 
     def cached_reid_status(self) -> dict[str, Any]:
-        return self._reid.cached_status()
+        return self._current_reid_status(self._reid.cached_status())
+
+    def _current_reid_status(self, status: dict[str, Any]) -> dict[str, Any]:
+        """Overlay hot matching policy on engine-owned worker status."""
+        current = dict(status)
+        current["enabled"] = bool(self.config.tracking.appearance_reid_enabled)
+        current["match_threshold"] = self.config.tracking.reid_match_threshold
+        person = current.get("person")
+        if isinstance(person, dict):
+            current["person"] = {
+                **person,
+                "enabled": bool(self.config.tracking.reid_enabled),
+                "match_threshold": self.config.tracking.reid_match_threshold,
+            }
+        vehicle = current.get("vehicle")
+        if isinstance(vehicle, dict):
+            current["vehicle"] = {
+                **vehicle,
+                "enabled": bool(self.config.tracking.vehicle_reid_enabled),
+                "labels": list(self.config.tracking.vehicle_reid_labels),
+                "match_threshold": self.config.tracking.vehicle_reid_match_threshold,
+            }
+        return current
 
     def probe_devices(self) -> dict[str, Any]:
         try:
@@ -1121,7 +1193,7 @@ class IsolatedPersonReidentifier:
             "model_kind": model_kind,
             "model_fingerprint": fingerprint,
             "embedding_size": int(engine.get("embedding_size") or 0),
-            "match_threshold": float(engine.get("match_threshold") or 0.0),
+            "match_threshold": self.config.reid_threshold_for_label(normalized),
         }
 
     def status(self) -> dict[str, Any]:

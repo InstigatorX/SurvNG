@@ -7686,7 +7686,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       ids.add(camera.id);
     }
     setGeneralSaving(true);
-    setSaveNotice({ state: "saving", text: "Saving and reloading cameras..." });
+    setSaveNotice({ state: "saving", text: "Saving settings..." });
     try {
       const response = await fetch("/api/config", {
         method: "PUT",
@@ -7707,6 +7707,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                 ? "Saved. Recorder processes restarted; cameras kept running."
                 : payload.subsystems_restarted?.includes("mqtt")
                   ? "Saved. MQTT reconnected; cameras kept running."
+                  : payload.subsystems_restarted?.some((name) => (
+                    name === "tracking_sessions" || name.endsWith("_inference")
+                  ))
+                    ? "Saved. Detection services refreshed; camera streams kept running."
               : "Saved without interrupting cameras.",
         }
         : { state: "error", text: "Saved, but the refreshed configuration could not be loaded. Retry this page." });

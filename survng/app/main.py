@@ -769,6 +769,16 @@ DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({
     "warmup_enabled",
     "labels",
 })
+DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({
+    "enabled",
+    "backend",
+    "model_path",
+    "model_xml",
+    "coreml_model_path",
+    "labels_path",
+    "nms_threshold",
+    "labels",
+})
 DETECTOR_FACE_ENGINE_FIELDS = frozenset({
     "face_recognition_enabled",
     "face_embedding_model_path",
@@ -874,11 +884,12 @@ def apply_config_update(
             for field_name in TRACKING_SESSION_FIELDS
         )
         inference_roles: set[str] = set()
-        if any(
+        object_engine_changed = any(
             getattr(previous_config.detector, field_name)
             != getattr(effective_config.detector, field_name)
             for field_name in DETECTOR_OBJECT_ENGINE_FIELDS
-        ):
+        )
+        if object_engine_changed:
             inference_roles.add("object")
         if any(
             getattr(previous_config.detector, field_name)
@@ -902,6 +913,16 @@ def apply_config_update(
             "reid" in inference_roles
             and previous_config.detector.tracking
             != effective_config.detector.tracking
+        )
+        object_tracking_refresh = any(
+            getattr(previous_config.detector, field_name)
+            != getattr(effective_config.detector, field_name)
+            for field_name in DETECTOR_OBJECT_TRACKING_RESET_FIELDS
+        )
+        inference_tracking_refresh = (
+            reid_tracking_refresh
+            or object_tracking_refresh
+            or (tracking_session_changed and bool(inference_roles))
         )
         recorder_changes = [
             field_name
@@ -940,9 +961,13 @@ def apply_config_update(
                 image_storage_attempted = True
                 manager.reconfigure_image_storage(effective_config.image_storage)
             if inference_roles:
-                manager.reconfigure_inference(effective_config.detector, inference_roles)
+                manager.reconfigure_inference(
+                    effective_config.detector,
+                    inference_roles,
+                    refresh_tracking=inference_tracking_refresh,
+                )
                 inference_applied = True
-            if tracking_session_changed and "reid" not in inference_roles:
+            if tracking_session_changed and not inference_tracking_refresh:
                 manager.reconfigure_object_tracking(effective_config.detector)
                 tracking_session_applied = True
             if detector_policy_changed:
@@ -950,6 +975,13 @@ def apply_config_update(
                 manager.reconfigure_detector_policy(effective_config.detector)
         except BaseException:
             manager.config = previous_config
+            if detector_policy_attempted:
+                try:
+                    manager.reconfigure_detector_policy(previous_config.detector)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back detector policy configuration"
+                    )
             if tracking_session_applied:
                 try:
                     manager.reconfigure_object_tracking(previous_config.detector)
@@ -959,17 +991,14 @@ def apply_config_update(
                     )
             if inference_applied:
                 try:
-                    manager.reconfigure_inference(previous_config.detector, inference_roles)
+                    manager.reconfigure_inference(
+                        previous_config.detector,
+                        inference_roles,
+                        refresh_tracking=inference_tracking_refresh,
+                    )
                 except Exception:
                     logging.getLogger(__name__).exception(
                         "failed to roll back inference configuration"
-                    )
-            if detector_policy_attempted:
-                try:
-                    manager.reconfigure_detector_policy(previous_config.detector)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back detector policy configuration"
                     )
             if image_storage_attempted:
                 try:
@@ -1017,7 +1046,7 @@ def apply_config_update(
             in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
             if changed
         ]
-        if tracking_session_changed or reid_tracking_refresh:
+        if tracking_session_changed or inference_tracking_refresh:
             restarted.append("tracking_sessions")
         restarted.extend(
             f"{role}_inference"

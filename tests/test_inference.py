@@ -72,6 +72,41 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertIs(self.supervisor._face.config, self.supervisor.config)
         self.assertIs(self.supervisor._reid.config, self.supervisor.config)
 
+    def test_failed_runtime_metadata_validation_does_not_mutate_config_references(self) -> None:
+        previous = self.supervisor.config
+        updated = DetectorConfig(enabled=False, labels_path="/unreadable/labels.txt")
+
+        with patch(
+            "survng.app.inference.load_detector_labels",
+            side_effect=OSError("labels unreadable"),
+        ):
+            with self.assertRaisesRegex(OSError, "labels unreadable"):
+                self.supervisor.update_runtime_config(updated)
+
+        self.assertIs(self.supervisor.config, previous)
+        self.assertIs(self.supervisor._object.config, previous)
+        self.assertIs(self.supervisor._face.config, previous)
+        self.assertIs(self.supervisor._reid.config, previous)
+
+    def test_failed_role_metadata_validation_leaves_live_worker_unchanged(self) -> None:
+        self.assertTrue(self.supervisor.start())
+        previous = self.supervisor.config
+        previous_pid = self.supervisor.isolation_status()["worker_pid"]
+        updated = DetectorConfig(enabled=False, labels_path="/unreadable/labels.txt")
+
+        with patch(
+            "survng.app.inference.load_detector_labels",
+            side_effect=OSError("labels unreadable"),
+        ):
+            with self.assertRaisesRegex(OSError, "labels unreadable"):
+                self.supervisor.reconfigure_roles(updated, {"object"})
+
+        self.assertIs(self.supervisor.config, previous)
+        self.assertEqual(
+            self.supervisor.isolation_status()["worker_pid"],
+            previous_pid,
+        )
+
     def test_role_reconfiguration_restarts_only_selected_worker(self) -> None:
         updated = DetectorConfig(enabled=False, device="GPU")
 
@@ -126,6 +161,28 @@ class InferenceSupervisorTest(unittest.TestCase):
         reid_reconfigure.assert_not_called()
         self.assertEqual(self.supervisor.config, previous)
 
+    def test_failed_worker_stop_keeps_prior_worker_recoverable(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+        )
+
+        def fail_stop() -> None:
+            worker._stopping = True
+            raise RuntimeError("worker remained alive")
+
+        with patch.object(worker, "stop", side_effect=fail_stop):
+            with self.assertRaisesRegex(RuntimeError, "remained alive"):
+                worker.reconfigure(
+                    DetectorConfig(enabled=False, device="GPU"),
+                    {},
+                    start_enabled=True,
+                )
+
+        self.assertFalse(worker._stopping)
+        self.assertEqual(worker.config.device, "CPU")
+
     def test_worker_restarts_after_native_style_process_death(self) -> None:
         self.assertTrue(self.supervisor.start())
         first_pid = self.supervisor.isolation_status()["worker_pid"]
@@ -176,6 +233,40 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertFalse(proxy.supports_label("person"))
         self.assertTrue(proxy.supports_label("car"))
         self.assertFalse(proxy.supports_label("dog"))
+
+    def test_hot_reid_threshold_is_used_for_status_and_model_identity(self) -> None:
+        config = DetectorConfig.model_validate({
+            "tracking": {
+                "reid_enabled": True,
+                "reid_model_path": "person.xml",
+                "reid_match_threshold": 0.83,
+            },
+        })
+        supervisor = InferenceSupervisor(config)
+        self.addCleanup(supervisor.stop)
+        supervisor._reid._status = {
+            "ready": True,
+            "match_threshold": 0.70,
+            "person": {
+                "ready": True,
+                "model_fingerprint": "person-model",
+                "embedding_size": 256,
+                "match_threshold": 0.70,
+            },
+            "vehicle": {"ready": False},
+        }
+        supervisor._reid.start_enabled = False
+        supervisor._reid._process = Mock(is_alive=Mock(return_value=True))
+        self.addCleanup(setattr, supervisor._reid, "_process", None)
+        proxy = IsolatedPersonReidentifier(supervisor)
+
+        status = supervisor.cached_reid_status()
+        identity = proxy.model_identity_for_label("person")
+
+        self.assertEqual(status["match_threshold"], 0.83)
+        self.assertEqual(status["person"]["match_threshold"], 0.83)
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity["match_threshold"], 0.83)
 
     def test_cached_worker_status_does_not_report_stale_readiness_after_exit(self) -> None:
         worker = _InferenceWorker(

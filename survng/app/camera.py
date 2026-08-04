@@ -597,6 +597,21 @@ class CameraWorker:
             catchup_frame_provider=self._recorded_tracking_frames,
         )
 
+    def pause_object_tracking_session(self) -> None:
+        """Quiesce tracking before an inference engine transition."""
+        with self._lifecycle_lock:
+            if not self.object_tracking.stop():
+                raise RuntimeError(
+                    f"object tracking session did not stop for {self.camera.id}"
+                )
+
+    def resume_object_tracking_session(self) -> None:
+        """Restore tracking eligibility after a cancelled transition."""
+        with self._lifecycle_lock:
+            self.object_tracking.set_accepting(
+                self._detection_enabled and not self._stop.is_set()
+            )
+
     def replace_object_tracking_session(
         self,
         replacement: ObjectTrackingSession,
@@ -628,11 +643,24 @@ class CameraWorker:
                     self._detection_enabled and not self._stop.is_set()
                 )
             except BaseException:
-                replacement.stop()
-                self.object_tracking = previous
-                previous.set_accepting(
-                    self._detection_enabled and not self._stop.is_set()
-                )
+                try:
+                    replacement.stop()
+                except Exception:
+                    LOGGER.exception(
+                        "replacement object tracking cleanup failed for %s",
+                        self.camera.id,
+                    )
+                finally:
+                    self.object_tracking = previous
+                try:
+                    previous.set_accepting(
+                        self._detection_enabled and not self._stop.is_set()
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "previous object tracking session restore failed for %s",
+                        self.camera.id,
+                    )
                 raise
             return previous
 

@@ -152,6 +152,24 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_tracking_pause_and_resume_preserve_camera_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+                Path(tmpdir),
+            )
+            tracking = Mock()
+            tracking.stop.return_value = True
+            worker.object_tracking = tracking
+            worker._stop.clear()
+
+            worker.pause_object_tracking_session()
+            worker.resume_object_tracking_session()
+
+            tracking.stop.assert_called_once_with()
+            tracking.set_accepting.assert_called_once_with(True)
+            self.assertFalse(worker._stop.is_set())
+
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(
@@ -195,6 +213,27 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertIs(worker.object_tracking, previous)
             replacement.set_accepting.assert_not_called()
+
+    def test_tracking_session_swap_restores_pointer_when_replacement_cleanup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+                Path(tmpdir),
+            )
+            previous = Mock()
+            previous.stop.return_value = True
+            replacement = Mock()
+            replacement.config = ObjectTrackingConfig(sample_fps=2.0)
+            replacement.set_accepting.side_effect = RuntimeError("accept failed")
+            replacement.stop.side_effect = RuntimeError("cleanup failed")
+            worker.object_tracking = previous
+            worker._stop.clear()
+
+            with self.assertRaisesRegex(RuntimeError, "accept failed"):
+                worker.replace_object_tracking_session(replacement)
+
+            self.assertIs(worker.object_tracking, previous)
+            previous.set_accepting.assert_called_once_with(True)
 
     def test_status_advertises_stable_dimensions_for_each_captured_source(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

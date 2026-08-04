@@ -161,6 +161,7 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.detector.config = manager.config.detector
         manager.face_recognizer = Mock()
         manager.person_reidentifier = Mock()
+        manager._mqtt_connected = Mock()
         next_detector = manager.config.detector.model_copy(deep=True)
         next_detector.device = "GPU"
 
@@ -174,6 +175,87 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.workers["gate"].stop.assert_not_called()
         manager.workers["gate"].start.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
+        manager._mqtt_connected.assert_called_once_with()
+
+    def test_output_changing_inference_update_refreshes_tracking_sessions(self) -> None:
+        manager = manager_with_mocks()
+        manager.detector.config = manager.config.detector
+        manager.face_recognizer = Mock()
+        manager.person_reidentifier = Mock()
+        manager._mqtt_connected = Mock()
+        manager.reconfigure_object_tracking = Mock()
+        order: list[str] = []
+        manager.workers["gate"].pause_object_tracking_session.side_effect = (
+            lambda: order.append("pause")
+        )
+        manager.detector.reconfigure_roles.side_effect = (
+            lambda _config, _roles: order.append("inference")
+        )
+        manager.reconfigure_object_tracking.side_effect = (
+            lambda _config: order.append("tracking")
+        )
+        next_detector = manager.config.detector.model_copy(deep=True)
+        next_detector.model_path = "/models/replacement.xml"
+
+        manager.reconfigure_inference(
+            next_detector,
+            {"object"},
+            refresh_tracking=True,
+        )
+
+        manager.reconfigure_object_tracking.assert_called_once_with(next_detector)
+        self.assertEqual(order, ["pause", "inference", "tracking"])
+        manager.workers["gate"].stop.assert_not_called()
+
+    def test_failed_tracking_refresh_restores_inference_before_resuming_tracking(self) -> None:
+        manager = manager_with_mocks()
+        previous = manager.config.detector
+        manager.detector.config = previous
+        manager.face_recognizer = Mock()
+        manager.person_reidentifier = Mock()
+        manager._mqtt_connected = Mock()
+        order: list[str] = []
+        worker = manager.workers["gate"]
+        worker.pause_object_tracking_session.side_effect = lambda: order.append("pause")
+        worker.resume_object_tracking_session.side_effect = lambda: order.append("resume")
+        manager.detector.reconfigure_roles.side_effect = (
+            lambda config, _roles: order.append(
+                "inference-new" if config.device == "GPU" else "inference-old"
+            )
+        )
+        manager.reconfigure_object_tracking = Mock(
+            side_effect=RuntimeError("tracking refresh failed")
+        )
+        next_detector = previous.model_copy(deep=True)
+        next_detector.device = "GPU"
+
+        with self.assertRaisesRegex(RuntimeError, "tracking refresh failed"):
+            manager.reconfigure_inference(
+                next_detector,
+                {"object"},
+                refresh_tracking=True,
+            )
+
+        self.assertEqual(
+            order,
+            ["pause", "inference-new", "pause", "inference-old", "resume"],
+        )
+
+    def test_face_queue_is_restored_when_stopping_it_fails(self) -> None:
+        manager = manager_with_mocks()
+        manager.detector.config = manager.config.detector
+        manager.face_recognizer = Mock()
+        manager.person_reidentifier = Mock()
+        manager.faces.close.side_effect = RuntimeError("face queue busy")
+        next_detector = manager.config.detector.model_copy(deep=True)
+        next_detector.face_recognition_enabled = True
+
+        with self.assertRaisesRegex(RuntimeError, "face queue busy"):
+            manager.reconfigure_inference(next_detector, {"face"})
+
+        manager.detector.reconfigure_roles.assert_not_called()
+        manager.faces.start.assert_called_once_with()
+        manager.workers["gate"].stop.assert_not_called()
 
     def test_camera_state_fingerprint_includes_trigger_health_changes(self) -> None:
         status = {
