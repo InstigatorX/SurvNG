@@ -122,6 +122,7 @@ class CameraWorker:
         self._source_frame_at: dict[str, str] = {}
         self._source_frame_epoch: dict[str, float] = {}
         self._source_frame_monotonic: dict[str, float] = {}
+        self._source_frame_dimensions: dict[str, dict[str, int]] = {}
         self._source_frame_times: dict[str, deque[float]] = {
             "live": deque(maxlen=600),
             "main": deque(maxlen=600),
@@ -441,6 +442,10 @@ class CameraWorker:
             live_frame_clock = self._source_frame_monotonic.get("live")
             main_frame_clock = self._source_frame_monotonic.get("main")
             main_error = self._source_errors.get("main", "")
+            stream_dimensions = {
+                source: dict(dimensions)
+                for source, dimensions in self._source_frame_dimensions.items()
+            }
             motion_buffered_frames = len(self._motion_frames)
             motion_frame_shape = list(self._motion_frames[-1][1].shape) if self._motion_frames else None
             capture_stats: dict[str, dict[str, int | float]] = {}
@@ -485,6 +490,7 @@ class CameraWorker:
             "last_error": self.last_error,
             "main_last_error": main_error,
             "capture_stats": capture_stats,
+            "stream_dimensions": stream_dimensions,
             "onvif_enabled": self.camera.onvif.enabled,
             "onvif_connected": self.onvif.connected,
             "onvif_last_event_at": self.onvif.last_event_at,
@@ -2295,6 +2301,10 @@ class CameraWorker:
                                 self._source_frame_at[source] = stamp
                                 self._source_frame_epoch[source] = frame_epoch
                                 self._source_frame_monotonic[source] = frame_clock
+                                self._source_frame_dimensions[source] = {
+                                    "width": int(frame.shape[1]),
+                                    "height": int(frame.shape[0]),
+                                }
                                 self._source_frame_times[source].append(frame_clock)
                                 self._source_capture_stats[source]["frames_received"] += 1
                                 if source == "live":

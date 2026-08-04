@@ -78,6 +78,15 @@ import {
   rememberWebRtcFailure,
   webRtcRetryDelay,
 } from "./liveTransport.mjs";
+import {
+  aspectFromDimensions,
+  cameraSourceAspect,
+  initialCameraAspect,
+  liveAspectStorageKey,
+  normalizedLiveSource,
+  validLiveAspect,
+} from "./liveAspect.mjs";
+import { resetLiveDefaultsForServer } from "./liveDefaults.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
@@ -319,7 +328,7 @@ function RecordingFallback({ cameraId, source, timeZone, muted, controls, onRead
       muted={muted}
       controls={controls}
       playsInline
-      onReady={(_player, video) => onReady?.(video, "recording")}
+      onReady={(_player, video) => onReady?.(video, "recording", source)}
       onError={onError}
     />
   );
@@ -667,6 +676,10 @@ const WebRtcLive = forwardRef(function WebRtcLive({
     return () => window.clearInterval(timer);
   }, [stage]);
 
+  const posterDeliverySource = stage === "mjpeg"
+    ? deliverySource
+    : deliverySource === "main" ? "live" : deliverySource;
+
   return (
     <div className={`live-stack ${videoReady ? "video-ready" : ""} ${showPoster ? "" : "external-poster"}`} data-stage={stage} data-video-ready={videoReady ? "true" : "false"}>
       {showPoster || !["webrtc", "mse", "recording"].includes(stage) ? (
@@ -674,9 +687,9 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           className="live-poster"
           src={appUrl(stage === "mjpeg"
             ? `/api/cameras/${cameraId}/stream.mjpg?source=${deliverySource}&fps=1&t=${snapshotToken}`
-            : `/api/cameras/${cameraId}/snapshot.jpg?source=${deliverySource === "main" ? "live" : deliverySource}&t=${snapshotToken}`)}
+            : `/api/cameras/${cameraId}/snapshot.jpg?source=${posterDeliverySource}&t=${snapshotToken}`)}
           alt=""
-          onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, stage)}
+          onLoad={(event) => ["mjpeg", "snapshot"].includes(stage) && onReady?.(event.currentTarget, stage, posterDeliverySource)}
         />
       ) : null}
       {["webrtc", "mse"].includes(stage) ? (
@@ -693,7 +706,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
           onLoadedData={(event) => {
             event.currentTarget.play().catch(() => {});
             setVideoReady(true);
-            onReady?.(event.currentTarget, stage);
+            onReady?.(event.currentTarget, stage, deliverySource);
           }}
         />
       ) : null}
@@ -1608,8 +1621,7 @@ const MOTION_WEBRTC_HOLD_MS = 30_000;
 function mediaAspect(element) {
   const width = element?.videoWidth || element?.naturalWidth || 0;
   const height = element?.videoHeight || element?.naturalHeight || 0;
-  if (!width || !height) return "16 / 9";
-  return `${width} / ${height}`;
+  return aspectFromDimensions(width, height) || "16 / 9";
 }
 
 function mediaAspectRatio(aspect) {
@@ -1620,10 +1632,6 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function liveAspectStorageKey(cameraId, source) {
-  return `survng.liveAspect.${cameraId}.${source === "main" ? "main" : "live"}`;
-}
-
 function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
@@ -1632,7 +1640,8 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   const lastMotionMs = new Date(camera.last_motion_at || 0).getTime();
   const motionActive = camera.running && Number.isFinite(lastMotionMs) && motionWindowNow - lastMotionMs <= MOTION_WEBRTC_HOLD_MS;
   const activeTransport = normalizedStreamMode === "motion" ? (motionActive ? "webrtc" : "snapshot") : normalizedStreamMode;
-  const [aspect, setAspect] = useState("16 / 9");
+  const [deliveredSource, setDeliveredSource] = useState(sourceMode === "main" ? "main" : "live");
+  const [aspect, setAspect] = useState(() => initialCameraAspect(camera, sourceMode, browserStorage(window)));
   const [mjpegToken, setMjpegToken] = useState(() => String(Date.now()));
   const [snapshotToken, setSnapshotToken] = useState(() => String(Date.now()));
   const [streamReady, setStreamReady] = useState(false);
@@ -1665,6 +1674,27 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
     setSnapshotToken(String(Date.now()));
     setStreamReady(false);
   }, [camera.id, sourceMode, activeTransport]);
+
+  const authoritativeAspect = cameraSourceAspect(camera, deliveredSource);
+
+  useEffect(() => {
+    const nextSource = activeTransport === "webrtc" ? deliveredSource : normalizedLiveSource(sourceMode);
+    const nextAspect = cameraSourceAspect(camera, nextSource)
+      || initialCameraAspect(camera, nextSource, browserStorage(window));
+    setAspect(nextAspect);
+  }, [camera.id, sourceMode, activeTransport, deliveredSource, authoritativeAspect]);
+
+  function rememberAspect(media, source, activate = true) {
+    const normalizedSource = normalizedLiveSource(source);
+    const measuredAspect = validLiveAspect(mediaAspect(media));
+    if (!measuredAspect) return;
+    writeStoredValue(
+      browserStorage(window),
+      liveAspectStorageKey(camera.id, normalizedSource),
+      measuredAspect,
+    );
+    if (activate && !cameraSourceAspect(camera, normalizedSource)) setAspect(measuredAspect);
+  }
 
   useEffect(() => {
     setStreamReady(false);
@@ -1743,7 +1773,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   }
 
   function toggleSourceMode() {
-    setSourceMode(sourceMode === "main" ? "live" : "main");
+    const nextSource = sourceMode === "main" ? "live" : "main";
+    setDeliveredSource(nextSource);
+    setAspect(initialCameraAspect(camera, nextSource, browserStorage(window)));
+    setSourceMode(nextSource);
   }
 
   const posterSource = activeTransport === "webrtc" && sourceMode === "main" ? "live" : sourceMode;
@@ -1781,7 +1814,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
               className="camera-tile-poster"
               src={imageUrl}
               alt={`${camera.name} ${sourceMode === "main" ? "main" : "sub"} live stream`}
-              onLoad={(event) => setAspect(mediaAspect(event.currentTarget))}
+              onLoad={(event) => rememberAspect(
+                event.currentTarget,
+                posterSource,
+                activeTransport !== "webrtc" || normalizedLiveSource(posterSource) === normalizedLiveSource(deliveredSource),
+              )}
             />
             {shouldUseWebRtc ? (
               <div className="camera-live-layer">
@@ -1791,7 +1828,8 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
                   timeZone={timeZone}
                   muted
                   showPoster={false}
-                  onReady={(media) => setAspect(mediaAspect(media))}
+                  onStageChange={(_stage, nextSource) => setDeliveredSource(normalizedLiveSource(nextSource))}
+                  onReady={(media, _stage, readySource) => rememberAspect(media, readySource || deliveredSource)}
                 />
               </div>
             ) : null}
@@ -1874,27 +1912,25 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
 }
 
 function LiveCameraOverlay({ camera, timeZone, onClose }) {
-  const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, preferredStreamSource());
+  const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, "live");
   const [mediaReady, setMediaReady] = useState(false);
   const [transport, setTransport] = useState("webrtc");
   const activeSource = source === "main" ? "main" : "live";
   const [deliveredSource, setDeliveredSource] = useState(activeSource);
-  const [aspect, setAspect] = useState(() => readStoredValue(
-    browserStorage(window),
-    liveAspectStorageKey(camera.id, activeSource),
-    "16 / 9",
-  ));
+  const [aspect, setAspect] = useState(() => initialCameraAspect(camera, activeSource, browserStorage(window)));
 
   useEffect(() => {
     setMediaReady(false);
     setTransport("webrtc");
     setDeliveredSource(activeSource);
-    setAspect(readStoredValue(
-      browserStorage(window),
-      liveAspectStorageKey(camera.id, activeSource),
-      "16 / 9",
-    ));
+    setAspect(initialCameraAspect(camera, activeSource, browserStorage(window)));
   }, [camera.id, activeSource]);
+
+  const authoritativeOverlayAspect = cameraSourceAspect(camera, deliveredSource);
+
+  useEffect(() => {
+    if (authoritativeOverlayAspect) setAspect(authoritativeOverlayAspect);
+  }, [authoritativeOverlayAspect]);
 
   useEffect(() => {
     function onKey(event) {
@@ -1906,7 +1942,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
 
   function rememberAspect(media, sourceName = activeSource) {
     const nextAspect = mediaAspect(media);
-    setAspect(nextAspect);
+    if (!cameraSourceAspect(camera, sourceName)) setAspect(nextAspect);
     writeStoredValue(
       browserStorage(window),
       liveAspectStorageKey(camera.id, sourceName),
@@ -1960,8 +1996,8 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
               setDeliveredSource(nextSource);
               if (nextSource !== deliveredSource) setMediaReady(false);
             }}
-            onReady={(media, readyTransport) => {
-              rememberAspect(media, deliveredSource);
+            onReady={(media, readyTransport, readySource) => {
+              rememberAspect(media, readySource || deliveredSource);
               setMediaReady(true);
               if (readyTransport) setTransport(readyTransport);
             }}
@@ -4322,6 +4358,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
+  const [liveDefaultsReady, setLiveDefaultsReady] = useState(false);
+  const [liveDefaultsInstance, setLiveDefaultsInstance] = useState("");
   const linkedCameraIdRef = useRef(new URLSearchParams(window.location.search).get("camera") || "");
   const [incidentPage, setIncidentPage] = useState(0);
   const [incidents, setIncidents] = useState([]);
@@ -4369,6 +4407,34 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     const seen = new Set(sorted.map((camera) => camera.id));
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
+  useEffect(() => {
+    let cancelled = false;
+    async function syncLiveDefaults() {
+      try {
+        const response = await fetch("/api/system/status", { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json();
+        const instanceId = String(payload.instance_id || "");
+        if (!instanceId || cancelled) return;
+        const reset = resetLiveDefaultsForServer(browserStorage(window), instanceId);
+        if (cancelled) return;
+        if (reset) setExpandedCamera(null);
+        setLiveDefaultsInstance(instanceId);
+      } catch {
+        // A reconnecting server is expected to be temporarily unavailable.
+      } finally {
+        if (!cancelled) setLiveDefaultsReady(true);
+      }
+    }
+    void syncLiveDefaults();
+    const timer = window.setInterval(syncLiveDefaults, 15_000);
+    window.addEventListener("focus", syncLiveDefaults);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", syncLiveDefaults);
+    };
+  }, []);
   useEffect(() => {
     const linkedCameraId = linkedCameraIdRef.current;
     if (!linkedCameraId || !cameras.length) return;
@@ -4635,9 +4701,9 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     <main className="bento-grid live-grid">
       <section className="bento-card camera-zone">
         <div className="camera-grid">
-          {orderedCameras.map((camera, index) => (
+          {liveDefaultsReady ? orderedCameras.map((camera, index) => (
             <CameraTile
-              key={camera.id}
+              key={`${camera.id}:${liveDefaultsInstance}`}
               camera={camera}
               timeZone={timeZone}
               refresh={refreshBase}
@@ -4676,7 +4742,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
                 },
               }}
             />
-          ))}
+          )) : null}
         </div>
       </section>
       <section className="bento-card events-zone" ref={liveIncidentZoneRef}>

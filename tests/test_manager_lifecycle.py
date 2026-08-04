@@ -150,6 +150,13 @@ class ManagerLifecycleTest(unittest.TestCase):
                 "onvif_renewal_errors": 1,
             }),
         )
+        self.assertNotEqual(
+            original,
+            AppManager._camera_state_fingerprint({
+                **status,
+                "stream_dimensions": {"live": {"width": 896, "height": 672}},
+            }),
+        )
 
     def test_real_empty_manager_starts_and_stops_all_background_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

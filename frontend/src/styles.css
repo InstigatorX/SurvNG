@@ -1628,7 +1628,6 @@ button.status-pill.hud-toggle:disabled {
   width: 100%;
   height: auto;
   aspect-ratio: var(--media-aspect, 16 / 9);
-  max-height: min(62vh, 760px);
 }
 
 .camera-open-target {
@@ -8607,7 +8606,6 @@ section.detection-settings-card {
 
   .video-frame {
     margin-inline: auto;
-    max-height: 68vh;
   }
 
   .video-frame video,

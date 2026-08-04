@@ -5,6 +5,8 @@
     "test:motion-analysis": "node tests/motion-analysis-config.mjs",
     "test:motion-decision": "node tests/motion-decision-config.mjs",
     "test:live-transport": "node tests/live-transport.mjs",
+    "test:live-aspect": "node tests/live-aspect.mjs",
+    "test:live-defaults": "node tests/live-defaults.mjs",
     "test:storage": "node tests/storage.mjs",
     "test:assistant-storage": "node tests/assistant-storage.mjs",
     "test:assistant-export": "node tests/assistant-export.mjs",

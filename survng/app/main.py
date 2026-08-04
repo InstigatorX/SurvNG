@@ -155,6 +155,7 @@ AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 PROCESS_STARTED_MONOTONIC = time.monotonic()
+PROCESS_INSTANCE_ID = secrets.token_hex(12)
 GPU_SAMPLE_LOCK = threading.Lock()
 GPU_SAMPLE: dict[str, object] = {"at": 0.0, "pids": (), "engines": {}}
 TELEMETRY_HISTORY_LOCK = threading.Lock()
@@ -1815,6 +1816,7 @@ def system_status() -> dict:
     cameras = manager.statuses()
     detector = manager.detector_status()
     return {
+        "instance_id": PROCESS_INSTANCE_ID,
         "storage": {
             "total_bytes": usage.total,
             "used_bytes": usage.used,

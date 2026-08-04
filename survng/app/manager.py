@@ -974,6 +974,7 @@ class AppManager:
             "onvif_renewals", "onvif_renewal_errors", "last_motion_at",
             "detection_enabled", "recording",
             "sub_recording", "recording_enabled", "recording_configured",
+            "stream_dimensions",
         )
         motion = status.get("motion_qualification") or {}
         return tuple(status.get(key) for key in keys) + (

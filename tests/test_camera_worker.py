@@ -150,6 +150,21 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_status_advertises_stable_dimensions_for_each_captured_source(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with worker._frame_lock:
+                worker._source_frame_dimensions = {
+                    "live": {"width": 896, "height": 672},
+                    "main": {"width": 1920, "height": 1080},
+                }
+
+            dimensions = worker.status()["stream_dimensions"]
+
+        self.assertEqual(dimensions["live"], {"width": 896, "height": 672})
+        self.assertEqual(dimensions["main"], {"width": 1920, "height": 1080})
+
     def test_main_stream_buffer_bridges_unfinalized_recording_gap(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
