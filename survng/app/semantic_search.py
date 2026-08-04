@@ -89,7 +89,7 @@ class SemanticIndex:
     generations remain searchable during background migration to a new model.
     """
 
-    MAX_CANDIDATE_ROWS = 250_000
+    MAX_CANDIDATE_ROWS = 50_000
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = Path(database_path)
@@ -310,6 +310,24 @@ class SemanticIndex:
             ).fetchone()
         return row is not None
 
+    def event_source_indexed(
+        self,
+        event_id: int,
+        identity: SemanticModelIdentity,
+        source_kind: str,
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select 1 from semantic_embeddings
+                where event_id = ? and model_fingerprint = ?
+                    and preprocessing_fingerprint = ? and source_kind = ? limit 1
+                """,
+                (int(event_id), identity.model_fingerprint,
+                 identity.preprocessing_fingerprint, str(source_kind)),
+            ).fetchone()
+        return row is not None
+
 
 def fingerprint_model_package(model_dir: Path) -> str:
     """Fingerprint local model artifacts without reading multi-gigabyte weights at startup."""
@@ -421,14 +439,24 @@ class OpenVinoManifestEncoder:
         dimensions = int(manifest.get("dimensions") or 0)
         if not 0 < dimensions <= 8192:
             raise RuntimeError("semantic manifest dimensions must be between 1 and 8192")
-        image_model = self.model_dir / str(manifest.get("image_model") or "image_encoder.xml")
-        text_model = self.model_dir / str(manifest.get("text_model") or "text_encoder.xml")
+        package_root = self.model_dir.resolve()
+
+        def package_path(value: object, default: str) -> Path:
+            path = (package_root / str(value or default)).resolve()
+            try:
+                path.relative_to(package_root)
+            except ValueError as exc:
+                raise RuntimeError("semantic manifest path escapes the model package") from exc
+            return path
+
+        image_model = package_path(manifest.get("image_model"), "image_encoder.xml")
+        text_model = package_path(manifest.get("text_model"), "text_encoder.xml")
         if not image_model.is_file() or not text_model.is_file():
             raise RuntimeError("semantic image or text OpenVINO model is missing")
         core = Core()
         self._image_model = core.compile_model(str(image_model), device)
         self._text_model = core.compile_model(str(text_model), device)
-        tokenizer_path = self.model_dir / str(text_spec.get("tokenizer_path") or "tokenizer")
+        tokenizer_path = package_path(text_spec.get("tokenizer_path"), "tokenizer")
         self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
         self._image_spec = image_spec
         self._text_spec = text_spec
@@ -459,7 +487,16 @@ class OpenVinoManifestEncoder:
         std = np.asarray(spec.get("std") or [0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
         prepared = []
         for image in images:
-            resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_AREA)
+            height, width = image.shape[:2]
+            scale = size / max(1, min(height, width))
+            resized = cv2.resize(
+                image,
+                (max(size, round(width * scale)), max(size, round(height * scale))),
+                interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA,
+            )
+            top = max(0, (resized.shape[0] - size) // 2)
+            left = max(0, (resized.shape[1] - size) // 2)
+            resized = resized[top:top + size, left:left + size]
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             prepared.append(np.transpose((rgb - mean) / std, (2, 0, 1)))
         batch = np.stack(prepared).astype(np.float32)
@@ -499,22 +536,42 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(config.worker_queue_size)
         self._thread: threading.Thread | None = None
         self._backfill_thread: threading.Thread | None = None
+        self._bootstrap_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._storage_dir = Path()
         self._error = ""
         self._indexed = 0
+        self._state = "stopped"
+        self._encoder_lock = threading.RLock()
 
     def start(self, event_store: Any, storage_dir: Path) -> None:
-        if self._thread and self._thread.is_alive():
+        if self._state in {"initializing", "ready"}:
             return
         self._storage_dir = Path(storage_dir)
+        self._stop.clear()
+        self._state = "initializing"
+        self._bootstrap_thread = threading.Thread(
+            target=self._initialize,
+            args=(event_store,),
+            name="survng-semantic-loader",
+            daemon=True,
+        )
+        self._bootstrap_thread.start()
+
+    def _initialize(self, event_store: Any) -> None:
         try:
-            self.encoder = OpenVinoManifestEncoder(self.model_dir, self.manifest, self.config.device)
+            encoder = OpenVinoManifestEncoder(self.model_dir, self.manifest, self.config.device)
         except Exception as exc:
             self._error = str(exc)
+            self._state = "unavailable"
             LOGGER.warning("semantic search unavailable: %s", exc)
             return
-        self._stop.clear()
+        if self._stop.is_set():
+            encoder.close()
+            self._state = "stopped"
+            return
+        self.encoder = encoder
+        self._state = "ready"
         self._thread = threading.Thread(target=self._run, name="survng-semantic", daemon=True)
         self._thread.start()
         self._backfill_thread = threading.Thread(
@@ -539,13 +596,22 @@ class SemanticSearchService(DisabledSemanticSearch):
             for event in reversed(rows):
                 if self._stop.is_set():
                     return
-                if self.encoder and self.index.event_indexed(int(event.get("id") or 0), self.encoder.identity):
-                    continue
-                try:
-                    self._queue.put(dict(event), timeout=0.5)
-                except queue.Full:
-                    if self._stop.is_set():
-                        return
+                if self.encoder:
+                    event_id = int(event.get("id") or 0)
+                    full_ready = not self.config.index_full_frame or self.index.event_source_indexed(
+                        event_id, self.encoder.identity, "full_frame"
+                    )
+                    crops_ready = not self.config.index_object_crops or self.index.event_source_indexed(
+                        event_id, self.encoder.identity, "object_crop"
+                    )
+                    if full_ready and crops_ready:
+                        continue
+                while not self._stop.is_set():
+                    try:
+                        self._queue.put(dict(event), timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
             last = rows[-1]
             before_created_at = str(last.get("created_at") or "")
             before_id = int(last.get("id") or 0)
@@ -608,7 +674,10 @@ class SemanticSearchService(DisabledSemanticSearch):
                 evidence.append(SemanticEvidence(int(event["id"]), str(event["camera_id"]), str(event["created_at"]), "object_crop", f"{label}:{index}", str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
                 images.append(frame[y1:y2, x1:x2])
         if images:
-            embeddings = self.encoder.encode_images(images)
+            with self._encoder_lock:
+                if self.encoder is None:
+                    return
+                embeddings = self.encoder.encode_images(images)
             self._indexed += self.index.upsert(evidence, embeddings, self.encoder.identity)
 
     def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
@@ -617,13 +686,17 @@ class SemanticSearchService(DisabledSemanticSearch):
         text = str(query).strip()
         if not text:
             raise ValueError("semantic search query cannot be empty")
-        embedding = self.encoder.encode_text([text])
-        return self.index.search(embedding, self.encoder.identity, **filters)
+        with self._encoder_lock:
+            if self.encoder is None:
+                raise RuntimeError(self._error or "semantic search is unavailable")
+            embedding = self.encoder.encode_text([text])
+            identity = self.encoder.identity
+        return self.index.search(embedding, identity, **filters)
 
     def status(self) -> dict[str, Any]:
         identity = self.encoder.identity if self.encoder else None
         return {
-            "enabled": True, "state": "ready" if identity else "unavailable",
+            "enabled": True, "state": self._state,
             "implementation": self.config.implementation, "device": self.config.device,
             "generation": identity.generation if identity else "", "error": self._error,
             "queue_depth": self._queue.qsize(), "indexed_since_start": self._indexed,
@@ -632,14 +705,19 @@ class SemanticSearchService(DisabledSemanticSearch):
 
     def close(self) -> None:
         self._stop.set()
+        self._state = "stopping"
         try:
             self._queue.put_nowait(None)
         except queue.Full:
             pass
-        if self._thread:
-            self._thread.join(timeout=5.0)
+        if self._bootstrap_thread:
+            self._bootstrap_thread.join(timeout=5.0)
         if self._backfill_thread:
             self._backfill_thread.join(timeout=5.0)
-        if self.encoder:
-            self.encoder.close()
-        self.encoder = None
+        if self._thread:
+            self._thread.join(timeout=5.0)
+        with self._encoder_lock:
+            if self.encoder:
+                self.encoder.close()
+            self.encoder = None
+        self._state = "stopped"

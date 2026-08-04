@@ -5005,7 +5005,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
         {results.map((result) => {
           const item = result.event || {};
           const context = incidentRecordingContext(item);
-          return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span>{Math.round(Number(result.score || 0) * 100)}% match</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
+          return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span>{Math.round(Math.max(0, Math.min(1, Number(result.score || 0))) * 100)}% similar</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
         })}
         {!loading && !error && !results.length ? <div className="semantic-search-empty"><Search size={28} /><strong>Search indexed incidents by appearance</strong><span>Results link to the exact incident and recording time.</span></div> : null}
       </div>

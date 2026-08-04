@@ -9,6 +9,7 @@ Configuration saves and their runtime restart boundaries are described in
 For the optional container installation, persistent-volume layout, migration,
 and Intel GPU/QSV support, see the [Docker README](docker/README.md). Generic
 deployment and upgrade guidance is in [Docker installation](docs/docker.md).
+Local visual-language search setup is documented in [Smart Search model packages](docs/semantic-search.md).
 
 For the end-to-end ingest, motion qualification, inference, incident, recording,
 and playback architecture, see [VIDEO_PIPELINE.md](VIDEO_PIPELINE.md). Keep that

@@ -96,7 +96,6 @@ class SemanticSearchConfig(BaseModel):
     )
     model_dir: str = Field(default="", max_length=4096)
     device: str = Field(default="GPU", min_length=1, max_length=64)
-    keyframes_per_incident: int = Field(default=3, ge=1, le=12)
     index_full_frame: bool = True
     index_object_crops: bool = True
     max_results: int = Field(default=100, ge=10, le=500)
