@@ -2146,13 +2146,30 @@ class CameraWorker:
                 frame,
             )
             if path is not None:
-                samples = sorted(
-                    self.image_writer.stored_images(directory),
-                    key=lambda item: item.stat().st_mtime,
-                )
-                for stale in samples[:-100]:
-                    stale.unlink(missing_ok=True)
+                try:
+                    samples = []
+                    for item in self.image_writer.stored_images(directory):
+                        try:
+                            samples.append((item.stat().st_mtime_ns, item))
+                        except FileNotFoundError:
+                            continue
+                    for _modified, stale in sorted(samples)[:-100]:
+                        try:
+                            stale.unlink(missing_ok=True)
+                        except OSError as error:
+                            LOGGER.debug(
+                                "failed to prune rejected motion sample %s: %s",
+                                stale,
+                                error,
+                            )
+                except OSError as error:
+                    LOGGER.debug(
+                        "failed to enumerate rejected motion samples for %s: %s",
+                        self.camera.id,
+                        error,
+                    )
                 return str(path)
+            LOGGER.warning("failed to encode rejected motion sample for %s", self.camera.id)
         except OSError as error:
             LOGGER.debug("failed to save rejected motion sample for %s: %s", self.camera.id, error)
         return ""

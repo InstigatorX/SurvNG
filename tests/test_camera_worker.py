@@ -293,6 +293,38 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(path.suffix, ".webp")
             self.assertTrue(path.name.startswith("20260727-155655-123456-"))
 
+    def test_rejected_sample_keeps_valid_path_when_pruning_races(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        result = MotionQualificationResult(
+            False,
+            0.4,
+            0.5,
+            "low_score",
+            2,
+            {},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(
+                    worker,
+                    "_get_latest_frame",
+                    return_value=np.zeros((20, 30, 3), dtype=np.uint8),
+                ),
+                patch.object(
+                    worker.image_writer,
+                    "stored_images",
+                    side_effect=OSError("concurrent cleanup"),
+                ),
+            ):
+                stored = worker._sample_rejected_motion(
+                    datetime(2026, 8, 3, tzinfo=timezone.utc),
+                    result,
+                )
+
+            self.assertTrue(stored)
+            self.assertTrue(Path(stored).is_file())
+
     def test_isolated_qualification_telemetry_reports_replay_stage_metrics(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         frames = [

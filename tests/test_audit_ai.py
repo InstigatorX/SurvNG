@@ -68,8 +68,8 @@ class AuditAiTest(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            image = Path(tmpdir) / "incident.jpg"
-            image.write_bytes(b"jpeg")
+            image = Path(tmpdir) / "incident.webp"
+            image.write_bytes(b"webp")
             with patch.object(advisor, "_request", side_effect=request):
                 result = advisor.analyze_structured(
                     image,
@@ -93,6 +93,8 @@ class AuditAiTest(unittest.TestCase):
             request_payload["text"]["format"]["name"],
             "custom_incident_review",
         )
+        image_url = request_payload["input"][0]["content"][1]["image_url"]
+        self.assertTrue(image_url.startswith("data:image/webp;base64,"))
 
     def test_active_and_cooldown_audits_are_duplicate_control_not_detector_misses(self) -> None:
         active = motion_audit_interpretation(

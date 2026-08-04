@@ -730,6 +730,11 @@ function eventSnapshotUrl(event) {
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
 }
 
+function eventSnapshotDownloadUrl(event) {
+  const snapshotUrl = eventSnapshotUrl(event);
+  return snapshotUrl ? `${snapshotUrl}?download=true` : "";
+}
+
 function eventThumbnailUrl(event, width = 720, quality = 82) {
   const eventId = Number(event?.representative_event_id || event?.id);
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=${width}&quality=${quality}`) : "";
@@ -2942,7 +2947,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, imageSize
       </section>
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
-        {incident.snapshot_path && eventSnapshotUrl(incident) ? <a href={eventSnapshotUrl(incident)} download><Download size={15} /> Snapshot</a> : null}
+        {incident.snapshot_path && eventSnapshotDownloadUrl(incident) ? <a href={eventSnapshotDownloadUrl(incident)}><Download size={15} /> Snapshot</a> : null}
       </div>
     </aside>
   );

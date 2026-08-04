@@ -6,7 +6,6 @@ import hmac
 import logging
 import math
 import mmap
-import mimetypes
 import asyncio
 import functools
 import queue
@@ -80,6 +79,7 @@ from .incident_utils import (
     event_epoch,
     event_snapshot_path,
     incident_event_groups,
+    snapshot_media_type,
     stable_incident_id,
     stable_incident_key,
 )
@@ -2852,7 +2852,7 @@ def motion_audit_snapshot(audit_id: int) -> FileResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    media_type = mimetypes.guess_type(snapshot_path.name)[0] or "image/jpeg"
+    media_type = snapshot_media_type(snapshot_path)
     return FileResponse(
         snapshot_path,
         media_type=media_type,
@@ -3720,7 +3720,7 @@ def start_camera_intelligence_followup(
 
 
 @app.get("/api/events/{event_id}/snapshot.jpg")
-def event_snapshot(event_id: int) -> FileResponse:
+def event_snapshot(event_id: int, download: bool = False) -> FileResponse:
     with MANAGER_RELOAD_LOCK:
         active_manager = manager
         event = active_manager.events.get(event_id)
@@ -3732,10 +3732,11 @@ def event_snapshot(event_id: int) -> FileResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    media_type = mimetypes.guess_type(snapshot_path.name)[0] or "image/jpeg"
+    media_type = snapshot_media_type(snapshot_path)
     return FileResponse(
         snapshot_path,
         media_type=media_type,
+        filename=snapshot_path.name if download else None,
         headers={"Cache-Control": "private, max-age=3600"},
     )
 
@@ -6091,7 +6092,7 @@ def zone_snapshot(camera_id: str, source: str = "live") -> Response:
             snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
         except (FileNotFoundError, PermissionError, OSError):
             continue
-        media_type = mimetypes.guess_type(snapshot_path.name)[0] or "application/octet-stream"
+        media_type = snapshot_media_type(snapshot_path)
         return FileResponse(snapshot_path, media_type=media_type, headers={"Cache-Control": "no-store"})
     raise HTTPException(status_code=503, detail="no camera or event snapshot available")
 

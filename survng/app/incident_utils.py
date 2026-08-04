@@ -6,8 +6,19 @@ from typing import Any
 
 
 SNAPSHOT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+SNAPSHOT_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 MEDIA_DIRECTORIES = ("snapshots", "motion_samples", "recordings")
 DEFAULT_INCIDENT_GAP_SECONDS = 45
+
+
+def snapshot_media_type(path: Path) -> str:
+    """Return a deterministic MIME type for every accepted evidence format."""
+    return SNAPSHOT_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 
 def stable_incident_key(camera_id: str, first_event_id: Any) -> str:

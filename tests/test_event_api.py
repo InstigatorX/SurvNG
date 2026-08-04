@@ -763,6 +763,27 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(first.path, second.path)
             self.assertTrue(str(first.path).startswith(str(root / "cache")))
 
+    def test_webp_snapshot_uses_correct_media_type_and_download_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "event.webp"
+            snapshot.parent.mkdir(parents=True)
+            self.assertTrue(cv2.imwrite(str(snapshot), np.zeros((24, 32, 3), dtype=np.uint8)))
+            fake_manager = SimpleNamespace(
+                storage_dir=root,
+                events=SimpleNamespace(
+                    get=lambda _event_id: {"id": 1, "snapshot_path": str(snapshot)},
+                ),
+            )
+
+            with patch.object(main, "manager", fake_manager):
+                inline = main.event_snapshot(1)
+                downloaded = main.event_snapshot(1, download=True)
+
+            self.assertEqual(inline.media_type, "image/webp")
+            self.assertNotIn("content-disposition", inline.headers)
+            self.assertIn("event.webp", downloaded.headers["content-disposition"])
+
     def test_face_crop_is_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

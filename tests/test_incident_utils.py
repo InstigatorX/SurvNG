@@ -9,6 +9,7 @@ from survng.app.incident_utils import (
     event_snapshot_path,
     incident_event_groups,
     portable_media_path,
+    snapshot_media_type,
     stable_incident_id,
     stable_incident_key,
     stored_media_path,
@@ -66,6 +67,11 @@ class IncidentTimeTest(unittest.TestCase):
 
 
 class EventSnapshotPathTest(unittest.TestCase):
+    def test_snapshot_media_types_are_deterministic_for_supported_formats(self) -> None:
+        self.assertEqual(snapshot_media_type(Path("event.webp")), "image/webp")
+        self.assertEqual(snapshot_media_type(Path("event.JPG")), "image/jpeg")
+        self.assertEqual(snapshot_media_type(Path("event.png")), "image/png")
+
     def test_allows_image_beneath_storage_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = Path(tmpdir)

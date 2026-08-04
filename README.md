@@ -365,6 +365,12 @@ Use `stream_url` for the main/high-resolution stream and `live_stream_url` for t
 
 Recorder timestamp handling is discontinuity-aware. Persistent regressing or rebased FFmpeg timestamps are coalesced into one diagnostic event and cause only the affected camera/source to begin a new recording epoch. The old recorder is finalized before its replacement starts, replacement health is verified, and recovery is rate-limited to prevent restart loops. Per-source discontinuity, rollover, failure, and rate-limit counters are exposed with camera status and under Admin > Telemetry.
 
+### Evidence image storage
+
+New incident snapshots and rejected motion-audit samples default to WebP at quality `95`. Change the format or quality under **Admin → Storage → Evidence image storage**, or configure `image_storage.format` (`webp` or `jpeg`) and `image_storage.quality` (`1` through `100`). The change applies immediately without restarting camera workers and affects only newly written evidence; existing JPEG, PNG, and WebP files remain readable.
+
+Evidence is written to a temporary file, flushed, and atomically moved into place so API readers never observe a partial image. File access follows the target storage directory's read permissions without granting group or world write access. If a particular OpenCV deployment cannot encode WebP, SurvNG logs one warning and safely stores JPEG for that image instead of losing incident evidence. Snapshot APIs return the actual media type, and the incident download action preserves the stored file extension.
+
 ## Object Detection
 
 Set `model_path` to an OpenVINO-readable model, such as `best.onnx` or an OpenVINO IR `.xml` file. Set `labels_path` to a newline-delimited class file such as `classes.txt`.

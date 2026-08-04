@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import copy
 import json
-import mimetypes
 from pathlib import Path
 from typing import Any, Literal, Mapping, TypeVar
 from urllib.error import HTTPError, URLError
@@ -13,6 +12,7 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, Field, model_validator
 
 from .config import AuditAiConfig
+from .incident_utils import snapshot_media_type
 
 
 MAX_AUDIT_IMAGE_BYTES = 20 * 1024 * 1024
@@ -496,7 +496,7 @@ class AuditAiAdvisor:
         if len(prompt.encode("utf-8")) > MAX_AUDIT_CONTEXT_BYTES:
             raise AuditAiError("audit telemetry is too large for AI analysis")
         model = model_override.strip() or self.config.model.strip() or self._default_model()
-        mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
+        mime_type = snapshot_media_type(image_path)
         provider = self.config.provider
         if provider == "openai":
             payload = self._openai_responses(
