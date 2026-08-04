@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import cv2
@@ -13,6 +14,7 @@ from survng.app.semantic_search import (
     SemanticIndex,
     SemanticModelIdentity,
     SemanticSearchService,
+    _semantic_encoder_worker_main,
     normalized_matrix,
 )
 
@@ -155,6 +157,39 @@ class SemanticIndexTest(unittest.TestCase):
             )
         self.assertFalse(service._history_queue_has_capacity())
         self.assertTrue(service.queue_event({"id": 99, "snapshot_path": "live.webp"}))
+
+    def test_semantic_worker_uses_distinct_process_name(self) -> None:
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.sent = []
+
+            def send(self, value) -> None:
+                self.sent.append(value)
+
+            def recv(self):
+                return {"id": 1, "op": "shutdown"}
+
+            def close(self) -> None:
+                return
+
+        class FakeEncoder:
+            def __init__(self, *_args) -> None:
+                return
+
+            def close(self) -> None:
+                return
+
+        connection = FakeConnection()
+        with (
+            patch("survng.app.semantic_search.OpenVinoManifestEncoder", FakeEncoder),
+            patch("survng.app.inference._set_worker_process_name") as set_name,
+            patch("survng.app.inference._disable_worker_core_dumps"),
+        ):
+            _semantic_encoder_worker_main(connection, "/models", {}, "GPU")
+
+        set_name.assert_called_once_with("semantic")
+        self.assertEqual(connection.sent[0]["type"], "ready")
+        self.assertEqual(connection.sent[-1], {"id": 1, "type": "stopped"})
 
 
 if __name__ == "__main__":

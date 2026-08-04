@@ -7,6 +7,7 @@ import threading
 import logging
 import queue
 import itertools
+import multiprocessing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ from .incident_utils import event_snapshot_path
 from .openclip_tokenizer import OpenClipBpeTokenizer
 
 LOGGER = logging.getLogger("uvicorn.error")
+SEMANTIC_WORKER_START_TIMEOUT_SECONDS = 60.0
+SEMANTIC_WORKER_REQUEST_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -426,6 +429,39 @@ def build_semantic_search(
     return SemanticSearchService(config, index, model_dir, manifest)
 
 
+def _semantic_package_path(model_dir: Path, value: object, default: str) -> Path:
+    package_root = Path(model_dir).resolve()
+    path = (package_root / str(value or default)).resolve()
+    try:
+        path.relative_to(package_root)
+    except ValueError as exc:
+        raise RuntimeError("semantic manifest path escapes the model package") from exc
+    return path
+
+
+def _semantic_model_identity(
+    model_dir: Path,
+    manifest: dict[str, Any],
+) -> SemanticModelIdentity:
+    dimensions = int(manifest.get("dimensions") or 0)
+    if not 0 < dimensions <= 8192:
+        raise RuntimeError("semantic manifest dimensions must be between 1 and 8192")
+    preprocessing = json.dumps(
+        {
+            "image": dict(manifest.get("image") or {}),
+            "text": dict(manifest.get("text") or {}),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return SemanticModelIdentity(
+        str(manifest.get("implementation") or "openvino_manifest"),
+        fingerprint_model_package(model_dir),
+        hashlib.sha256(preprocessing).hexdigest()[:24],
+        dimensions,
+    )
+
+
 class OpenVinoManifestEncoder:
     """OpenVINO dual-encoder loaded entirely from a local model package."""
 
@@ -434,21 +470,12 @@ class OpenVinoManifestEncoder:
         self.model_dir = Path(model_dir)
         image_spec = dict(manifest.get("image") or {})
         text_spec = dict(manifest.get("text") or {})
-        dimensions = int(manifest.get("dimensions") or 0)
-        if not 0 < dimensions <= 8192:
-            raise RuntimeError("semantic manifest dimensions must be between 1 and 8192")
-        package_root = self.model_dir.resolve()
-
-        def package_path(value: object, default: str) -> Path:
-            path = (package_root / str(value or default)).resolve()
-            try:
-                path.relative_to(package_root)
-            except ValueError as exc:
-                raise RuntimeError("semantic manifest path escapes the model package") from exc
-            return path
-
-        image_model = package_path(manifest.get("image_model"), "image_encoder.xml")
-        text_model = package_path(manifest.get("text_model"), "text_encoder.xml")
+        image_model = _semantic_package_path(
+            self.model_dir, manifest.get("image_model"), "image_encoder.xml"
+        )
+        text_model = _semantic_package_path(
+            self.model_dir, manifest.get("text_model"), "text_encoder.xml"
+        )
         if not image_model.is_file() or not text_model.is_file():
             raise RuntimeError("semantic image or text OpenVINO model is missing")
         core = Core()
@@ -457,7 +484,8 @@ class OpenVinoManifestEncoder:
         tokenizer_kind = str(text_spec.get("tokenizer_kind") or "openclip_bpe")
         if tokenizer_kind != "openclip_bpe":
             raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
-        tokenizer_path = package_path(
+        tokenizer_path = _semantic_package_path(
+            self.model_dir,
             text_spec.get("tokenizer_path"),
             "tokenizer/bpe_simple_vocab_16e6.txt.gz",
         )
@@ -467,15 +495,7 @@ class OpenVinoManifestEncoder:
         )
         self._image_spec = image_spec
         self._text_spec = text_spec
-        preprocessing = json.dumps(
-            {"image": image_spec, "text": text_spec}, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        self._identity = SemanticModelIdentity(
-            str(manifest.get("implementation") or "openvino_manifest"),
-            fingerprint_model_package(self.model_dir),
-            hashlib.sha256(preprocessing).hexdigest()[:24],
-            dimensions,
-        )
+        self._identity = _semantic_model_identity(self.model_dir, manifest)
 
     @property
     def identity(self) -> SemanticModelIdentity:
@@ -488,7 +508,13 @@ class OpenVinoManifestEncoder:
         return np.asarray(result[compiled.output(0)])
 
     def encode_images(self, images: Sequence[np.ndarray]) -> np.ndarray:
-        spec = self._image_spec
+        return self.encode_prepared_images(self.prepare_images(images, self._image_spec))
+
+    @staticmethod
+    def prepare_images(
+        images: Sequence[np.ndarray],
+        spec: dict[str, Any],
+    ) -> np.ndarray:
         size = int(spec.get("size") or 256)
         mean = np.asarray(spec.get("mean") or [0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
         std = np.asarray(spec.get("std") or [0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
@@ -510,7 +536,10 @@ class OpenVinoManifestEncoder:
             resized = resized[top:top + size, left:left + size]
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             prepared.append(np.transpose((rgb - mean) / std, (2, 0, 1)))
-        batch = np.stack(prepared).astype(np.float32)
+        return np.stack(prepared).astype(np.float32)
+
+    def encode_prepared_images(self, batch: np.ndarray) -> np.ndarray:
+        spec = self._image_spec
         input_name = str(spec.get("input") or self._image_model.input(0).get_any_name())
         result = self._image_model({input_name: batch})
         return normalized_matrix(self._output(self._image_model, result, str(spec.get("output") or "")))
@@ -520,6 +549,9 @@ class OpenVinoManifestEncoder:
         tokens = self._tokenizer(list(texts))
         if tokens.shape[1] != max_length:
             raise RuntimeError("semantic tokenizer output length does not match the manifest")
+        return self.encode_tokens(tokens)
+
+    def encode_tokens(self, tokens: np.ndarray) -> np.ndarray:
         input_name = str(
             self._text_spec.get("input")
             or self._text_model.input(0).get_any_name()
@@ -531,6 +563,216 @@ class OpenVinoManifestEncoder:
     def close(self) -> None:
         self._image_model = None
         self._text_model = None
+
+
+def _semantic_encoder_worker_main(
+    connection: Any,
+    model_dir: str,
+    manifest: dict[str, Any],
+    device: str,
+) -> None:
+    from .inference import _disable_worker_core_dumps, _set_worker_process_name
+
+    _set_worker_process_name("semantic")
+    _disable_worker_core_dumps()
+    encoder: OpenVinoManifestEncoder | None = None
+    try:
+        encoder = OpenVinoManifestEncoder(Path(model_dir), manifest, device)
+        connection.send({"type": "ready", "pid": multiprocessing.current_process().pid})
+        while True:
+            request = connection.recv()
+            request_id = int(request.get("id") or 0)
+            operation = str(request.get("op") or "")
+            if operation == "shutdown":
+                connection.send({"id": request_id, "type": "stopped"})
+                return
+            try:
+                if operation == "images":
+                    result = encoder.encode_prepared_images(
+                        np.asarray(request["batch"], dtype=np.float32)
+                    )
+                elif operation == "text":
+                    result = encoder.encode_tokens(
+                        np.asarray(request["tokens"], dtype=np.int64)
+                    )
+                else:
+                    raise ValueError(f"unknown semantic inference operation: {operation}")
+                connection.send({"id": request_id, "type": "result", "value": result})
+            except Exception as exc:
+                connection.send({"id": request_id, "type": "error", "error": str(exc)})
+    except (EOFError, BrokenPipeError):
+        return
+    except BaseException as exc:
+        try:
+            connection.send({"type": "fatal", "error": str(exc)})
+        except (BrokenPipeError, OSError):
+            pass
+    finally:
+        if encoder is not None:
+            encoder.close()
+        connection.close()
+
+
+class IsolatedOpenVinoManifestEncoder:
+    """OpenVINO encoder proxy backed by a named, failure-isolated process."""
+
+    def __init__(self, model_dir: Path, manifest: dict[str, Any], device: str) -> None:
+        self.model_dir = Path(model_dir)
+        self.manifest = dict(manifest)
+        self.device = str(device)
+        self._image_spec = dict(manifest.get("image") or {})
+        self._text_spec = dict(manifest.get("text") or {})
+        tokenizer_kind = str(self._text_spec.get("tokenizer_kind") or "openclip_bpe")
+        if tokenizer_kind != "openclip_bpe":
+            raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
+        tokenizer_path = _semantic_package_path(
+            self.model_dir,
+            self._text_spec.get("tokenizer_path"),
+            "tokenizer/bpe_simple_vocab_16e6.txt.gz",
+        )
+        self._tokenizer = OpenClipBpeTokenizer(
+            tokenizer_path,
+            context_length=int(self._text_spec.get("max_length") or 77),
+        )
+        self._identity = _semantic_model_identity(self.model_dir, manifest)
+        self._context = multiprocessing.get_context("spawn")
+        self._connection: Any = None
+        self._process: Any = None
+        self._lock = threading.RLock()
+        self._request_id = 0
+        self._closed = False
+        self._start_locked()
+
+    @property
+    def identity(self) -> SemanticModelIdentity:
+        return self._identity
+
+    @property
+    def worker_pid(self) -> int | None:
+        process = self._process
+        return int(process.pid) if process is not None and process.is_alive() else None
+
+    def _start_locked(self) -> None:
+        parent, child = self._context.Pipe(duplex=True)
+        process = self._context.Process(
+            target=_semantic_encoder_worker_main,
+            args=(child, str(self.model_dir), self.manifest, self.device),
+            name="survng-semantic-inference",
+            daemon=False,
+        )
+        try:
+            process.start()
+            child.close()
+            if not parent.poll(SEMANTIC_WORKER_START_TIMEOUT_SECONDS):
+                raise RuntimeError("semantic inference worker startup timed out")
+            message = parent.recv()
+            if message.get("type") != "ready":
+                raise RuntimeError(
+                    str(message.get("error") or "semantic inference worker failed to start")
+                )
+        except BaseException:
+            parent.close()
+            try:
+                child.close()
+            except OSError:
+                pass
+            if process.pid is not None:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=3.0)
+            raise
+        self._connection = parent
+        self._process = process
+        LOGGER.info(
+            "Semantic inference worker ready pid=%s device=%s",
+            process.pid,
+            self.device,
+        )
+
+    def _stop_locked(self) -> None:
+        process = self._process
+        connection = self._connection
+        stubborn = False
+        if process is not None and process.is_alive() and connection is not None:
+            try:
+                self._request_id += 1
+                connection.send({"id": self._request_id, "op": "shutdown"})
+                if connection.poll(5.0):
+                    connection.recv()
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+        if process is not None:
+            process.join(timeout=5.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=3.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2.0)
+            stubborn = process.is_alive()
+        if connection is not None:
+            connection.close()
+        self._process = None
+        self._connection = None
+        if stubborn:
+            raise RuntimeError("semantic inference worker did not stop")
+
+    def _request(self, operation: str, field: str, value: np.ndarray) -> np.ndarray:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("semantic inference worker is closed")
+            for attempt in range(2):
+                try:
+                    if self._closed:
+                        raise RuntimeError("semantic inference worker is closed")
+                    if self._process is None or not self._process.is_alive():
+                        self._stop_locked()
+                        self._start_locked()
+                    self._request_id += 1
+                    request_id = self._request_id
+                    self._connection.send({
+                        "id": request_id,
+                        "op": operation,
+                        field: value,
+                    })
+                    if not self._connection.poll(SEMANTIC_WORKER_REQUEST_TIMEOUT_SECONDS):
+                        raise RuntimeError("semantic inference worker request timed out")
+                    message = self._connection.recv()
+                    if int(message.get("id") or 0) != request_id:
+                        raise RuntimeError("semantic inference worker response was out of sequence")
+                    if message.get("type") != "result":
+                        raise RuntimeError(
+                            str(message.get("error") or "semantic inference worker failed")
+                        )
+                    return normalized_matrix(message["value"])
+                except (BrokenPipeError, EOFError, OSError, RuntimeError):
+                    self._stop_locked()
+                    if attempt:
+                        raise
+            raise RuntimeError("semantic inference worker failed")
+
+    def encode_images(self, images: Sequence[np.ndarray]) -> np.ndarray:
+        batch = OpenVinoManifestEncoder.prepare_images(images, self._image_spec)
+        return self._request("images", "batch", batch)
+
+    def encode_text(self, texts: Sequence[str]) -> np.ndarray:
+        tokens = self._tokenizer(list(texts))
+        max_length = int(self._text_spec.get("max_length") or 77)
+        if tokens.shape[1] != max_length:
+            raise RuntimeError("semantic tokenizer output length does not match the manifest")
+        return self._request("text", "tokens", tokens)
+
+    def close(self) -> None:
+        self.abort()
+        with self._lock:
+            self._stop_locked()
+
+    def abort(self) -> None:
+        """Interrupt in-flight inference so application shutdown stays bounded."""
+        self._closed = True
+        process = self._process
+        if process is not None and process.is_alive():
+            process.terminate()
 
 
 class SemanticSearchService(DisabledSemanticSearch):
@@ -573,7 +815,11 @@ class SemanticSearchService(DisabledSemanticSearch):
 
     def _initialize(self, event_store: Any) -> None:
         try:
-            encoder = OpenVinoManifestEncoder(self.model_dir, self.manifest, self.config.device)
+            encoder = IsolatedOpenVinoManifestEncoder(
+                self.model_dir,
+                self.manifest,
+                self.config.device,
+            )
         except Exception as exc:
             self._error = str(exc)
             self._state = "unavailable"
@@ -734,6 +980,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             "generation": identity.generation if identity else "", "error": self._error,
             "queue_depth": self._queue.qsize(), "indexed_since_start": self._indexed,
             "skipped_missing_since_start": self._skipped_missing,
+            "worker_pid": getattr(self.encoder, "worker_pid", None),
             **self.index.coverage(identity),
         }
 
@@ -744,6 +991,10 @@ class SemanticSearchService(DisabledSemanticSearch):
             self._queue.put_nowait((-1, next(self._queue_sequence), None))
         except queue.Full:
             pass
+        encoder = self.encoder
+        abort = getattr(encoder, "abort", None)
+        if callable(abort):
+            abort()
         if self._bootstrap_thread:
             self._bootstrap_thread.join(timeout=5.0)
         if self._backfill_thread:
