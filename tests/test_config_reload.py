@@ -527,6 +527,29 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["mqtt"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_semantic_search_change_restarts_only_semantic_search(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.semantic_search.enabled = True
+        incoming.semantic_search.model_dir = "/models/mobileclip2"
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_semantic_search.assert_called_once_with(
+            effective.semantic_search
+        )
+        self.assertEqual(result["subsystems_restarted"], ["semantic_search"])
+        self.assertFalse(result["camera_workers_restarted"])
+
     def test_camera_retention_override_hot_applies_only_retention(self) -> None:
         active = Mock()
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")

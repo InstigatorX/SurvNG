@@ -716,6 +716,7 @@ HOT_CONFIG_FIELDS = frozenset({
     "audit_ai",
     "mqtt",
     "retention",
+    "semantic_search",
 })
 RECORDER_CONFIG_FIELDS = frozenset({
     "ffmpeg_path",
@@ -873,6 +874,7 @@ def apply_config_update(
         mqtt_changed = previous_config.mqtt != effective_config.mqtt
         retention_changed = "retention" in changes
         image_storage_changed = "image_storage" in changes
+        semantic_search_changed = "semantic_search" in changes
         detector_policy_changed = any(
             getattr(previous_config.detector, field_name)
             != getattr(effective_config.detector, field_name)
@@ -944,6 +946,7 @@ def apply_config_update(
         detector_policy_attempted = False
         tracking_session_applied = False
         inference_applied = False
+        semantic_search_attempted = False
         try:
             if recorder_changes:
                 recorder_attempted = True
@@ -960,6 +963,9 @@ def apply_config_update(
             if image_storage_changed:
                 image_storage_attempted = True
                 manager.reconfigure_image_storage(effective_config.image_storage)
+            if semantic_search_changed:
+                semantic_search_attempted = True
+                manager.reconfigure_semantic_search(effective_config.semantic_search)
             if inference_roles:
                 manager.reconfigure_inference(
                     effective_config.detector,
@@ -975,6 +981,13 @@ def apply_config_update(
                 manager.reconfigure_detector_policy(effective_config.detector)
         except BaseException:
             manager.config = previous_config
+            if semantic_search_attempted:
+                try:
+                    manager.reconfigure_semantic_search(previous_config.semantic_search)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back semantic search configuration"
+                    )
             if detector_policy_attempted:
                 try:
                     manager.reconfigure_detector_policy(previous_config.detector)
@@ -1046,6 +1059,8 @@ def apply_config_update(
             in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
             if changed
         ]
+        if semantic_search_changed:
+            restarted.append("semantic_search")
         if tracking_session_changed or inference_tracking_refresh:
             restarted.append("tracking_sessions")
         restarted.extend(

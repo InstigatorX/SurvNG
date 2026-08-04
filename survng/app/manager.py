@@ -19,6 +19,7 @@ from .config import (
     DetectionZone,
     ImageStorageConfig,
     MqttConfig,
+    SemanticSearchConfig,
 )
 from .events import EventStore
 from .faces import FaceStore
@@ -29,6 +30,7 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
+from .semantic_search import SemanticIndex, build_semantic_search
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
     EVIDENCE_REPOSITORY_SERVICE,
@@ -107,6 +109,8 @@ class AppManager:
         self.image_writer = DurableImageWriter(config.image_storage)
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.appearance_index = AppearanceIndex(self.events.db_path)
+        self.semantic_index = SemanticIndex(self.events.db_path)
+        self.semantic_search = build_semantic_search(config.semantic_search, self.semantic_index)
         self.detector = InferenceSupervisor(config.detector)
         self.face_recognizer = IsolatedFaceRecognizer(self.detector)
         self.person_reidentifier = IsolatedPersonReidentifier(self.detector)
@@ -599,6 +603,11 @@ class AppManager:
         LOGGER.info("SurvNG shutdown: stopping face recognition")
         attempt("face recognition", self.faces.close)
 
+        LOGGER.info("SurvNG shutdown: stopping semantic search")
+        semantic_search = getattr(self, "semantic_search", None)
+        if semantic_search is not None:
+            attempt("semantic search", semantic_search.close)
+
         LOGGER.info("SurvNG shutdown: stopping isolated inference workers")
         attempt("inference", self.detector.stop)
 
@@ -978,6 +987,7 @@ class AppManager:
                 inference_applied = True
                 self.face_recognizer.config = self.detector.config
                 self.person_reidentifier.config = self.detector.config.tracking
+
                 if refresh_tracking:
                     self.reconfigure_object_tracking(config)
                     tracking_applied = True
@@ -1029,6 +1039,19 @@ class AppManager:
                     except Exception:
                         LOGGER.exception("failed to restore face recognition queue")
                 raise
+
+    def reconfigure_semantic_search(self, config: SemanticSearchConfig) -> None:
+        """Replace semantic search independently of cameras and object inference."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            replacement = build_semantic_search(config, self.semantic_index)
+            previous = self.semantic_search
+            self.semantic_search = replacement
+            previous.close()
+
+    def semantic_search_status(self) -> dict:
+        return self.semantic_search.status()
 
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([
