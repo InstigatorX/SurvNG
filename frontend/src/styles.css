@@ -6675,7 +6675,7 @@ section.detection-settings-card {
 
 .recordings-v2-page {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
   height: calc(100dvh - 76px);
   min-height: calc(100dvh - 76px);
   overflow: hidden;
@@ -6686,23 +6686,24 @@ section.detection-settings-card {
 .recordings-v2-cameras {
   display: grid;
   align-content: start;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   border-right: 1px solid var(--line);
-  padding: 10px 8px;
+  background: var(--panel);
+  padding: 12px 10px;
   overflow-y: auto;
 }
 
 .recordings-section-switcher {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-  margin-bottom: 6px;
-  padding-bottom: 9px;
+  grid-template-columns: .9fr 1.2fr .9fr;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding-bottom: 11px;
   border-bottom: 1px solid var(--line);
 }
 
-.semantic-search-page { display: grid; grid-template-columns: 160px minmax(0, 1fr); height: calc(100dvh - 66px); min-height: 0; }
+.semantic-search-page { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); height: calc(100dvh - 66px); min-height: 0; }
 .semantic-search-workspace { min-width: 0; overflow: auto; padding: 18px; }
 .semantic-search-workspace > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .semantic-search-workspace h2, .semantic-search-workspace p { margin: 0; }
@@ -6729,16 +6730,17 @@ section.detection-settings-card {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
-  min-height: 32px;
+  min-height: 38px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 7px;
   background: var(--panel-soft);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 850;
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .recordings-section-switcher a.active {
@@ -6752,9 +6754,11 @@ section.detection-settings-card {
   grid-template-columns: 18px minmax(0, 1fr) 8px;
   align-items: center;
   gap: 8px;
-  min-height: 38px;
+  min-height: 40px;
   border-color: transparent;
   background: transparent;
+  color: var(--muted);
+  font-size: 12px;
   text-align: left;
 }
 
@@ -6762,6 +6766,12 @@ section.detection-settings-card {
   border-color: rgba(15, 118, 110, .38);
   background: var(--active);
   color: var(--active-ink);
+}
+
+.recordings-v2-cameras button:hover:not(.active) {
+  border-color: var(--line);
+  background: var(--panel-soft);
+  color: var(--ink);
 }
 
 .recordings-v2-cameras span {
@@ -7941,12 +7951,12 @@ section.detection-settings-card {
     position: sticky;
     left: 0;
     z-index: 2;
-    grid-template-columns: 72px 72px;
+    grid-template-columns: 82px 112px 82px;
     margin: 0 2px 0 0;
     border: 0;
     border-right: 1px solid var(--line);
     padding: 0 7px 0 0;
-    background: var(--canvas);
+    background: var(--panel);
   }
 
   .recordings-v2-cameras button {
