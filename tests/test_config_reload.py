@@ -312,6 +312,71 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(result_config, effective)
         self.assertTrue(result["camera_workers_restarted"])
 
+    def test_tracking_session_change_rebuilds_only_tracking_sessions(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.tracking.sample_fps = 3.0
+        incoming.detector.tracking.max_active_cameras = 4
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_object_tracking.assert_called_once_with(effective.detector)
+        active.reconfigure_detector_policy.assert_not_called()
+        self.assertEqual(result["apply_mode"], "targeted")
+        self.assertEqual(result["subsystems_restarted"], ["tracking_sessions"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_tracking_engine_change_still_uses_full_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.tracking.reid_device = "GPU"
+        effective = incoming.model_copy(deep=True)
+
+        with patch("survng.app.main.reload_manager", return_value=effective) as reload:
+            _result_config, result = main.apply_config_update(incoming)
+
+        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        active.reconfigure_object_tracking.assert_not_called()
+        self.assertTrue(result["camera_workers_restarted"])
+
+    def test_failed_tracking_session_apply_rolls_back_runtime(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.tracking.lost_timeout_seconds = 4.0
+        active.reconfigure_object_tracking.side_effect = [
+            RuntimeError("tracking failed"),
+            None,
+        ]
+
+        with patch("survng.app.main.save_config") as save:
+            with self.assertRaisesRegex(RuntimeError, "tracking failed"):
+                main.apply_config_update(incoming)
+
+        self.assertEqual(active.reconfigure_object_tracking.call_args_list, [
+            unittest.mock.call(incoming.detector),
+            unittest.mock.call(current.detector),
+        ])
+        self.assertEqual(save.call_count, 2)
+        self.assertIs(main.config, current)
+        self.assertIs(active.config, current)
+
     def test_failed_detector_policy_hot_apply_rolls_back_runtime_and_persistence(self) -> None:
         active = Mock()
         current = AppConfig()

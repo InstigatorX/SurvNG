@@ -733,6 +733,27 @@ DETECTOR_HOT_POLICY_FIELDS = frozenset({
     "face_min_size",
     "face_max_references",
 })
+TRACKING_SESSION_FIELDS = frozenset({
+    "enabled",
+    "implementation",
+    "excluded_labels",
+    "sample_fps",
+    "max_session_seconds",
+    "lost_timeout_seconds",
+    "min_confirmations",
+    "low_confidence_threshold",
+    "match_iou_threshold",
+    "match_center_distance_ratio",
+    "max_active_cameras",
+    "capacity_wait_seconds",
+    "max_tracks_per_session",
+    "reid_max_age_seconds",
+    "reid_max_embeddings_per_frame",
+    "reid_refresh_interval_frames",
+    "botsort_match_threshold",
+    "botsort_proximity_threshold",
+    "botsort_fuse_score",
+})
 
 
 def _detector_without_fields(detector: dict, fields: frozenset[str]) -> dict:
@@ -754,6 +775,12 @@ def _manager_owned_config(config_value: AppConfig) -> dict:
         payload.get("detector", {}),
         DETECTOR_HOT_POLICY_FIELDS,
     )
+    tracking = payload["detector"].get("tracking")
+    if isinstance(tracking, dict):
+        payload["detector"]["tracking"] = _detector_without_fields(
+            tracking,
+            TRACKING_SESSION_FIELDS,
+        )
     return payload
 
 
@@ -805,6 +832,11 @@ def apply_config_update(
             != getattr(effective_config.detector, field_name)
             for field_name in DETECTOR_HOT_POLICY_FIELDS
         )
+        tracking_session_changed = any(
+            getattr(previous_config.detector.tracking, field_name)
+            != getattr(effective_config.detector.tracking, field_name)
+            for field_name in TRACKING_SESSION_FIELDS
+        )
         recorder_changes = [
             field_name
             for field_name in sorted(RECORDER_CONFIG_FIELDS)
@@ -823,6 +855,7 @@ def apply_config_update(
         retention_attempted = False
         image_storage_attempted = False
         detector_policy_attempted = False
+        tracking_session_attempted = False
         try:
             if recorder_changes:
                 recorder_attempted = True
@@ -839,11 +872,21 @@ def apply_config_update(
             if image_storage_changed:
                 image_storage_attempted = True
                 manager.reconfigure_image_storage(effective_config.image_storage)
+            if tracking_session_changed:
+                tracking_session_attempted = True
+                manager.reconfigure_object_tracking(effective_config.detector)
             if detector_policy_changed:
                 detector_policy_attempted = True
                 manager.reconfigure_detector_policy(effective_config.detector)
         except BaseException:
             manager.config = previous_config
+            if tracking_session_attempted:
+                try:
+                    manager.reconfigure_object_tracking(previous_config.detector)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back object tracking configuration"
+                    )
             if detector_policy_attempted:
                 try:
                     manager.reconfigure_detector_policy(previous_config.detector)
@@ -897,6 +940,8 @@ def apply_config_update(
             in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
             if changed
         ]
+        if tracking_session_changed:
+            restarted.append("tracking_sessions")
         hot_updated = changes + recorder_changes
         if detector_policy_changed:
             hot_updated.append("detector_policy")

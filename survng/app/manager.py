@@ -19,6 +19,7 @@ from .config import (
     DetectionZone,
     ImageStorageConfig,
     MqttConfig,
+    ObjectTrackingConfig,
 )
 from .events import EventStore
 from .faces import FaceStore
@@ -28,7 +29,7 @@ from .inference import InferenceSupervisor, IsolatedFaceRecognizer, IsolatedPers
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
-from .object_tracking import ObjectTrackingSessionFactory
+from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
     EVIDENCE_REPOSITORY_SERVICE,
@@ -900,6 +901,56 @@ class AppManager:
         self.detector.update_runtime_config(config)
         self.face_recognizer.config = self.detector.config
         self.faces.reconfigure_max_observations(config.face_max_observations)
+
+    def reconfigure_object_tracking(self, config: DetectorConfig) -> None:
+        """Replace tracking sessions without restarting camera-owned services."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            tracking = config.tracking.model_copy(deep=True)
+            next_limiter = threading.BoundedSemaphore(tracking.max_active_cameras)
+            next_factory = ObjectTrackingSessionFactory(
+                config=tracking,
+                detector=self.detector,
+                update_event=self.events.update_object_tracking,
+                publisher=self.publish_event,
+                limiter=next_limiter,
+                appearance_encoder=self.person_reidentifier,
+                appearance_indexer=self.appearance_index.replace_event,
+            )
+            workers = list(self.workers.values())
+            replacements = [
+                worker.create_object_tracking_session(next_factory)
+                for worker in workers
+            ]
+            previous_sessions: list[tuple[CameraWorker, ObjectTrackingSession]] = []
+            previous_config = self.detector.config
+            previous_factory = self.object_tracking_session_factory
+            previous_limiter = self._object_tracking_limiter
+            try:
+                for worker, replacement in zip(workers, replacements, strict=True):
+                    previous = worker.replace_object_tracking_session(replacement)
+                    previous_sessions.append((worker, previous))
+                self.detector.update_runtime_config(config)
+                self.face_recognizer.config = self.detector.config
+                self.person_reidentifier.config = self.detector.config.tracking
+                self.object_tracking_session_factory = next_factory
+                self._object_tracking_limiter = next_limiter
+            except BaseException:
+                for worker, previous in reversed(previous_sessions):
+                    try:
+                        worker.replace_object_tracking_session(previous)
+                    except Exception:
+                        LOGGER.exception(
+                            "failed to roll back object tracking for %s",
+                            worker.camera.id,
+                        )
+                self.detector.update_runtime_config(previous_config)
+                self.face_recognizer.config = self.detector.config
+                self.person_reidentifier.config = self.detector.config.tracking
+                self.object_tracking_session_factory = previous_factory
+                self._object_tracking_limiter = previous_limiter
+                raise
 
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([

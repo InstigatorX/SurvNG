@@ -21,7 +21,7 @@ from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
-from .object_tracking import ObjectTrackingSessionFactory
+from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
 from .security import redact_secret_text
 from .motion_pipeline import (
@@ -585,6 +585,56 @@ class CameraWorker:
         self.object_tracking.set_accepting(
             self._detection_enabled and not self._stop.is_set()
         )
+
+    def create_object_tracking_session(
+        self,
+        factory: ObjectTrackingSessionFactory,
+    ) -> ObjectTrackingSession:
+        """Build a replacement tracking session without changing camera I/O."""
+        return factory.create(
+            camera=self.camera,
+            frame_provider=self._get_latest_tracking_frame_with_fallback,
+            catchup_frame_provider=self._recorded_tracking_frames,
+        )
+
+    def replace_object_tracking_session(
+        self,
+        replacement: ObjectTrackingSession,
+    ) -> ObjectTrackingSession:
+        """Atomically replace tracking while preserving capture and ONVIF state."""
+        with self._lifecycle_lock:
+            previous = self.object_tracking
+            if replacement is previous:
+                return previous
+            if not previous.stop():
+                raise RuntimeError(
+                    f"object tracking session did not stop for {self.camera.id}"
+                )
+            try:
+                self.object_tracking = replacement
+                tracking_buffer_size = max(
+                    4,
+                    round(
+                        replacement.config.sample_fps * TRACKING_CATCHUP_SECONDS
+                    ) + 2,
+                )
+                with self._frame_lock:
+                    self._tracking_frames = deque(
+                        self._tracking_frames,
+                        maxlen=tracking_buffer_size,
+                    )
+                    self._tracking_last_sample_epoch = 0.0
+                replacement.set_accepting(
+                    self._detection_enabled and not self._stop.is_set()
+                )
+            except BaseException:
+                replacement.stop()
+                self.object_tracking = previous
+                previous.set_accepting(
+                    self._detection_enabled and not self._stop.is_set()
+                )
+                raise
+            return previous
 
     def snapshot(self, source: str = "live") -> bytes | None:
         frame = self._get_latest_frame(source)

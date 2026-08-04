@@ -125,6 +125,37 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.workers["gate"].stop.assert_not_called()
         manager.workers["gate"].start.assert_not_called()
 
+    def test_tracking_reconfiguration_keeps_camera_capture_and_recorders_running(self) -> None:
+        manager = manager_with_mocks()
+        manager.events = Mock()
+        manager.publish_event = Mock()
+        manager.person_reidentifier = Mock()
+        manager.face_recognizer = Mock()
+        manager.appearance_index = Mock()
+        manager.object_tracking_session_factory = Mock()
+        manager._object_tracking_limiter = threading.BoundedSemaphore(2)
+        manager.detector.config = manager.config.detector
+        replacement = Mock()
+        previous = Mock()
+        worker = manager.workers["gate"]
+        worker.create_object_tracking_session.return_value = replacement
+        worker.replace_object_tracking_session.return_value = previous
+        next_detector = manager.config.detector.model_copy(deep=True)
+        next_detector.tracking.sample_fps = 3.0
+
+        with patch("survng.app.manager.ObjectTrackingSessionFactory") as factory_type:
+            factory_type.return_value = Mock()
+            manager.reconfigure_object_tracking(next_detector)
+
+        worker.create_object_tracking_session.assert_called_once_with(
+            factory_type.return_value
+        )
+        worker.replace_object_tracking_session.assert_called_once_with(replacement)
+        manager.detector.update_runtime_config.assert_called_once_with(next_detector)
+        worker.stop.assert_not_called()
+        worker.start.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+
     def test_camera_state_fingerprint_includes_trigger_health_changes(self) -> None:
         status = {
             "id": "gate",

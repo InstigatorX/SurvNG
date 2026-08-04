@@ -152,6 +152,50 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+                Path(tmpdir),
+            )
+            previous = Mock()
+            previous.stop.return_value = True
+            replacement = Mock()
+            replacement.config = ObjectTrackingConfig(sample_fps=3.0)
+            worker.object_tracking = previous
+            worker._stop.clear()
+            worker._tracking_frames.extend([
+                (1.0, np.zeros((2, 2, 3), dtype=np.uint8)),
+                (2.0, np.zeros((2, 2, 3), dtype=np.uint8)),
+            ])
+
+            returned = worker.replace_object_tracking_session(replacement)
+
+            self.assertIs(returned, previous)
+            self.assertIs(worker.object_tracking, replacement)
+            previous.stop.assert_called_once_with()
+            replacement.set_accepting.assert_called_once_with(True)
+            self.assertEqual(worker._tracking_frames.maxlen, 32)
+            self.assertEqual(len(worker._tracking_frames), 2)
+            self.assertFalse(worker._stop.is_set())
+
+    def test_tracking_session_swap_refuses_to_replace_busy_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+                Path(tmpdir),
+            )
+            previous = Mock()
+            previous.stop.return_value = False
+            replacement = Mock()
+            worker.object_tracking = previous
+
+            with self.assertRaisesRegex(RuntimeError, "did not stop"):
+                worker.replace_object_tracking_session(replacement)
+
+            self.assertIs(worker.object_tracking, previous)
+            replacement.set_accepting.assert_not_called()
+
     def test_status_advertises_stable_dimensions_for_each_captured_source(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
