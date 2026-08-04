@@ -75,6 +75,7 @@
     "nms_threshold": 0.45,
     "event_confirmation_frames": 2,
     "event_class_confirmation_frames": {},
+    "event_class_confidence_thresholds": {},
     "labels": [],
     "tracking": {
       "enabled": true,

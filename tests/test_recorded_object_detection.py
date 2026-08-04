@@ -39,6 +39,44 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_per_class_confidence_sets_inference_floor_and_object_eligibility(self) -> None:
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.45,
+                event_class_confidence_thresholds={"car": 0.7, "person": 0.3},
+                require_incident_zone=False,
+            )
+
+            def __init__(self) -> None:
+                self.requested_threshold = None
+
+            def detect(self, _frame, confidence_threshold=None):
+                self.requested_threshold = confidence_threshold
+                return [
+                    detected("car", 0.69, (2, 2, 12, 12)),
+                    detected("person", 0.35, (14, 2, 24, 12)),
+                ]
+
+        detector = Detector()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://example.invalid/main",
+            ),
+            detector,
+            SimpleNamespace(),
+            lambda: None,
+        )
+
+        objects = backend._detect_objects(np.zeros((20, 30, 3), dtype=np.uint8))
+
+        self.assertEqual(detector.requested_threshold, 0.3)
+        self.assertFalse(objects[0]["incident_eligible"])
+        self.assertEqual(objects[0]["confidence_threshold"], 0.7)
+        self.assertTrue(objects[1]["incident_eligible"])
+        self.assertEqual(objects[1]["confidence_threshold"], 0.3)
+
     def test_non_finite_confidence_cannot_win_temporal_selection(self) -> None:
         samples = [
             sample(-0.5, [detected("ghost", float("nan"), (10, 10, 30, 30))]),

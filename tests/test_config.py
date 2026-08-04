@@ -135,6 +135,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertTrue(config.detector.require_incident_zone)
         self.assertEqual(config.detector.event_confirmation_frames, 2)
         self.assertEqual(config.detector.event_class_confirmation_frames, {})
+        self.assertEqual(config.detector.event_class_confidence_thresholds, {})
         self.assertIsNone(config.cameras[0].require_incident_zone)
         self.assertEqual(config.motion_qualification.pipeline.qualification, [])
         self.assertIsNone(
@@ -180,6 +181,30 @@ class AppConfigTest(unittest.TestCase):
                 AppConfig.model_validate({
                     "detector": {
                         "event_class_confirmation_frames": {"person": invalid},
+                    },
+                })
+
+    def test_detector_normalizes_class_specific_confidence_thresholds(self) -> None:
+        config = AppConfig.model_validate({
+            "detector": {
+                "confidence_threshold": 0.45,
+                "event_class_confidence_thresholds": {
+                    " Robot_Lawnmower ": "0.75",
+                    "PERSON": 0.35,
+                },
+            },
+        })
+
+        self.assertEqual(config.detector.event_class_confidence_thresholds, {
+            "robot_lawnmower": 0.75,
+            "person": 0.35,
+        })
+
+        for invalid in (True, float("nan"), 0.0, 1.0, "not-a-number"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                AppConfig.model_validate({
+                    "detector": {
+                        "event_class_confidence_thresholds": {"person": invalid},
                     },
                 })
 

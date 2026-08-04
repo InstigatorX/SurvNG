@@ -2637,6 +2637,9 @@ def _audit_ai_context(
         "object_class_confirmation_frames": dict(
             active_config.detector.event_class_confirmation_frames
         ),
+        "object_class_confidence_thresholds": dict(
+            active_config.detector.event_class_confidence_thresholds
+        ),
         "incident_eligibility_policy": (
             "zones_only" if require_incident_zone else "zones_plus_full_frame"
         ),
@@ -4184,6 +4187,7 @@ def _assistant_configuration_evidence(active_config: AppConfig) -> AssistantEvid
             "nms_threshold": active_config.detector.nms_threshold,
             "event_confirmation_frames": active_config.detector.event_confirmation_frames,
             "event_class_confirmation_frames": active_config.detector.event_class_confirmation_frames,
+            "event_class_confidence_thresholds": active_config.detector.event_class_confidence_thresholds,
             "zone_only_incident_eligibility": active_config.detector.require_incident_zone,
             "tracking": active_config.detector.tracking.model_dump(mode="json"),
         },

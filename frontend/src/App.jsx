@@ -9112,9 +9112,11 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
   const activeModel = detectorModels.find((model) => model.path === activeModelPath);
   const eventClassConfirmations = config.detector?.event_class_confirmation_frames || {};
+  const eventClassConfidences = config.detector?.event_class_confidence_thresholds || {};
   const eventConfirmationClasses = [...new Set([
     ...(activeModel?.classes || []),
     ...Object.keys(eventClassConfirmations),
+    ...Object.keys(eventClassConfidences),
   ].map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
   const trackingExcludedLabels = config.detector?.tracking?.excluded_labels || ["face"];
@@ -9135,6 +9137,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     if (value === "") delete next[label];
     else next[label] = Number(value);
     updateConfig(["detector", "event_class_confirmation_frames"], next);
+  }
+
+  function setEventClassConfidence(label, value) {
+    const next = { ...eventClassConfidences };
+    if (value === "") delete next[label];
+    else next[label] = Number(value);
+    updateConfig(["detector", "event_class_confidence_thresholds"], next);
   }
 
   function resetLiveCameraOrder() {
@@ -9283,10 +9292,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             </div>
           </details>
           <details className="detection-compact-details">
-            <summary>Per-object confirmation</summary>
-            <p className="settings-help">Optional overrides for labels that need more or less evidence than the global Object confirmation setting. Higher values reduce one-frame misidentifications but can miss objects visible only briefly.</p>
-            {eventConfirmationClasses.length ? <div className="detection-field-grid">
-              {eventConfirmationClasses.map((label) => <label key={label}>{label}<select value={eventClassConfirmations[label] == null ? "" : String(eventClassConfirmations[label])} onChange={(event) => setEventClassConfirmation(label, event.target.value)}><option value="">Use global ({config.detector?.event_confirmation_frames ?? 2} frames)</option><option value="1">1 frame</option><option value="2">2 frames</option><option value="3">3 frames</option><option value="4">4 frames</option><option value="5">5 frames</option></select></label>)}
+            <summary>Per-object confirmation and confidence</summary>
+            <p className="settings-help">Tune how often and how confidently each object must be recognized. Higher confirmation reduces one-frame mistakes; higher confidence rejects weaker matches. Leaving either setting on global uses the values above.</p>
+            {eventConfirmationClasses.length ? <div className="per-object-detection-grid">
+              {eventConfirmationClasses.map((label) => <div className="per-object-detection-row" key={label}>
+                <strong>{label.replaceAll("_", " ")}</strong>
+                <label>Confirmation<select value={eventClassConfirmations[label] == null ? "" : String(eventClassConfirmations[label])} onChange={(event) => setEventClassConfirmation(label, event.target.value)}><option value="">Global ({config.detector?.event_confirmation_frames ?? 2} frames)</option><option value="1">1 frame</option><option value="2">2 frames</option><option value="3">3 frames</option><option value="4">4 frames</option><option value="5">5 frames</option></select></label>
+                <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={`Global (${config.detector?.confidence_threshold ?? 0.45})`} value={eventClassConfidences[label] == null ? "" : String(eventClassConfidences[label])} onChange={(event) => setEventClassConfidence(label, event.target.value)} /></label>
+              </div>)}
             </div> : <span className="settings-help">Select a model with class metadata to configure per-object overrides.</span>}
           </details>
         </section>

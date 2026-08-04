@@ -3472,6 +3472,31 @@ section.detection-settings-card {
   gap: 10px;
 }
 
+.per-object-detection-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.per-object-detection-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.7fr) repeat(2, minmax(150px, 1fr));
+  align-items: end;
+  gap: 8px;
+  border-radius: 7px;
+  background: var(--control-muted);
+  padding: 7px;
+}
+
+.per-object-detection-row > strong {
+  align-self: center;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
 .detection-settings-subhead {
   display: grid;
   gap: 2px;
@@ -3591,6 +3616,14 @@ section.detection-settings-card {
   .detection-settings-card-head > .compact-toggle {
     grid-column: 1 / -1;
     width: 100%;
+  }
+
+  .per-object-detection-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .per-object-detection-row > strong {
+    grid-column: 1 / -1;
   }
 }
 

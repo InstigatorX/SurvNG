@@ -202,6 +202,33 @@ class DetectionZoneTest(unittest.TestCase):
 
         self.assertEqual(detection_threshold(self.camera, 0.45), 0.45)
 
+    def test_detection_threshold_uses_lowest_class_threshold(self) -> None:
+        self.assertEqual(
+            detection_threshold(self.camera, 0.45, {"person": 0.3, "car": 0.8}),
+            0.3,
+        )
+
+    def test_class_threshold_controls_full_frame_incident_eligibility(self) -> None:
+        self.camera.zones = []
+        objects = [
+            {"label": "car", "confidence": 0.69},
+            {"label": "person", "confidence": 0.69},
+        ]
+
+        apply_detection_zones(
+            self.camera,
+            objects,
+            3840,
+            2160,
+            0.45,
+            class_confidence_thresholds={"car": 0.7},
+        )
+
+        self.assertFalse(objects[0]["incident_eligible"])
+        self.assertEqual(objects[0]["confidence_threshold"], 0.7)
+        self.assertTrue(objects[1]["incident_eligible"])
+        self.assertEqual(objects[1]["confidence_threshold"], 0.45)
+
     def test_no_zone_configuration_also_clears_stale_annotations(self) -> None:
         self.camera.zones = []
         detected = {

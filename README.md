@@ -369,7 +369,7 @@ Recorder timestamp handling is discontinuity-aware. Persistent regressing or reb
 
 Set `model_path` to an OpenVINO-readable model, such as `best.onnx` or an OpenVINO IR `.xml` file. Set `labels_path` to a newline-delimited class file such as `classes.txt`.
 
-`event_confirmation_frames` controls the global temporal confirmation requirement from one to five frames. `event_class_confirmation_frames` maps individual model labels to optional overrides, for example `{"robot_lawnmower": 3}`. These confirmation counts do not add inference work because SurvNG already analyzes the five event-time frames.
+`event_confirmation_frames` controls the global temporal confirmation requirement from one to five frames. `event_class_confirmation_frames` maps individual model labels to optional overrides, for example `{"robot_lawnmower": 3}`. `event_class_confidence_thresholds` provides the matching per-label confidence override, for example `{"robot_lawnmower": 0.75}`. SurvNG runs inference at the lowest applicable global, class, or zone threshold and then applies the correct threshold to each result, so class overrides may safely be either higher or lower than the global setting. Confirmation counts do not add inference work because SurvNG already analyzes the event-time frames.
 
 The detector supports YOLO-style ONNX output shaped like `[1, 4 + classes, anchors]` and SSD-style output shaped like `[image_id, label, confidence, xmin, ymin, xmax, ymax]`.
 

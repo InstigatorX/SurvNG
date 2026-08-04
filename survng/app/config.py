@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -377,6 +378,7 @@ class DetectorConfig(BaseModel):
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)
+    event_class_confidence_thresholds: dict[str, float] = Field(default_factory=dict)
     require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)
@@ -408,6 +410,34 @@ class DetectorConfig(BaseModel):
             if confirmations < 1 or confirmations > 5:
                 raise ValueError("event class confirmations must be between 1 and 5")
             normalized[label] = confirmations
+        return normalized
+
+    @field_validator("event_class_confidence_thresholds", mode="before")
+    @classmethod
+    def normalize_event_class_confidence_thresholds(
+        cls,
+        value: object,
+    ) -> dict[str, float]:
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("event class confidence thresholds must be an object")
+        if len(value) > 256:
+            raise ValueError("event class confidence thresholds cannot exceed 256 labels")
+        normalized: dict[str, float] = {}
+        for raw_label, raw_threshold in value.items():
+            label = str(raw_label or "").strip().lower()
+            if not label:
+                raise ValueError("event class confidence threshold labels cannot be empty")
+            try:
+                threshold = float(raw_threshold)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("event class confidence thresholds must be numbers") from exc
+            if isinstance(raw_threshold, bool) or not math.isfinite(threshold):
+                raise ValueError("event class confidence thresholds must be finite numbers")
+            if threshold < 0.01 or threshold > 0.99:
+                raise ValueError("event class confidence thresholds must be between 0.01 and 0.99")
+            normalized[label] = threshold
         return normalized
 
     def resolved_model_path(self) -> str:

@@ -74,6 +74,9 @@
     "event_class_confirmation_frames": {
       "robot_lawnmower": 3
     },
+    "event_class_confidence_thresholds": {
+      "robot_lawnmower": 0.75
+    },
     "labels": [],
     "tracking": {
       "enabled": true,

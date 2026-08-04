@@ -53,8 +53,23 @@ def _point_in_polygon(x: float, y: float, zone: DetectionZone) -> bool:
     return inside
 
 
-def detection_threshold(camera: CameraConfig, default: float) -> float:
+def class_confidence_threshold(
+    label: str,
+    default: float,
+    class_thresholds: dict[str, float] | None = None,
+) -> float:
+    normalized_label = str(label or "").strip().lower()
+    configured = (class_thresholds or {}).get(normalized_label, default)
+    return max(0.01, min(0.99, float(configured)))
+
+
+def detection_threshold(
+    camera: CameraConfig,
+    default: float,
+    class_thresholds: dict[str, float] | None = None,
+) -> float:
     thresholds = [default]
+    thresholds.extend((class_thresholds or {}).values())
     thresholds.extend(
         zone.confidence_threshold
         for zone in camera.zones
@@ -75,6 +90,7 @@ def apply_detection_zones(
     frame_height: int,
     default_confidence: float,
     require_incident_zone: bool = True,
+    class_confidence_thresholds: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     zones = [zone for zone in camera.zones if zone.enabled and len(zone.points) >= 3]
     if not zones:
@@ -85,8 +101,25 @@ def apply_detection_zones(
             detected["zone_matches"] = []
             detected.pop("zone_point", None)
             detected["incident_eligible"] = False
-            if detected.get("label"):
-                detected["incident_eligible"] = True
+            label = str(detected.get("label") or "")
+            if class_confidence_thresholds is None:
+                detected["incident_eligible"] = bool(label)
+                continue
+            threshold = class_confidence_threshold(
+                label,
+                default_confidence,
+                class_confidence_thresholds,
+            )
+            try:
+                confidence = float(detected.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            confidence_eligible = bool(
+                label and math.isfinite(confidence) and confidence >= threshold
+            )
+            detected["confidence_threshold"] = threshold
+            detected["confidence_eligible"] = confidence_eligible
+            detected["incident_eligible"] = confidence_eligible
         return objects
 
     has_incident_zones = any(zone.behavior == "incident" for zone in zones)
@@ -102,6 +135,13 @@ def apply_detection_zones(
         detected.pop("zone_point", None)
         detected["incident_eligible"] = False
         label = str(detected.get("label") or "")
+        label_threshold = class_confidence_threshold(
+            label,
+            default_confidence,
+            class_confidence_thresholds,
+        )
+        detected["confidence_threshold"] = label_threshold
+        detected["confidence_eligible"] = False
         box = detected.get("box") or {}
         if not label or not isinstance(box, dict) or not all(
             key in box for key in ("x1", "y1", "x2", "y2")
@@ -121,13 +161,14 @@ def apply_detection_zones(
         relevant = [zone for zone in zones if _class_applies(zone, label)]
         matches = []
         for zone in relevant:
-            threshold = zone.confidence_threshold if zone.confidence_threshold is not None else default_confidence
+            threshold = zone.confidence_threshold if zone.confidence_threshold is not None else label_threshold
             if confidence >= threshold and _point_in_polygon(x, y, zone):
                 matches.append(zone)
 
         ignored = any(zone.behavior == "ignore" for zone in matches)
         admitted = any(zone.behavior == "incident" for zone in matches)
-        meets_default = confidence >= default_confidence
+        meets_default = confidence >= label_threshold
+        detected["confidence_eligible"] = bool(meets_default or matches)
         detected["zones"] = [zone.name for zone in matches]
         detected["zone_matches"] = [
             {"name": zone.name, "behavior": zone.behavior, "color": zone.color}

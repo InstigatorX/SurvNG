@@ -170,7 +170,11 @@ def _candidate_detection(detected: dict[str, Any]) -> bool:
     incident zone and then crosses its boundary is still the same object; the
     completed track only needs one admitted observation to become eligible.
     """
-    return bool(detected.get("label") and _box(detected) is not None)
+    return bool(
+        detected.get("label")
+        and detected.get("confidence_eligible") is not False
+        and _box(detected) is not None
+    )
 
 
 def _temporal_motion_metrics(
@@ -465,7 +469,19 @@ class RecordedMotionObjectDetector:
 
     def _detect_objects(self, frame: Frame) -> list[dict[str, Any]]:
         configured_threshold = float(self.detector.config.confidence_threshold)
-        threshold = detection_threshold(self.camera, configured_threshold)
+        class_thresholds = dict(
+            getattr(
+                self.detector.config,
+                "event_class_confidence_thresholds",
+                {},
+            )
+            or {}
+        )
+        threshold = detection_threshold(
+            self.camera,
+            configured_threshold,
+            class_thresholds,
+        )
         objects = self.detector.detect(frame, confidence_threshold=threshold)
         apply_detection_zones(
             self.camera,
@@ -474,6 +490,7 @@ class RecordedMotionObjectDetector:
             int(frame.shape[0]),
             configured_threshold,
             bool(getattr(self.detector.config, "require_incident_zone", True)),
+            class_thresholds,
         )
         return objects
 
