@@ -1962,7 +1962,13 @@ def object_tracking_catalog() -> dict:
 @app.get("/api/detector/models")
 def detector_models() -> dict:
     models: list[dict] = []
-    search_roots = sorted({Path("openvino_model"), *Path(".").glob("*_openvino_model")})
+    search_roots = sorted({
+        Path("models/openvino_model"),
+        *Path("models").glob("*_openvino_model"),
+        # Preserve discovery for installations that have not consolidated yet.
+        Path("openvino_model"),
+        *Path(".").glob("*_openvino_model"),
+    })
     for root in search_roots:
         if not root.exists():
             continue
