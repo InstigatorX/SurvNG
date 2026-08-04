@@ -4947,9 +4947,21 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   return (
     <div className="recordings-section-switcher" aria-label="Recording section">
       <a className={mode === "history" ? "active" : ""} href={appUrl(`/recordings${query}`)}><Film size={14} />History</a>
-      <a className={mode === "search" ? "active" : ""} href={appUrl(`/recordings/search${query}`)}><Search size={14} />Smart Search</a>
-      <a className={mode === "exports" ? "active" : ""} href={appUrl(`/recordings/exports${query}`)}><Download size={14} />Exports</a>
+      <a className={mode === "search" ? "active" : ""} href={appUrl("/recordings/search")}><Search size={14} />Smart Search</a>
+      <a className={mode === "exports" ? "active" : ""} href={appUrl("/recordings/exports")}><Download size={14} />Exports</a>
     </div>
+  );
+}
+
+function RecordingCameraRail({ subtitle, children }) {
+  return (
+    <aside className="recordings-v2-cameras" aria-label="Cameras">
+      <header className="recordings-camera-header">
+        <strong>Cameras</strong>
+        <small>{subtitle}</small>
+      </header>
+      <div className="recordings-camera-list">{children}</div>
+    </aside>
   );
 }
 
@@ -4991,12 +5003,12 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     finally { setLoading(false); }
   }
 
-  return <main className="semantic-search-page">
-    <aside className="recordings-v2-cameras">
-      <RecordingSectionSwitcher mode="search" cameraId={cameraId} />
+  return <main className="recordings-v2-page semantic-search-page">
+    <nav className="recordings-tabs"><RecordingSectionSwitcher mode="search" cameraId={cameraId} /></nav>
+    <RecordingCameraRail subtitle="Filter search results">
       <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}><Search size={16} /><span>All cameras</span><i /></button>
       {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => setCameraId(camera.id)}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
-    </aside>
+    </RecordingCameraRail>
     <section className="semantic-search-workspace">
       <header><div><h2>Smart Search</h2><p>Describe what you remember. SurvNG searches locally indexed incident images.</p></div><span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span></header>
       <form onSubmit={runSearch}><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Try “person in a red jacket” or “white delivery truck”' /><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></form>
@@ -5655,8 +5667,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
 
   return (
     <main className="recordings-v2-page">
-      <aside className="recordings-v2-cameras" aria-label="Cameras">
-        <RecordingSectionSwitcher mode="history" cameraId={activeCameraId} />
+      <nav className="recordings-tabs"><RecordingSectionSwitcher mode="history" cameraId={activeCameraId} /></nav>
+      <RecordingCameraRail subtitle="Choose recording source">
         {cameras.map((camera) => (
           <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
             <Camera size={16} />
@@ -5664,7 +5676,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             <i className={(source === "main" ? camera.recording : camera.sub_recording) ? "online" : ""} />
           </button>
         ))}
-      </aside>
+      </RecordingCameraRail>
 
       <section className="recordings-v2-workspace">
         <div className="recordings-v2-player">
@@ -6066,8 +6078,8 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
 
   return (
     <main className="recordings-v2-page export-center-page">
-      <aside className="recordings-v2-cameras export-center-cameras" aria-label="Export cameras">
-        <RecordingSectionSwitcher mode="exports" cameraId={cameraId} />
+      <nav className="recordings-tabs"><RecordingSectionSwitcher mode="exports" cameraId={cameraId} /></nav>
+      <RecordingCameraRail subtitle="Filter saved exports">
         <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}>
           <Film size={16} /><span>All exports</span><i className={Number(summary.total) ? "online" : ""} />
         </button>
@@ -6076,7 +6088,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
             <Camera size={16} /><span>{camera.name}</span><i className={(camera.recording || camera.sub_recording) ? "online" : ""} />
           </button>
         ))}
-      </aside>
+      </RecordingCameraRail>
 
       <section className="export-center-workspace">
         <header className="export-center-toolbar">

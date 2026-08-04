@@ -6676,35 +6676,73 @@ section.detection-settings-card {
 .recordings-v2-page {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
   height: calc(100dvh - 76px);
   min-height: calc(100dvh - 76px);
+  box-sizing: border-box;
+  padding: 12px;
   overflow: hidden;
   border-top: 1px solid var(--line);
   background: var(--canvas);
 }
 
+.recordings-tabs {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .recordings-v2-cameras {
+  display: grid;
+  grid-column: 1;
+  grid-row: 2;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.recordings-camera-header {
+  display: grid;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  padding: 13px 14px;
+}
+
+.recordings-camera-header strong {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.recordings-camera-header small {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.recordings-camera-list {
   display: grid;
   align-content: start;
   gap: 6px;
-  min-width: 0;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  padding: 12px 10px;
+  min-height: 0;
+  padding: 10px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .recordings-section-switcher {
-  display: grid;
-  grid-template-columns: .9fr 1.2fr .9fr;
+  display: flex;
+  align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
-  padding-bottom: 11px;
-  border-bottom: 1px solid var(--line);
 }
 
-.semantic-search-page { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); height: calc(100dvh - 66px); min-height: 0; }
-.semantic-search-workspace { min-width: 0; overflow: auto; padding: 18px; }
+.semantic-search-workspace { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; overflow: auto; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); box-shadow: var(--shadow); padding: 18px; }
 .semantic-search-workspace > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .semantic-search-workspace h2, .semantic-search-workspace p { margin: 0; }
 .semantic-search-workspace p { color: var(--muted); margin-top: 3px; }
@@ -6724,88 +6762,102 @@ section.detection-settings-card {
 .semantic-search-results footer a { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; padding: 6px 8px; font-size: 11px; }
 .semantic-search-empty { grid-column: 1/-1; min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
 .semantic-search-error { display: flex; align-items: center; gap: 7px; color: var(--danger); margin-top: 10px; }
-@media (max-width: 760px) { .semantic-search-page { grid-template-columns: 1fr; height: auto; } .semantic-search-page .recordings-v2-cameras { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); } .semantic-search-page .recordings-section-switcher { min-width: 260px; margin: 0; } .semantic-search-page .recordings-v2-cameras button { min-width: 135px; } .semantic-search-workspace { padding: 12px; } }
-
 .recordings-section-switcher a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   min-width: 0;
-  min-height: 38px;
+  min-height: 34px;
+  padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: var(--panel-soft);
+  background: var(--control);
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 850;
+  font-size: 16px;
+  font-weight: 720;
   text-decoration: none;
   white-space: nowrap;
 }
 
 .recordings-section-switcher a.active {
-  border-color: rgba(15, 118, 110, .48);
+  border-color: rgba(15, 118, 110, .35);
   background: var(--active);
   color: var(--active-ink);
 }
 
-.recordings-v2-cameras button {
+.recordings-camera-list button {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 8px;
   align-items: center;
   gap: 8px;
-  min-height: 40px;
-  border-color: transparent;
-  background: transparent;
+  min-height: 38px;
+  border-color: var(--line);
+  background: var(--control);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 16px;
+  font-weight: 720;
   text-align: left;
 }
 
-.recordings-v2-cameras button.active {
-  border-color: rgba(15, 118, 110, .38);
+.recordings-camera-list button.active {
+  border-color: rgba(15, 118, 110, .35);
   background: var(--active);
   color: var(--active-ink);
 }
 
-.recordings-v2-cameras button:hover:not(.active) {
+.recordings-camera-list button:hover:not(.active) {
   border-color: var(--line);
-  background: var(--panel-soft);
+  background: var(--control);
   color: var(--ink);
 }
 
-.recordings-v2-cameras span {
+.recordings-camera-list span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recordings-v2-cameras i {
+.recordings-camera-list i {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--muted);
 }
 
-.recordings-v2-cameras i.online {
+.recordings-camera-list i.online {
   background: #24b47e;
   box-shadow: 0 0 0 3px rgba(36, 180, 126, .12);
 }
 
 .recordings-v2-workspace {
   display: grid;
+  grid-column: 2;
+  grid-row: 2;
   grid-template-rows: minmax(260px, 1fr) auto clamp(110px, 14dvh, 160px);
   min-width: 0;
   min-height: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  overflow: hidden;
   padding: 8px;
 }
 
 .export-center-workspace {
   display: grid;
+  grid-column: 2;
+  grid-row: 2;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 8px;
   min-width: 0;
   min-height: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  overflow: hidden;
   padding: 8px;
 }
 
@@ -7931,42 +7983,66 @@ section.detection-settings-card {
 @media (max-width: 760px) {
   .recordings-v2-page {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 8px;
     height: auto;
     min-height: calc(100dvh - 52px);
+    padding: 8px;
     overflow: visible;
   }
 
+  .recordings-tabs {
+    grid-column: 1;
+    grid-row: 1;
+    overflow-x: auto;
+  }
+
+  .recordings-section-switcher {
+    display: grid;
+    grid-template-columns: 82px 112px 82px;
+    flex: 0 0 auto;
+  }
+
   .recordings-v2-cameras {
+    grid-column: 1;
+    grid-row: 2;
+    grid-template-rows: auto;
+  }
+
+  .recordings-camera-header {
+    display: none;
+  }
+
+  .recordings-camera-list {
+    display: grid;
     grid-auto-flow: column;
-    grid-auto-columns: minmax(125px, 1fr);
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
+    grid-auto-columns: minmax(135px, 1fr);
     padding: 6px;
     overflow-x: auto;
     overflow-y: hidden;
   }
 
-  .recordings-section-switcher {
-    position: sticky;
-    left: 0;
-    z-index: 2;
-    grid-template-columns: 82px 112px 82px;
-    margin: 0 2px 0 0;
-    border: 0;
-    border-right: 1px solid var(--line);
-    padding: 0 7px 0 0;
-    background: var(--panel);
-  }
-
-  .recordings-v2-cameras button {
+  .recordings-camera-list button {
     min-height: 34px;
+    font-size: 12px;
   }
 
   .recordings-v2-workspace {
+    grid-column: 1;
+    grid-row: 3;
     align-content: start;
     grid-template-rows: auto auto minmax(140px, auto);
     padding: 0;
+  }
+
+  .semantic-search-workspace,
+  .export-center-workspace {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .semantic-search-workspace {
+    padding: 12px;
   }
 
   .recordings-v2-player video {
