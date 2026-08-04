@@ -108,6 +108,20 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(encoder.shapes, [(100, 200, 3), (60, 100, 3)])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 2, "event_count": 1})
 
+    def test_missing_retained_snapshot_is_counted_without_faulting_service(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service.encoder = type("Encoder", (), {"identity": self.identity})()
+        service._storage_dir = Path(self.temporary.name)
+
+        service._index_event({"id": 1, "snapshot_path": "expired.webp"})
+
+        self.assertEqual(service.status()["skipped_missing_since_start"], 1)
+        self.assertEqual(service.status()["error"], "")
+
     def test_live_events_have_priority_over_historical_backfill(self) -> None:
         from survng.app.config import SemanticSearchConfig
 

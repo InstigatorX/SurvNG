@@ -553,6 +553,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._storage_dir = Path()
         self._error = ""
         self._indexed = 0
+        self._skipped_missing = 0
         self._state = "stopped"
         self._encoder_lock = threading.RLock()
 
@@ -662,6 +663,7 @@ class SemanticSearchService(DisabledSemanticSearch):
                 break
             try:
                 self._index_event(event)
+                self._error = ""
                 if priority > 0:
                     self._stop.wait(self.config.backfill_pause_seconds)
             except Exception as exc:
@@ -671,10 +673,15 @@ class SemanticSearchService(DisabledSemanticSearch):
     def _index_event(self, event: dict[str, Any]) -> None:
         if self.encoder is None:
             return
-        path = event_snapshot_path(self._storage_dir, event)
+        try:
+            path = event_snapshot_path(self._storage_dir, event)
+        except FileNotFoundError:
+            self._skipped_missing += 1
+            return
         frame = cv2.imread(str(path))
         if frame is None:
-            raise RuntimeError("incident snapshot could not be decoded")
+            self._skipped_missing += 1
+            return
         try:
             objects = json.loads(str(event.get("objects_json") or "[]"))
         except json.JSONDecodeError:
@@ -726,6 +733,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             "implementation": self.config.implementation, "device": self.config.device,
             "generation": identity.generation if identity else "", "error": self._error,
             "queue_depth": self._queue.qsize(), "indexed_since_start": self._indexed,
+            "skipped_missing_since_start": self._skipped_missing,
             **self.index.coverage(identity),
         }
 
