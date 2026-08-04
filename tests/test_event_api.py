@@ -16,10 +16,33 @@ from survng.app.audit_ai import AuditAiChange
 from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 from survng.app.image_cache import LocalImageCache
 from survng.app.state_events import StateEventBroker
+from survng.app.semantic_search import SemanticSearchHit
 from fastapi import HTTPException
 
 
 class EventApiSerializationTest(unittest.TestCase):
+    def test_semantic_search_deduplicates_evidence_by_event(self) -> None:
+        hits = [
+            SemanticSearchHit(7, "gate", "now", "object_crop", "car:0", "a.webp", "car", (1, 2, 3, 4), 0.91),
+            SemanticSearchHit(7, "gate", "now", "full_frame", "frame", "a.webp", "", None, 0.85),
+        ]
+        events = SimpleNamespace(get_many=Mock(return_value=[{
+            "id": 7, "camera_id": "gate", "kind": "object", "snapshot_path": "a.webp",
+            "recording_path": "", "objects_json": "[]", "created_at": "now",
+        }]))
+        semantic = SimpleNamespace(search_text=Mock(return_value=hits))
+        active = SimpleNamespace(
+            semantic_search=semantic, events=events,
+            config=AppConfig(base_path="/survng"),
+        )
+        with patch.object(main, "manager", active):
+            response = main.semantic_search(main.SemanticSearchRequest(query="red car"))
+
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["results"][0]["score"], 0.91)
+        self.assertEqual(response["results"][0]["snapshot_url"], "/survng/api/events/7/snapshot.jpg")
+        self.assertNotIn("objects_json", response["results"][0]["event"])
+
     def test_motion_audit_apply_requires_bound_camera_recommendation(self) -> None:
         active_config = AppConfig(
             audit_ai=AuditAiConfig(allow_apply_recommendations=True),

@@ -4,14 +4,20 @@ import hashlib
 import json
 import sqlite3
 import threading
+import logging
+import queue
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Protocol, Sequence
 
 import numpy as np
+import cv2
 
 from .config import SemanticSearchConfig
+from .incident_utils import event_snapshot_path
+
+LOGGER = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -292,6 +298,18 @@ class SemanticIndex:
             "event_count": int(row["event_count"] if row else 0),
         }
 
+    def event_indexed(self, event_id: int, identity: SemanticModelIdentity) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select 1 from semantic_embeddings
+                where event_id = ? and model_fingerprint = ?
+                    and preprocessing_fingerprint = ? limit 1
+                """,
+                (int(event_id), identity.model_fingerprint, identity.preprocessing_fingerprint),
+            ).fetchone()
+        return row is not None
+
 
 def fingerprint_model_package(model_dir: Path) -> str:
     """Fingerprint local model artifacts without reading multi-gigabyte weights at startup."""
@@ -337,6 +355,15 @@ class DisabledSemanticSearch:
     def close(self) -> None:
         return
 
+    def start(self, event_store: Any, storage_dir: Path) -> None:
+        return
+
+    def queue_event(self, event: dict[str, Any]) -> bool:
+        return False
+
+    def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
+        raise RuntimeError("semantic search is disabled")
+
 
 class UnavailableSemanticSearch(DisabledSemanticSearch):
     """Failure-isolated placeholder for an enabled but unusable model package."""
@@ -373,11 +400,246 @@ def build_semantic_search(
     if not model_dir.is_dir():
         return UnavailableSemanticSearch(config, index, f"model directory does not exist: {model_dir}")
     try:
-        load_semantic_manifest(model_dir)
+        manifest = load_semantic_manifest(model_dir)
     except RuntimeError as exc:
         return UnavailableSemanticSearch(config, index, str(exc))
-    return UnavailableSemanticSearch(
-        config,
-        index,
-        "semantic inference runtime has not started",
-    )
+    return SemanticSearchService(config, index, model_dir, manifest)
+
+
+class OpenVinoManifestEncoder:
+    """OpenVINO dual-encoder loaded entirely from a local model package."""
+
+    def __init__(self, model_dir: Path, manifest: dict[str, Any], device: str) -> None:
+        from openvino import Core
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError("semantic tokenizer runtime is not installed") from exc
+        self.model_dir = Path(model_dir)
+        image_spec = dict(manifest.get("image") or {})
+        text_spec = dict(manifest.get("text") or {})
+        dimensions = int(manifest.get("dimensions") or 0)
+        if not 0 < dimensions <= 8192:
+            raise RuntimeError("semantic manifest dimensions must be between 1 and 8192")
+        image_model = self.model_dir / str(manifest.get("image_model") or "image_encoder.xml")
+        text_model = self.model_dir / str(manifest.get("text_model") or "text_encoder.xml")
+        if not image_model.is_file() or not text_model.is_file():
+            raise RuntimeError("semantic image or text OpenVINO model is missing")
+        core = Core()
+        self._image_model = core.compile_model(str(image_model), device)
+        self._text_model = core.compile_model(str(text_model), device)
+        tokenizer_path = self.model_dir / str(text_spec.get("tokenizer_path") or "tokenizer")
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+        self._image_spec = image_spec
+        self._text_spec = text_spec
+        preprocessing = json.dumps(
+            {"image": image_spec, "text": text_spec}, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        self._identity = SemanticModelIdentity(
+            str(manifest.get("implementation") or "openvino_manifest"),
+            fingerprint_model_package(self.model_dir),
+            hashlib.sha256(preprocessing).hexdigest()[:24],
+            dimensions,
+        )
+
+    @property
+    def identity(self) -> SemanticModelIdentity:
+        return self._identity
+
+    @staticmethod
+    def _output(compiled: Any, result: Any, name: str) -> np.ndarray:
+        if name:
+            return np.asarray(result[compiled.output(name)])
+        return np.asarray(result[compiled.output(0)])
+
+    def encode_images(self, images: Sequence[np.ndarray]) -> np.ndarray:
+        spec = self._image_spec
+        size = int(spec.get("size") or 256)
+        mean = np.asarray(spec.get("mean") or [0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+        std = np.asarray(spec.get("std") or [0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+        prepared = []
+        for image in images:
+            resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            prepared.append(np.transpose((rgb - mean) / std, (2, 0, 1)))
+        batch = np.stack(prepared).astype(np.float32)
+        input_name = str(spec.get("input") or self._image_model.input(0).get_any_name())
+        result = self._image_model({input_name: batch})
+        return normalized_matrix(self._output(self._image_model, result, str(spec.get("output") or "")))
+
+    def encode_text(self, texts: Sequence[str]) -> np.ndarray:
+        max_length = int(self._text_spec.get("max_length") or 77)
+        tokens = self._tokenizer(
+            list(texts), padding="max_length", truncation=True,
+            max_length=max_length, return_tensors="np",
+        )
+        mapping = dict(self._text_spec.get("inputs") or {})
+        inputs: dict[str, np.ndarray] = {}
+        for model_input in self._text_model.inputs:
+            name = model_input.get_any_name()
+            token_name = str(mapping.get(name) or name)
+            if token_name in tokens:
+                inputs[name] = np.asarray(tokens[token_name])
+        result = self._text_model(inputs)
+        return normalized_matrix(self._output(self._text_model, result, str(self._text_spec.get("output") or "")))
+
+    def close(self) -> None:
+        self._image_model = None
+        self._text_model = None
+
+
+class SemanticSearchService(DisabledSemanticSearch):
+    """Low-priority asynchronous incident indexer and text search service."""
+
+    def __init__(self, config: SemanticSearchConfig, index: SemanticIndex, model_dir: Path, manifest: dict[str, Any]) -> None:
+        super().__init__(config, index)
+        self.model_dir = model_dir
+        self.manifest = manifest
+        self.encoder: SemanticEncoder | None = None
+        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(config.worker_queue_size)
+        self._thread: threading.Thread | None = None
+        self._backfill_thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._storage_dir = Path()
+        self._error = ""
+        self._indexed = 0
+
+    def start(self, event_store: Any, storage_dir: Path) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._storage_dir = Path(storage_dir)
+        try:
+            self.encoder = OpenVinoManifestEncoder(self.model_dir, self.manifest, self.config.device)
+        except Exception as exc:
+            self._error = str(exc)
+            LOGGER.warning("semantic search unavailable: %s", exc)
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="survng-semantic", daemon=True)
+        self._thread.start()
+        self._backfill_thread = threading.Thread(
+            target=self._backfill,
+            args=(event_store,),
+            name="survng-semantic-backfill",
+            daemon=True,
+        )
+        self._backfill_thread.start()
+
+    def _backfill(self, event_store: Any) -> None:
+        before_created_at: str | None = None
+        before_id: int | None = None
+        while not self._stop.is_set():
+            rows = event_store.recent_compact(
+                self.config.backfill_batch_size,
+                before_created_at,
+                before_id,
+            )
+            if not rows:
+                return
+            for event in reversed(rows):
+                if self._stop.is_set():
+                    return
+                if self.encoder and self.index.event_indexed(int(event.get("id") or 0), self.encoder.identity):
+                    continue
+                try:
+                    self._queue.put(dict(event), timeout=0.5)
+                except queue.Full:
+                    if self._stop.is_set():
+                        return
+            last = rows[-1]
+            before_created_at = str(last.get("created_at") or "")
+            before_id = int(last.get("id") or 0)
+            if len(rows) < self.config.backfill_batch_size:
+                return
+
+    def queue_event(self, event: dict[str, Any]) -> bool:
+        if self.encoder is None or not event.get("snapshot_path") or not event.get("id"):
+            return False
+        try:
+            self._queue.put_nowait(dict(event))
+            return True
+        except queue.Full:
+            self._error = "index queue is full"
+            return False
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                event = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if event is None:
+                break
+            try:
+                self._index_event(event)
+            except Exception as exc:
+                self._error = str(exc)
+                LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
+
+    def _index_event(self, event: dict[str, Any]) -> None:
+        if self.encoder is None:
+            return
+        path = event_snapshot_path(self._storage_dir, event)
+        frame = cv2.imread(str(path))
+        if frame is None:
+            raise RuntimeError("incident snapshot could not be decoded")
+        try:
+            objects = json.loads(str(event.get("objects_json") or "[]"))
+        except json.JSONDecodeError:
+            objects = []
+        if not isinstance(objects, list) or not objects:
+            return
+        evidence: list[SemanticEvidence] = []
+        images: list[np.ndarray] = []
+        if self.config.index_full_frame:
+            evidence.append(SemanticEvidence(int(event["id"]), str(event["camera_id"]), str(event["created_at"]), "full_frame", "frame", str(event["snapshot_path"])))
+            images.append(frame)
+        if self.config.index_object_crops:
+            height, width = frame.shape[:2]
+            for index, item in enumerate(objects):
+                bbox = item.get("bbox") if isinstance(item, dict) else None
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    continue
+                x1, y1, x2, y2 = (int(value) for value in bbox)
+                x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                label = str(item.get("label") or "").strip().lower()
+                evidence.append(SemanticEvidence(int(event["id"]), str(event["camera_id"]), str(event["created_at"]), "object_crop", f"{label}:{index}", str(event["snapshot_path"]), label, (x1, y1, x2, y2)))
+                images.append(frame[y1:y2, x1:x2])
+        if images:
+            embeddings = self.encoder.encode_images(images)
+            self._indexed += self.index.upsert(evidence, embeddings, self.encoder.identity)
+
+    def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
+        if self.encoder is None:
+            raise RuntimeError(self._error or "semantic search is unavailable")
+        text = str(query).strip()
+        if not text:
+            raise ValueError("semantic search query cannot be empty")
+        embedding = self.encoder.encode_text([text])
+        return self.index.search(embedding, self.encoder.identity, **filters)
+
+    def status(self) -> dict[str, Any]:
+        identity = self.encoder.identity if self.encoder else None
+        return {
+            "enabled": True, "state": "ready" if identity else "unavailable",
+            "implementation": self.config.implementation, "device": self.config.device,
+            "generation": identity.generation if identity else "", "error": self._error,
+            "queue_depth": self._queue.qsize(), "indexed_since_start": self._indexed,
+            **self.index.coverage(identity),
+        }
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._thread:
+            self._thread.join(timeout=5.0)
+        if self._backfill_thread:
+            self._backfill_thread.join(timeout=5.0)
+        if self.encoder:
+            self.encoder.close()
+        self.encoder = None

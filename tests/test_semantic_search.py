@@ -6,11 +6,13 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import cv2
 
 from survng.app.semantic_search import (
     SemanticEvidence,
     SemanticIndex,
     SemanticModelIdentity,
+    SemanticSearchService,
     normalized_matrix,
 )
 
@@ -71,6 +73,40 @@ class SemanticIndexTest(unittest.TestCase):
             1.0,
             places=3,
         )
+
+    def test_service_indexes_full_frame_and_object_crop(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        image_path = Path(self.temporary.name) / "snapshot.jpg"
+        cv2.imwrite(str(image_path), np.full((100, 200, 3), 127, dtype=np.uint8))
+
+        class FakeEncoder:
+            identity = self.identity
+
+            def encode_images(self, images):
+                self.shapes = [image.shape for image in images]
+                return np.asarray([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
+
+            def encode_text(self, texts):
+                return np.asarray([[1, 0, 0]], dtype=np.float32)
+
+            def close(self):
+                return
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        encoder = FakeEncoder()
+        service.encoder = encoder
+        service._storage_dir = Path(self.temporary.name)
+        service._index_event({
+            "id": 1, "camera_id": "gate", "created_at": "now",
+            "snapshot_path": "snapshot.jpg",
+            "objects_json": '[{"label":"car","bbox":[10,20,110,80]}]',
+        })
+
+        self.assertEqual(encoder.shapes, [(100, 200, 3), (60, 100, 3)])
+        self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 2, "event_count": 1})
 
 
 if __name__ == "__main__":

@@ -468,6 +468,9 @@ class AppManager:
                 # have been applied to every worker.
                 self.mqtt.start()
                 self._start_state_monitor()
+                semantic_search = getattr(self, "semantic_search", None)
+                if semantic_search is not None:
+                    semantic_search.start(self.events, self.storage_dir)
                 self._started = True
                 self.mqtt.set_server_lifecycle("running")
             except BaseException:
@@ -1046,6 +1049,8 @@ class AppManager:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
             replacement = build_semantic_search(config, self.semantic_index)
+            if self._started:
+                replacement.start(self.events, self.storage_dir)
             previous = self.semantic_search
             self.semantic_search = replacement
             previous.close()
@@ -1099,6 +1104,7 @@ class AppManager:
                 event = self.events.get(int(event_id))
                 if event:
                     self.faces.ingest_events([event])
+                    self.semantic_search.queue_event(event)
             payload = {
                 **payload,
                 "classes": sorted({str(item.get("label")) for item in objects if item.get("label")}),
