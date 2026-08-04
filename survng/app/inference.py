@@ -309,6 +309,48 @@ class _InferenceWorker:
         with self._lock:
             self.config = config
 
+    def reconfigure(
+        self,
+        config: DetectorConfig,
+        initial_status: dict[str, Any],
+        *,
+        start_enabled: bool,
+    ) -> None:
+        """Restart this inference role and restore its prior runtime on failure."""
+        with self._lock:
+            previous_config = self.config
+            previous_status = dict(self._status)
+            previous_start_enabled = self.start_enabled
+            previous_alive = bool(
+                self._process is not None and self._process.is_alive()
+            )
+            self.stop()
+            self.config = config
+            self.start_enabled = start_enabled
+            self._status = dict(initial_status)
+            self._stopping = False
+            try:
+                if start_enabled and not self.start():
+                    raise InferenceUnavailable(
+                        self._last_error
+                        or f"{self.role} inference worker failed to restart"
+                    )
+            except BaseException:
+                try:
+                    self.stop()
+                finally:
+                    self.config = previous_config
+                    self.start_enabled = previous_start_enabled
+                    self._status = previous_status
+                    self._stopping = False
+                    if previous_alive and not self.start():
+                        LOGGER.critical(
+                            "%s inference rollback failed: %s",
+                            self.role.capitalize(),
+                            self._last_error,
+                        )
+                raise
+
     def start(self) -> bool:
         if not self.start_enabled:
             return True
@@ -750,6 +792,85 @@ class InferenceSupervisor:
                 or next_config.resolved_coreml_model_path()
             )
         )
+
+    def reconfigure_roles(
+        self,
+        config: DetectorConfig,
+        roles: set[str],
+    ) -> None:
+        """Restart only selected inference processes, transactionally."""
+        invalid = roles - {"object", "face", "reid"}
+        if invalid:
+            raise ValueError(f"unknown inference roles: {', '.join(sorted(invalid))}")
+        if not roles:
+            self.update_runtime_config(config)
+            return
+        previous_config = self.config.model_copy(deep=True)
+        next_config = config.model_copy(deep=True)
+        completed: list[str] = []
+
+        def apply_supervisor_config(value: DetectorConfig) -> None:
+            self.config = value
+            self.labels = load_detector_labels(value)
+            self.enabled = bool(
+                value.enabled
+                and (value.resolved_model_path() or value.resolved_coreml_model_path())
+            )
+
+        def role_settings(role: str) -> tuple[_InferenceWorker, dict[str, Any], bool]:
+            if role == "object":
+                return self._object, self._base_detector_status(), True
+            if role == "face":
+                return (
+                    self._face,
+                    self._base_face_status(),
+                    bool(self.config.face_recognition_enabled),
+                )
+            return (
+                self._reid,
+                self._base_reid_status(),
+                bool(self.config.tracking.appearance_reid_enabled),
+            )
+
+        apply_supervisor_config(next_config)
+        try:
+            for role in ("object", "face", "reid"):
+                if role not in roles:
+                    continue
+                worker, status, start_enabled = role_settings(role)
+                worker.reconfigure(
+                    next_config,
+                    status,
+                    start_enabled=start_enabled,
+                )
+                completed.append(role)
+            for role, worker in (
+                ("object", self._object),
+                ("face", self._face),
+                ("reid", self._reid),
+            ):
+                if role not in roles:
+                    worker.update_config_reference(next_config)
+        except BaseException:
+            apply_supervisor_config(previous_config)
+            for role in reversed(completed):
+                worker, status, start_enabled = role_settings(role)
+                try:
+                    worker.reconfigure(
+                        previous_config,
+                        status,
+                        start_enabled=start_enabled,
+                    )
+                except Exception:
+                    LOGGER.exception("failed to roll back %s inference role", role)
+            for role, worker in (
+                ("object", self._object),
+                ("face", self._face),
+                ("reid", self._reid),
+            ):
+                if role not in completed:
+                    worker.update_config_reference(previous_config)
+            raise
 
     def _base_face_status(self) -> dict[str, Any]:
         return {

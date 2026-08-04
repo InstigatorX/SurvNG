@@ -156,6 +156,25 @@ class ManagerLifecycleTest(unittest.TestCase):
         worker.start.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
 
+    def test_inference_reconfiguration_keeps_camera_capture_running(self) -> None:
+        manager = manager_with_mocks()
+        manager.detector.config = manager.config.detector
+        manager.face_recognizer = Mock()
+        manager.person_reidentifier = Mock()
+        next_detector = manager.config.detector.model_copy(deep=True)
+        next_detector.device = "GPU"
+
+        manager.reconfigure_inference(next_detector, {"object"})
+
+        manager.detector.reconfigure_roles.assert_called_once_with(
+            next_detector,
+            {"object"},
+        )
+        manager.faces.close.assert_not_called()
+        manager.workers["gate"].stop.assert_not_called()
+        manager.workers["gate"].start.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+
     def test_camera_state_fingerprint_includes_trigger_health_changes(self) -> None:
         status = {
             "id": "gate",

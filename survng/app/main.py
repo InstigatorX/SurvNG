@@ -750,9 +750,42 @@ TRACKING_SESSION_FIELDS = frozenset({
     "reid_max_age_seconds",
     "reid_max_embeddings_per_frame",
     "reid_refresh_interval_frames",
+    "reid_match_threshold",
+    "vehicle_reid_match_threshold",
+    "vehicle_reid_labels",
     "botsort_match_threshold",
     "botsort_proximity_threshold",
     "botsort_fuse_score",
+})
+DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({
+    "enabled",
+    "backend",
+    "model_path",
+    "model_xml",
+    "coreml_model_path",
+    "labels_path",
+    "device",
+    "nms_threshold",
+    "warmup_enabled",
+    "labels",
+})
+DETECTOR_FACE_ENGINE_FIELDS = frozenset({
+    "face_recognition_enabled",
+    "face_embedding_model_path",
+    "face_landmark_model_path",
+    "face_recognition_device",
+})
+DETECTOR_SHARED_ENGINE_FIELDS = frozenset({
+    "cache_enabled",
+    "cache_dir",
+})
+TRACKING_REID_ENGINE_FIELDS = frozenset({
+    "reid_enabled",
+    "reid_model_path",
+    "reid_device",
+    "vehicle_reid_enabled",
+    "vehicle_reid_model_path",
+    "vehicle_reid_device",
 })
 
 
@@ -773,13 +806,16 @@ def _manager_owned_config(config_value: AppConfig) -> dict:
         camera.pop("retention", None)
     payload["detector"] = _detector_without_fields(
         payload.get("detector", {}),
-        DETECTOR_HOT_POLICY_FIELDS,
+        DETECTOR_HOT_POLICY_FIELDS
+        | DETECTOR_OBJECT_ENGINE_FIELDS
+        | DETECTOR_FACE_ENGINE_FIELDS
+        | DETECTOR_SHARED_ENGINE_FIELDS,
     )
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
         payload["detector"]["tracking"] = _detector_without_fields(
             tracking,
-            TRACKING_SESSION_FIELDS,
+            TRACKING_SESSION_FIELDS | TRACKING_REID_ENGINE_FIELDS,
         )
     return payload
 
@@ -837,6 +873,36 @@ def apply_config_update(
             != getattr(effective_config.detector.tracking, field_name)
             for field_name in TRACKING_SESSION_FIELDS
         )
+        inference_roles: set[str] = set()
+        if any(
+            getattr(previous_config.detector, field_name)
+            != getattr(effective_config.detector, field_name)
+            for field_name in DETECTOR_OBJECT_ENGINE_FIELDS
+        ):
+            inference_roles.add("object")
+        if any(
+            getattr(previous_config.detector, field_name)
+            != getattr(effective_config.detector, field_name)
+            for field_name in DETECTOR_FACE_ENGINE_FIELDS
+        ):
+            inference_roles.add("face")
+        if any(
+            getattr(previous_config.detector, field_name)
+            != getattr(effective_config.detector, field_name)
+            for field_name in DETECTOR_SHARED_ENGINE_FIELDS
+        ):
+            inference_roles.update({"object", "face", "reid"})
+        if any(
+            getattr(previous_config.detector.tracking, field_name)
+            != getattr(effective_config.detector.tracking, field_name)
+            for field_name in TRACKING_REID_ENGINE_FIELDS
+        ):
+            inference_roles.add("reid")
+        reid_tracking_refresh = (
+            "reid" in inference_roles
+            and previous_config.detector.tracking
+            != effective_config.detector.tracking
+        )
         recorder_changes = [
             field_name
             for field_name in sorted(RECORDER_CONFIG_FIELDS)
@@ -855,7 +921,8 @@ def apply_config_update(
         retention_attempted = False
         image_storage_attempted = False
         detector_policy_attempted = False
-        tracking_session_attempted = False
+        tracking_session_applied = False
+        inference_applied = False
         try:
             if recorder_changes:
                 recorder_attempted = True
@@ -872,20 +939,30 @@ def apply_config_update(
             if image_storage_changed:
                 image_storage_attempted = True
                 manager.reconfigure_image_storage(effective_config.image_storage)
-            if tracking_session_changed:
-                tracking_session_attempted = True
+            if inference_roles:
+                manager.reconfigure_inference(effective_config.detector, inference_roles)
+                inference_applied = True
+            if tracking_session_changed and "reid" not in inference_roles:
                 manager.reconfigure_object_tracking(effective_config.detector)
+                tracking_session_applied = True
             if detector_policy_changed:
                 detector_policy_attempted = True
                 manager.reconfigure_detector_policy(effective_config.detector)
         except BaseException:
             manager.config = previous_config
-            if tracking_session_attempted:
+            if tracking_session_applied:
                 try:
                     manager.reconfigure_object_tracking(previous_config.detector)
                 except Exception:
                     logging.getLogger(__name__).exception(
                         "failed to roll back object tracking configuration"
+                    )
+            if inference_applied:
+                try:
+                    manager.reconfigure_inference(previous_config.detector, inference_roles)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back inference configuration"
                     )
             if detector_policy_attempted:
                 try:
@@ -940,8 +1017,13 @@ def apply_config_update(
             in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
             if changed
         ]
-        if tracking_session_changed:
+        if tracking_session_changed or reid_tracking_refresh:
             restarted.append("tracking_sessions")
+        restarted.extend(
+            f"{role}_inference"
+            for role in ("object", "face", "reid")
+            if role in inference_roles
+        )
         hot_updated = changes + recorder_changes
         if detector_policy_changed:
             hot_updated.append("detector_policy")

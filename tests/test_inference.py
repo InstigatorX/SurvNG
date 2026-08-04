@@ -72,6 +72,60 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertIs(self.supervisor._face.config, self.supervisor.config)
         self.assertIs(self.supervisor._reid.config, self.supervisor.config)
 
+    def test_role_reconfiguration_restarts_only_selected_worker(self) -> None:
+        updated = DetectorConfig(enabled=False, device="GPU")
+
+        with (
+            patch.object(self.supervisor._object, "reconfigure") as object_reconfigure,
+            patch.object(self.supervisor._face, "reconfigure") as face_reconfigure,
+            patch.object(self.supervisor._reid, "reconfigure") as reid_reconfigure,
+        ):
+            self.supervisor.reconfigure_roles(updated, {"object"})
+
+        object_reconfigure.assert_called_once()
+        face_reconfigure.assert_not_called()
+        reid_reconfigure.assert_not_called()
+        self.assertEqual(self.supervisor.config.device, "GPU")
+        self.assertIs(self.supervisor._face.config, self.supervisor.config)
+        self.assertIs(self.supervisor._reid.config, self.supervisor.config)
+
+    def test_object_role_reconfiguration_replaces_live_worker_process(self) -> None:
+        self.assertTrue(self.supervisor.start())
+        previous_pid = self.supervisor.isolation_status()["worker_pid"]
+        updated = DetectorConfig(enabled=False, nms_threshold=0.51)
+
+        self.supervisor.reconfigure_roles(updated, {"object"})
+
+        status = self.supervisor.isolation_status()
+        self.assertTrue(status["worker_alive"])
+        self.assertNotEqual(status["worker_pid"], previous_pid)
+        self.assertEqual(self.supervisor.config.nms_threshold, 0.51)
+
+    def test_multi_role_reconfiguration_rolls_back_completed_roles(self) -> None:
+        previous = self.supervisor.config.model_copy(deep=True)
+        updated = DetectorConfig(enabled=False, cache_dir="/tmp/new-cache")
+
+        with (
+            patch.object(self.supervisor._object, "reconfigure") as object_reconfigure,
+            patch.object(
+                self.supervisor._face,
+                "reconfigure",
+                side_effect=RuntimeError("face restart failed"),
+            ) as face_reconfigure,
+            patch.object(self.supervisor._reid, "reconfigure") as reid_reconfigure,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "face restart failed"):
+                self.supervisor.reconfigure_roles(
+                    updated,
+                    {"object", "face", "reid"},
+                )
+
+        self.assertEqual(object_reconfigure.call_count, 2)
+        self.assertEqual(object_reconfigure.call_args_list[-1].args[0], previous)
+        face_reconfigure.assert_called_once()
+        reid_reconfigure.assert_not_called()
+        self.assertEqual(self.supervisor.config, previous)
+
     def test_worker_restarts_after_native_style_process_death(self) -> None:
         self.assertTrue(self.supervisor.start())
         first_pid = self.supervisor.isolation_status()["worker_pid"]

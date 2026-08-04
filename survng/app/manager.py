@@ -952,6 +952,55 @@ class AppManager:
                 self._object_tracking_limiter = previous_limiter
                 raise
 
+    def reconfigure_inference(
+        self,
+        config: DetectorConfig,
+        roles: set[str],
+    ) -> None:
+        """Restart selected inference roles without restarting camera workers."""
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            previous_config = self.detector.config.model_copy(deep=True)
+            face_role = "face" in roles
+            reid_role = "reid" in roles
+            refresh_tracking = (
+                reid_role and previous_config.tracking != config.tracking
+            )
+            inference_applied = False
+            tracking_applied = False
+            if face_role:
+                self.faces.close()
+            try:
+                self.detector.reconfigure_roles(config, roles)
+                inference_applied = True
+                self.face_recognizer.config = self.detector.config
+                self.person_reidentifier.config = self.detector.config.tracking
+                if refresh_tracking:
+                    self.reconfigure_object_tracking(config)
+                    tracking_applied = True
+                if face_role:
+                    self.faces.start()
+            except BaseException:
+                if tracking_applied:
+                    try:
+                        self.reconfigure_object_tracking(previous_config)
+                    except Exception:
+                        LOGGER.exception("failed to roll back ReID tracking sessions")
+                if inference_applied:
+                    try:
+                        self.detector.reconfigure_roles(previous_config, roles)
+                    except Exception:
+                        LOGGER.exception("failed to roll back inference roles")
+                self.face_recognizer.config = self.detector.config
+                self.person_reidentifier.config = self.detector.config.tracking
+                if face_role:
+                    try:
+                        self.faces.start()
+                    except Exception:
+                        LOGGER.exception("failed to restore face recognition queue")
+                raise
+
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([
             {

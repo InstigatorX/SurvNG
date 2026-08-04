@@ -294,7 +294,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIn("detector_policy", result["hot_updated"])
         self.assertFalse(result["camera_workers_restarted"])
 
-    def test_detector_engine_change_still_uses_full_manager_reload(self) -> None:
+    def test_detector_engine_change_restarts_only_object_inference(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -302,15 +302,20 @@ class ConfigReloadTest(unittest.TestCase):
         main.manager = active
         incoming = current.model_copy(deep=True)
         incoming.detector.device = "GPU"
-        effective = incoming.model_copy(deep=True)
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
 
-        with patch("survng.app.main.reload_manager", return_value=effective) as reload:
-            result_config, result = main.apply_config_update(incoming)
-
-        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        reload.assert_not_called()
+        active.reconfigure_inference.assert_called_once_with(
+            effective.detector,
+            {"object"},
+        )
         active.reconfigure_detector_policy.assert_not_called()
-        self.assertIs(result_config, effective)
-        self.assertTrue(result["camera_workers_restarted"])
+        self.assertEqual(result["subsystems_restarted"], ["object_inference"])
+        self.assertFalse(result["camera_workers_restarted"])
 
     def test_tracking_session_change_rebuilds_only_tracking_sessions(self) -> None:
         active = Mock()
@@ -335,7 +340,7 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["tracking_sessions"])
         self.assertFalse(result["camera_workers_restarted"])
 
-    def test_tracking_engine_change_still_uses_full_manager_reload(self) -> None:
+    def test_tracking_engine_change_restarts_reid_and_tracking_sessions(self) -> None:
         active = Mock()
         current = AppConfig()
         active.config = current
@@ -343,14 +348,54 @@ class ConfigReloadTest(unittest.TestCase):
         main.manager = active
         incoming = current.model_copy(deep=True)
         incoming.detector.tracking.reid_device = "GPU"
-        effective = incoming.model_copy(deep=True)
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
 
-        with patch("survng.app.main.reload_manager", return_value=effective) as reload:
-            _result_config, result = main.apply_config_update(incoming)
-
-        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        reload.assert_not_called()
+        active.reconfigure_inference.assert_called_once_with(
+            effective.detector,
+            {"reid"},
+        )
         active.reconfigure_object_tracking.assert_not_called()
-        self.assertTrue(result["camera_workers_restarted"])
+        self.assertEqual(
+            result["subsystems_restarted"],
+            ["tracking_sessions", "reid_inference"],
+        )
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_shared_inference_cache_change_restarts_all_inference_roles(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.cache_dir = "/tmp/new-openvino-cache"
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_inference.assert_called_once_with(
+            effective.detector,
+            {"object", "face", "reid"},
+        )
+        self.assertEqual(result["apply_mode"], "targeted")
+        self.assertEqual(
+            result["subsystems_restarted"],
+            [
+                "object_inference",
+                "face_inference",
+                "reid_inference",
+            ],
+        )
+        self.assertFalse(result["camera_workers_restarted"])
 
     def test_failed_tracking_session_apply_rolls_back_runtime(self) -> None:
         active = Mock()
@@ -369,10 +414,7 @@ class ConfigReloadTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "tracking failed"):
                 main.apply_config_update(incoming)
 
-        self.assertEqual(active.reconfigure_object_tracking.call_args_list, [
-            unittest.mock.call(incoming.detector),
-            unittest.mock.call(current.detector),
-        ])
+        active.reconfigure_object_tracking.assert_called_once_with(incoming.detector)
         self.assertEqual(save.call_count, 2)
         self.assertIs(main.config, current)
         self.assertIs(active.config, current)
