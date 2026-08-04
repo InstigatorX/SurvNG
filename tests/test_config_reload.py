@@ -269,6 +269,71 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_detector_policy_change_hot_applies_without_restarting_cameras(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.confidence_threshold = 0.61
+        incoming.detector.event_confirmation_frames = 3
+        incoming.detector.event_class_confidence_thresholds = {"car": 0.7}
+        incoming.detector.face_match_threshold = 0.55
+        incoming.detector.face_max_observations = 1500
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_detector_policy.assert_called_once_with(effective.detector)
+        self.assertEqual(result["apply_mode"], "hot")
+        self.assertIn("detector_policy", result["hot_updated"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_detector_engine_change_still_uses_full_manager_reload(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.device = "GPU"
+        effective = incoming.model_copy(deep=True)
+
+        with patch("survng.app.main.reload_manager", return_value=effective) as reload:
+            result_config, result = main.apply_config_update(incoming)
+
+        reload.assert_called_once_with(effective, assign_ids=False, persist=True)
+        active.reconfigure_detector_policy.assert_not_called()
+        self.assertIs(result_config, effective)
+        self.assertTrue(result["camera_workers_restarted"])
+
+    def test_failed_detector_policy_hot_apply_rolls_back_runtime_and_persistence(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.require_incident_zone = False
+        active.reconfigure_detector_policy.side_effect = [RuntimeError("policy failed"), None]
+
+        with patch("survng.app.main.save_config") as save:
+            with self.assertRaisesRegex(RuntimeError, "policy failed"):
+                main.apply_config_update(incoming)
+
+        self.assertEqual(active.reconfigure_detector_policy.call_args_list, [
+            unittest.mock.call(incoming.detector),
+            unittest.mock.call(current.detector),
+        ])
+        self.assertEqual(save.call_count, 2)
+        self.assertIs(main.config, current)
+        self.assertIs(active.config, current)
+
     def test_mqtt_change_restarts_only_mqtt(self) -> None:
         active = Mock()
         current = AppConfig()

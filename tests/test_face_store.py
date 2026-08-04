@@ -8,7 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -18,6 +18,27 @@ from survng.app.inference import InferenceUnavailable
 
 
 class FaceStoreTest(unittest.TestCase):
+    def test_observation_limit_reconfigures_and_prunes_without_restarting_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), max_observations=100)
+            with patch.object(store, "_prune_locked", return_value=4) as prune:
+                removed = store.reconfigure_max_observations(500)
+
+            self.assertEqual(removed, 4)
+            self.assertEqual(store.max_observations, 500)
+            prune.assert_called_once()
+
+    def test_failed_observation_limit_reconfiguration_restores_previous_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), max_observations=250)
+            with (
+                patch.object(store, "_prune_locked", side_effect=sqlite3.OperationalError("busy")),
+                self.assertRaisesRegex(sqlite3.OperationalError, "busy"),
+            ):
+                store.reconfigure_max_observations(500)
+
+            self.assertEqual(store.max_observations, 250)
+
     def test_database_can_be_local_while_snapshots_remain_in_media_storage(self) -> None:
         with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryDirectory() as database:
             store = FaceStore(

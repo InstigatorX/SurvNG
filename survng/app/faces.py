@@ -82,6 +82,18 @@ class FaceStore:
         except Exception:
             LOGGER.exception("Could not restore pending face recognition work")
 
+    def reconfigure_max_observations(self, max_observations: int) -> int:
+        """Apply a new history limit and prune transactionally without stopping recognition."""
+        next_limit = max(100, int(max_observations))
+        with self._lock, self._connect() as connection:
+            previous_limit = self.max_observations
+            self.max_observations = next_limit
+            try:
+                return self._prune_locked(connection)
+            except BaseException:
+                self.max_observations = previous_limit
+                raise
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=10)
         connection.row_factory = sqlite3.Row

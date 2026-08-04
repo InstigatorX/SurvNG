@@ -722,6 +722,25 @@ RECORDER_CONFIG_FIELDS = frozenset({
     "hardware_acceleration",
     "recording_segment_seconds",
 })
+DETECTOR_HOT_POLICY_FIELDS = frozenset({
+    "confidence_threshold",
+    "event_confirmation_frames",
+    "event_class_confirmation_frames",
+    "event_class_confidence_thresholds",
+    "require_incident_zone",
+    "face_max_observations",
+    "face_match_threshold",
+    "face_min_size",
+    "face_max_references",
+})
+
+
+def _detector_without_fields(detector: dict, fields: frozenset[str]) -> dict:
+    return {
+        key: value
+        for key, value in detector.items()
+        if key not in fields
+    }
 
 
 def _manager_owned_config(config_value: AppConfig) -> dict:
@@ -731,6 +750,10 @@ def _manager_owned_config(config_value: AppConfig) -> dict:
         payload.pop(field_name, None)
     for camera in payload.get("cameras", []):
         camera.pop("retention", None)
+    payload["detector"] = _detector_without_fields(
+        payload.get("detector", {}),
+        DETECTOR_HOT_POLICY_FIELDS,
+    )
     return payload
 
 
@@ -777,6 +800,11 @@ def apply_config_update(
         mqtt_changed = previous_config.mqtt != effective_config.mqtt
         retention_changed = "retention" in changes
         image_storage_changed = "image_storage" in changes
+        detector_policy_changed = any(
+            getattr(previous_config.detector, field_name)
+            != getattr(effective_config.detector, field_name)
+            for field_name in DETECTOR_HOT_POLICY_FIELDS
+        )
         recorder_changes = [
             field_name
             for field_name in sorted(RECORDER_CONFIG_FIELDS)
@@ -794,6 +822,7 @@ def apply_config_update(
         mqtt_attempted = False
         retention_attempted = False
         image_storage_attempted = False
+        detector_policy_attempted = False
         try:
             if recorder_changes:
                 recorder_attempted = True
@@ -810,8 +839,18 @@ def apply_config_update(
             if image_storage_changed:
                 image_storage_attempted = True
                 manager.reconfigure_image_storage(effective_config.image_storage)
+            if detector_policy_changed:
+                detector_policy_attempted = True
+                manager.reconfigure_detector_policy(effective_config.detector)
         except BaseException:
             manager.config = previous_config
+            if detector_policy_attempted:
+                try:
+                    manager.reconfigure_detector_policy(previous_config.detector)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to roll back detector policy configuration"
+                    )
             if image_storage_attempted:
                 try:
                     manager.reconfigure_image_storage(previous_config.image_storage)
@@ -858,11 +897,14 @@ def apply_config_update(
             in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
             if changed
         ]
+        hot_updated = changes + recorder_changes
+        if detector_policy_changed:
+            hot_updated.append("detector_policy")
         return effective_config, {
-            "apply_mode": "targeted" if restarted else "hot" if changes else "unchanged",
+            "apply_mode": "targeted" if restarted else "hot" if hot_updated else "unchanged",
             "camera_workers_restarted": False,
             "subsystems_restarted": restarted,
-            "hot_updated": changes + recorder_changes,
+            "hot_updated": hot_updated,
         }
 
 

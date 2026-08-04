@@ -304,6 +304,11 @@ class _InferenceWorker:
             return next(iter(devices)) if len(devices) == 1 else "AUTO"
         return self.config.device
 
+    def update_config_reference(self, config: DetectorConfig) -> None:
+        """Update configuration used by status and any future worker respawn."""
+        with self._lock:
+            self.config = config
+
     def start(self) -> bool:
         if not self.start_enabled:
             return True
@@ -730,6 +735,21 @@ class InferenceSupervisor:
                 "stages": {"last_ms": {}, "average_ms": {}},
             },
         }
+
+    def update_runtime_config(self, config: DetectorConfig) -> None:
+        """Hot-swap policy data without restarting active inference workers."""
+        next_config = config.model_copy(deep=True)
+        for worker in (self._object, self._face, self._reid):
+            worker.update_config_reference(next_config)
+        self.config = next_config
+        self.labels = load_detector_labels(next_config)
+        self.enabled = bool(
+            next_config.enabled
+            and (
+                next_config.resolved_model_path()
+                or next_config.resolved_coreml_model_path()
+            )
+        )
 
     def _base_face_status(self) -> dict[str, Any]:
         return {

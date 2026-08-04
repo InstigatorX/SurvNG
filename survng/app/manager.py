@@ -15,6 +15,7 @@ from .config import (
     AppConfig,
     CameraConfig,
     CameraMotionQualificationConfig,
+    DetectorConfig,
     DetectionZone,
     ImageStorageConfig,
     MqttConfig,
@@ -893,6 +894,12 @@ class AppManager:
 
     def reconfigure_image_storage(self, config: ImageStorageConfig) -> None:
         self.image_writer.reconfigure(config)
+
+    def reconfigure_detector_policy(self, config: DetectorConfig) -> None:
+        """Apply policy-only detector settings without disturbing camera workers."""
+        self.detector.update_runtime_config(config)
+        self.face_recognizer.config = self.detector.config
+        self.faces.reconfigure_max_observations(config.face_max_observations)
 
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([

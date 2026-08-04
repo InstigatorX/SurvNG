@@ -55,6 +55,23 @@ class InferenceSupervisorTest(unittest.TestCase):
         result = self.supervisor.detect(np.zeros((24, 32, 3), dtype=np.uint8))
         self.assertEqual(result, [{"status": "detector_unavailable"}])
 
+    def test_runtime_config_update_reaches_supervisor_and_future_worker_respawns(self) -> None:
+        updated = DetectorConfig(
+            enabled=False,
+            confidence_threshold=0.67,
+            event_confirmation_frames=3,
+            face_match_threshold=0.52,
+        )
+
+        self.supervisor.update_runtime_config(updated)
+
+        self.assertEqual(self.supervisor.config.confidence_threshold, 0.67)
+        self.assertEqual(self.supervisor.config.event_confirmation_frames, 3)
+        self.assertEqual(self.supervisor.config.face_match_threshold, 0.52)
+        self.assertIs(self.supervisor._object.config, self.supervisor.config)
+        self.assertIs(self.supervisor._face.config, self.supervisor.config)
+        self.assertIs(self.supervisor._reid.config, self.supervisor.config)
+
     def test_worker_restarts_after_native_style_process_death(self) -> None:
         self.assertTrue(self.supervisor.start())
         first_pid = self.supervisor.isolation_status()["worker_pid"]
