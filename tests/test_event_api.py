@@ -230,6 +230,14 @@ class EventApiSerializationTest(unittest.TestCase):
                     tracking_capacity_activity=Mock(return_value=[]),
                 ),
                 detector_status=Mock(return_value={"runtime": {"total_inferences": 8}}),
+                semantic_search_status=Mock(return_value={
+                    "enabled": True,
+                    "state": "ready",
+                    "device": "GPU",
+                    "event_count": 120,
+                    "evidence_count": 245,
+                    "queue_depth": 2,
+                }),
                 statuses=Mock(return_value=[{
                     "id": "gate",
                     "name": "Gate",
@@ -277,6 +285,8 @@ class EventApiSerializationTest(unittest.TestCase):
                 payload = main.telemetry(hours=24, camera_id="gate")
 
             self.assertEqual(payload["activity"], activity)
+            self.assertEqual(payload["semantic_search"]["state"], "ready")
+            self.assertEqual(payload["semantic_search"]["event_count"], 120)
             self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
             self.assertEqual(payload["cameras"][0]["onvif"]["notifications"], 12)
             self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)
@@ -1166,6 +1176,8 @@ class EventApiSerializationTest(unittest.TestCase):
                 "label": "person",
                 "confidence": 0.9,
                 "box": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+                "detection_frame_width": 2560,
+                "detection_frame_height": 1920,
                 "zones": ["yard"],
                 "mask_polygon": [[1, 2], [3, 4]],
                 "incident_eligible": True,
@@ -1191,6 +1203,8 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(payload["objects"][0]["label"], "person")
         self.assertEqual(payload["objects"][0]["zones"], ["yard"])
         self.assertEqual(payload["objects"][0]["track_id"], 3)
+        self.assertEqual(payload["objects"][0]["detection_frame_width"], 2560)
+        self.assertEqual(payload["objects"][0]["detection_frame_height"], 1920)
         self.assertEqual(payload["objects"][0]["temporal_observations"], 3)
         self.assertEqual(payload["objects"][0]["temporal_incident_observations"], 2)
         self.assertEqual(payload["objects"][0]["temporal_sample_offset_seconds"], 0.5)

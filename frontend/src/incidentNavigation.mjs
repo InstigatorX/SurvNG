@@ -3,6 +3,22 @@ function sameEventId(left, right) {
   return String(left) === String(right);
 }
 
+export function incidentDetectionFrameSize(event) {
+  const trackedWidth = Number(event?.object_tracking?.frame_width);
+  const trackedHeight = Number(event?.object_tracking?.frame_height);
+  if (trackedWidth > 0 && trackedHeight > 0) {
+    return { width: trackedWidth, height: trackedHeight };
+  }
+  const detected = (Array.isArray(event?.objects) ? event.objects : []).find((object) => (
+    Number(object?.detection_frame_width) > 0
+    && Number(object?.detection_frame_height) > 0
+  ));
+  return detected ? {
+    width: Number(detected.detection_frame_width),
+    height: Number(detected.detection_frame_height),
+  } : null;
+}
+
 function incidentRecencyEpoch(incident) {
   for (const value of [
     incident?.last_epoch,

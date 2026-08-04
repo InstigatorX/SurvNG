@@ -120,6 +120,8 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(detector.requested_threshold, 0.3)
         self.assertFalse(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["confidence_threshold"], 0.7)
+        self.assertEqual(objects[0]["detection_frame_width"], 30)
+        self.assertEqual(objects[0]["detection_frame_height"], 20)
         self.assertTrue(objects[1]["incident_eligible"])
         self.assertEqual(objects[1]["confidence_threshold"], 0.3)
 

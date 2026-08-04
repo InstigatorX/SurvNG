@@ -2338,6 +2338,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     usage = shutil.disk_usage(storage_path)
     camera_statuses = manager.statuses()
     detector = manager.detector_status()
+    semantic_search = manager.semantic_search_status()
     gpu = _gpu_status(detector)
     activity = manager.events.telemetry_activity(hours=hours)
     selected_camera_id = str(camera_id or "").strip()[:128]
@@ -2462,6 +2463,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             "database": {"path": str(manager.database_dir), "bytes": _database_bytes()},
         },
         "detector": detector,
+        "semantic_search": semantic_search,
         "gpu": gpu,
         "history": history,
         "runtime_history": runtime_history,
@@ -6144,6 +6146,8 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
         detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
         detected_object["detection_source"] = "manual_openvino"
         detected_object["manual_confidence_threshold"] = safe_confidence
+        detected_object["detection_frame_width"] = int(frame.shape[1])
+        detected_object["detection_frame_height"] = int(frame.shape[0])
     persisted_event = active_manager.events.replace_detected_objects(
         event_id,
         objects_to_json(objects),
@@ -8132,6 +8136,8 @@ def _incident_event_payload(event: dict) -> dict:
                 "box",
                 "zones",
                 "mask_polygon",
+                "detection_frame_width",
+                "detection_frame_height",
                 "incident_eligible",
                 "temporal_consensus",
                 "temporal_sample_offset_seconds",
@@ -8184,6 +8190,8 @@ def _incident_list_payload(incident: dict) -> dict:
                     "box",
                     "zones",
                     "mask_polygon",
+                    "detection_frame_width",
+                    "detection_frame_height",
                     "incident_eligible",
                     "track_id",
                     "track_state",

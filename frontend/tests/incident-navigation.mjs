@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -30,6 +30,14 @@ assert.equal(incidentObjectIconName("person"), "person");
 assert.equal(incidentObjectIconName("robot lawnmower"), "mower");
 assert.equal(incidentObjectIconName("motorcycle"), "bike");
 assert.equal(incidentObjectIconName("custom_class"), "object");
+assert.deepEqual(incidentDetectionFrameSize({
+  objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
+}), { width: 2560, height: 1920 });
+assert.deepEqual(incidentDetectionFrameSize({
+  object_tracking: { frame_width: 1280, frame_height: 720 },
+  objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
+}), { width: 1280, height: 720 });
+assert.equal(incidentDetectionFrameSize({ objects: [{}] }), null);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 8);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 12);
 assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 2);

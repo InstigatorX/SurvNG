@@ -561,11 +561,16 @@ class RecordedMotionObjectDetector:
             class_thresholds,
         )
         objects = self.detector.detect(frame, confidence_threshold=threshold)
+        frame_height, frame_width = frame.shape[:2]
+        for detected in objects:
+            if isinstance(detected, dict) and detected.get("label"):
+                detected["detection_frame_width"] = int(frame_width)
+                detected["detection_frame_height"] = int(frame_height)
         apply_detection_zones(
             self.camera,
             objects,
-            int(frame.shape[1]),
-            int(frame.shape[0]),
+            int(frame_width),
+            int(frame_height),
             configured_threshold,
             bool(getattr(self.detector.config, "require_incident_zone", True)),
             class_thresholds,

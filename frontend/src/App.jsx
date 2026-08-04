@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -91,7 +91,8 @@ import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } 
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -1917,7 +1918,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
 }
 
 function LiveCameraOverlay({ camera, timeZone, onClose }) {
-  const [source, setSource] = useStoredState(`survng.liveOverlaySource.${camera.id}`, "live");
+  const [source, setSource] = useStoredState(
+    `survng.liveOverlaySource.${camera.id}`,
+    preferredStreamSource(),
+  );
   const [mediaReady, setMediaReady] = useState(false);
   const [transport, setTransport] = useState("webrtc");
   const activeSource = source === "main" ? "main" : "live";
@@ -2117,9 +2121,11 @@ function objectBoxes(event, incidentEligibleOnly = false) {
 function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
+  const coordinateSize = incidentDetectionFrameSize(event);
   const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}`;
   const frameRef = useRef(null);
-  const [imageSize, setImageSize] = useState(null);
+  const [imageSize, setImageSize] = useState(() => coordinateSize);
+  const [imageReady, setImageReady] = useState(false);
   const [frameSize, setFrameSize] = useState(null);
   const [objectFocused, setObjectFocused] = useState(false);
   const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
@@ -2139,12 +2145,13 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   }, [frameSize, imageSize]);
   const canFocus = allowObjectFocus && showAnnotations && boxes.length > 0 && renderedImage;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setObjectFocused(false);
-    setImageSize(null);
-  }, [event?.id, event?.snapshot_path]);
+    setImageSize(coordinateSize);
+    setImageReady(false);
+  }, [event?.id, event?.snapshot_path, coordinateSize?.height, coordinateSize?.width]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const frame = frameRef.current;
     if (!frame) return undefined;
     function updateFrameSize() {
@@ -2157,11 +2164,16 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     return () => observer.disconnect();
   }, []);
 
+  useLayoutEffect(() => {
+    if (coordinateSize) onImageSize?.(coordinateSize);
+  }, [coordinateSize?.height, coordinateSize?.width]);
+
   function onImageLoad(loadEvent) {
     const image = loadEvent.currentTarget;
     if (image.naturalWidth && image.naturalHeight) {
       const size = { width: image.naturalWidth, height: image.naturalHeight };
       setImageSize(size);
+      setImageReady(true);
       onImageSize?.(size);
     }
   }
@@ -2177,8 +2189,8 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
 
   const renderedBoxes = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
-    const sourceWidth = Number(event?.object_tracking?.frame_width) || imageSize?.width;
-    const sourceHeight = Number(event?.object_tracking?.frame_height) || imageSize?.height;
+    const sourceWidth = coordinateSize?.width || imageSize?.width;
+    const sourceHeight = coordinateSize?.height || imageSize?.height;
     if (!sourceWidth || !sourceHeight) return [];
     const scaleX = renderedImage.width / sourceWidth;
     const scaleY = renderedImage.height / sourceHeight;
@@ -2190,12 +2202,12 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
       height: (box.y2 - box.y1) * scaleY,
       maskPoints: box.maskPolygon.map(([x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
     })).filter((box) => box.width > 0 && box.height > 0);
-  }, [boxes, event?.object_tracking?.frame_height, event?.object_tracking?.frame_width, frameSize, imageSize, renderedImage]);
+  }, [boxes, coordinateSize?.height, coordinateSize?.width, frameSize, imageSize, renderedImage]);
 
   const renderedTracks = useMemo(() => {
     if (!renderedImage || !frameSize) return [];
-    const sourceWidth = Number(event?.object_tracking?.frame_width) || imageSize?.width;
-    const sourceHeight = Number(event?.object_tracking?.frame_height) || imageSize?.height;
+    const sourceWidth = coordinateSize?.width || imageSize?.width;
+    const sourceHeight = coordinateSize?.height || imageSize?.height;
     if (!sourceWidth || !sourceHeight) return [];
     const scaleX = renderedImage.width / sourceWidth;
     const scaleY = renderedImage.height / sourceHeight;
@@ -2207,7 +2219,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
       height: (track.y2 - track.y1) * scaleY,
       pathPoints: track.trajectory.map(([, x, y]) => `${renderedImage.x + x * scaleX},${renderedImage.y + y * scaleY}`).join(" "),
     })).filter((track) => track.width > 0 && track.height > 0);
-  }, [event?.object_tracking?.frame_height, event?.object_tracking?.frame_width, frameSize, imageSize, renderedImage, tracks]);
+  }, [coordinateSize?.height, coordinateSize?.width, frameSize, imageSize, renderedImage, tracks]);
 
   const focusStyle = useMemo(() => {
     if (!canFocus || !frameSize || !renderedBoxes.length) return null;
@@ -2275,7 +2287,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
             </div>
           ) : <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={onImageLoad} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
-        {showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
+        {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
             <svg className="object-mask-layer" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none">
               {renderedBoxes.filter((box) => box.maskPoints).map((box, index) => (
@@ -2293,7 +2305,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
             ))}
           </div>
         ) : null}
-        {showTracking && renderedTracks.length ? (
+        {imageReady && showTracking && renderedTracks.length ? (
           <div className="object-track-layer" aria-hidden="true">
             <svg viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="none" aria-hidden="true">
               {renderedTracks.map((track) => (
@@ -3109,7 +3121,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
   const [trackingVerdictLoading, setTrackingVerdictLoading] = useState(false);
   const [analysisToolsOpen, setAnalysisToolsOpen] = useState(false);
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
-  const [mediaSize, setMediaSize] = useState(null);
+  const [mediaSize, setMediaSize] = useState(() => incidentDetectionFrameSize(event));
   const [fullSnapshotRequested, setFullSnapshotRequested] = useState(false);
   const zoomRef = useRef(zoom);
   const [manualConfidence, setManualConfidence] = useStoredState("survng.manualDetectionConfidence.v1", "0.35");
@@ -3393,9 +3405,9 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     setZoom(reset);
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     resetZoom();
-    setMediaSize(null);
+    setMediaSize(incidentDetectionFrameSize(trackingEvent));
     setFullSnapshotRequested(false);
     setDetectionDebug(false);
     setDetectionDebugStats(null);
@@ -4967,13 +4979,28 @@ function RecordingCameraRail({ subtitle, children }) {
 
 function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
   const initialQuery = useMemo(() => new URLSearchParams(window.location.search), []);
+  const localStorage = useMemo(() => browserStorage(window), []);
+  const sessionStorage = useMemo(() => {
+    try { return window.sessionStorage; } catch { return null; }
+  }, []);
+  const initialQueryText = initialQuery.get("q") || "";
+  const initialCameraId = initialQuery.get("camera") || "";
+  const restoredSearch = useMemo(
+    () => readSemanticSearchSession(sessionStorage, initialQueryText, initialCameraId),
+    [initialCameraId, initialQueryText, sessionStorage],
+  );
   const [cameras, setCameras] = useState([]);
-  const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
-  const [query, setQuery] = useState(initialQuery.get("q") || "");
-  const [results, setResults] = useState([]);
+  const [cameraId, setCameraId] = useState(initialCameraId);
+  const [query, setQuery] = useState(initialQueryText);
+  const [results, setResults] = useState(() => restoredSearch?.results || []);
+  const [searchHistory, setSearchHistory] = useState(() => readSemanticSearchHistory(localStorage));
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const visibleResults = useMemo(
+    () => semanticSearchResultsForCamera(results, cameraId),
+    [cameraId, results],
+  );
 
   useEffect(() => {
     Promise.all([fetch("/api/cameras").then((r) => r.json()), fetch("/api/semantic-search/status").then((r) => r.json())])
@@ -4984,42 +5011,83 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     onAssistantContextChange?.({ page: "recordings", camera_id: cameraId, filters: { semantic_query: query } });
   }, [cameraId, onAssistantContextChange, query]);
 
-  async function runSearch(event) {
+  async function runSearch(event, requestedQuery = query, requestedCameraId = cameraId) {
     event?.preventDefault();
-    if (!query.trim()) return;
+    const searchQuery = String(requestedQuery || "").trim();
+    const searchCameraId = String(requestedCameraId || "");
+    if (!searchQuery) return;
+    setQuery(searchQuery);
+    setCameraId(searchCameraId);
     setLoading(true); setError("");
     try {
       const response = await fetch("/api/semantic-search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: query.trim(), camera_ids: cameraId ? [cameraId] : [], limit: 100 }),
+        body: JSON.stringify({ query: searchQuery, camera_ids: searchCameraId ? [searchCameraId] : [], limit: 100 }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Smart Search failed.");
-      setResults(payload.results || []);
-      const params = new URLSearchParams({ q: query.trim() });
-      if (cameraId) params.set("camera", cameraId);
+      const nextResults = payload.results || [];
+      setResults(nextResults);
+      writeSemanticSearchSession(sessionStorage, { query: searchQuery, cameraId: searchCameraId, results: nextResults });
+      setSearchHistory((current) => {
+        const next = addSemanticSearchHistory(current, {
+          query: searchQuery,
+          cameraId: searchCameraId,
+          searchedAt: new Date().toISOString(),
+        });
+        writeSemanticSearchHistory(localStorage, next);
+        return next;
+      });
+      const params = new URLSearchParams({ q: searchQuery });
+      if (searchCameraId) params.set("camera", searchCameraId);
       window.history.replaceState(null, "", appUrl(`/recordings/search?${params.toString()}`));
     } catch (reason) { setError(reason.message || "Smart Search failed."); }
     finally { setLoading(false); }
   }
 
+  function resetSearch() {
+    setQuery("");
+    setCameraId("");
+    setResults([]);
+    setError("");
+    clearSemanticSearchSession(sessionStorage);
+    window.history.replaceState(null, "", appUrl("/recordings/search"));
+  }
+
+  function selectCamera(nextCameraId) {
+    const selectedCameraId = String(nextCameraId || "");
+    setCameraId(selectedCameraId);
+    if (!query.trim()) return;
+    writeSemanticSearchSession(sessionStorage, { query: query.trim(), cameraId: selectedCameraId, results });
+    const params = new URLSearchParams({ q: query.trim() });
+    if (selectedCameraId) params.set("camera", selectedCameraId);
+    window.history.replaceState(null, "", appUrl(`/recordings/search?${params.toString()}`));
+  }
+
   return <main className="recordings-v2-page semantic-search-page">
     <nav className="recordings-tabs"><RecordingSectionSwitcher mode="search" cameraId={cameraId} /></nav>
     <RecordingCameraRail subtitle="Filter search results">
-      <button type="button" className={!cameraId ? "active" : ""} onClick={() => setCameraId("")}><Search size={16} /><span>All cameras</span><i /></button>
-      {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => setCameraId(camera.id)}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
+      <button type="button" className={!cameraId ? "active" : ""} onClick={() => selectCamera("")}><Search size={16} /><span>All cameras</span><i /></button>
+      {cameras.map((camera) => <button type="button" key={camera.id} className={cameraId === camera.id ? "active" : ""} onClick={() => selectCamera(camera.id)}><Camera size={16} /><span>{camera.name}</span><i className={camera.running ? "online" : ""} /></button>)}
     </RecordingCameraRail>
     <section className="semantic-search-workspace">
       <header><div><h2>Smart Search</h2><p>Describe what you remember. SurvNG searches locally indexed incident images.</p></div><span className={`semantic-status ${status?.state || ""}`}>{status?.state === "ready" ? `${Number(status.event_count || 0).toLocaleString()} incidents indexed` : status?.state || "Loading"}</span></header>
-      <form onSubmit={runSearch}><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Try “person in a red jacket” or “white delivery truck”' /><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></form>
+      <form onSubmit={runSearch}><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder='Try “person in a red jacket” or “white delivery truck”' /><div className="semantic-search-actions"><button type="button" className="secondary" onClick={resetSearch} disabled={loading || (!query && !cameraId && !results.length && !error)}>Reset</button><button type="submit" disabled={loading || !query.trim()}>{loading ? "Searching…" : "Search"}</button></div></form>
+      {searchHistory.length ? <div className="semantic-search-history" aria-label="Recent Smart Search history">
+        <span><Clock3 size={14} />Recent</span>
+        <div>{searchHistory.map((item) => {
+          const cameraName = item.cameraId ? cameras.find((camera) => camera.id === item.cameraId)?.name || item.cameraId : "All cameras";
+          return <button type="button" key={`${item.query.toLocaleLowerCase()}-${item.cameraId}`} onClick={() => void runSearch(null, item.query, item.cameraId)} disabled={loading} title={`Search ${cameraName}`}><strong>{item.query}</strong><small>{cameraName}</small></button>;
+        })}</div>
+      </div> : null}
       {error ? <div className="semantic-search-error"><CircleAlert size={17} />{error}</div> : null}
       <div className="semantic-search-results">
-        {results.map((result) => {
+        {visibleResults.map((result) => {
           const item = result.event || {};
           const context = incidentRecordingContext(item);
           return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span>{Math.round(Math.max(0, Math.min(1, Number(result.score || 0))) * 100)}% similar</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
         })}
-        {!loading && !error && !results.length ? <div className="semantic-search-empty"><Search size={28} /><strong>Search indexed incidents by appearance</strong><span>Results link to the exact incident and recording time.</span></div> : null}
+        {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
     </section>
   </main>;
@@ -7141,6 +7209,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const lastHour = activity?.last_hour || {};
   const lastDay = activity?.last_24h || {};
   const runtime = data.detector?.runtime || {};
+  const semantic = data.semantic_search || {};
   const gpu = data.gpu || {};
   const storage = data.system?.storage || {};
   const memory = data.system?.memory || {};
@@ -7259,6 +7328,16 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>Eligible objects (1h / 24h)</dt><dd>{lastHour.objects || 0} / {lastDay.objects || 0}</dd></div>
             <div><dt>Top labels · 24h</dt><dd>{topLabels.length ? topLabels.map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
           </dl>
+          {!selected ? <div className="telemetry-semantic-subsection">
+            <header><strong>Semantic search</strong><small>Local visual search indexing</small></header>
+            <dl className="telemetry-details">
+              <div><dt>Status</dt><dd>{String(semantic.state || (semantic.enabled ? "starting" : "disabled")).replaceAll("_", " ")}{semantic.device ? ` · ${semantic.device}` : ""}</dd></div>
+              <div><dt>Indexed incidents</dt><dd>{Number(semantic.event_count || 0).toLocaleString()}</dd></div>
+              <div><dt>Search evidence</dt><dd>{Number(semantic.evidence_count || 0).toLocaleString()} <small>whole images and object crops</small></dd></div>
+              <div><dt>Queue / indexed since restart</dt><dd>{Number(semantic.queue_depth || 0).toLocaleString()} / {Number(semantic.indexed_since_start || 0).toLocaleString()}</dd></div>
+              {semantic.error || semantic.reason ? <div><dt>Last issue</dt><dd>{semantic.error || semantic.reason}</dd></div> : null}
+            </dl>
+          </div> : null}
         </section>
       </div>
 
