@@ -27,6 +27,26 @@ def _class_aware_nms(
     nms_threshold: float,
 ) -> list[int]:
     """Suppress duplicate boxes within a class without hiding overlapping classes."""
+    if not boxes:
+        return []
+    batched_nms = getattr(cv2.dnn, "NMSBoxesBatched", None)
+    if batched_nms is not None:
+        try:
+            indexes = batched_nms(
+                boxes,
+                scores,
+                class_ids,
+                confidence_threshold,
+                nms_threshold,
+            )
+            selected = np.asarray(indexes).reshape(-1).tolist()
+            return sorted(
+                (int(index) for index in selected),
+                key=lambda index: scores[index],
+                reverse=True,
+            )
+        except (cv2.error, TypeError, ValueError):
+            LOGGER.debug("Batched OpenCV NMS unavailable; using per-class fallback")
     selected: list[int] = []
     for class_id in dict.fromkeys(class_ids):
         group = [
@@ -108,8 +128,23 @@ class OpenVinoDetector:
         self._active_inferences = 0
         self._durations_ms: deque[float] = deque(maxlen=100)
         self._stage_durations_ms: dict[str, deque[float]] = {
-            name: deque(maxlen=100) for name in ("queue", "preprocess", "inference", "postprocess", "total")
+            name: deque(maxlen=100)
+            for name in (
+                "queue",
+                "preprocess",
+                "inference",
+                "postprocess",
+                "postprocess_decode",
+                "postprocess_nms",
+                "postprocess_result",
+                "total",
+            )
         }
+        self._candidate_counts: dict[str, deque[int]] = {
+            name: deque(maxlen=100)
+            for name in ("raw", "confidence", "valid_boxes", "selected")
+        }
+        self._last_candidate_counts: dict[str, int] = {}
         self._last_stage_ms: dict[str, float] = {}
         self._completion_times: deque[float] = deque(maxlen=240)
         self._last_inference_ms: float | None = None
@@ -300,6 +335,7 @@ class OpenVinoDetector:
         original_threshold = self.config.confidence_threshold
         started = time.perf_counter()
         stages = {"queue": queue_ms, "preprocess": 0.0, "inference": 0.0, "postprocess": 0.0}
+        candidate_counts: dict[str, int] = {}
         objects: list[dict[str, Any]] = []
         succeeded = False
         try:
@@ -338,7 +374,20 @@ class OpenVinoDetector:
                 stages["inference"] = (time.perf_counter() - inference_started) * 1000
                 postprocess_started = time.perf_counter()
             if self.output_format == "yolo":
-                objects = self._parse_yolo_output(output, metadata)
+                postprocess_metrics: dict[str, float | int] = {}
+                objects = self._parse_yolo_output(
+                    output,
+                    metadata,
+                    metrics=postprocess_metrics,
+                )
+                for name in ("decode", "nms", "result"):
+                    stages[f"postprocess_{name}"] = float(
+                        postprocess_metrics.get(f"{name}_ms") or 0.0
+                    )
+                candidate_counts = {
+                    name: int(postprocess_metrics.get(name) or 0)
+                    for name in ("raw", "confidence", "valid_boxes", "selected")
+                }
             elif self.output_format == "yolo-e2e":
                 objects = self._parse_yolo_e2e_output(output, metadata)
             else:
@@ -349,7 +398,12 @@ class OpenVinoDetector:
         finally:
             self.config.confidence_threshold = original_threshold
             stages["total"] = (time.perf_counter() - started) * 1000 + queue_ms
-            self._finish_inference(stages, objects, succeeded=succeeded)
+            self._finish_inference(
+                stages,
+                objects,
+                succeeded=succeeded,
+                candidate_counts=candidate_counts,
+            )
 
     def _begin_inference(self) -> None:
         with self._stats_lock:
@@ -366,6 +420,7 @@ class OpenVinoDetector:
         objects: list[dict[str, Any]],
         *,
         succeeded: bool,
+        candidate_counts: dict[str, int] | None = None,
     ) -> None:
         now_monotonic = time.monotonic()
         now_epoch = time.time()
@@ -382,6 +437,11 @@ class OpenVinoDetector:
             for name, value in stages.items():
                 if name in self._stage_durations_ms:
                     self._stage_durations_ms[name].append(float(value))
+            if candidate_counts:
+                self._last_candidate_counts = dict(candidate_counts)
+                for name, value in candidate_counts.items():
+                    if name in self._candidate_counts:
+                        self._candidate_counts[name].append(int(value))
             self._completion_times.append(now_monotonic)
             while self._completion_times and now_monotonic - self._completion_times[0] > 60:
                 self._completion_times.popleft()
@@ -410,6 +470,18 @@ class OpenVinoDetector:
                 name: round(sum(values) / len(values), 2) if values else None
                 for name, values in self._stage_durations_ms.items()
             }
+            stage_percentiles = {
+                name: {
+                    percentile: round(float(np.percentile(values, quantile)), 2)
+                    for percentile, quantile in (("p50", 50), ("p95", 95), ("p99", 99))
+                }
+                for name, values in self._stage_durations_ms.items()
+                if values
+            }
+            candidate_averages = {
+                name: round(sum(values) / len(values), 1) if values else None
+                for name, values in self._candidate_counts.items()
+            }
             return {
                 "last_inference_ms": round(self._last_inference_ms, 1) if self._last_inference_ms is not None else None,
                 "average_inference_ms": round(average_ms, 1) if average_ms is not None else None,
@@ -427,6 +499,11 @@ class OpenVinoDetector:
                 "stages": {
                     "last_ms": dict(self._last_stage_ms),
                     "average_ms": stage_averages,
+                    "percentiles_ms": stage_percentiles,
+                },
+                "candidates": {
+                    "last": dict(self._last_candidate_counts),
+                    "average": candidate_averages,
                 },
             }
 
@@ -928,7 +1005,10 @@ class OpenVinoDetector:
         self,
         output: np.ndarray,
         metadata: dict[str, float],
+        *,
+        metrics: dict[str, float | int] | None = None,
     ) -> list[dict[str, Any]]:
+        decode_started = time.perf_counter()
         detections = np.squeeze(output)
         if detections.ndim != 2:
             return []
@@ -936,6 +1016,134 @@ class OpenVinoDetector:
         if detections.shape[0] < detections.shape[1] and (
             detections.shape[0] == expected_channels
             or (detections.shape[1] != expected_channels and detections.shape[1] > detections.shape[0] * 2)
+        ):
+            detections = detections.T
+
+        raw_candidates = int(detections.shape[0])
+        if detections.shape[1] < 5:
+            return []
+        class_scores = np.asarray(detections[:, 4:], dtype=np.float32)
+        if class_scores.shape[1] == 0:
+            return []
+        finite_scores = np.isfinite(class_scores).all(axis=1)
+        class_ids_array = np.argmax(class_scores, axis=1)
+        row_ids = np.arange(detections.shape[0])
+        scores_array = class_scores[row_ids, class_ids_array]
+        confidence_mask = (
+            finite_scores
+            & np.isfinite(scores_array)
+            & (scores_array >= self.config.confidence_threshold)
+        )
+        confidence_candidates = int(np.count_nonzero(confidence_mask))
+
+        coordinates = np.asarray(detections[:, :4], dtype=np.float64)
+        valid_mask = (
+            confidence_mask
+            & np.isfinite(coordinates).all(axis=1)
+            & (coordinates[:, 2] > 0)
+            & (coordinates[:, 3] > 0)
+        )
+        coordinates = coordinates[valid_mask]
+        scores_array = scores_array[valid_mask]
+        class_ids_array = class_ids_array[valid_mask]
+        image_width = metadata["image_width"]
+        image_height = metadata["image_height"]
+        scale = metadata["scale"]
+        pad_x = metadata["pad_x"]
+        pad_y = metadata["pad_y"]
+
+        if coordinates.size:
+            center_x, center_y, width, height = coordinates.T
+            x1 = np.clip((center_x - width / 2 - pad_x) / scale, 0, image_width)
+            y1 = np.clip((center_y - height / 2 - pad_y) / scale, 0, image_height)
+            x2 = np.clip((center_x + width / 2 - pad_x) / scale, 0, image_width)
+            y2 = np.clip((center_y + height / 2 - pad_y) / scale, 0, image_height)
+            valid_boxes = (x2 > x1) & (y2 > y1)
+            x1 = x1[valid_boxes]
+            y1 = y1[valid_boxes]
+            x2 = x2[valid_boxes]
+            y2 = y2[valid_boxes]
+            scores_array = scores_array[valid_boxes]
+            class_ids_array = class_ids_array[valid_boxes]
+            boxes_array = np.column_stack((x1, y1, x2 - x1, y2 - y1)).astype(
+                np.int64
+            )
+        else:
+            boxes_array = np.empty((0, 4), dtype=np.int64)
+        boxes = boxes_array.tolist()
+        scores = [float(value) for value in scores_array]
+        class_ids = [int(value) for value in class_ids_array]
+        valid_box_candidates = len(boxes)
+        decode_ms = (time.perf_counter() - decode_started) * 1000
+
+        if not boxes:
+            if metrics is not None:
+                metrics.update({
+                    "raw": raw_candidates,
+                    "confidence": confidence_candidates,
+                    "valid_boxes": 0,
+                    "selected": 0,
+                    "decode_ms": decode_ms,
+                    "nms_ms": 0.0,
+                    "result_ms": 0.0,
+                })
+            return []
+
+        nms_started = time.perf_counter()
+        selected = _class_aware_nms(
+            boxes,
+            scores,
+            class_ids,
+            self.config.confidence_threshold,
+            self.config.nms_threshold,
+        )
+        nms_ms = (time.perf_counter() - nms_started) * 1000
+        result_started = time.perf_counter()
+        objects: list[dict[str, Any]] = []
+        for index in selected:
+            x, y, width, height = boxes[index]
+            class_id = class_ids[index]
+            label = self.labels[class_id] if class_id < len(self.labels) else str(class_id)
+            objects.append(
+                {
+                    "label": label,
+                    "confidence": round(scores[index], 4),
+                    "box": {
+                        "x1": x,
+                        "y1": y,
+                        "x2": x + width,
+                        "y2": y + height,
+                    },
+                }
+            )
+        if metrics is not None:
+            metrics.update({
+                "raw": raw_candidates,
+                "confidence": confidence_candidates,
+                "valid_boxes": valid_box_candidates,
+                "selected": len(selected),
+                "decode_ms": decode_ms,
+                "nms_ms": nms_ms,
+                "result_ms": (time.perf_counter() - result_started) * 1000,
+            })
+        return objects
+
+    def _parse_yolo_output_scalar_reference(
+        self,
+        output: np.ndarray,
+        metadata: dict[str, float],
+    ) -> list[dict[str, Any]]:
+        """Preserve the pre-vectorization parser for offline equivalence replay."""
+        detections = np.squeeze(output)
+        if detections.ndim != 2:
+            return []
+        expected_channels = len(self.labels) + 4 if self.labels else 0
+        if detections.shape[0] < detections.shape[1] and (
+            detections.shape[0] == expected_channels
+            or (
+                detections.shape[1] != expected_channels
+                and detections.shape[1] > detections.shape[0] * 2
+            )
         ):
             detections = detections.T
 
@@ -956,11 +1164,20 @@ class OpenVinoDetector:
                 continue
             class_id = int(np.argmax(class_scores))
             confidence = float(class_scores[class_id])
-            if not np.isfinite(confidence) or confidence < self.config.confidence_threshold:
+            if (
+                not np.isfinite(confidence)
+                or confidence < self.config.confidence_threshold
+            ):
                 continue
 
-            center_x, center_y, width, height = [float(value) for value in detection[:4]]
-            if not np.all(np.isfinite([center_x, center_y, width, height])) or width <= 0 or height <= 0:
+            center_x, center_y, width, height = [
+                float(value) for value in detection[:4]
+            ]
+            if (
+                not np.all(np.isfinite([center_x, center_y, width, height]))
+                or width <= 0
+                or height <= 0
+            ):
                 continue
             x1 = (center_x - width / 2 - pad_x) / scale
             y1 = (center_y - height / 2 - pad_y) / scale
@@ -979,7 +1196,6 @@ class OpenVinoDetector:
 
         if not boxes:
             return []
-
         selected = _class_aware_nms(
             boxes,
             scores,
@@ -992,18 +1208,16 @@ class OpenVinoDetector:
             x, y, width, height = boxes[index]
             class_id = class_ids[index]
             label = self.labels[class_id] if class_id < len(self.labels) else str(class_id)
-            objects.append(
-                {
-                    "label": label,
-                    "confidence": round(scores[index], 4),
-                    "box": {
-                        "x1": x,
-                        "y1": y,
-                        "x2": x + width,
-                        "y2": y + height,
-                    },
-                }
-            )
+            objects.append({
+                "label": label,
+                "confidence": round(scores[index], 4),
+                "box": {
+                    "x1": x,
+                    "y1": y,
+                    "x2": x + width,
+                    "y2": y + height,
+                },
+            })
         return objects
 
 
