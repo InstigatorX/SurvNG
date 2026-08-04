@@ -1,6 +1,0 @@
-person
-car
-cat
-dog
-face
-robot_lawnmower
