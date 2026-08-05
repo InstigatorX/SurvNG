@@ -48,6 +48,11 @@ ALLOWED_CAMERA_SETTINGS = {
     "frame_width",
     "borderline_rescue_enabled",
     "borderline_margin",
+    "visual_backup_grace_seconds",
+    "visual_backup_min_score",
+    "visual_backup_min_consecutive",
+    "visual_backup_cooldown_seconds",
+    "visual_backup_max_triggers_5m",
 }
 
 

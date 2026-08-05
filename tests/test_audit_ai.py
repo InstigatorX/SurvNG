@@ -315,6 +315,15 @@ class AuditAiTest(unittest.TestCase):
         )
         self.assertEqual(validate_tuning_value("visual_backup_min_consecutive", 4), 4)
         self.assertEqual(validate_tuning_value("visual_backup_min_score", 0.8), 0.8)
+        self.assertEqual(
+            AuditAiChange(
+                scope="camera",
+                setting="visual_backup_min_score",
+                value=0.8,
+                reason="Repeated camera evidence supports a stricter rescue score.",
+            ).value,
+            0.8,
+        )
         with self.assertRaises(ValueError):
             validate_tuning_value("visual_backup_cooldown_seconds", 2)
         with self.assertRaises(ValueError):

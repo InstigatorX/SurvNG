@@ -62,6 +62,12 @@ from .camera_intelligence import (
     compare_camera_intelligence_results,
     select_balanced_samples,
 )
+from .calibration import (
+    apply_calibration_changes,
+    build_calibration_report,
+    calibration_configuration_fingerprint,
+    calibration_setting_value,
+)
 from .detector import detection_failure, objects_to_json
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_pipeline import (
@@ -1097,6 +1103,7 @@ async def lifespan(app: FastAPI):
     early_onvif_thread: threading.Thread | None = None
     early_onvif_lock = threading.Lock()
     media_exports: MediaExportManager | None = None
+    calibration_monitor_task: asyncio.Task | None = None
 
     def release_onvif_before_server_drain() -> None:
         nonlocal early_onvif_thread
@@ -1138,9 +1145,19 @@ async def lifespan(app: FastAPI):
         media_exports.start()
         _start_face_observation_sync()
         _start_recording_prewarmer()
+        calibration_monitor_task = asyncio.create_task(
+            _calibration_followup_monitor(),
+            name="survng-calibration-followup-monitor",
+        )
         yield
     finally:
         APPLICATION_STOPPING.set()
+        if calibration_monitor_task is not None:
+            calibration_monitor_task.cancel()
+            try:
+                await calibration_monitor_task
+            except asyncio.CancelledError:
+                pass
         if early_signal_installed:
             loop.remove_signal_handler(signal.SIGUSR1)
         try:
@@ -2801,6 +2818,26 @@ class CameraIntelligenceFollowupRequest(BaseModel):
     image_limit: int = Field(default=12, ge=4, le=24)
 
 
+class CalibrationRunRequest(BaseModel):
+    camera_ids: list[str] = Field(default_factory=list, max_length=128)
+    mode: str = Field(default="standard", pattern=r"^(quick|standard|deep)$")
+    override_active_evaluation: bool = False
+
+
+class CalibrationApplyRequest(BaseModel):
+    recommendation_ids: list[str] = Field(min_length=1, max_length=256)
+    confirmed: bool = False
+    configuration_fingerprint: str = Field(min_length=64, max_length=64)
+    evaluation_hours: float = Field(default=24.0, ge=24.0, le=168.0)
+
+
+class CalibrationRollbackRequest(BaseModel):
+    change_ids: list[str] = Field(default_factory=list, max_length=256)
+    camera_ids: list[str] = Field(default_factory=list, max_length=128)
+    confirmed: bool = False
+    force_conflicts: bool = False
+
+
 class TrackingComparisonVerdictRequest(BaseModel):
     verdict: str = Field(
         pattern=r"^(survng_hybrid|ultralytics_botsort|inconclusive)$"
@@ -4053,6 +4090,551 @@ def start_camera_intelligence_followup(
         )
         raise
     return active_manager.events.get_camera_intelligence_evaluation(evaluation_id) or {}
+
+
+CALIBRATION_MODE_LIMITS = {
+    "quick": (24.0, 100, 12),
+    "standard": (168.0, 100, 20),
+    "deep": (720.0, 100, 40),
+}
+
+
+def _calibration_camera_review(
+    camera: CameraConfig,
+    *,
+    hours: float,
+    record_limit: int,
+    image_limit: int,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> dict[str, Any]:
+    samples, records_considered = _camera_intelligence_candidates(
+        camera,
+        active_manager,
+        hours=hours,
+        record_limit=record_limit,
+        image_limit=image_limit,
+    )
+    if not samples:
+        return {
+            "review_type": "camera_intelligence",
+            "summary": "No retained incidents or motion decisions were available.",
+            "analyzed": 0,
+            "failed": 0,
+            "recommendations": [],
+            "samples": [],
+        }
+    wait_started = time.monotonic()
+    while not AUDIT_AI_LIMITER.acquire(timeout=5):
+        if APPLICATION_STOPPING.is_set():
+            raise RuntimeError("camera review stopped because SurvNG is shutting down")
+        if time.monotonic() - wait_started >= 300:
+            raise RuntimeError("timed out waiting for the AI review worker")
+    _begin_ai_operation("camera_intelligence")
+    try:
+        review = active_manager.events.create_motion_ai_review(
+            camera.id,
+            records_considered,
+        )
+    except BaseException:
+        _end_ai_operation("camera_intelligence")
+        AUDIT_AI_LIMITER.release()
+        raise
+    _run_camera_intelligence_review(
+        int(review["id"]),
+        camera.id,
+        samples,
+        records_considered,
+        hours,
+        active_config,
+        active_manager,
+    )
+    completed = active_manager.events.get_motion_ai_review(int(review["id"])) or {}
+    if completed.get("status") != "completed":
+        raise RuntimeError(str(completed.get("error") or "camera review failed"))
+    return {
+        **(completed.get("result") or {}),
+        "source_review_id": int(review["id"]),
+    }
+
+
+def _run_system_calibration(
+    run_id: int,
+    camera_ids: list[str],
+    mode: str,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> None:
+    hours, record_limit, image_limit = CALIBRATION_MODE_LIMITS[mode]
+    reports: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    try:
+        active_manager.events.update_calibration_run(run_id, status="running")
+        for camera_id in camera_ids:
+            camera = camera_by_id(active_config, camera_id)
+            if camera is None:
+                errors[camera_id] = "camera is no longer configured"
+                continue
+            try:
+                reports[camera_id] = _calibration_camera_review(
+                    camera,
+                    hours=hours,
+                    record_limit=record_limit,
+                    image_limit=image_limit,
+                    active_config=active_config,
+                    active_manager=active_manager,
+                )
+            except Exception as exc:
+                LOGGER.warning("calibration review failed for %s", camera_id, exc_info=True)
+                errors[camera_id] = redact_secret_text(exc)
+            active_manager.events.update_calibration_run(
+                run_id,
+                status="running",
+                result={
+                    "progress": {
+                        "completed": len(reports) + len(errors),
+                        "total": len(camera_ids),
+                    },
+                    "camera_errors": errors,
+                },
+            )
+        if not reports:
+            raise RuntimeError("no selected camera could be analyzed")
+        statuses = {str(item.get("id") or ""): item for item in active_manager.statuses()}
+        stream_health = {
+            camera_id: {
+                key: statuses.get(camera_id, {}).get(key)
+                for key in (
+                    "running", "live_fps", "main_fps", "capture_read_failures",
+                    "analysis_frames_dropped", "last_error",
+                )
+                if key in statuses.get(camera_id, {})
+            }
+            for camera_id in reports
+        }
+        result = build_calibration_report(
+            active_config,
+            reports,
+            mode=mode,
+            stream_health=stream_health,
+        )
+        result["camera_errors"] = errors
+        result["progress"] = {"completed": len(camera_ids), "total": len(camera_ids)}
+        active_manager.events.update_calibration_run(
+            run_id,
+            status="completed",
+            result=result,
+        )
+    except Exception as exc:
+        LOGGER.exception("system calibration run %s failed", run_id)
+        active_manager.events.update_calibration_run(
+            run_id,
+            status="failed",
+            result={"camera_reports": reports, "camera_errors": errors},
+            error=redact_secret_text(exc),
+        )
+
+
+@app.post("/api/calibration/runs", status_code=202)
+def start_calibration_run(request: CalibrationRunRequest) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        active_config = config.model_copy(deep=True)
+        if not active_config.audit_ai.enabled or not ai_provider_configured(active_config.audit_ai):
+            raise HTTPException(status_code=400, detail="AI analysis is not configured")
+        active_runs = [
+            item for item in active_manager.events.calibration_runs(20)
+            if item.get("status") in {"queued", "running"}
+        ]
+        if active_runs:
+            raise HTTPException(status_code=409, detail="a system calibration analysis is already running")
+        if not request.override_active_evaluation:
+            active_sets = [
+                item for item in active_manager.events.calibration_change_sets(100)
+                if item.get("status") in {"collecting", "reviewing"}
+            ]
+            if active_sets:
+                raise HTTPException(
+                    status_code=409,
+                    detail="a calibration change set is still being evaluated; explicitly override it to start another run",
+                )
+        available = {camera.id for camera in active_config.cameras}
+        camera_ids = list(dict.fromkeys(request.camera_ids or [camera.id for camera in active_config.cameras]))
+        unknown = sorted(set(camera_ids) - available)
+        if unknown:
+            raise HTTPException(status_code=404, detail=f"unknown cameras: {', '.join(unknown)}")
+        if not camera_ids:
+            raise HTTPException(status_code=400, detail="no cameras are configured")
+        run = active_manager.events.create_calibration_run(
+            mode=request.mode,
+            camera_ids=camera_ids,
+            configuration_fingerprint=calibration_configuration_fingerprint(active_config),
+        )
+    thread = threading.Thread(
+        target=_run_system_calibration,
+        args=(int(run["id"]), camera_ids, request.mode, active_config, active_manager),
+        name=f"survng-calibration-{run['id']}",
+        daemon=True,
+    )
+    thread.start()
+    return run
+
+
+@app.get("/api/calibration/runs")
+def calibration_runs(limit: int = 20) -> dict:
+    return {"runs": manager.events.calibration_runs(limit)}
+
+
+@app.get("/api/calibration/runs/{run_id}")
+def calibration_run(run_id: int) -> dict:
+    run = manager.events.get_calibration_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="calibration run not found")
+    return run
+
+
+@app.post("/api/calibration/runs/{run_id}/apply")
+def calibration_apply(run_id: int, request: CalibrationApplyRequest) -> dict:
+    if not request.confirmed:
+        raise HTTPException(status_code=400, detail="explicit confirmation is required")
+    with MANAGER_RELOAD_LOCK:
+        if not config.audit_ai.allow_apply_recommendations:
+            raise HTTPException(status_code=403, detail="applying AI recommendations is disabled")
+        active_events = manager.events
+        run = active_events.get_calibration_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="calibration run not found")
+        if run.get("status") != "completed":
+            raise HTTPException(status_code=409, detail="calibration analysis is not complete")
+        current_fingerprint = calibration_configuration_fingerprint(config)
+        if request.configuration_fingerprint != current_fingerprint or run.get("configuration_fingerprint") != current_fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="calibration settings changed after analysis; run calibration again",
+            )
+        recommendations = {
+            str(item.get("id") or ""): item
+            for item in (run.get("result") or {}).get("recommendations") or []
+        }
+        unknown = [item for item in request.recommendation_ids if item not in recommendations]
+        if unknown:
+            raise HTTPException(status_code=400, detail="one or more recommendations changed or expired")
+        selected = [recommendations[item] for item in request.recommendation_ids]
+        try:
+            next_config, changes = apply_calibration_changes(config, selected)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not changes:
+            raise HTTPException(status_code=409, detail="selected recommendations no longer change configuration")
+        for index, change in enumerate(changes, start=1):
+            change["id"] = f"{run_id}:{index}:{change['setting']}:{change.get('camera_id') or 'global'}"
+        before_config = config.model_copy(deep=True)
+        before_fingerprint = current_fingerprint
+        _effective, apply_result = apply_config_update(next_config)
+        after_fingerprint = calibration_configuration_fingerprint(config)
+        try:
+            change_set = active_events.create_calibration_change_set(
+                run_id=run_id,
+                parent_change_set_id=None,
+                action="apply",
+                status="collecting",
+                evaluation_hours=request.evaluation_hours,
+                configuration_fingerprint_before=before_fingerprint,
+                configuration_fingerprint_after=after_fingerprint,
+                changes=changes,
+                apply_result=apply_result,
+            )
+        except BaseException:
+            try:
+                apply_config_update(before_config)
+            except Exception:
+                LOGGER.exception("calibration ledger failure rollback was incomplete")
+            raise
+    return {"ok": True, "change_set": change_set}
+
+
+@app.get("/api/calibration/change-sets")
+def calibration_change_sets(limit: int = 50) -> dict:
+    rows = manager.events.calibration_change_sets(limit)
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        try:
+            created = datetime.fromisoformat(str(row.get("created_at") or "").replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            ready_at = created + timedelta(hours=float(row.get("evaluation_hours") or 24))
+            row["ready_at"] = ready_at.isoformat()
+            row["seconds_until_ready"] = max(0, round((ready_at - now).total_seconds()))
+        except (TypeError, ValueError):
+            row["ready_at"] = ""
+            row["seconds_until_ready"] = 0
+    return {"change_sets": rows}
+
+
+def _run_calibration_evaluation(
+    change_set_id: int,
+    active_config: AppConfig,
+    active_manager: AppManager,
+) -> None:
+    change_set = active_manager.events.get_calibration_change_set(change_set_id) or {}
+    run = active_manager.events.get_calibration_run(int(change_set.get("run_id") or 0)) or {}
+    baseline_reports = (run.get("result") or {}).get("camera_reports") or {}
+    global_change = any(
+        item.get("scope") == "global" for item in change_set.get("changes") or []
+    )
+    affected = {
+        str(item.get("camera_id") or "")
+        for item in change_set.get("changes") or []
+        if item.get("camera_id")
+    }
+    if global_change:
+        affected.update(str(item) for item in run.get("camera_ids") or [])
+    comparisons: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    try:
+        try:
+            applied_at = datetime.fromisoformat(
+                str(change_set.get("created_at") or "").replace("Z", "+00:00")
+            )
+            if applied_at.tzinfo is None:
+                applied_at = applied_at.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            applied_at = datetime.now(timezone.utc) - timedelta(hours=24)
+        hours = max(1.0, min(720.0, (datetime.now(timezone.utc) - applied_at).total_seconds() / 3600.0))
+        mode = str(run.get("mode") or "standard")
+        _baseline_hours, record_limit, image_limit = CALIBRATION_MODE_LIMITS.get(
+            mode, CALIBRATION_MODE_LIMITS["standard"]
+        )
+        for camera_id in sorted(affected):
+            if APPLICATION_STOPPING.is_set():
+                raise RuntimeError("calibration follow-up stopped because SurvNG is shutting down")
+            camera = camera_by_id(active_config, camera_id)
+            baseline = baseline_reports.get(camera_id)
+            if camera is None or not isinstance(baseline, dict):
+                errors[camera_id] = "baseline evidence is unavailable"
+                continue
+            try:
+                followup = _calibration_camera_review(
+                    camera,
+                    hours=hours,
+                    record_limit=record_limit,
+                    image_limit=image_limit,
+                    active_config=active_config,
+                    active_manager=active_manager,
+                )
+                comparisons[camera_id] = {
+                    "comparison": compare_camera_intelligence_results(baseline, followup),
+                    "followup": followup,
+                }
+            except Exception as exc:
+                LOGGER.warning("calibration follow-up failed for %s", camera_id, exc_info=True)
+                errors[camera_id] = redact_secret_text(exc)
+        outcomes = Counter(
+            str(item.get("comparison", {}).get("outcome") or "inconclusive")
+            for item in comparisons.values()
+        )
+        comparable = outcomes["improved"] + outcomes["worsened"]
+        if not comparisons or comparable == 0:
+            outcome = "inconclusive"
+        elif outcomes["worsened"] and outcomes["improved"]:
+            outcome = "mixed"
+        elif outcomes["worsened"]:
+            outcome = "regressed"
+        else:
+            outcome = "improved"
+        evaluation = {
+            "outcome": outcome,
+            "camera_comparisons": comparisons,
+            "camera_errors": errors,
+            "summary": (
+                f"{outcomes['improved']} cameras improved, {outcomes['worsened']} regressed, "
+                f"and {outcomes['inconclusive']} were inconclusive using matched before/after evidence."
+            ),
+            "comparison_basis": "category_matched_balanced_samples",
+        }
+        active_manager.events.update_calibration_evaluation(
+            change_set_id,
+            evaluation,
+            status="evaluated",
+        )
+    except Exception as exc:
+        LOGGER.exception("calibration evaluation %s failed", change_set_id)
+        active_manager.events.update_calibration_evaluation(
+            change_set_id,
+            {"outcome": "failed", "error": redact_secret_text(exc)},
+            status="evaluation_failed",
+        )
+
+
+async def _calibration_followup_monitor() -> None:
+    """Start due follow-ups automatically without overlapping evaluations."""
+    while not APPLICATION_STOPPING.is_set():
+        await asyncio.sleep(60)
+        if APPLICATION_STOPPING.is_set():
+            return
+        selected: tuple[int, AppConfig, AppManager] | None = None
+        with MANAGER_RELOAD_LOCK:
+            active_manager = manager
+            change_sets = active_manager.events.calibration_change_sets(100)
+            if any(item.get("status") == "reviewing" for item in change_sets):
+                continue
+            now = datetime.now(timezone.utc)
+            for item in reversed(change_sets):
+                if item.get("action") != "apply" or item.get("status") != "collecting":
+                    continue
+                try:
+                    created = datetime.fromisoformat(
+                        str(item.get("created_at") or "").replace("Z", "+00:00")
+                    )
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    ready_at = created + timedelta(
+                        hours=float(item.get("evaluation_hours") or 24)
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if now < ready_at:
+                    continue
+                change_set_id = int(item["id"])
+                active_manager.events.update_calibration_change_set_status(
+                    change_set_id,
+                    "reviewing",
+                )
+                selected = (
+                    change_set_id,
+                    config.model_copy(deep=True),
+                    active_manager,
+                )
+                break
+        if selected is not None:
+            change_set_id, active_config, active_manager = selected
+            thread = threading.Thread(
+                target=_run_calibration_evaluation,
+                args=(change_set_id, active_config, active_manager),
+                name=f"survng-calibration-evaluation-{change_set_id}",
+                daemon=True,
+            )
+            thread.start()
+
+
+@app.post("/api/calibration/change-sets/{change_set_id}/evaluate", status_code=202)
+def start_calibration_evaluation(change_set_id: int) -> dict:
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        active_config = config.model_copy(deep=True)
+        change_set = active_manager.events.get_calibration_change_set(change_set_id)
+        if change_set is None:
+            raise HTTPException(status_code=404, detail="calibration change set not found")
+        if change_set.get("action") != "apply":
+            raise HTTPException(status_code=400, detail="rollback entries are not evaluated")
+        if change_set.get("status") not in {"collecting", "evaluation_failed"}:
+            raise HTTPException(status_code=409, detail="change set is already evaluating or complete")
+        try:
+            created = datetime.fromisoformat(str(change_set["created_at"]).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            ready_at = created + timedelta(hours=float(change_set.get("evaluation_hours") or 24))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="evaluation schedule is invalid") from exc
+        if datetime.now(timezone.utc) < ready_at:
+            raise HTTPException(
+                status_code=409,
+                detail=f"follow-up evidence is still being collected until {ready_at.isoformat()}",
+            )
+        active_manager.events.update_calibration_change_set_status(change_set_id, "reviewing")
+    thread = threading.Thread(
+        target=_run_calibration_evaluation,
+        args=(change_set_id, active_config, active_manager),
+        name=f"survng-calibration-evaluation-{change_set_id}",
+        daemon=True,
+    )
+    thread.start()
+    return active_manager.events.get_calibration_change_set(change_set_id) or {}
+
+
+@app.post("/api/calibration/change-sets/{change_set_id}/rollback")
+def calibration_rollback(change_set_id: int, request: CalibrationRollbackRequest) -> dict:
+    if not request.confirmed:
+        raise HTTPException(status_code=400, detail="explicit confirmation is required")
+    with MANAGER_RELOAD_LOCK:
+        active_events = manager.events
+        source = active_events.get_calibration_change_set(change_set_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="calibration change set not found")
+        selected = []
+        change_ids = set(request.change_ids)
+        camera_ids = set(request.camera_ids)
+        for item in source.get("changes") or []:
+            if change_ids and str(item.get("id") or "") not in change_ids:
+                continue
+            if camera_ids and str(item.get("camera_id") or "") not in camera_ids:
+                continue
+            selected.append(item)
+        if not selected:
+            raise HTTPException(status_code=400, detail="no matching changes selected for rollback")
+        conflicts = []
+        inverse = []
+        for item in selected:
+            current = calibration_setting_value(
+                config,
+                scope=str(item.get("scope") or ""),
+                camera_id=str(item.get("camera_id") or ""),
+                setting=str(item.get("setting") or ""),
+            )
+            if current != item.get("after"):
+                conflicts.append({
+                    "change_id": item.get("id"),
+                    "setting": item.get("setting"),
+                    "camera_id": item.get("camera_id"),
+                    "expected": item.get("after"),
+                    "current": current,
+                })
+            inverse.append({
+                "scope": item.get("scope"),
+                "camera_id": item.get("camera_id"),
+                "setting": item.get("setting"),
+                "proposed": item.get("before"),
+                "reason": f"Rollback of calibration change set {change_set_id}",
+                "source_change_id": item.get("id"),
+            })
+        if conflicts and not request.force_conflicts:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "newer configuration changes conflict with rollback", "conflicts": conflicts},
+            )
+        try:
+            next_config, changes = apply_calibration_changes(config, inverse)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        before_config = config.model_copy(deep=True)
+        before_fingerprint = calibration_configuration_fingerprint(config)
+        _effective, apply_result = apply_config_update(next_config)
+        after_fingerprint = calibration_configuration_fingerprint(config)
+        try:
+            rollback = active_events.create_calibration_change_set(
+                run_id=source.get("run_id"),
+                parent_change_set_id=change_set_id,
+                action="rollback",
+                status="rolled_back",
+                evaluation_hours=24,
+                configuration_fingerprint_before=before_fingerprint,
+                configuration_fingerprint_after=after_fingerprint,
+                changes=changes,
+                apply_result={**apply_result, "forced_conflicts": conflicts},
+            )
+        except BaseException:
+            try:
+                apply_config_update(before_config)
+            except Exception:
+                LOGGER.exception("calibration rollback ledger failure recovery was incomplete")
+            raise
+        rolled_count = len(selected)
+        total_count = len(source.get("changes") or [])
+        active_events.update_calibration_change_set_status(
+            change_set_id,
+            "rolled_back" if rolled_count == total_count else "partially_rolled_back",
+        )
+    return {"ok": True, "rollback": rollback, "conflicts": conflicts}
 
 
 @app.get("/api/events/{event_id}/snapshot.jpg")

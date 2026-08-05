@@ -9833,3 +9833,72 @@ section.detection-settings-card {
     border-radius: 13px;
   }
 }
+.calibration-run-controls,
+.calibration-panel,
+.calibration-recommendations,
+.calibration-change-history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.calibration-run-controls { padding: 0.75rem; border-bottom: 1px solid var(--line); }
+.calibration-run-controls > label { display: grid; gap: 0.35rem; font-weight: 700; }
+.calibration-camera-select { display: flex; align-items: center; justify-content: space-between; }
+.calibration-camera-select button { padding: 0; border: 0; background: transparent; color: var(--accent); }
+.calibration-camera-list { display: grid; gap: 0.3rem; max-height: 14rem; overflow: auto; }
+.calibration-camera-list label { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); }
+.calibration-history { margin-top: 0.5rem; }
+.calibration-history button span { display: grid; text-align: left; }
+.calibration-history button small { color: var(--muted); text-transform: capitalize; }
+.calibration-progress,
+.calibration-summary { display: flex; align-items: center; gap: 0.75rem; padding: 1rem; border: 1px solid var(--line); border-radius: 0.65rem; background: var(--subtle); }
+.calibration-progress > :last-child,
+.calibration-summary div { display: grid; gap: 0.2rem; }
+.calibration-summary span { color: var(--muted); }
+.calibration-recommendations article { display: grid; gap: 0.65rem; padding: 0.9rem; border: 1px solid var(--line); border-radius: 0.7rem; background: var(--subtle); }
+.calibration-recommendations article.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.calibration-recommendation-select { display: flex; align-items: center; gap: 0.5rem; }
+.calibration-recommendation-select span { font-weight: 800; }
+.calibration-recommendation-select em { margin-left: auto; padding: 0.15rem 0.45rem; border-radius: 999px; background: var(--control-muted); color: var(--muted); font-style: normal; text-transform: capitalize; }
+.calibration-recommendations header,
+.calibration-recommendations footer,
+.calibration-apply-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.calibration-recommendations header strong { text-transform: capitalize; }
+.calibration-recommendations code { color: var(--accent); }
+.calibration-recommendations p { margin: 0; }
+.calibration-recommendations small,
+.calibration-recommendations footer { color: var(--muted); }
+.calibration-evidence { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.calibration-effective-preview { padding-top: 0.4rem; border-top: 1px solid var(--line); }
+.calibration-effective-preview > div { display: flex; justify-content: space-between; gap: 0.75rem; padding: 0.3rem 0; }
+.calibration-effective-preview span { color: var(--muted); }
+.calibration-apply-bar { position: sticky; bottom: 0; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.65rem; background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(10px); }
+.calibration-apply-bar label { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
+.calibration-camera-findings { border: 1px solid var(--line); border-radius: 0.65rem; padding: 0.75rem; }
+.calibration-camera-findings article { display: grid; gap: 0.2rem; padding: 0.65rem 0; border-top: 1px solid var(--line); }
+.calibration-camera-findings article:first-of-type { margin-top: 0.65rem; }
+.calibration-camera-findings span,
+.calibration-camera-findings small { color: var(--muted); }
+.calibration-change-history { margin-top: 0.75rem; border-top: 1px solid var(--line); padding-top: 0.75rem; }
+.calibration-change-history article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem 1rem; align-items: center; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.65rem; }
+.calibration-change-history article > div:first-child { display: grid; }
+.calibration-change-history article > div:last-child { display: flex; gap: 0.4rem; grid-column: 2; grid-row: 1 / span 2; }
+.calibration-change-history span,
+.calibration-change-history small { color: var(--muted); }
+.calibration-change-details { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+.calibration-change-details section { display: grid; gap: 0.35rem; margin-top: 0.55rem; }
+.calibration-change-details section header,
+.calibration-change-details section > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.5rem; align-items: center; }
+.calibration-change-details section header { grid-template-columns: minmax(0, 1fr) auto; }
+.calibration-change-details code { color: var(--muted); }
+
+@media (max-width: 760px) {
+  .calibration-recommendations header,
+  .calibration-recommendations footer,
+  .calibration-apply-bar { align-items: stretch; flex-direction: column; }
+  .calibration-change-history article { grid-template-columns: 1fr; }
+  .calibration-change-history article > div:last-child { grid-column: 1; grid-row: auto; }
+  .calibration-change-details section > div { grid-template-columns: 1fr auto; }
+  .calibration-change-details section > div span { grid-column: 1 / -1; }
+}
