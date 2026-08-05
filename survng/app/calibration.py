@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from typing import Any, Iterable
 
@@ -55,6 +56,7 @@ TRACKING_SETTINGS = {
     "vehicle_reid_match_threshold": (0.0, 1.0),
     "max_active_cameras": (1, 16),
 }
+_CLASS_LABEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 
 
 def calibration_configuration_payload(config: AppConfig) -> dict[str, Any]:
@@ -164,13 +166,33 @@ def _normalized_calibration_value(
             raise ValueError("zone eligibility must be true or false")
         return value
     if setting.startswith("detector.class_confidence."):
-        number = float(value)
+        label = setting.removeprefix("detector.class_confidence.")
+        if not _CLASS_LABEL_PATTERN.fullmatch(label):
+            raise ValueError("per-class confidence requires a valid object class")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("per-class confidence must be a number") from exc
+        if not math.isfinite(number):
+            raise ValueError("per-class confidence must be finite")
         if not 0.01 <= number <= 0.99:
             raise ValueError("per-class confidence must be between 0.01 and 0.99")
         return number
     if setting.startswith("detector.class_confirmations."):
-        number = int(value)
-        if isinstance(value, bool) or number != float(value) or not 1 <= number <= 5:
+        label = setting.removeprefix("detector.class_confirmations.")
+        if not _CLASS_LABEL_PATTERN.fullmatch(label):
+            raise ValueError("per-class confirmations requires a valid object class")
+        try:
+            numeric_value = float(value)
+            number = int(numeric_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("per-class confirmations must be an integer") from exc
+        if (
+            isinstance(value, bool)
+            or not math.isfinite(numeric_value)
+            or number != numeric_value
+            or not 1 <= number <= 5
+        ):
             raise ValueError("per-class confirmations must be between 1 and 5")
         return number
     if setting.startswith("detector.tracking."):
@@ -178,7 +200,12 @@ def _normalized_calibration_value(
         bounds = TRACKING_SETTINGS.get(name)
         if bounds is None:
             raise ValueError(f"unsupported tracking calibration setting: {name}")
-        number = float(value)
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"{name} must be finite")
         if not bounds[0] <= number <= bounds[1]:
             raise ValueError(f"{name} must be between {bounds[0]:g} and {bounds[1]:g}")
         return int(number) if name == "max_active_cameras" else number
@@ -187,7 +214,12 @@ def _normalized_calibration_value(
         bounds = DETECTOR_SETTINGS.get(name)
         if bounds is None:
             raise ValueError(f"unsupported detector calibration setting: {name}")
-        number = float(value)
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"{name} must be finite")
         if not bounds[0] <= number <= bounds[1]:
             raise ValueError(f"{name} must be between {bounds[0]:g} and {bounds[1]:g}")
         return int(number) if name == "event_confirmation_frames" else number
@@ -332,7 +364,6 @@ def build_calibration_report(
             "verdict_counts": report.get("verdict_counts") or {},
             "detector_assessments": report.get("detector_assessments") or {},
             "tracking_assessments": report.get("tracking_assessments") or {},
-            "samples": report.get("samples") or [],
             "stream_health": (stream_health or {}).get(camera_id, {}),
         })
         for item in report.get("recommendations") or []:
@@ -343,12 +374,27 @@ def build_calibration_report(
                 "camera_id": camera_id,
             })
 
-    selected_count = max(1, len(camera_reports))
-    global_support = max(2, math.ceil(selected_count * 0.6))
+    reviewed_camera_ids = set(camera_reports)
+    configured_camera_ids = {camera.id for camera in config.cameras}
+    all_cameras_reviewed = reviewed_camera_ids == configured_camera_ids
     globally_covered: set[tuple[str, str]] = set()
     for (setting, value_key), rows in grouped.items():
         proposed = json.loads(value_key)
-        if setting in MOTION_SETTINGS and len(rows) >= global_support:
+        supporting_camera_ids = {str(row["camera_id"]) for row in rows}
+        inheriting_camera_ids = {
+            camera.id
+            for camera in config.cameras
+            if getattr(camera.motion_qualification, setting, "__unsupported__")
+            in (None, "inherit")
+        }
+        # A global change is safe only when every configured camera was reviewed and
+        # every camera that would inherit the value independently supported it.
+        global_consensus = (
+            all_cameras_reviewed
+            and bool(inheriting_camera_ids)
+            and inheriting_camera_ids <= supporting_camera_ids
+        )
+        if setting in MOTION_SETTINGS and global_consensus:
             current = _motion_effective_value(config, None, setting)
             if current != proposed:
                 payload = {
@@ -364,7 +410,7 @@ def build_calibration_report(
                     "subsystem": "motion",
                     "expected_benefit": rows[0].get("reasons", ["Repeated camera evidence supports this change."])[0],
                     "downside": "A global adjustment affects cameras that inherit this value; review listed exceptions.",
-                    "evidence_strength": "strong" if len(rows) >= max(3, global_support) else "moderate",
+                    "evidence_strength": "strong" if len(rows) >= 3 else "moderate",
                     "support_count": sum(int(row.get("support_count") or 1) for row in rows),
                     "affected_cameras": [
                         camera.id for camera in config.cameras
@@ -390,15 +436,16 @@ def build_calibration_report(
 
     for (setting, value_key), rows in grouped.items():
         proposed = json.loads(value_key)
-        if (setting, value_key) in globally_covered:
-            continue
+        covered_globally = (setting, value_key) in globally_covered
         for row in rows:
             camera = camera_by_id(config, row["camera_id"])
             if camera is None or setting not in CAMERA_MOTION_SETTINGS:
                 continue
+            override = getattr(camera.motion_qualification, setting)
+            if covered_globally and override in (None, "inherit"):
+                continue
             current = _motion_effective_value(config, camera, setting)
             if current == proposed:
-                override = getattr(camera.motion_qualification, setting)
                 if override not in (None, "inherit"):
                     inherited_value: Any = (
                         "inherit"
@@ -461,28 +508,18 @@ def build_calibration_report(
         tracking.update(report.get("tracking_assessments") or {})
 
     # Object/tracking changes require materially more evidence than motion.
+    object_advisory = "No broad detector adjustment was justified."
     if total_analyzed >= 20 and verdicts["likely_misclassification"] >= 4:
-        current = config.detector.event_confirmation_frames
-        proposed = min(5, current + 1)
-        if proposed != current:
-            payload = {"scope": "global", "camera_id": "", "setting": "detector.event_confirmation_frames", "current": current, "proposed": proposed}
-            recommendations.append({
-                **payload,
-                "id": _recommendation_id(payload),
-                "subsystem": "object",
-                "expected_benefit": "Require another agreeing frame before creating an object incident.",
-                "downside": "Brief or heavily occluded objects may be missed.",
-                "evidence_strength": "strong",
-                "support_count": verdicts["likely_misclassification"],
-                "affected_cameras": list(camera_reports),
-                "evidence": [],
-                "compute_impact": "Small increase in detector sampling per candidate.",
-            })
+        object_advisory = (
+            "Repeated likely misclassifications were found, but confirmation depth is not "
+            "an automatic remedy for a consistently wrong label. Review class-specific "
+            "confidence evidence before changing detector policy."
+        )
     tracking_issues = sum(
         count for name, count in tracking.items()
         if name in {"late", "lost", "fragmented", "duplicate"}
     )
-    if total_analyzed >= 12 and tracking_issues >= 4:
+    if all_cameras_reviewed and total_analyzed >= 12 and tracking_issues >= 4:
         current = config.detector.tracking.sample_fps
         proposed = min(5.0, round(current + 0.5, 1))
         if proposed != current:
@@ -495,7 +532,7 @@ def build_calibration_report(
                 "downside": "Raises detector and tracking compute while incidents are active.",
                 "evidence_strength": "strong",
                 "support_count": tracking_issues,
-                "affected_cameras": list(camera_reports),
+                "affected_cameras": [camera.id for camera in config.cameras],
                 "evidence": [],
                 "compute_impact": "Moderate increase during active tracking sessions.",
             })
@@ -509,6 +546,12 @@ def build_calibration_report(
         if bounded:
             validated_recommendations.append(recommendation)
 
+    manual_review_settings = sorted({
+        setting
+        for setting, _value_key in grouped
+        if setting not in CAMERA_MOTION_SETTINGS
+    })
+
     return {
         "review_type": "calibration_lab",
         "mode": mode,
@@ -519,6 +562,16 @@ def build_calibration_report(
         "recommendations": validated_recommendations,
         "advisories": {
             "stream_health": "Stream recommendations are advisory and never modify camera URLs or firmware settings.",
-            "object_safety": "Object and tracking changes require larger evidence sets than motion changes.",
+            "object_safety": object_advisory,
+            "scope_safety": (
+                "Global changes require unanimous support from every inheriting camera "
+                "and are not proposed for partial-camera analyses."
+            ),
+            "manual_review": (
+                "The following pipeline-level suggestions require manual review because "
+                f"they can replace custom stage graphs: {', '.join(manual_review_settings)}."
+                if manual_review_settings
+                else "No pipeline-level suggestion required separate manual review."
+            ),
         },
     }

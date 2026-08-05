@@ -133,6 +133,7 @@ class RecordingRetentionService:
         usage = shutil.disk_usage(self.storage_dir)
         protected_paths = self.protected_paths_provider()
         with self.connection_factory() as connection:
+            self._register_protection_function(connection, protected_paths)
             totals = connection.execute(
                 """
                 SELECT count(*) AS file_count, coalesce(sum(size_bytes), 0) AS bytes,
@@ -161,28 +162,29 @@ class RecordingRetentionService:
                 source = "main" if str(row["source"]) == "main" else "live"
                 retention_days = self._retention_days(camera_id, source)
                 cutoff = now - retention_days * SECONDS_PER_DAY
-                expired_rows = connection.execute(
+                expired = connection.execute(
                     """
-                    SELECT path, size_bytes
+                    SELECT count(*) AS file_count,
+                           coalesce(sum(size_bytes), 0) AS bytes,
+                           coalesce(sum(CASE WHEN survng_path_protected(path) = 1 THEN 1 ELSE 0 END), 0)
+                               AS protected_file_count,
+                           coalesce(sum(CASE WHEN survng_path_protected(path) = 1 THEN size_bytes ELSE 0 END), 0)
+                               AS protected_bytes
                     FROM recordings
                     WHERE camera_id = ? AND source = ? AND end_epoch < ?
                     """,
                     (camera_id, source, cutoff),
-                ).fetchall()
-                eligible_expired_files = 0
-                eligible_expired_bytes = 0
-                group_protected_expired_files = 0
-                group_protected_expired_bytes = 0
-                for expired_row in expired_rows:
-                    row_bytes = int(expired_row["size_bytes"] or 0)
-                    if self._path_is_protected(
-                        str(expired_row["path"]), protected_paths
-                    ):
-                        group_protected_expired_files += 1
-                        group_protected_expired_bytes += row_bytes
-                    else:
-                        eligible_expired_files += 1
-                        eligible_expired_bytes += row_bytes
+                ).fetchone()
+                group_protected_expired_files = int(
+                    expired["protected_file_count"] or 0
+                )
+                group_protected_expired_bytes = int(expired["protected_bytes"] or 0)
+                eligible_expired_files = max(
+                    0, int(expired["file_count"] or 0) - group_protected_expired_files
+                )
+                eligible_expired_bytes = max(
+                    0, int(expired["bytes"] or 0) - group_protected_expired_bytes
+                )
                 group_bytes = int(row["bytes"] or 0)
                 oldest = _optional_float(row["oldest"])
                 newest = _optional_float(row["newest"])
@@ -532,7 +534,24 @@ class RecordingRetentionService:
 
     @staticmethod
     def _path_is_protected(raw_path: str, protected_paths: set[str]) -> bool:
+        if raw_path in protected_paths:
+            return True
         return str(Path(raw_path).resolve(strict=False)) in protected_paths
+
+    @classmethod
+    def _register_protection_function(
+        cls,
+        connection: sqlite3.Connection,
+        protected_paths: set[str],
+    ) -> None:
+        connection.create_function(
+            "survng_path_protected",
+            1,
+            lambda raw_path: int(
+                cls._path_is_protected(str(raw_path or ""), protected_paths)
+            ),
+            deterministic=True,
+        )
 
     def _retention_days(self, camera_id: str, source: str) -> int:
         camera = self._cameras.get(camera_id)
@@ -551,10 +570,10 @@ class RecordingRetentionService:
         limit = self.config.cleanup_batch_files
         protected_cutoff = now_epoch - RECENT_RECORDING_PROTECTION_SECONDS
         protected_paths = self.protected_paths_provider()
-        query_limit = limit + len(protected_paths)
         groups = plan.get("per_camera", [])
         candidates: dict[str, sqlite3.Row] = {}
         with self.connection_factory() as connection:
+            self._register_protection_function(connection, protected_paths)
             expiring_groups = list(groups)
             if expiring_groups:
                 predicates: list[str] = []
@@ -566,11 +585,12 @@ class RecordingRetentionService:
                         group["source"],
                         now_epoch - int(group["retention_days"]) * SECONDS_PER_DAY,
                     ))
-                parameters.append(query_limit)
+                parameters.append(limit)
                 rows = connection.execute(
                     f"""
                     SELECT path, size_bytes, start_epoch FROM recordings
-                    WHERE end_epoch < ? AND ({' OR '.join(predicates)})
+                    WHERE end_epoch < ? AND survng_path_protected(path) = 0
+                      AND ({' OR '.join(predicates)})
                     ORDER BY start_epoch ASC LIMIT ?
                     """,
                     parameters,
@@ -593,9 +613,10 @@ class RecordingRetentionService:
                 rows = connection.execute(
                     """
                     SELECT path, size_bytes, start_epoch FROM recordings
-                    WHERE end_epoch < ? ORDER BY start_epoch ASC LIMIT ?
+                    WHERE end_epoch < ? AND survng_path_protected(path) = 0
+                    ORDER BY start_epoch ASC LIMIT ?
                     """,
-                    (protected_cutoff, query_limit),
+                    (protected_cutoff, limit * 2),
                 ).fetchall()
                 for row in rows:
                     if self._path_is_protected(str(row["path"]), protected_paths):

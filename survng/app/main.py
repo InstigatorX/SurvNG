@@ -4171,6 +4171,8 @@ def _run_system_calibration(
     try:
         active_manager.events.update_calibration_run(run_id, status="running")
         for camera_id in camera_ids:
+            if APPLICATION_STOPPING.is_set():
+                raise RuntimeError("system calibration stopped because SurvNG is shutting down")
             camera = camera_by_id(active_config, camera_id)
             if camera is None:
                 errors[camera_id] = "camera is no longer configured"
@@ -4229,7 +4231,7 @@ def _run_system_calibration(
         LOGGER.exception("system calibration run %s failed", run_id)
         active_manager.events.update_calibration_run(
             run_id,
-            status="failed",
+            status="interrupted" if APPLICATION_STOPPING.is_set() else "failed",
             result={"camera_reports": reports, "camera_errors": errors},
             error=redact_secret_text(exc),
         )
@@ -4276,13 +4278,24 @@ def start_calibration_run(request: CalibrationRunRequest) -> dict:
         name=f"survng-calibration-{run['id']}",
         daemon=True,
     )
-    thread.start()
+    try:
+        thread.start()
+    except BaseException as exc:
+        active_manager.events.update_calibration_run(
+            int(run["id"]),
+            status="failed",
+            error=f"Calibration worker could not start: {redact_secret_text(exc)}",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="calibration worker could not start",
+        ) from exc
     return run
 
 
 @app.get("/api/calibration/runs")
 def calibration_runs(limit: int = 20) -> dict:
-    return {"runs": manager.events.calibration_runs(limit)}
+    return {"runs": manager.events.calibration_runs(limit, include_result=False)}
 
 
 @app.get("/api/calibration/runs/{run_id}")
@@ -4316,10 +4329,11 @@ def calibration_apply(run_id: int, request: CalibrationApplyRequest) -> dict:
             str(item.get("id") or ""): item
             for item in (run.get("result") or {}).get("recommendations") or []
         }
-        unknown = [item for item in request.recommendation_ids if item not in recommendations]
+        recommendation_ids = list(dict.fromkeys(request.recommendation_ids))
+        unknown = [item for item in recommendation_ids if item not in recommendations]
         if unknown:
             raise HTTPException(status_code=400, detail="one or more recommendations changed or expired")
-        selected = [recommendations[item] for item in request.recommendation_ids]
+        selected = [recommendations[item] for item in recommendation_ids]
         try:
             next_config, changes = apply_calibration_changes(config, selected)
         except ValueError as exc:
@@ -4355,9 +4369,15 @@ def calibration_apply(run_id: int, request: CalibrationApplyRequest) -> dict:
 
 @app.get("/api/calibration/change-sets")
 def calibration_change_sets(limit: int = 50) -> dict:
-    rows = manager.events.calibration_change_sets(limit)
+    with MANAGER_RELOAD_LOCK:
+        active_events = manager.events
+        rows = active_events.calibration_change_sets(limit)
     now = datetime.now(timezone.utc)
     for row in rows:
+        if row.get("action") == "apply":
+            row["rolled_back_change_ids"] = sorted(
+                active_events.calibration_rollback_change_ids(int(row["id"]))
+            )
         try:
             created = datetime.fromisoformat(str(row.get("created_at") or "").replace("Z", "+00:00"))
             if created.tzinfo is None:
@@ -4392,6 +4412,25 @@ def _run_calibration_evaluation(
     comparisons: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     try:
+        with MANAGER_RELOAD_LOCK:
+            current_fingerprint = calibration_configuration_fingerprint(config)
+        expected_fingerprint = str(
+            change_set.get("configuration_fingerprint_after") or ""
+        )
+        if expected_fingerprint and current_fingerprint != expected_fingerprint:
+            active_manager.events.update_calibration_evaluation(
+                change_set_id,
+                {
+                    "outcome": "inconclusive",
+                    "summary": (
+                        "Calibration settings changed again before follow-up evidence was "
+                        "reviewed, so this change set cannot be evaluated independently."
+                    ),
+                    "comparison_basis": "configuration_conflict",
+                },
+                status="evaluated",
+            )
+            return
         try:
             applied_at = datetime.fromisoformat(
                 str(change_set.get("created_at") or "").replace("Z", "+00:00")
@@ -4452,6 +4491,18 @@ def _run_calibration_evaluation(
             ),
             "comparison_basis": "category_matched_balanced_samples",
         }
+        with MANAGER_RELOAD_LOCK:
+            final_fingerprint = calibration_configuration_fingerprint(config)
+        if expected_fingerprint and final_fingerprint != expected_fingerprint:
+            evaluation = {
+                "outcome": "inconclusive",
+                "summary": (
+                    "Calibration settings changed while follow-up evidence was being "
+                    "reviewed, so this result cannot be attributed to one change set."
+                ),
+                "comparison_basis": "configuration_conflict",
+                "camera_errors": errors,
+            }
         active_manager.events.update_calibration_evaluation(
             change_set_id,
             evaluation,
@@ -4514,7 +4565,18 @@ async def _calibration_followup_monitor() -> None:
                 name=f"survng-calibration-evaluation-{change_set_id}",
                 daemon=True,
             )
-            thread.start()
+            try:
+                thread.start()
+            except BaseException as exc:
+                LOGGER.exception("calibration evaluation worker could not start")
+                active_manager.events.update_calibration_evaluation(
+                    change_set_id,
+                    {
+                        "outcome": "failed",
+                        "error": f"Evaluation worker could not start: {redact_secret_text(exc)}",
+                    },
+                    status="evaluation_failed",
+                )
 
 
 @app.post("/api/calibration/change-sets/{change_set_id}/evaluate", status_code=202)
@@ -4548,7 +4610,21 @@ def start_calibration_evaluation(change_set_id: int) -> dict:
         name=f"survng-calibration-evaluation-{change_set_id}",
         daemon=True,
     )
-    thread.start()
+    try:
+        thread.start()
+    except BaseException as exc:
+        active_manager.events.update_calibration_evaluation(
+            change_set_id,
+            {
+                "outcome": "failed",
+                "error": f"Evaluation worker could not start: {redact_secret_text(exc)}",
+            },
+            status="evaluation_failed",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="calibration evaluation worker could not start",
+        ) from exc
     return active_manager.events.get_calibration_change_set(change_set_id) or {}
 
 
@@ -4561,6 +4637,9 @@ def calibration_rollback(change_set_id: int, request: CalibrationRollbackRequest
         source = active_events.get_calibration_change_set(change_set_id)
         if source is None:
             raise HTTPException(status_code=404, detail="calibration change set not found")
+        if source.get("action") != "apply":
+            raise HTTPException(status_code=400, detail="only applied calibration changes can be rolled back")
+        already_rolled_back = active_events.calibration_rollback_change_ids(change_set_id)
         selected = []
         change_ids = set(request.change_ids)
         camera_ids = set(request.camera_ids)
@@ -4569,9 +4648,16 @@ def calibration_rollback(change_set_id: int, request: CalibrationRollbackRequest
                 continue
             if camera_ids and str(item.get("camera_id") or "") not in camera_ids:
                 continue
+            if str(item.get("id") or "") in already_rolled_back:
+                continue
             selected.append(item)
         if not selected:
-            raise HTTPException(status_code=400, detail="no matching changes selected for rollback")
+            raise HTTPException(
+                status_code=409 if already_rolled_back else 400,
+                detail="the selected calibration changes are already rolled back"
+                if already_rolled_back
+                else "no matching changes selected for rollback",
+            )
         conflicts = []
         inverse = []
         for item in selected:
@@ -4628,11 +4714,11 @@ def calibration_rollback(change_set_id: int, request: CalibrationRollbackRequest
             except Exception:
                 LOGGER.exception("calibration rollback ledger failure recovery was incomplete")
             raise
-        rolled_count = len(selected)
+        rolled_count = len(already_rolled_back) + len(selected)
         total_count = len(source.get("changes") or [])
         active_events.update_calibration_change_set_status(
             change_set_id,
-            "rolled_back" if rolled_count == total_count else "partially_rolled_back",
+            "rolled_back" if rolled_count >= total_count else "partially_rolled_back",
         )
     return {"ok": True, "rollback": rollback, "conflicts": conflicts}
 

@@ -9856,6 +9856,8 @@ section.detection-settings-card {
 .calibration-progress > :last-child,
 .calibration-summary div { display: grid; gap: 0.2rem; }
 .calibration-summary span { color: var(--muted); }
+.calibration-advisories { display: grid; gap: 0.35rem; padding: 0.75rem; border-left: 3px solid var(--accent); background: var(--subtle); }
+.calibration-advisories p { margin: 0; color: var(--muted); }
 .calibration-recommendations article { display: grid; gap: 0.65rem; padding: 0.9rem; border: 1px solid var(--line); border-radius: 0.7rem; background: var(--subtle); }
 .calibration-recommendations article.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 .calibration-recommendation-select { display: flex; align-items: center; gap: 0.5rem; }

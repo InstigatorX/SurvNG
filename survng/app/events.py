@@ -315,6 +315,9 @@ class EventStore:
             ("camera_ids_json", "camera_ids", []),
             ("result_json", "result", {}),
         ):
+            if column not in payload:
+                payload[target] = fallback
+                continue
             try:
                 payload[target] = json.loads(str(payload.pop(column) or ""))
             except (json.JSONDecodeError, TypeError):
@@ -389,13 +392,44 @@ class EventStore:
             ).fetchone()
         return self._calibration_run_row(row)
 
-    def calibration_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+    def calibration_runs(
+        self,
+        limit: int = 20,
+        *,
+        include_result: bool = False,
+    ) -> list[dict[str, Any]]:
+        columns = "*" if include_result else """
+            id, status, mode, camera_ids_json, configuration_fingerprint,
+            error, created_at, updated_at, completed_at
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                "select * from calibration_runs order by created_at desc, id desc limit ?",
+                f"select {columns} from calibration_runs order by created_at desc, id desc limit ?",
                 (max(1, min(int(limit), 100)),),
             ).fetchall()
         return [item for row in rows if (item := self._calibration_run_row(row))]
+
+    def calibration_rollback_change_ids(self, parent_change_set_id: int) -> set[str]:
+        """Return source change IDs already reversed by child rollback entries."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select changes_json from calibration_change_sets
+                where parent_change_set_id = ? and action = 'rollback'
+                """,
+                (int(parent_change_set_id),),
+            ).fetchall()
+        change_ids: set[str] = set()
+        for row in rows:
+            try:
+                changes = json.loads(str(row["changes_json"] or "[]"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for change in changes:
+                source_id = str(change.get("source_change_id") or "")
+                if source_id:
+                    change_ids.add(source_id)
+        return change_ids
 
     @staticmethod
     def _calibration_change_set_row(

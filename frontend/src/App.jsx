@@ -7484,7 +7484,12 @@ function CalibrationLab({ cameras, timeZone }) {
       ]);
       if (!runResponse.ok || !changeResponse.ok) throw new Error("Calibration history could not be loaded");
       const [runPayload, changePayload] = await Promise.all([runResponse.json(), changeResponse.json()]);
-      setRuns(runPayload.runs || []);
+      setRuns((current) => (runPayload.runs || []).map((run) => {
+        const existing = current.find((item) => item.id === run.id);
+        return existing?.result && Object.keys(existing.result).length
+          ? { ...run, result: existing.result }
+          : run;
+      }));
       setChangeSets(changePayload.change_sets || []);
       setSelectedRunId((current) => current || runPayload.runs?.[0]?.id || null);
       setError("");
@@ -7493,12 +7498,33 @@ function CalibrationLab({ cameras, timeZone }) {
     }
   }
 
+  async function loadCalibrationRun(runId) {
+    if (!runId) return;
+    const response = await fetch(`/api/calibration/runs/${runId}`);
+    if (!response.ok) throw new Error("Calibration run details could not be loaded");
+    const run = await response.json();
+    setRuns((current) => current.some((item) => item.id === run.id)
+      ? current.map((item) => item.id === run.id ? run : item)
+      : [run, ...current]);
+  }
+
   useEffect(() => { void loadCalibration(); }, []);
   useEffect(() => {
-    if (!runs.some((run) => ["queued", "running"].includes(run.status))) return undefined;
-    const timer = window.setInterval(() => void loadCalibration(), 2000);
+    if (!selectedRunId) return;
+    void loadCalibrationRun(selectedRunId).catch((loadError) => setError(loadError.message));
+  }, [selectedRunId]);
+  useEffect(() => {
+    const activeRun = runs.some((run) => ["queued", "running"].includes(run.status));
+    const activeEvaluation = changeSets.some((item) => item.status === "reviewing");
+    if (!activeRun && !activeEvaluation) return undefined;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        await loadCalibration();
+        if (selectedRunId) await loadCalibrationRun(selectedRunId);
+      })().catch((loadError) => setError(loadError.message || "Calibration status could not be refreshed"));
+    }, activeRun ? 2000 : 10000);
     return () => window.clearInterval(timer);
-  }, [runs]);
+  }, [runs, changeSets, selectedRunId]);
   useEffect(() => {
     const ids = new Set(cameras.map((camera) => camera.id));
     setSelectedCameras((current) => current.filter((id) => ids.has(id)));
@@ -7507,16 +7533,26 @@ function CalibrationLab({ cameras, timeZone }) {
 
   async function startRun(override = false) {
     if (!selectedCameras.length) return setError("Select at least one camera.");
+    if (mode === "deep" && !override && !window.confirm(`Deep analysis can review up to 40 images for each of ${selectedCameras.length} selected cameras and may use substantial AI API capacity. Continue?`)) return;
     setBusy(true); setError("");
     try {
-      const response = await fetch("/api/calibration/runs", {
+      let response = await fetch("/api/calibration/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ camera_ids: selectedCameras, mode, override_active_evaluation: override }),
       });
-      const payload = await response.json().catch(() => ({}));
+      let payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        if (response.status === 409 && !override && window.confirm(`${payload.detail}\n\nStart a new analysis anyway?`)) return startRun(true);
+        if (response.status === 409 && !override && window.confirm(`${payload.detail}\n\nStart a new analysis anyway?`)) {
+          response = await fetch("/api/calibration/runs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ camera_ids: selectedCameras, mode, override_active_evaluation: true }),
+          });
+          payload = await response.json().catch(() => ({}));
+        }
+      }
+      if (!response.ok) {
         throw new Error(typeof payload.detail === "string" ? payload.detail : "Calibration could not start");
       }
       setSelectedRunId(payload.id);
@@ -7548,8 +7584,12 @@ function CalibrationLab({ cameras, timeZone }) {
     if (!window.confirm(`Roll back ${scopeLabel} from change set #${changeSet.id}? Newer conflicting values will be preserved.`)) return;
     setBusy(true); setError("");
     try {
-      const response = await fetch(`/api/calibration/change-sets/${changeSet.id}/rollback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, change_ids: changeIds, camera_ids: cameraIds }) });
-      const payload = await response.json().catch(() => ({}));
+      let response = await fetch(`/api/calibration/change-sets/${changeSet.id}/rollback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, change_ids: changeIds, camera_ids: cameraIds, force_conflicts: false }) });
+      let payload = await response.json().catch(() => ({}));
+      if (response.status === 409 && payload.detail?.conflicts?.length && window.confirm(`${payload.detail.message}. Replace the ${payload.detail.conflicts.length} newer conflicting value${payload.detail.conflicts.length === 1 ? "" : "s"} anyway?`)) {
+        response = await fetch(`/api/calibration/change-sets/${changeSet.id}/rollback`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, change_ids: changeIds, camera_ids: cameraIds, force_conflicts: true }) });
+        payload = await response.json().catch(() => ({}));
+      }
       if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : payload.detail?.message || "Rollback could not be completed");
       await loadCalibration();
     } catch (rollbackError) { setError(rollbackError.message || "Rollback could not be completed"); }
@@ -7584,6 +7624,7 @@ function CalibrationLab({ cameras, timeZone }) {
       {error ? <div className="error-banner">{error}</div> : null}
       {!selectedRun ? <div className="empty-state">Run an analysis to build camera-specific and system-wide recommendations.</div> : ["queued", "running"].includes(selectedRun.status) ? <div className="calibration-progress"><RefreshCcw className="spin" size={20} /><strong>Analyzing cameras</strong><span>{selectedRun.result?.progress?.completed || 0} of {selectedRun.result?.progress?.total || selectedRun.camera_ids?.length || 0} complete</span></div> : selectedRun.status === "failed" ? <div className="error-banner">{selectedRun.error || "Calibration failed"}</div> : <>
         <div className="calibration-summary"><ShieldCheck size={22} /><div><strong>{selectedRun.result?.summary}</strong><span>{recommendations.length} actionable recommendation{recommendations.length === 1 ? "" : "s"} · configuration fingerprint protected</span></div></div>
+        {selectedRun.result?.advisories ? <div className="calibration-advisories">{Object.values(selectedRun.result.advisories).map((advisory) => <p key={advisory}>{advisory}</p>)}</div> : null}
         <div className="calibration-recommendations">{recommendations.length ? recommendations.map((item) => <article key={item.id} className={selectedRecommendations.includes(item.id) ? "selected" : ""}>
           <label className="calibration-recommendation-select"><input type="checkbox" checked={selectedRecommendations.includes(item.id)} onChange={(event) => setSelectedRecommendations((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span>{item.scope === "global" ? "Global" : cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</span><em>{item.subsystem}</em></label>
           <header><strong>{String(item.setting || "").replaceAll(".", " · ").replaceAll("_", " ")}</strong><code>{JSON.stringify(item.current_effective ?? item.current)} → {JSON.stringify(item.proposed)}</code></header>
@@ -7595,7 +7636,7 @@ function CalibrationLab({ cameras, timeZone }) {
         {recommendations.length ? <div className="calibration-apply-bar"><label>Evaluate after<select value={evaluationHours} onChange={(event) => setEvaluationHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={72}>3 days</option><option value={168}>7 days</option></select></label><button className="primary" onClick={() => void applySelected()} disabled={busy || !selectedRecommendations.length}><Check size={16} />Apply selected ({selectedRecommendations.length})</button></div> : null}
         <details className="calibration-camera-findings"><summary>Camera findings ({selectedRun.result?.camera_summaries?.length || 0})</summary>{selectedRun.result?.camera_summaries?.map((camera) => <article key={camera.camera_id}><strong>{camera.camera_name}</strong><span>{camera.summary}</span><small>{camera.analyzed} reviewed · {camera.failed} failed</small></article>)}</details>
       </>}
-      <div className="calibration-change-history"><h3>Applied change sets</h3>{changeSets.length ? changeSets.map((item) => <article key={item.id}><div><strong>#{item.id} · {item.action}</strong><span>{formatDateTime(item.created_at, timeZone)} · {String(item.status).replaceAll("_", " ")}</span></div><small>{item.changes?.length || 0} setting changes{item.evaluation?.summary ? ` · ${item.evaluation.summary}` : ""}</small><div>{item.action === "apply" && item.status === "collecting" && item.seconds_until_ready <= 0 ? <button onClick={() => void evaluate(item)} disabled={busy}><Activity size={15} />Evaluate</button> : null}{item.action === "apply" && !["rolled_back", "partially_rolled_back"].includes(item.status) ? <button onClick={() => void rollback(item)} disabled={busy}><Undo2 size={15} />Rollback all</button> : null}</div>{item.action === "apply" && item.changes?.length ? <details className="calibration-change-details"><summary>Selective rollback</summary>{Object.entries(item.changes.reduce((groups, change) => { const key = change.camera_id || "Global"; return { ...groups, [key]: [...(groups[key] || []), change] }; }, {})).map(([cameraId, changes]) => <section key={cameraId}><header><strong>{cameraId === "Global" ? "Global settings" : cameras.find((camera) => camera.id === cameraId)?.name || cameraId}</strong><button onClick={() => void rollback(item, { cameraIds: cameraId === "Global" ? [] : [cameraId], changeIds: cameraId === "Global" ? changes.map((change) => change.id) : [] })} disabled={busy}><Undo2 size={14} />Rollback group</button></header>{changes.map((change) => <div key={change.id}><span>{String(change.setting).replaceAll(".", " · ").replaceAll("_", " ")}</span><code>{JSON.stringify(change.before)} → {JSON.stringify(change.after)}</code><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy}>Rollback</button></div>)}</section>)}</details> : null}</article>) : <div className="empty-state">No calibration changes have been applied.</div>}</div>
+      <div className="calibration-change-history"><h3>Applied change sets</h3>{changeSets.length ? changeSets.map((item) => { const rolledBack = new Set(item.rolled_back_change_ids || []); const remaining = (item.changes || []).filter((change) => !rolledBack.has(change.id)); return <article key={item.id}><div><strong>#{item.id} · {item.action}</strong><span>{formatDateTime(item.created_at, timeZone)} · {String(item.status).replaceAll("_", " ")}</span></div><small>{item.changes?.length || 0} setting changes{rolledBack.size ? ` · ${rolledBack.size} rolled back` : ""}{item.evaluation?.summary ? ` · ${item.evaluation.summary}` : ""}</small><div>{item.action === "apply" && item.status === "collecting" && item.seconds_until_ready <= 0 ? <button onClick={() => void evaluate(item)} disabled={busy}><Activity size={15} />Evaluate</button> : null}{item.action === "apply" && remaining.length ? <button onClick={() => void rollback(item)} disabled={busy}><Undo2 size={15} />Rollback remaining</button> : null}</div>{item.action === "apply" && item.changes?.length ? <details className="calibration-change-details"><summary>Selective rollback</summary>{Object.entries(item.changes.reduce((groups, change) => { const key = change.camera_id || "Global"; return { ...groups, [key]: [...(groups[key] || []), change] }; }, {})).map(([cameraId, changes]) => { const remainingGroup = changes.filter((change) => !rolledBack.has(change.id)); return <section key={cameraId}><header><strong>{cameraId === "Global" ? "Global settings" : cameras.find((camera) => camera.id === cameraId)?.name || cameraId}</strong><button onClick={() => void rollback(item, { changeIds: remainingGroup.map((change) => change.id) })} disabled={busy || !remainingGroup.length}><Undo2 size={14} />Rollback group</button></header>{changes.map((change) => <div key={change.id}><span>{String(change.setting).replaceAll(".", " · ").replaceAll("_", " ")}</span><code>{JSON.stringify(change.before)} → {JSON.stringify(change.after)}</code><button onClick={() => void rollback(item, { changeIds: [change.id] })} disabled={busy || rolledBack.has(change.id)}>{rolledBack.has(change.id) ? "Rolled back" : "Rollback"}</button></div>)}</section>; })}</details> : null}</article>; }) : <div className="empty-state">No calibration changes have been applied.</div>}</div>
     </section>
   </>;
 }
