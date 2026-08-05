@@ -19,6 +19,7 @@ from survng.app.object_tracking import (
     ObjectTrackerRegistry,
     ObjectTrackingSession,
     _rescale_detection_boxes,
+    ultralytics_botsort_dependency_status,
 )
 
 
@@ -33,6 +34,33 @@ def detection(
         "box": {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]},
         "incident_eligible": True,
     }
+
+
+class UltralyticsDependencyStatusTest(unittest.TestCase):
+    @patch("survng.app.object_tracking.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_tracking.version", return_value="8.4.999")
+    def test_compatible_patch_version_is_not_rejected(
+        self,
+        _version,
+        _find_spec,
+    ) -> None:
+        status = ultralytics_botsort_dependency_status()
+
+        self.assertTrue(status["available"])
+        self.assertFalse(status["is_tested_version"])
+        self.assertEqual(status["reason"], "")
+
+    @patch("survng.app.object_tracking.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_tracking.version", return_value="8.5.0")
+    def test_unreviewed_tracker_api_line_is_rejected(
+        self,
+        _version,
+        _find_spec,
+    ) -> None:
+        status = ultralytics_botsort_dependency_status()
+
+        self.assertFalse(status["available"])
+        self.assertIn("outside", status["reason"])
 
 
 class ByteTrackObjectTrackerTest(unittest.TestCase):

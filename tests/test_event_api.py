@@ -517,6 +517,12 @@ class EventApiSerializationTest(unittest.TestCase):
         )
         limiter.release.assert_called_once_with()
 
+    def test_tracking_comparison_duration_defaults_to_full_bounded_window(self) -> None:
+        self.assertEqual(main._tracking_comparison_duration(None), 30.0)
+        self.assertEqual(main._tracking_comparison_duration(6.0), 6.0)
+        self.assertEqual(main._tracking_comparison_duration(200.0), 30.0)
+        self.assertEqual(main._tracking_comparison_duration(1.0), 3.0)
+
     def test_tracking_comparison_keeps_the_original_manager_during_reload(self) -> None:
         event = {
             "id": 43,

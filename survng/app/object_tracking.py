@@ -201,7 +201,22 @@ class ObjectTrackerBackend(Protocol):
 
 
 ObjectTrackerBuilder = Callable[[ObjectTrackingConfig, float], ObjectTrackerBackend]
-SUPPORTED_ULTRALYTICS_TRACKING_VERSION = "8.4.108"
+TESTED_ULTRALYTICS_TRACKING_VERSION = "8.4.115"
+MINIMUM_ULTRALYTICS_TRACKING_VERSION = (8, 4, 108)
+MAXIMUM_ULTRALYTICS_TRACKING_VERSION = (8, 5, 0)
+
+
+def _ultralytics_tracking_version_supported(installed_version: str) -> bool:
+    """Accept compatible patches without importing the heavyweight runtime."""
+    try:
+        release = tuple(
+            int(part)
+            for part in installed_version.partition("+")[0].partition("-")[0].split(".")[:3]
+        )
+        release = (*release, *(0 for _ in range(3 - len(release))))
+    except (TypeError, ValueError):
+        return False
+    return MINIMUM_ULTRALYTICS_TRACKING_VERSION <= release < MAXIMUM_ULTRALYTICS_TRACKING_VERSION
 
 
 def ultralytics_botsort_dependency_status() -> dict[str, Any]:
@@ -209,27 +224,31 @@ def ultralytics_botsort_dependency_status() -> dict[str, Any]:
         installed_version = version("ultralytics")
     except PackageNotFoundError:
         installed_version = ""
+    package_present = importlib.util.find_spec("ultralytics") is not None
     lap_present = importlib.util.find_spec("lap") is not None
-    available = (
-        importlib.util.find_spec("ultralytics") is not None
-        and installed_version == SUPPORTED_ULTRALYTICS_TRACKING_VERSION
-        and lap_present
-    )
+    version_supported = _ultralytics_tracking_version_supported(installed_version)
+    available = bool(installed_version and package_present and lap_present and version_supported)
     if not installed_version:
         reason = "Ultralytics is not installed."
-    elif installed_version != SUPPORTED_ULTRALYTICS_TRACKING_VERSION:
-        reason = (
-            f"Ultralytics {installed_version} is installed; "
-            f"SurvNG requires {SUPPORTED_ULTRALYTICS_TRACKING_VERSION}."
-        )
     elif not lap_present:
         reason = "The LAP assignment dependency is not installed."
+    elif not version_supported:
+        reason = (
+            f"Ultralytics {installed_version} is outside SurvNG's supported "
+            "BoT-SORT API range (8.4.108 through the latest 8.4.x release)."
+        )
     else:
         reason = ""
     return {
         "available": available,
         "installed_version": installed_version,
-        "required_version": SUPPORTED_ULTRALYTICS_TRACKING_VERSION,
+        # Keep required_version for API compatibility with older frontends.
+        # Availability is capability-based; this is the reproducible version
+        # pinned by requirements-ultralytics-tracking.txt and exercised by CI.
+        "required_version": TESTED_ULTRALYTICS_TRACKING_VERSION,
+        "tested_version": TESTED_ULTRALYTICS_TRACKING_VERSION,
+        "is_tested_version": installed_version == TESTED_ULTRALYTICS_TRACKING_VERSION,
+        "supported_version_range": ">=8.4.108,<8.5",
         "reason": reason,
     }
 

@@ -3492,7 +3492,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     setTrackingComparisonError("");
     setTrackingComparisonEngine(null);
     try {
-      const response = await fetch(`/api/events/${manualEventId}/tracking-comparison?duration_seconds=6`, { method: "POST" });
+      const response = await fetch(`/api/events/${manualEventId}/tracking-comparison?duration_seconds=30`, { method: "POST" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Tracking comparison failed");
       setTrackingComparison(payload);
@@ -3606,7 +3606,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               className="tile-control-button"
               onClick={runTrackingComparison}
               disabled={trackingComparisonLoading || !Number.isFinite(manualEventId)}
-              title="Run Hybrid and BoT-SORT on the same recorded frames"
+              title="Run Hybrid and BoT-SORT on the same 30-second recording window"
             >
               <Gauge size={16} /> {trackingComparisonLoading ? "Comparing" : "Compare"}
             </button>

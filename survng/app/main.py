@@ -1985,6 +1985,9 @@ def object_tracking_catalog() -> dict:
                 "description": "Official Kalman/BoT-SORT association using SurvNG person embeddings.",
                 "installed_version": ultralytics_status["installed_version"],
                 "required_version": ultralytics_status["required_version"],
+                "tested_version": ultralytics_status["tested_version"],
+                "is_tested_version": ultralytics_status["is_tested_version"],
+                "supported_version_range": ultralytics_status["supported_version_range"],
                 "reason": ultralytics_status["reason"] or "",
             },
         ],
@@ -7214,6 +7217,23 @@ def update_tracking_comparison_verdict(
     }
 
 
+TRACKING_COMPARISON_MIN_DURATION_SECONDS = 3.0
+TRACKING_COMPARISON_DEFAULT_DURATION_SECONDS = 30.0
+TRACKING_COMPARISON_MAX_DURATION_SECONDS = 30.0
+
+
+def _tracking_comparison_duration(duration_seconds: float | None) -> float:
+    requested = (
+        float(duration_seconds)
+        if duration_seconds is not None
+        else TRACKING_COMPARISON_DEFAULT_DURATION_SECONDS
+    )
+    return max(
+        TRACKING_COMPARISON_MIN_DURATION_SECONDS,
+        min(TRACKING_COMPARISON_MAX_DURATION_SECONDS, requested),
+    )
+
+
 @app.post("/api/events/{event_id}/tracking-comparison")
 def compare_event_tracking(event_id: int, duration_seconds: float | None = None) -> dict:
     dependency = ultralytics_botsort_dependency_status()
@@ -7225,15 +7245,7 @@ def compare_event_tracking(event_id: int, duration_seconds: float | None = None)
         active_manager = manager
         active_config = config.model_copy(deep=True)
         event = active_manager.events.get(event_id)
-    duration = max(
-        3.0,
-        min(
-            30.0,
-            float(duration_seconds)
-            if duration_seconds is not None
-            else min(15.0, active_config.detector.tracking.max_session_seconds),
-        ),
-    )
+    duration = _tracking_comparison_duration(duration_seconds)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
     camera = camera_by_id(active_config, str(event.get("camera_id") or ""))

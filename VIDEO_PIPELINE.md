@@ -447,9 +447,11 @@ embeddings used by the default engine. Install
 `requirements-ultralytics-tracking.txt` before selecting it. This optional
 runtime adds a large PyTorch dependency and should be enabled only after its
 accuracy and resource use are compared with the default on representative
-recordings. The adapter is pinned to the reviewed Ultralytics version because
-it uses tracker-level APIs rather than the higher-level `model.track()` entry
-point. Ultralytics is distributed under AGPL-3.0; deployments that redistribute
+recordings. The optional requirements pin the reviewed Ultralytics version for
+reproducible installs. At runtime SurvNG accepts compatible patches on the
+reviewed 8.4.x tracker API line instead of disabling comparison solely because
+the installed patch is newer. Adapter regression tests exercise the private APIs
+SurvNG uses. Ultralytics is distributed under AGPL-3.0; deployments that redistribute
 SurvNG with this optional dependency should review the applicable license terms.
 
 Tracking runs only after an eligible object is found. It samples the main
@@ -473,7 +475,7 @@ but cannot show synchronized video boxes. Snapshot boxes represent the last
 stored position and can therefore be later than the representative snapshot.
 
 The incident viewer’s **Compare** action is an explicit, offline diagnostic.
-It decodes a bounded recording window, runs OpenVINO detection and optional
+It decodes a bounded 30-second recording window, runs OpenVINO detection and optional
 person appearance extraction once per sampled frame, then gives that identical
 detection sequence to SurvNG Hybrid and Ultralytics BoT-SORT. The result shows
 side-by-side paths, track and observation counts, extra-track-ID and processing
