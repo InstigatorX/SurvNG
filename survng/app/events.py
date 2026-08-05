@@ -1018,6 +1018,8 @@ class EventStore:
         *,
         sampled_at: datetime | None = None,
         process_memory: dict[str, Any] | None = None,
+        worker_memory: dict[str, Any] | None = None,
+        memory_maintenance: dict[str, Any] | None = None,
     ) -> None:
         """Persist one compact camera-health sample per UTC minute for seven days."""
         current = sampled_at or datetime.now(timezone.utc)
@@ -1043,6 +1045,8 @@ class EventStore:
             {
                 "cameras": cameras,
                 "process_memory": process_memory or {},
+                "worker_memory": worker_memory or {},
+                "memory_maintenance": memory_maintenance or {},
             },
             separators=(",", ":"),
             allow_nan=False,
@@ -1094,6 +1098,10 @@ class EventStore:
                 continue
             malloc = memory.get("malloc")
             malloc = malloc if isinstance(malloc, dict) else {}
+            worker_memory = payload.get("worker_memory")
+            worker_memory = worker_memory if isinstance(worker_memory, dict) else {}
+            maintenance = payload.get("memory_maintenance")
+            maintenance = maintenance if isinstance(maintenance, dict) else {}
             bucket_epoch = int(sampled.timestamp() // bucket_seconds) * bucket_seconds
             buckets[bucket_epoch] = {
                 "sampled_at": sampled.astimezone(timezone.utc).isoformat(),
@@ -1107,6 +1115,12 @@ class EventStore:
                 "malloc_allocated_bytes": int(malloc.get("allocated_bytes") or 0),
                 "malloc_free_bytes": int(malloc.get("free_bytes") or 0),
                 "malloc_mmap_bytes": int(malloc.get("mmap_bytes") or 0),
+                "worker_rss_bytes": int(worker_memory.get("total_rss_bytes") or 0),
+                "worker_pss_bytes": int(worker_memory.get("total_pss_bytes") or 0),
+                "allocator_trim_count": int(maintenance.get("successful_trims") or 0),
+                "allocator_trim_reclaimed_bytes": int(
+                    maintenance.get("reclaimed_total_bytes") or 0
+                ),
                 "threads": int(memory.get("threads") or 0),
                 "file_descriptors": int(memory.get("file_descriptors") or 0),
             }
@@ -1166,6 +1180,7 @@ class EventStore:
                 "tracking_active_max": 0,
                 "capture_read_failures": 0,
                 "capture_open_failures": 0,
+                "main_capture_starts": 0,
                 "analysis_frames_dropped": 0,
             })
             live_values: list[float] = []
@@ -1185,6 +1200,7 @@ class EventStore:
                 counters = {
                     "capture_read_failures": int(live.get("read_failures") or 0) + int(main.get("read_failures") or 0),
                     "capture_open_failures": int(live.get("open_failures") or 0) + int(main.get("open_failures") or 0),
+                    "main_capture_starts": int(main.get("starts") or 0),
                     "analysis_frames_dropped": int(item.get("analysis_frames_dropped") or 0),
                 }
                 previous = previous_counters.get(selected_id)
@@ -1213,6 +1229,7 @@ class EventStore:
                 "tracking_active_max": int(bucket["tracking_active_max"]),
                 "capture_read_failures": int(bucket["capture_read_failures"]),
                 "capture_open_failures": int(bucket["capture_open_failures"]),
+                "main_capture_starts": int(bucket["main_capture_starts"]),
                 "analysis_frames_dropped": int(bucket["analysis_frames_dropped"]),
             })
         return result

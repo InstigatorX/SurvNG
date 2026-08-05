@@ -2375,6 +2375,18 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     memory = _linux_memory_status()
     process_memory = process_memory_status()
     process_rss_bytes = int(process_memory["rss_bytes"])
+    worker_memory_status = getattr(manager, "worker_memory_status", None)
+    worker_memory = (
+        worker_memory_status(detector_status=detector)
+        if callable(worker_memory_status)
+        else {"total_rss_bytes": 0, "total_pss_bytes": 0, "workers": {}}
+    )
+    allocator_memory_status = getattr(manager, "allocator_memory_status", None)
+    memory_maintenance = (
+        allocator_memory_status()
+        if callable(allocator_memory_status)
+        else {}
+    )
     service_memory = _cgroup_memory_status()
     cpu_count = os.cpu_count() or 1
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -2479,6 +2491,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             "memory": memory,
             "process_rss_bytes": process_rss_bytes,
             "process_memory": process_memory,
+            "worker_memory": worker_memory,
+            "memory_maintenance": memory_maintenance,
             "service_memory": service_memory,
             "storage": {
                 "path": str(storage_path),

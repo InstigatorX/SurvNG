@@ -30,7 +30,11 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
-from .process_memory import process_memory_status
+from .process_memory import (
+    AllocatorMemoryTrimmer,
+    process_memory_status,
+    process_memory_status_for_pid,
+)
 from .semantic_search import SemanticIndex, build_semantic_search
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
@@ -177,6 +181,7 @@ class AppManager:
         self._closed = False
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None
+        self._allocator_memory_trimmer = AllocatorMemoryTrimmer()
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
         self._motion_analysis_limiter = threading.BoundedSemaphore(2)
         workers: dict[str, CameraWorker] = {}
@@ -1180,10 +1185,32 @@ class AppManager:
                             previous[camera_id] = fingerprint
                             self.state_events.publish("camera_state", status)
                     now = time.monotonic()
+                    detector_status = self.detector_status()
+                    detector_runtime = detector_status.get("runtime") or {}
+                    allocator_idle = not (
+                        any(
+                            bool(status.get("main_running"))
+                            or bool((status.get("object_tracking") or {}).get("active"))
+                            for status in statuses
+                        )
+                        or int(detector_runtime.get("queue_depth") or 0) > 0
+                        or int(detector_runtime.get("pending_frames") or 0) > 0
+                        or int(detector_runtime.get("active_inferences") or 0) > 0
+                    )
+                    self._allocator_memory_trimmer.observe_idle(allocator_idle, now=now)
                     if now - telemetry_sample_at >= 60.0:
+                        process_memory = process_memory_status()
+                        self._allocator_memory_trimmer.maybe_trim(
+                            process_memory,
+                            now=now,
+                        )
                         self.events.record_runtime_telemetry(
                             statuses,
                             process_memory=process_memory_status(),
+                            worker_memory=self.worker_memory_status(
+                                detector_status=detector_status,
+                            ),
+                            memory_maintenance=self.allocator_memory_status(),
                         )
                         telemetry_sample_at = now
                 except Exception:
@@ -1204,6 +1231,51 @@ class AppManager:
 
     def mqtt_status(self) -> dict:
         return self.mqtt.status()
+
+    def allocator_memory_status(self) -> dict:
+        return self._allocator_memory_trimmer.status()
+
+    def worker_memory_status(
+        self,
+        *,
+        detector_status: dict | None = None,
+    ) -> dict:
+        """Return current isolated-inference worker memory without shelling out."""
+        detector = detector_status or self.detector_status()
+        workers = dict(detector.get("workers") or {})
+        semantic = self.semantic_search_status()
+        workers["semantic"] = {
+            "worker_pid": semantic.get("worker_pid"),
+            "worker_alive": semantic.get("state") == "ready",
+        }
+        result: dict[str, dict] = {}
+        total_rss = 0
+        total_pss = 0
+        seen_pids: set[int] = set()
+        for role, worker in workers.items():
+            if not isinstance(worker, dict) or not worker.get("worker_alive"):
+                continue
+            pid = int(worker.get("worker_pid") or 0)
+            if pid <= 0 or pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+            memory = process_memory_status_for_pid(pid)
+            rss = int(memory.get("rss_bytes") or 0)
+            pss = int(memory.get("pss_bytes") or 0)
+            result[str(role)] = {
+                "pid": pid,
+                "rss_bytes": rss,
+                "pss_bytes": pss,
+                "threads": int(memory.get("threads") or 0),
+                "file_descriptors": int(memory.get("file_descriptors") or 0),
+            }
+            total_rss += rss
+            total_pss += pss
+        return {
+            "total_rss_bytes": total_rss,
+            "total_pss_bytes": total_pss,
+            "workers": result,
+        }
 
     def statuses(self) -> list[dict]:
         recording_keys = set()

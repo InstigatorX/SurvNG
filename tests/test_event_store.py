@@ -124,7 +124,12 @@ class EventStoreTest(unittest.TestCase):
             store = EventStore(Path(tmpdir))
             first_at = datetime.fromisoformat("2026-08-02T12:00:00+00:00")
 
-            def status(read_failures: int, analysis_drops: int, fps: float) -> list[dict]:
+            def status(
+                read_failures: int,
+                analysis_drops: int,
+                fps: float,
+                main_starts: int,
+            ) -> list[dict]:
                 return [{
                     "id": "gate",
                     "connected": True,
@@ -132,15 +137,15 @@ class EventStoreTest(unittest.TestCase):
                     "main_last_frame_age_seconds": 0.2,
                     "capture_stats": {
                         "live": {"fps": fps, "read_failures": read_failures, "open_failures": 0},
-                        "main": {"fps": fps / 2, "read_failures": 0, "open_failures": 0},
+                        "main": {"fps": fps / 2, "read_failures": 0, "open_failures": 0, "starts": main_starts},
                     },
                     "motion_qualification": {"analysis_frames_dropped": analysis_drops},
                     "object_tracking": {"active": False},
                 }]
 
-            store.record_runtime_telemetry(status(2, 3, 10.0), sampled_at=first_at)
+            store.record_runtime_telemetry(status(2, 3, 10.0, 4), sampled_at=first_at)
             store.record_runtime_telemetry(
-                status(4, 8, 12.0),
+                status(4, 8, 12.0, 7),
                 sampled_at=first_at + timedelta(minutes=1),
             )
             history = store.runtime_telemetry_history(
@@ -154,6 +159,7 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(history[-1]["live_fps"], 12.0)
             self.assertEqual(history[-1]["main_fps"], 6.0)
             self.assertEqual(history[-1]["capture_read_failures"], 2)
+            self.assertEqual(history[-1]["main_capture_starts"], 3)
             self.assertEqual(history[-1]["analysis_frames_dropped"], 5)
 
     def test_runtime_telemetry_persists_process_memory_diagnostics(self) -> None:
@@ -177,6 +183,11 @@ class EventStoreTest(unittest.TestCase):
                         "mmap_bytes": 30,
                     },
                 },
+                worker_memory={"total_rss_bytes": 60, "total_pss_bytes": 55},
+                memory_maintenance={
+                    "successful_trims": 2,
+                    "reclaimed_total_bytes": 400,
+                },
             )
 
             history = store.process_memory_history(
@@ -189,6 +200,9 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(history[0]["rss_bytes"], 100)
             self.assertEqual(history[0]["malloc_allocated_bytes"], 50)
             self.assertEqual(history[0]["malloc_free_bytes"], 10)
+            self.assertEqual(history[0]["worker_rss_bytes"], 60)
+            self.assertEqual(history[0]["allocator_trim_count"], 2)
+            self.assertEqual(history[0]["allocator_trim_reclaimed_bytes"], 400)
             self.assertEqual(history[0]["threads"], 12)
             self.assertEqual(history[0]["file_descriptors"], 34)
 

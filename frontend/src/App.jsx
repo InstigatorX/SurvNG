@@ -7493,6 +7493,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const storage = data.system?.storage || {};
   const memory = data.system?.memory || {};
   const serviceMemory = data.system?.service_memory || {};
+  const workerMemory = data.system?.worker_memory || {};
+  const memoryMaintenance = data.system?.memory_maintenance || {};
   const hourly = activity?.hourly || [];
   const history = data.history || [];
   const runtimeShort = data.runtime_history?.short || [];
@@ -7563,9 +7565,9 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         <div className="telemetry-section-head"><div><h3>Camera stream health{selected ? ` · ${selected.name}` : ""}</h3><p>Background samples continue when this page is closed. Read failures are decoder/camera delivery failures; motion-analysis drops are internal queue pressure. Main-stream FPS is zero while its on-demand capture is idle.</p></div></div>
         <div className="telemetry-trend-grid two-column">
           <TelemetryTrend title="Decoded FPS · 2 hours" description={selected ? "Selected camera" : "Average across cameras"} history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
-          <TelemetryTrend title="Dropped work · 2 hours" description="Capture failures and motion queue drops per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
+          <TelemetryTrend title="Capture lifecycle · 2 hours" description="Main decoder starts, read failures, and motion queue drops per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "main_capture_starts", label: "Main starts", className: "secondary" }, { key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
           <TelemetryTrend title="Decoded FPS · 7 days" description="15-minute averages" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
-          <TelemetryTrend title="Dropped work · 7 days" description="Capture failures and motion queue drops per 15 minutes" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
+          <TelemetryTrend title="Capture lifecycle · 7 days" description="Main decoder starts, read failures, and motion queue drops per 15 minutes" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "main_capture_starts", label: "Main starts", className: "secondary" }, { key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
         </div>
       </section>
 
@@ -7584,7 +7586,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
       {!selected ? <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>Memory diagnostics</h3><p>Background samples continue while this page is closed. Allocated measures glibc-owned live blocks; retained is free space held inside allocator arenas.</p></div></div>
         <div className="telemetry-trend-grid two-column">
-          <TelemetryTrend title="Main process · 24 hours" description="Resident, anonymous, and proportionally owned memory" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "RSS", className: "process-memory" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }, { key: "pss_bytes", label: "PSS", className: "secondary" }]} />
+          <TelemetryTrend title="Processes · 24 hours" description="Main-process RSS and isolated inference-worker RSS" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "Main RSS", className: "process-memory" }, { key: "worker_rss_bytes", label: "Workers", className: "secondary" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }]} />
           <TelemetryTrend title="Native allocator · 24 hours" description="Live allocations versus reusable retained arenas and large mappings" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "malloc_allocated_bytes", label: "Allocated", className: "process-memory" }, { key: "malloc_free_bytes", label: "Retained", className: "warning" }, { key: "malloc_mmap_bytes", label: "Mapped", className: "storage" }]} />
           <TelemetryTrend title="Main process · 7 days" description="Fifteen-minute long-term memory trend" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "RSS", className: "process-memory" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }, { key: "malloc_allocated_bytes", label: "Allocated", className: "secondary" }]} />
           <TelemetryTrend title="Process resources · 7 days" description="Thread and file-descriptor growth can expose lifecycle leaks" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "threads", label: "Threads", className: "rate" }, { key: "file_descriptors", label: "Files", className: "warning" }]} />
@@ -7604,6 +7606,9 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>Main process RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
             <div><dt>Main anonymous memory</dt><dd>{formatBytes(data.system?.process_memory?.anonymous_rss_bytes)} <small>{formatBytes(data.system?.process_memory?.malloc?.allocated_bytes)} live glibc allocations</small></dd></div>
             <div><dt>Allocator retained</dt><dd>{formatBytes(data.system?.process_memory?.malloc?.free_bytes)} <small>reusable arena space</small></dd></div>
+            <div><dt>Inference worker memory</dt><dd>{formatBytes(workerMemory.total_rss_bytes)} <small>{Object.keys(workerMemory.workers || {}).length} isolated workers</small></dd></div>
+            <div><dt>Allocator trims</dt><dd>{Number(memoryMaintenance.successful_trims || 0).toLocaleString()} <small>{formatBytes(memoryMaintenance.reclaimed_total_bytes)} reclaimed since restart</small></dd></div>
+            <div><dt>Last allocator trim</dt><dd>{memoryMaintenance.last_trim_at ? formatDateTime(memoryMaintenance.last_trim_at, timeZone) : "Not yet needed"} <small>{memoryMaintenance.last_skip_reason ? String(memoryMaintenance.last_skip_reason).replaceAll("_", " ") : `${formatBytes(memoryMaintenance.last_reclaimed_bytes)} reclaimed`}</small></dd></div>
             <div><dt>Threads / file descriptors</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
             <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
             <div><dt>Detector</dt><dd>{data.detector?.loaded_backend || "Not loaded"} · {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
@@ -7646,6 +7651,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
                 <div><dt>Recorder clock recovery</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
                 <div><dt>Decoded FPS · live / main</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)} / {Number(camera.capture?.main?.fps || 0).toFixed(1)}</dd></div>
+                <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                 <div><dt>Capture read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
                 <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>

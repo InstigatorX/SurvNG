@@ -15,6 +15,7 @@ services:
       SURVNG_CONFIG_PATH: /config/config.json
       SURVNG_UID: ${SURVNG_UID:-1000}
       SURVNG_GID: ${SURVNG_GID:-1000}
+      MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-16}
     volumes:
       - ${SURVNG_CONFIG_DIR:-./docker-data/config}:/config
       - ${SURVNG_DATA_DIR:-./docker-data/data}:/data

@@ -16,6 +16,9 @@ ExecStop=/bin/sleep 1
 ExecStop=/bin/kill -TERM $MAINPID
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONFAULTHANDLER=1
+# Bound glibc's per-thread arenas; transient high-resolution decoder threads
+# otherwise retain several GiB of reusable native heap after they stop.
+Environment=MALLOC_ARENA_MAX=16
 
 # SIGUSR1 releases ONVIF first; FastAPI lifespan then stops the remaining workers.
 # SurvNG gracefully stops FFmpeg children; systemd kills the cgroup only if that stalls.

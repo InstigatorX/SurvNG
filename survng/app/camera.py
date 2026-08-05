@@ -131,8 +131,8 @@ class CameraWorker:
             "main": deque(maxlen=600),
         }
         self._source_capture_stats: dict[str, dict[str, int]] = {
-            "live": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0},
-            "main": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0},
+            "live": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0, "starts": 0},
+            "main": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0, "starts": 0},
         }
         self._source_last_access: dict[str, float] = {}
         self._source_errors: dict[str, str] = {}
@@ -2416,6 +2416,7 @@ class CameraWorker:
                             source_stats = self._source_capture_stats[source]
                             if source_stats["frames_received"] > 0:
                                 source_stats["reconnects"] += 1
+                            source_stats["starts"] += 1
                         self._set_source_error(source, "")
                         while not self._stop.is_set() and not stop_event.is_set():
                             if self._source_is_idle(source):
