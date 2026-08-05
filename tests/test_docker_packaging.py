@@ -70,8 +70,8 @@ class DockerPackagingTest(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("FROM ubuntu:24.04 AS runtime-base", dockerfile)
-        self.assertIn("INTEL_COMPUTE_VERSION=26.22.38646.6-1~24.04~ppa1", dockerfile)
-        self.assertIn("INTEL_IGC_VERSION=2.36.3-2~24.04", dockerfile)
+        self.assertIn("INTEL_COMPUTE_VERSION=26.22.38646.7-1~24.04~ppa1", dockerfile)
+        self.assertIn("INTEL_IGC_VERSION=2.36.5-1~24.04", dockerfile)
         self.assertIn("INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1", dockerfile)
         self.assertIn("ppa:kobuk-team/intel-graphics", dockerfile)
         self.assertIn('"libze-intel-gpu1=${INTEL_COMPUTE_VERSION}"', dockerfile)

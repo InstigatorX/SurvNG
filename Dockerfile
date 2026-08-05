@@ -62,8 +62,8 @@ CMD ["uvicorn", "survng.app.main:app", "--host", "0.0.0.0", "--port", "8088", "-
 # docker compose -f compose.yaml -f compose.intel-gpu.yaml up -d --build.
 FROM runtime-base AS runtime-intel
 USER root
-ARG INTEL_COMPUTE_VERSION=26.22.38646.6-1~24.04~ppa1
-ARG INTEL_IGC_VERSION=2.36.3-2~24.04
+ARG INTEL_COMPUTE_VERSION=26.22.38646.7-1~24.04~ppa1
+ARG INTEL_IGC_VERSION=2.36.5-1~24.04
 ARG INTEL_GMMLIB_VERSION=22.10.0-1~24.04~ppa1
 ARG INTEL_LEVEL_ZERO_VERSION=1.28.6-1~24.04~ppa1
 ARG INTEL_MEDIA_VERSION=26.2.2-1~24.04~ppa1

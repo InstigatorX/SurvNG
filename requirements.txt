@@ -1,8 +1,8 @@
-fastapi>=0.121,<1
-uvicorn[standard]>=0.38,<1
+fastapi>=0.141,<1
+uvicorn[standard]>=0.52,<1
 websockets>=16,<17
 opencv-python==4.10.0.84
-openvino==2026.2.1
+openvino==2026.3.0
 ftfy>=6.1,<7
 regex>=2024.0,<2027
 coremltools>=8,<10; platform_system=="Darwin"
