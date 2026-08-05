@@ -1018,6 +1018,56 @@ class Recorder:
             "segment_count": len(rows),
         }
 
+    def recording_grid_availability_between(
+        self,
+        camera_ids: list[str],
+        start_epoch: float,
+        end_epoch: float,
+    ) -> dict[str, dict[str, dict]]:
+        """Read compact Main/Sub availability for multiple cameras in one index query."""
+        unique_camera_ids = list(dict.fromkeys(str(camera_id) for camera_id in camera_ids if camera_id))
+        result = {
+            camera_id: {
+                source: {"ranges": [], "segment_count": 0}
+                for source in ("main", "live")
+            }
+            for camera_id in unique_camera_ids
+        }
+        if not unique_camera_ids:
+            return result
+        placeholders = ",".join("?" for _ in unique_camera_ids)
+        with self._index_connection() as connection:
+            indexed = connection.execute(
+                f"""
+                SELECT camera_id, source, start_epoch, end_epoch
+                FROM recordings
+                WHERE camera_id IN ({placeholders})
+                    AND source IN ('main', 'live')
+                    AND playable = 1
+                    AND size_bytes > 1024
+                    AND end_epoch > ?
+                    AND start_epoch < ?
+                ORDER BY camera_id, source, start_epoch
+                """,
+                (*unique_camera_ids, start_epoch, end_epoch),
+            ).fetchall()
+        grouped: dict[tuple[str, str], list[dict]] = {}
+        for row in indexed:
+            key = (str(row["camera_id"]), str(row["source"]))
+            grouped.setdefault(key, []).append(dict(row))
+        gap_tolerance = min(5.0, max(0.25, self.segment_seconds / 2))
+        for (camera_id, source), rows in grouped.items():
+            result[camera_id][source] = {
+                "ranges": self._merge_availability_rows(
+                    rows,
+                    start_epoch,
+                    end_epoch,
+                    gap_tolerance=gap_tolerance,
+                ),
+                "segment_count": len(rows),
+            }
+        return result
+
     def refresh_recording_edge(
         self,
         camera_id: str,

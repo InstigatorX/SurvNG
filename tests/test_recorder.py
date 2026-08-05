@@ -815,6 +815,36 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(availability["segment_count"], 1)
 
+    def test_grid_availability_reads_all_cameras_and_sources_in_one_index_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            front_main = Path(tmpdir) / "front-main.mp4"
+            front_live = Path(tmpdir) / "front-live.mp4"
+            gate_live = Path(tmpdir) / "gate-live.mp4"
+            for path in (front_main, front_live, gate_live):
+                path.write_bytes(b"x" * 2048)
+            recorder._store_recording_rows(
+                "front-door", "main", [self._row(front_main, start_epoch=1_784_000_000.0)],
+            )
+            recorder._store_recording_rows(
+                "front-door", "live", [self._row(front_live, start_epoch=1_784_000_010.0)],
+            )
+            recorder._store_recording_rows(
+                "gate", "live", [self._row(gate_live, start_epoch=1_784_000_020.0)],
+            )
+
+            availability = recorder.recording_grid_availability_between(
+                ["front-door", "gate", "missing"],
+                1_784_000_000.0,
+                1_784_000_040.0,
+            )
+
+        self.assertEqual(availability["front-door"]["main"]["segment_count"], 1)
+        self.assertEqual(availability["front-door"]["live"]["segment_count"], 1)
+        self.assertEqual(availability["gate"]["live"]["segment_count"], 1)
+        self.assertEqual(availability["gate"]["main"]["segment_count"], 0)
+        self.assertEqual(availability["missing"]["live"]["ranges"], [])
+
     def test_refresh_recording_edge_indexes_only_completed_recent_segments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)

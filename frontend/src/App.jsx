@@ -31,6 +31,7 @@ import {
   ListTree,
   Monitor,
   Moon,
+  Pause,
   Play,
   Plus,
   Power,
@@ -4906,6 +4907,15 @@ function recordingDayHlsUrl(cameraId, startEpoch, endEpoch, source) {
   return appUrl(`/api/cameras/${cameraId}/recordings/day.m3u8?${params.toString()}`);
 }
 
+function recordingGridDayUrl(startEpoch, endEpoch, source) {
+  const params = new URLSearchParams({
+    start_epoch: startEpoch.toFixed(3),
+    end_epoch: endEpoch.toFixed(3),
+    source,
+  });
+  return appUrl(`/api/recordings/grid/day?${params.toString()}`);
+}
+
 function recordingPreviewUrl(cameraId, epoch, source) {
   const params = new URLSearchParams({
     epoch: epoch.toFixed(3),
@@ -4961,6 +4971,247 @@ function recordingIncidentEndEpoch(incident) {
   const parsed = new Date(incident?.end_at || incident?.created_at || "").getTime() / 1000;
   return Number.isFinite(parsed) ? parsed : recordingIncidentEpoch(incident);
 }
+
+function recordingPlaybackTimeline(rows) {
+  let mediaOffset = 0;
+  return (rows || [])
+    .map((item) => ({
+      ...item,
+      start_epoch: Number(item.start_epoch),
+      end_epoch: Number(item.end_epoch),
+    }))
+    .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
+    .sort((left, right) => left.start_epoch - right.start_epoch)
+    .map((item) => {
+      const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
+      const result = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
+      mediaOffset += duration;
+      return result;
+    });
+}
+
+function recordingCameraAspect(camera, source = "live") {
+  const dimensions = camera?.stream_dimensions?.[source]
+    || camera?.stream_dimensions?.live
+    || camera?.stream_dimensions?.main;
+  const width = Number(dimensions?.width);
+  const height = Number(dimensions?.height);
+  return width > 0 && height > 0 ? width / height : 16 / 9;
+}
+
+function recordingGridLayout(cameras, source, width, height, gap = 6) {
+  if (!cameras.length || width <= 0 || height <= 0) return [];
+  const items = cameras.map((camera) => ({ camera, aspect: recordingCameraAspect(camera, source) }));
+  let best = null;
+  const maximumRows = Math.min(items.length, 7);
+  for (let rowCount = 1; rowCount <= maximumRows; rowCount += 1) {
+    const rows = [];
+    let offset = 0;
+    let remainingAspect = items.reduce((sum, item) => sum + item.aspect, 0);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const rowsRemaining = rowCount - rowIndex;
+      const itemsRemaining = items.length - offset;
+      const minimumRemainingItems = rowsRemaining - 1;
+      const targetAspect = remainingAspect / rowsRemaining;
+      const row = [];
+      let rowAspect = 0;
+      while (offset < items.length && items.length - offset > minimumRemainingItems) {
+        const next = items[offset];
+        if (row.length && rowAspect + next.aspect > targetAspect) {
+          const currentDistance = Math.abs(targetAspect - rowAspect);
+          const nextDistance = Math.abs(targetAspect - rowAspect - next.aspect);
+          if (currentDistance <= nextDistance) break;
+        }
+        row.push(next);
+        rowAspect += next.aspect;
+        offset += 1;
+      }
+      if (!row.length && offset < items.length) {
+        row.push(items[offset]);
+        rowAspect += items[offset].aspect;
+        offset += 1;
+      }
+      remainingAspect -= rowAspect;
+      rows.push({ items: row, aspect: rowAspect });
+    }
+    const heightLimit = (height - gap * (rows.length - 1)) / rows.length;
+    const widthLimit = Math.min(...rows.map((row) => (
+      (width - gap * (row.items.length - 1)) / row.aspect
+    )));
+    const rowHeight = Math.max(1, Math.min(heightLimit, widthLimit));
+    if (!best || rowHeight > best.rowHeight) best = { rows, rowHeight };
+  }
+  return best.rows.map((row) => ({
+    height: best.rowHeight,
+    items: row.items.map((item) => ({
+      camera: item.camera,
+      width: item.aspect * best.rowHeight,
+    })),
+  }));
+}
+
+function RecordingGridTile({ camera, source, epoch, playing, focused, width, height, onFocus, onSelect }) {
+  const videoRef = useRef(null);
+  const [playback, setPlayback] = useState(null);
+  const [error, setError] = useState("");
+  const bucket = Math.floor(Math.max(0, Number(epoch) || 0) / (15 * 60)) * 15 * 60;
+  const timeline = useMemo(
+    () => recordingPlaybackTimeline(playback?.rows || []),
+    [playback?.rows],
+  );
+  const mediaTime = playbackMediaTimeForEpoch(timeline, epoch);
+  const hasCoverage = Number.isFinite(mediaTime);
+
+  useEffect(() => {
+    if (!camera?.id || !bucket) return undefined;
+    const controller = new AbortController();
+    let cancelled = false;
+    setPlayback(null);
+    setError("");
+    const candidates = source === "main" ? ["main", "live"] : ["live", "main"];
+    async function load() {
+      for (const candidate of candidates) {
+        const response = await fetch(
+          recordingWindowUrl(camera.id, bucket, bucket + 15 * 60, candidate),
+          { signal: controller.signal },
+        );
+        if (!response.ok) continue;
+        const payload = await response.json();
+        if (!(payload.recordings || []).length) continue;
+        if (!cancelled) {
+          setPlayback({
+            source: candidate,
+            start: Number(payload.start_epoch),
+            end: Number(payload.end_epoch),
+            rows: payload.recordings,
+            targetEpoch: epoch,
+          });
+        }
+        return;
+      }
+      if (!cancelled) setError("No recording at this time");
+    }
+    load().catch((loadError) => {
+      if (!cancelled && loadError.name !== "AbortError") setError("Recording unavailable");
+    });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [bucket, camera?.id, source]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(mediaTime)) {
+      video?.pause();
+      return;
+    }
+    if (Math.abs(video.currentTime - mediaTime) > 1.1) video.currentTime = mediaTime;
+    if (playing) video.play().catch(() => {});
+    else video.pause();
+  }, [mediaTime, playing]);
+
+  const manifestUrl = playback
+    ? recordingDayHlsUrl(camera.id, playback.start, playback.end, playback.source)
+    : "";
+  const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch);
+  const displayedSource = playback?.source || source;
+  const aspect = recordingCameraAspect(camera, displayedSource);
+  return (
+    <article
+      className={`recording-grid-tile${hasCoverage ? "" : " gap"}${focused ? " focused" : ""}`}
+      style={{
+        "--recording-aspect": aspect,
+        ...(!focused && width > 0 && height > 0 ? { width: `${width}px`, height: `${height}px` } : {}),
+      }}
+    >
+      {manifestUrl ? <ShakaVideo
+        ref={videoRef}
+        src={manifestUrl}
+        mimeType="application/vnd.apple.mpegurl"
+        startTime={Number.isFinite(initialMediaTime) ? initialMediaTime : 0}
+        bufferingGoal={4}
+        muted
+        playsInline
+        preload="metadata"
+        onReady={(_player, video) => {
+          if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;
+          if (playing && Number.isFinite(mediaTime)) video.play().catch(() => {});
+        }}
+        onError={() => setError("Playback unavailable")}
+      /> : null}
+      <button
+        type="button"
+        className="recording-grid-focus-hit"
+        onClick={() => onFocus(camera.id)}
+        aria-label={focused ? `Restore ${camera.name} grid tile` : `Enlarge ${camera.name} recording`}
+        title={focused ? "Return to camera grid" : "Enlarge camera"}
+      />
+      <button type="button" className="recording-grid-camera" onClick={() => onSelect(camera.id)} title={`Open ${camera.name} recording`}>
+        <Camera size={14} /><span>{camera.name}</span>
+        {playback?.source && playback.source !== source ? <em>{playback.source === "live" ? "Sub" : "Main"}</em> : null}
+      </button>
+      {!playback && !error ? <div className="recording-grid-status"><RefreshCcw className="spin" size={17} />Loading</div> : null}
+      {(!hasCoverage || error) && playback ? <div className="recording-grid-status"><Film size={17} />{error || "No recording at this time"}</div> : null}
+      {error && !playback ? <div className="recording-grid-status"><Film size={17} />{error}</div> : null}
+    </article>
+  );
+}
+
+function RecordingCameraGrid({ cameras, source, epoch, playing, onSelect }) {
+  const [focusedCameraId, setFocusedCameraId] = useState("");
+  const [gridSize, setGridSize] = useState({ width: 0, height: 0 });
+  const gridRef = useRef(null);
+  const layout = useMemo(
+    () => recordingGridLayout(cameras, source, gridSize.width, gridSize.height),
+    [cameras, gridSize.height, gridSize.width, source],
+  );
+
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return undefined;
+    const update = () => setGridSize({ width: grid.clientWidth, height: grid.clientHeight });
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!focusedCameraId) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setFocusedCameraId("");
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [focusedCameraId]);
+
+  function focusCamera(cameraId) {
+    setFocusedCameraId((current) => current === cameraId ? "" : cameraId);
+    gridRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  const rows = layout.length ? layout : [{ height: 0, items: cameras.map((camera) => ({ camera, width: 0 })) }];
+  return <div ref={gridRef} className={`recording-camera-grid${focusedCameraId ? " has-focus" : ""}`}>
+    {rows.map((row, rowIndex) => <div className="recording-camera-row" key={`${rowIndex}-${row.items.map((item) => item.camera.id).join("-")}`}>
+      {row.items.map(({ camera, width }) => <RecordingGridTile
+        key={camera.id}
+        camera={camera}
+        source={source}
+        epoch={epoch}
+        playing={playing}
+        focused={camera.id === focusedCameraId}
+        width={width}
+        height={row.height}
+        onFocus={focusCamera}
+        onSelect={onSelect}
+      />)}
+    </div>)}
+    {focusedCameraId ? <button type="button" className="recording-grid-close-focus" onClick={() => setFocusedCameraId("")} aria-label="Return to all camera tiles"><X size={18} /></button> : null}
+  </div>;
+}
+
+const ALL_RECORDING_CAMERAS_ID = "all";
 
 function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   const query = cameraId ? `?camera=${encodeURIComponent(cameraId)}` : "";
@@ -5139,7 +5390,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const querySource = initialQuery.get("source");
   const [cameras, setCameras] = useState([]);
   const [cameraId, setCameraId] = useState(initialQuery.get("camera") || "");
-  const [source, setSource] = useState(querySource === "live" || querySource === "main" ? querySource : preferredStreamSource());
+  const [source, setSource] = useState(querySource === "live" || querySource === "main"
+    ? querySource
+    : initialQuery.get("camera") === ALL_RECORDING_CAMERAS_ID ? "live" : preferredStreamSource());
   const [date, setDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(queryDate) && queryDate <= today ? queryDate : today);
   const [recordings, setRecordings] = useState([]);
   const [playbackDetail, setPlaybackDetail] = useState(null);
@@ -5165,8 +5418,12 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   const [exportJob, setExportJob] = useState(null);
   const [exportError, setExportError] = useState("");
   const [exportSubmitting, setExportSubmitting] = useState(false);
+  const [gridPlaying, setGridPlaying] = useState(false);
 
-  const activeCameraId = cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
+  const isAllCameras = cameraId === ALL_RECORDING_CAMERAS_ID;
+  const activeCameraId = isAllCameras
+    ? ALL_RECORDING_CAMERAS_ID
+    : cameras.some((camera) => camera.id === cameraId) ? cameraId : cameras[0]?.id || "";
   const dayStart = useMemo(() => zonedDateSecondToEpoch(date, 0, timeZone), [date, timeZone]);
   const nextDate = addDaysToDateKey(date, 1);
   const dayEnd = useMemo(() => zonedDateSecondToEpoch(nextDate, 0, timeZone), [nextDate, timeZone]);
@@ -5175,42 +5432,22 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   useEffect(() => {
     onAssistantContextChange?.({
       page: "recordings",
-      camera_id: activeCameraId,
+      camera_id: isAllCameras ? "" : activeCameraId,
       recording_epoch: Number(playhead) || initialEpoch || dayStart,
-      filters: { date, source, event_type: eventFilter },
+      filters: { date, source, event_type: eventFilter, camera_view: isAllCameras ? "all" : "single" },
     });
-  }, [activeCameraId, date, dayStart, eventFilter, initialEpoch, onAssistantContextChange, playhead, source]);
+  }, [activeCameraId, date, dayStart, eventFilter, initialEpoch, isAllCameras, onAssistantContextChange, playhead, source]);
 
   const timeline = useMemo(() => {
-    let mediaOffset = 0;
-    return recordings
-      .map((item) => ({ ...item, start_epoch: Number(item.start_epoch), end_epoch: Number(item.end_epoch) }))
-      .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
-      .sort((a, b) => a.start_epoch - b.start_epoch)
-      .map((item) => {
-        const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
-        const mapped = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
-        mediaOffset += duration;
-        return mapped;
-      });
+    return recordingPlaybackTimeline(recordings);
   }, [recordings]);
   latestAvailabilityRef.current = timeline[timeline.length - 1]?.end_epoch ?? null;
   const playbackTimeline = useMemo(() => {
     if (!playbackDetail) return [];
-    let mediaOffset = 0;
-    return playbackDetail.rows
-      .map((item) => ({ ...item, start_epoch: Number(item.start_epoch), end_epoch: Number(item.end_epoch) }))
-      .filter((item) => Number.isFinite(item.start_epoch) && Number.isFinite(item.end_epoch))
-      .sort((a, b) => a.start_epoch - b.start_epoch)
-      .map((item) => {
-        const duration = Math.max(0.01, Number(item.duration_seconds) || item.end_epoch - item.start_epoch);
-        const mapped = { ...item, media_start: mediaOffset, media_end: mediaOffset + duration };
-        mediaOffset += duration;
-        return mapped;
-      });
+    return recordingPlaybackTimeline(playbackDetail.rows);
   }, [playbackDetail]);
   const loadedPlaybackWindow = playbackDetail;
-  const manifestUrl = activeCameraId && playbackDetail && playbackTimeline.length
+  const manifestUrl = !isAllCameras && activeCameraId && playbackDetail && playbackTimeline.length
     ? `${recordingDayHlsUrl(activeCameraId, playbackDetail.start, playbackDetail.end, source)}&reload=${playbackDetail.revision || 0}-${manifestRetryToken}`
     : "";
   const manifestStartTime = useMemo(() => {
@@ -5374,6 +5611,16 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   function playAt(epoch, autoplay = true) {
     const target = snapToRecording(epoch);
     if (target === null || !activeCameraId) return;
+    if (isAllCameras) {
+      autoplayRef.current = autoplay;
+      setGridPlaying(autoplay);
+      setPlaybackError("");
+      setPlaybackErrorStage("");
+      setPlaybackNotice("");
+      setPlayhead(target);
+      desiredEpochRef.current = target;
+      return;
+    }
     autoplayRef.current = autoplay;
     setFollowTarget(null);
     setPlaybackError("");
@@ -5406,6 +5653,33 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
   }
 
   useEffect(() => {
+    if (!isAllCameras || !gridPlaying || !timeline.length) return undefined;
+    let previous = performance.now();
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = Math.max(0, Math.min(2, (now - previous) / 1000));
+      previous = now;
+      setPlayhead((current) => {
+        const base = Number.isFinite(current) ? current : timeline[0].start_epoch;
+        const requested = base + elapsed;
+        const containing = timeline.find((item) => item.start_epoch <= requested && requested < item.end_epoch);
+        let next = containing ? requested : null;
+        if (!Number.isFinite(next)) {
+          const following = timeline.find((item) => item.end_epoch > requested);
+          next = following ? Math.max(requested, following.start_epoch) : null;
+        }
+        if (!Number.isFinite(next) || next >= dayEnd) {
+          setGridPlaying(false);
+          return base;
+        }
+        desiredEpochRef.current = next;
+        return next;
+      });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [dayEnd, gridPlaying, isAllCameras, timeline]);
+
+  useEffect(() => {
     const controller = new AbortController();
     fetch("/api/cameras", { signal: controller.signal })
       .then((response) => {
@@ -5435,6 +5709,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     setEvents([]);
     setAvailableSources([]);
     setPlaybackWindow(null);
+    setGridPlaying(false);
     setManifestRetryToken(0);
     setFollowTarget(null);
     pendingSeekEpochRef.current = null;
@@ -5448,7 +5723,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     codecFallbackRef.current = false;
     if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
     playbackRetryRef.current = { attempts: 0, timer: null };
-    fetch(recordingDayUrl(activeCameraId, dayStart, dayEnd, source), { signal: controller.signal })
+    const indexUrl = isAllCameras
+      ? recordingGridDayUrl(dayStart, dayEnd, source)
+      : recordingDayUrl(activeCameraId, dayStart, dayEnd, source);
+    fetch(indexUrl, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Recording index failed (${response.status})`);
         return response.json();
@@ -5459,7 +5737,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         setAvailableSources(nextAvailableSources);
         if (!nextAvailability.length && source === "main" && nextAvailableSources.includes("live")) {
           codecFallbackRef.current = true;
-          setPlaybackNotice("No Main recording exists for this day; using Sub.");
+          setPlaybackNotice(isAllCameras
+            ? "No Main recordings exist for this day; using Sub."
+            : "No Main recording exists for this day; using Sub.");
           setSource("live");
           return;
         }
@@ -5480,10 +5760,10 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       if (playbackRetryRef.current.timer) window.clearTimeout(playbackRetryRef.current.timer);
       playbackRetryRef.current = { attempts: 0, timer: null };
     };
-  }, [activeCameraId, source, dayStart, dayEnd, recordingIndexRevision]);
+  }, [activeCameraId, isAllCameras, source, dayStart, dayEnd, recordingIndexRevision]);
 
   useEffect(() => {
-    if (!activeCameraId || date !== today) return undefined;
+    if (!activeCameraId || isAllCameras || date !== today) return undefined;
     let stopped = false;
     let inFlight = false;
     const refresh = async () => {
@@ -5518,10 +5798,32 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [activeCameraId, source, date, today, dayStart, dayEnd]);
+  }, [activeCameraId, isAllCameras, source, date, today, dayStart, dayEnd]);
 
   useEffect(() => {
-    if (!activeCameraId || !playbackWindow) return undefined;
+    if (!isAllCameras || date !== today) return undefined;
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const response = await fetch(recordingGridDayUrl(dayStart, dayEnd, source));
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (stopped) return;
+        setRecordings(payload.availability || payload.recordings || []);
+        setEvents(payload.incidents || payload.events || []);
+      } catch {
+        // The next refresh retries without interrupting synchronized playback.
+      }
+    };
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [date, dayEnd, dayStart, isAllCameras, source, today]);
+
+  useEffect(() => {
+    if (!activeCameraId || isAllCameras || !playbackWindow) return undefined;
     const controller = new AbortController();
     const requestId = ++playbackRequestRef.current;
     const requestedWindow = { ...playbackWindow };
@@ -5554,7 +5856,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
         }
       });
     return () => controller.abort();
-  }, [activeCameraId, source, playbackWindow?.start, playbackWindow?.end, playbackWindowRevision]);
+  }, [activeCameraId, isAllCameras, source, playbackWindow?.start, playbackWindow?.end, playbackWindowRevision]);
 
   useEffect(() => {
     if (!timeline.length || Number.isFinite(playhead)) return;
@@ -5765,6 +6067,11 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     <main className="recordings-v2-page">
       <nav className="recordings-tabs"><RecordingSectionSwitcher mode="history" cameraId={activeCameraId} /></nav>
       <RecordingCameraRail subtitle="Choose recording source">
+        <button type="button" className={isAllCameras ? "active" : ""} onClick={() => { setCameraId(ALL_RECORDING_CAMERAS_ID); setSource("live"); }}>
+          <Grid2X2 size={16} />
+          <span>All Cameras</span>
+          <i className={cameras.some((camera) => camera.recording || camera.sub_recording) ? "online" : ""} />
+        </button>
         {cameras.map((camera) => (
           <button key={camera.id} type="button" className={camera.id === activeCameraId ? "active" : ""} onClick={() => setCameraId(camera.id)}>
             <Camera size={16} />
@@ -5775,8 +6082,15 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
       </RecordingCameraRail>
 
       <section className="recordings-v2-workspace">
-        <div className="recordings-v2-player">
-          {manifestUrl ? (
+        <div className={`recordings-v2-player${isAllCameras ? " all-camera-grid" : ""}`}>
+          {isAllCameras && Number.isFinite(playhead) ? <RecordingCameraGrid
+            cameras={cameras}
+            source={source}
+            epoch={playhead}
+            playing={gridPlaying}
+            onSelect={(selectedCameraId) => setCameraId(selectedCameraId)}
+          /> : null}
+          {!isAllCameras && manifestUrl ? (
             <ShakaVideo
               ref={videoRef}
               src={manifestUrl}
@@ -5807,7 +6121,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           {!loading && !timeline.length ? <div className="recordings-v2-message"><Film size={28} />No recordings on this day</div> : null}
           {playbackError ? <div className="recordings-v2-error"><span>{playbackError}</span><button type="button" onClick={retryRecordingPlayback}><RefreshCcw size={14} />Retry</button></div> : null}
           {playbackNotice && !playbackError ? <div className="recordings-v2-notice">{playbackNotice}</div> : null}
-          {playbackBlocked && !playbackError ? (
+          {!isAllCameras && playbackBlocked && !playbackError ? (
             <button type="button" className="recordings-v2-play" onClick={() => requestRecordingPlay(videoRef.current)}>
               <Play size={22} fill="currentColor" />
               Play recording
@@ -5817,11 +6131,17 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main</button>
             <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub</button>
           </div>
+          {isAllCameras && Number.isFinite(playhead) ? <div className="recording-grid-controls">
+            <button type="button" onClick={() => playAt(playhead - 10, gridPlaying)} aria-label="Back 10 seconds"><SkipBack size={16} /></button>
+            <button type="button" className="primary" onClick={() => setGridPlaying((current) => !current)}>{gridPlaying ? <Pause size={17} /> : <Play size={17} fill="currentColor" />}{gridPlaying ? "Pause" : "Play"}</button>
+            <button type="button" onClick={() => playAt(playhead + 10, gridPlaying)} aria-label="Forward 10 seconds"><SkipForward size={16} /></button>
+            <time>{formatDateTime(playhead, timeZone)}</time>
+          </div> : null}
         </div>
 
         <div className="recordings-v2-controls">
           <RecordingTimeline
-            cameraId={activeCameraId}
+            cameraId={isAllCameras ? "" : activeCameraId}
             source={source}
             previewManifestUrl={manifestUrl}
             previewStartTime={manifestStartTime}
@@ -5833,8 +6153,8 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
             playhead={playhead ?? dayStart}
             timeZone={timeZone}
             onSeek={(epoch) => playAt(epoch, true)}
-            exportRange={exportRange}
-            onExportRangeChange={exportJob ? null : setExportRange}
+            exportRange={isAllCameras ? null : exportRange}
+            onExportRangeChange={isAllCameras || exportJob ? null : setExportRange}
           />
           {exportRange ? (
             <section className="recordings-v2-export-panel" aria-label="Export recording">
@@ -5903,9 +6223,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 type="button"
                 className={`recordings-v2-export-toggle${exportRange ? " active" : ""}`}
                 onClick={toggleExport}
-                disabled={!timeline.length || exportActive}
+                disabled={isAllCameras || !timeline.length || exportActive}
               >
-                <Download size={15} />{exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
+                <Download size={15} />{isAllCameras ? "Select camera to export" : exportActive ? "Export running" : exportRange ? "Close export" : "Export"}
               </button>
             </div>
             <span>{nearbyEvents.length.toLocaleString()} of {filteredEvents.length.toLocaleString()} {eventFilter} incident{filteredEvents.length === 1 ? "" : "s"} · {incidentRangeHours >= 24 ? "full day" : `${incidentRangeHours} hour${incidentRangeHours === 1 ? "" : "s"} around current time`}</span>
@@ -5925,7 +6245,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
                 </span>
                 <span className="recordings-v2-event-caption">
                   <time>{formatTimeOnly(event.incident_epoch, timeZone).replace(/:\d{2}(?=\s)/, "")}</time>
-                  <b>{event.labels?.length ? event.labels.join(", ") : "Motion"}</b>
+                  <b>{isAllCameras ? `${cameras.find((camera) => camera.id === event.camera_id)?.name || event.camera_id} · ` : ""}{event.labels?.length ? event.labels.join(", ") : "Motion"}</b>
                 </span>
               </button>
             )) : <div className="recordings-v2-no-events"><Radar size={17} />No {eventFilter} incidents {incidentRangeHours >= 24 ? "on this day" : `within ${incidentRangeHours === 1 ? "30 minutes" : `${incidentRangeHours / 2} hours`} of this time`}</div>}

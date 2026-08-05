@@ -7484,6 +7484,104 @@ def recording_day(
     }
 
 
+@app.get("/api/recordings/grid/day")
+def recording_grid_day(
+    start_epoch: float,
+    end_epoch: float,
+    source: str = "live",
+) -> dict:
+    """Return local-index history for the synchronized all-camera recording view."""
+    _validate_recording_range(
+        start_epoch,
+        end_epoch,
+        90000,
+        "invalid recording grid day range",
+    )
+    selected_source = recording_source(source)
+    start_at = datetime.fromtimestamp(start_epoch, timezone.utc).isoformat()
+    end_at = datetime.fromtimestamp(end_epoch, timezone.utc).isoformat()
+    camera_payloads: list[dict[str, object]] = []
+    aggregate_ranges: list[dict[str, object]] = []
+    aggregate_incidents: list[dict] = []
+    available_sources: set[str] = set()
+    camera_ids = {camera.id for camera in config.cameras}
+    events_by_camera: dict[str, list[dict]] = {camera_id: [] for camera_id in camera_ids}
+    if hasattr(manager.events, "between_compact"):
+        for event in manager.events.between_compact(start_at, end_at):
+            camera_id = str(event.get("camera_id") or "")
+            if camera_id in events_by_camera:
+                events_by_camera[camera_id].append(event)
+    grid_availability = None
+    if hasattr(manager.recorder, "recording_grid_availability_between"):
+        grid_availability = manager.recorder.recording_grid_availability_between(
+            [camera.id for camera in config.cameras],
+            start_epoch,
+            end_epoch,
+        )
+    for camera in config.cameras:
+        if grid_availability is not None:
+            source_availability = grid_availability[camera.id]
+        else:
+            source_availability = {
+                candidate: manager.recorder.recording_availability_between(
+                    camera.id,
+                    start_epoch,
+                    end_epoch,
+                    candidate,
+                    discover_missing=False,
+                )
+                for candidate in ("main", "live")
+            }
+        camera_sources = [
+            candidate
+            for candidate in ("main", "live")
+            if int(source_availability[candidate]["segment_count"]) > 0
+        ]
+        available_sources.update(camera_sources)
+        availability = source_availability[selected_source]
+        ranges = [dict(item) for item in availability["ranges"]]
+        for item in ranges:
+            item["camera_id"] = camera.id
+        aggregate_ranges.extend(ranges)
+        event_rows = events_by_camera[camera.id]
+        if not hasattr(manager.events, "between_compact"):
+            event_rows = manager.events.for_camera_range(
+                camera.id,
+                start_at,
+                end_at,
+                limit=5000,
+            )
+        public_events = [_event_row(event) for event in event_rows]
+        incidents = [
+            _incident_list_payload(incident)
+            for incident in _incident_rows(public_events)
+        ]
+        aggregate_incidents.extend(incidents)
+        camera_payloads.append({
+            "camera_id": camera.id,
+            "camera_name": camera.name,
+            "source": selected_source,
+            "recordings": ranges,
+            "recording_count": int(availability["segment_count"]),
+            "available_sources": camera_sources,
+        })
+    aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
+    aggregate_incidents.sort(
+        key=lambda item: str(item.get("start_at") or item.get("created_at") or "")
+    )
+    return {
+        "view": "all_cameras",
+        "source": selected_source,
+        "start_epoch": start_epoch,
+        "end_epoch": end_epoch,
+        "recordings": aggregate_ranges,
+        "availability": aggregate_ranges,
+        "incidents": aggregate_incidents,
+        "available_sources": sorted(available_sources),
+        "cameras": camera_payloads,
+    }
+
+
 def _public_media_export(job: dict[str, object]) -> dict[str, object]:
     payload = dict(job)
     for key in ("download_url", "media_url"):

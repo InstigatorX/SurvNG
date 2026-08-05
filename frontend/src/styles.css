@@ -7306,6 +7306,178 @@ section.detection-settings-card {
   visibility: visible;
 }
 
+.recordings-v2-player.all-camera-grid {
+  display: block;
+  padding: 42px 6px 48px;
+}
+
+.recording-camera-grid {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
+.recording-camera-row {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recording-grid-tile {
+  position: relative;
+  flex: 0 0 auto;
+  aspect-ratio: var(--recording-aspect, 16 / 9);
+  width: 220px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, .28);
+  border-radius: 5px;
+  background: #071011;
+}
+
+.recordings-v2-player .recording-grid-tile video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.recording-grid-tile.gap video { visibility: hidden; }
+
+.recording-grid-focus-hit {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.recording-camera-grid.has-focus .recording-grid-tile:not(.focused) {
+  opacity: .48;
+}
+
+.recording-grid-tile.focused {
+  position: absolute;
+  z-index: 6;
+  top: 50%;
+  left: 50%;
+  width: min(78%, 1100px);
+  height: min(86%, 760px);
+  aspect-ratio: auto;
+  opacity: 1;
+  transform: translate(-50%, -50%);
+  border-color: rgba(65, 214, 190, .8);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .75), 0 0 0 1px rgba(65, 214, 190, .18);
+}
+
+.recording-grid-tile.focused .recording-grid-focus-hit { cursor: zoom-out; }
+
+.recording-grid-close-focus {
+  position: absolute;
+  z-index: 8;
+  top: calc(7% + 6px);
+  right: calc(11% + 6px);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-color: rgba(255, 255, 255, .2);
+  background: rgba(3, 10, 11, .84);
+  color: #fff;
+  backdrop-filter: blur(7px);
+}
+
+.recording-grid-camera {
+  position: absolute;
+  z-index: 4;
+  top: 6px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  border-color: rgba(255, 255, 255, .18);
+  background: rgba(3, 10, 11, .78);
+  color: #fff;
+  padding: 4px 7px;
+  backdrop-filter: blur(6px);
+}
+
+.recording-grid-camera em {
+  border-left: 1px solid rgba(255, 255, 255, .2);
+  color: #9de9dc;
+  font-size: 9px;
+  font-style: normal;
+  padding-left: 5px;
+}
+
+.recording-grid-status {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #9caaa9;
+  font-size: 11px;
+  font-weight: 750;
+  pointer-events: none;
+}
+
+.recording-grid-controls {
+  position: absolute;
+  z-index: 7;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.recording-grid-controls button,
+.recording-grid-controls time {
+  pointer-events: auto;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 6px;
+  background: rgba(3, 10, 11, .82);
+  color: #fff;
+  backdrop-filter: blur(7px);
+}
+
+.recording-grid-controls button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 5px 9px;
+}
+
+.recording-grid-controls time {
+  margin-left: 5px;
+  padding: 7px 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .recordings-v2-message,
 .recordings-v2-error {
   position: absolute;
@@ -8084,6 +8256,26 @@ section.detection-settings-card {
     height: min(52dvh, 480px);
     min-height: 220px;
   }
+
+  .recordings-v2-player.all-camera-grid {
+    height: min(68dvh, 680px);
+    padding: 40px 4px 48px;
+  }
+
+  .recording-camera-grid {
+    gap: 4px;
+  }
+
+  .recording-camera-row { gap: 4px; }
+
+  .recording-grid-tile.focused {
+    width: calc(100% - 12px);
+    height: min(76%, 620px);
+  }
+  .recording-grid-close-focus { top: calc(12% + 6px); right: 10px; }
+  .recording-grid-camera { max-width: calc(100% - 12px); }
+  .recording-grid-camera span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recording-grid-controls time { display: none; }
 
   .recordings-v2-controls {
     gap: 6px;

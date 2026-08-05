@@ -100,6 +100,41 @@ class RecordingApiTest(unittest.TestCase):
         for call in recorder.recording_availability_between.call_args_list:
             self.assertIs(call.kwargs["discover_missing"], False)
 
+    def test_recording_grid_day_aggregates_cameras_from_local_index_only(self) -> None:
+        recorder = Mock()
+        available = {"ranges": [{"start_epoch": 100.0, "end_epoch": 110.0}], "segment_count": 1}
+        unavailable = {"ranges": [], "segment_count": 0}
+        recorder.recording_grid_availability_between.return_value = {
+            "gate": {"main": unavailable, "live": available},
+            "garage": {"main": available, "live": unavailable},
+        }
+        events = SimpleNamespace(between_compact=Mock(return_value=[]))
+        manager = SimpleNamespace(
+            recorder=recorder,
+            events=events,
+        )
+        config = SimpleNamespace(
+            cameras=[
+                SimpleNamespace(id="gate", name="Gate"),
+                SimpleNamespace(id="garage", name="Garage"),
+            ],
+        )
+
+        with patch.object(main, "manager", manager), patch.object(main, "config", config):
+            payload = main.recording_grid_day(100.0, 200.0, "live")
+
+        self.assertEqual(payload["view"], "all_cameras")
+        self.assertEqual(payload["available_sources"], ["live", "main"])
+        self.assertEqual(len(payload["cameras"]), 2)
+        self.assertEqual(payload["cameras"][0]["recording_count"], 1)
+        self.assertEqual(payload["cameras"][1]["recording_count"], 0)
+        self.assertEqual(payload["recordings"][0]["camera_id"], "gate")
+        events.between_compact.assert_called_once()
+        recorder.recording_grid_availability_between.assert_called_once_with(
+            ["gate", "garage"], 100.0, 200.0,
+        )
+        recorder.recording_availability_between.assert_not_called()
+
     def test_recording_day_groups_events_into_thumbnail_incidents(self) -> None:
         recorder = Mock()
         recorder.recording_availability_between.return_value = {
