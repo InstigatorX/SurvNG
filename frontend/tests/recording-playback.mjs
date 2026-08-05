@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   describePlaybackError,
   isUnsupportedPlaybackError,
+  mergeRecordingAvailability,
   playbackMediaTimeForEpoch,
   playbackRowsCoverEpoch,
 } from "../src/recordingPlayback.mjs";
@@ -21,6 +22,22 @@ assert.equal(playbackMediaTimeForEpoch([
 ], 125), 15);
 assert.equal(playbackMediaTimeForEpoch(rows, 105), null);
 assert.equal(playbackMediaTimeForEpoch([], 105), null);
+
+const mergedAvailability = mergeRecordingAvailability(
+  [
+    { camera_id: "gate", source: "live", start_epoch: 100, end_epoch: 110 },
+    { camera_id: "garage", source: "live", start_epoch: 100, end_epoch: 110 },
+  ],
+  [
+    { camera_id: "gate", source: "live", start_epoch: 109, end_epoch: 120 },
+    { camera_id: "gate", source: "main", start_epoch: 109, end_epoch: 125 },
+  ],
+);
+assert.equal(mergedAvailability.length, 3);
+assert.deepEqual(
+  mergedAvailability.find((item) => item.camera_id === "gate" && item.source === "live"),
+  { camera_id: "gate", source: "live", start_epoch: 100, end_epoch: 120, duration_seconds: 20, segment_count: 0 },
+);
 
 assert.equal(describePlaybackError({ code: 1001, category: 1, message: "request failed" }), "code 1001 · category 1 · request failed");
 assert.equal(describePlaybackError(null), "unknown media error");

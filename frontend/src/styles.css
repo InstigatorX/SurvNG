@@ -7313,27 +7313,14 @@ section.detection-settings-card {
 
 .recording-camera-grid {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 6px;
+  display: block;
   width: 100%;
   height: 100%;
-  overflow: auto;
-}
-
-.recording-camera-row {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 0;
+  overflow: hidden;
 }
 
 .recording-grid-tile {
-  position: relative;
-  flex: 0 0 auto;
+  position: absolute;
   aspect-ratio: var(--recording-aspect, 16 / 9);
   width: 220px;
   min-width: 0;
@@ -8261,12 +8248,6 @@ section.detection-settings-card {
     height: min(68dvh, 680px);
     padding: 40px 4px 48px;
   }
-
-  .recording-camera-grid {
-    gap: 4px;
-  }
-
-  .recording-camera-row { gap: 4px; }
 
   .recording-grid-tile.focused {
     width: calc(100% - 12px);

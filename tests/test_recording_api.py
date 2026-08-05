@@ -129,11 +129,63 @@ class RecordingApiTest(unittest.TestCase):
         self.assertEqual(payload["cameras"][0]["recording_count"], 1)
         self.assertEqual(payload["cameras"][1]["recording_count"], 0)
         self.assertEqual(payload["recordings"][0]["camera_id"], "gate")
+        self.assertEqual(
+            {(item["camera_id"], item["source"]) for item in payload["recordings"]},
+            {("gate", "live"), ("garage", "main")},
+        )
         events.between_compact.assert_called_once()
         recorder.recording_grid_availability_between.assert_called_once_with(
             ["gate", "garage"], 100.0, 200.0,
         )
         recorder.recording_availability_between.assert_not_called()
+
+    def test_recording_grid_updates_uses_bounded_index_and_event_overlap(self) -> None:
+        recorder = Mock()
+        available = {"ranges": [{"start_epoch": 130.0, "end_epoch": 150.0}], "segment_count": 2}
+        unavailable = {"ranges": [], "segment_count": 0}
+        recorder.recording_grid_availability_between.return_value = {
+            "gate": {"main": unavailable, "live": available},
+        }
+        events = SimpleNamespace(between_compact=Mock(return_value=[]))
+        manager = SimpleNamespace(recorder=recorder, events=events)
+        config = SimpleNamespace(cameras=[SimpleNamespace(id="gate", name="Gate")])
+
+        with patch.object(main, "manager", manager), patch.object(main, "config", config):
+            payload = main.recording_grid_updates(100.0, 200.0, 190.0, "live")
+
+        self.assertEqual(payload["start_epoch"], 100.0)
+        self.assertEqual(payload["availability"][0]["camera_id"], "gate")
+        recorder.recording_grid_availability_between.assert_called_once_with(
+            ["gate"], 100.0, 200.0,
+        )
+        event_start = datetime.fromisoformat(events.between_compact.call_args.args[0]).timestamp()
+        self.assertEqual(event_start, 100.0)
+        recorder.request_recording_edge_refresh.assert_not_called()
+
+    def test_recording_grid_updates_rejects_non_finite_cursor(self) -> None:
+        with self.assertRaises(HTTPException) as invalid:
+            main.recording_grid_updates(100.0, 200.0, float("nan"), "live")
+        self.assertEqual(invalid.exception.status_code, 400)
+
+    def test_recording_grid_incident_payload_omits_investigation_details(self) -> None:
+        payload = main._recording_grid_incident_payload({
+            "id": "incident-gate-1",
+            "camera_id": "gate",
+            "representative_event_id": 2,
+            "snapshot_path": "snapshots/gate/2.webp",
+            "has_objects": True,
+            "labels": ["car"],
+            "start_epoch": 100.0,
+            "events": [{"id": 1}, {"id": 2}],
+            "objects": [{"label": "car", "box": [0, 0, 1, 1]}],
+            "object_tracking": {"tracks": [{"id": 1}]},
+        })
+
+        self.assertEqual(payload["labels"], ["car"])
+        self.assertEqual(payload["representative_event_id"], 2)
+        self.assertNotIn("events", payload)
+        self.assertNotIn("objects", payload)
+        self.assertNotIn("object_tracking", payload)
 
     def test_recording_day_groups_events_into_thumbnail_incidents(self) -> None:
         recorder = Mock()
@@ -494,6 +546,26 @@ class RecordingApiTest(unittest.TestCase):
             discover_missing=False,
         )
         recorder.discard_missing_recording_rows.assert_called_once_with(current)
+        recorder.lease_recordings_for_playback.assert_called_once_with(current)
+
+    def test_near_live_recording_rows_expire_cache_quickly(self) -> None:
+        stale: list[dict] = []
+        current = [{"path": "/recordings/current.mp4", "size_bytes": 4096}]
+        recorder = Mock(segment_seconds=10.0)
+        recorder.recording_rows_between.return_value = current
+        manager = SimpleNamespace(recorder=recorder)
+        cache_key = ("gate", "live", 100, 200)
+
+        with (
+            patch.object(main, "manager", manager),
+            patch.object(main, "RECORDING_DAY_CACHE", {cache_key: (100.0, stale)}),
+            patch.object(main.time, "monotonic", return_value=103.0),
+            patch.object(main.time, "time", return_value=190.0),
+        ):
+            rows = main._recording_day_rows("gate", 100.0, 200.0, "live")
+
+        self.assertEqual(rows, current)
+        recorder.recording_rows_between.assert_called_once()
         recorder.lease_recordings_for_playback.assert_called_once_with(current)
 
 

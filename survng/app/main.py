@@ -116,6 +116,7 @@ EVENT_CLIP_LOCKS_GUARD = threading.Lock()
 RECORDING_DAY_CACHE: dict[tuple[str, str, int, int], tuple[float, list[dict]]] = {}
 RECORDING_DAY_CACHE_LOCK = threading.Lock()
 RECORDING_DAY_CACHE_SECONDS = 30.0
+RECORDING_NEAR_LIVE_CACHE_SECONDS = 2.0
 RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
 RECORDING_PREVIEW_INTERVAL_SECONDS = 5.0
 RECORDING_PREVIEW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -7504,7 +7505,8 @@ def recording_grid_day(
     aggregate_ranges: list[dict[str, object]] = []
     aggregate_incidents: list[dict] = []
     available_sources: set[str] = set()
-    camera_ids = {camera.id for camera in config.cameras}
+    cameras = list(config.cameras)
+    camera_ids = {camera.id for camera in cameras}
     events_by_camera: dict[str, list[dict]] = {camera_id: [] for camera_id in camera_ids}
     if hasattr(manager.events, "between_compact"):
         for event in manager.events.between_compact(start_at, end_at):
@@ -7514,11 +7516,11 @@ def recording_grid_day(
     grid_availability = None
     if hasattr(manager.recorder, "recording_grid_availability_between"):
         grid_availability = manager.recorder.recording_grid_availability_between(
-            [camera.id for camera in config.cameras],
+            [camera.id for camera in cameras],
             start_epoch,
             end_epoch,
         )
-    for camera in config.cameras:
+    for camera in cameras:
         if grid_availability is not None:
             source_availability = grid_availability[camera.id]
         else:
@@ -7540,9 +7542,12 @@ def recording_grid_day(
         available_sources.update(camera_sources)
         availability = source_availability[selected_source]
         ranges = [dict(item) for item in availability["ranges"]]
-        for item in ranges:
-            item["camera_id"] = camera.id
-        aggregate_ranges.extend(ranges)
+        for candidate in (selected_source, "live" if selected_source == "main" else "main"):
+            for range_item in source_availability[candidate]["ranges"]:
+                item = dict(range_item)
+                item["camera_id"] = camera.id
+                item["source"] = candidate
+                aggregate_ranges.append(item)
         event_rows = events_by_camera[camera.id]
         if not hasattr(manager.events, "between_compact"):
             event_rows = manager.events.for_camera_range(
@@ -7553,7 +7558,7 @@ def recording_grid_day(
             )
         public_events = [_event_row(event) for event in event_rows]
         incidents = [
-            _incident_list_payload(incident)
+            _recording_grid_incident_payload(incident)
             for incident in _incident_rows(public_events)
         ]
         aggregate_incidents.extend(incidents)
@@ -7567,7 +7572,7 @@ def recording_grid_day(
         })
     aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
     aggregate_incidents.sort(
-        key=lambda item: str(item.get("start_at") or item.get("created_at") or "")
+        key=lambda item: float(item.get("start_epoch") or 0)
     )
     return {
         "view": "all_cameras",
@@ -7579,6 +7584,75 @@ def recording_grid_day(
         "incidents": aggregate_incidents,
         "available_sources": sorted(available_sources),
         "cameras": camera_payloads,
+    }
+
+
+@app.get("/api/recordings/grid/updates")
+def recording_grid_updates(
+    start_epoch: float,
+    end_epoch: float,
+    after_epoch: float,
+    source: str = "live",
+) -> dict:
+    """Return a bounded near-live delta for the synchronized camera grid."""
+    _validate_recording_range(
+        start_epoch,
+        end_epoch,
+        90000,
+        "invalid recording grid update range",
+    )
+    if not math.isfinite(after_epoch):
+        raise HTTPException(status_code=400, detail="invalid recording grid update cursor")
+    selected_source = recording_source(source)
+    cameras = list(config.cameras)
+    camera_ids = {camera.id for camera in cameras}
+    overlap_seconds = max(
+        5.0,
+        float(getattr(config, "recording_segment_seconds", 10.0)) * 2,
+        float(DEFAULT_INCIDENT_GAP_SECONDS) * 2,
+    )
+    update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
+    # The recorder's ten-second index loop already discovers every configured
+    # source. Keep this multi-camera request SQLite-only instead of scheduling
+    # a second wave of per-camera NFS directory scans.
+    availability_by_camera = manager.recorder.recording_grid_availability_between(
+        [camera.id for camera in cameras],
+        update_start,
+        end_epoch,
+    )
+    aggregate_ranges: list[dict[str, object]] = []
+    for camera in cameras:
+        source_availability = availability_by_camera[camera.id]
+        for candidate in (selected_source, "live" if selected_source == "main" else "main"):
+            for range_item in source_availability[candidate]["ranges"]:
+                item = dict(range_item)
+                item["camera_id"] = camera.id
+                item["source"] = candidate
+                aggregate_ranges.append(item)
+    event_start = max(
+        start_epoch,
+        min(end_epoch, after_epoch) - max(overlap_seconds, 5 * 60.0),
+    )
+    event_rows = [
+        row
+        for row in manager.events.between_compact(
+            datetime.fromtimestamp(event_start, timezone.utc).isoformat(),
+            datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
+        )
+        if str(row.get("camera_id") or "") in camera_ids
+    ]
+    public_events = [_event_row(event) for event in event_rows]
+    aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
+    return {
+        "view": "all_cameras",
+        "source": selected_source,
+        "start_epoch": update_start,
+        "end_epoch": end_epoch,
+        "availability": aggregate_ranges,
+        "incidents": [
+            _recording_grid_incident_payload(incident)
+            for incident in _incident_rows(public_events)
+        ],
     }
 
 
@@ -7894,7 +7968,13 @@ def _recording_day_rows(
     if not fresh:
         with RECORDING_DAY_CACHE_LOCK:
             cached = RECORDING_DAY_CACHE.get(cache_key)
-            if cached is not None and now - cached[0] < RECORDING_DAY_CACHE_SECONDS:
+            near_live = end_epoch >= time.time() - max(30.0, manager.recorder.segment_seconds * 3)
+            cache_seconds = (
+                RECORDING_NEAR_LIVE_CACHE_SECONDS
+                if near_live
+                else RECORDING_DAY_CACHE_SECONDS
+            )
+            if cached is not None and now - cached[0] < cache_seconds:
                 manager.recorder.lease_recordings_for_playback(cached[1])
                 return cached[1]
     rows = [
@@ -9063,6 +9143,24 @@ def _incident_list_payload(incident: dict) -> dict:
         compact_events.append(compact_event)
     payload["events"] = compact_events
     return payload
+
+
+def _recording_grid_incident_payload(incident: dict) -> dict:
+    """Return only fields used by Recording History's timeline and thumbnail rail."""
+    return {
+        key: incident[key]
+        for key in (
+            "id",
+            "representative_event_id",
+            "camera_id",
+            "snapshot_path",
+            "start_epoch",
+            "last_epoch",
+            "has_objects",
+            "labels",
+        )
+        if key in incident
+    }
 
 
 def _incident_row(camera_id: str, events: list[dict]) -> dict:
