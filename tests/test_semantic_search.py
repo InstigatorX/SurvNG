@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -308,6 +309,120 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertIsNone(service.encoder)
         self.assertIsNone(service._thread)
         self.assertIsNone(service._backfill_thread)
+
+    def test_initialization_retries_isolated_worker_crash_and_recovers(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        class EventStore:
+            def recent_compact(self, *_args):
+                return []
+
+        class FakeEncoder:
+            identity = self.identity
+            worker_pid = 123
+
+            def close(self):
+                return
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        with (
+            patch(
+                "survng.app.semantic_search.IsolatedOpenVinoManifestEncoder",
+                side_effect=[RuntimeError(""), FakeEncoder()],
+            ) as encoder,
+            patch("survng.app.semantic_search.SEMANTIC_WORKER_RETRY_INITIAL_SECONDS", 0.001),
+        ):
+            service.start(EventStore(), Path(self.temporary.name))
+            deadline = time.monotonic() + 2.0
+            while service.status()["state"] != "ready" and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+        status = service.status()
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["initialization_attempts"], 1)
+        self.assertEqual(status["error"], "")
+        self.assertEqual(status["retry_in_seconds"], 0.0)
+        self.assertEqual(encoder.call_count, 2)
+        service.close()
+
+    def test_close_interrupts_worker_startup_retry_delay(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        failed = threading.Event()
+
+        def fail(*_args):
+            failed.set()
+            raise RuntimeError("native worker exited")
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        with (
+            patch(
+                "survng.app.semantic_search.IsolatedOpenVinoManifestEncoder",
+                side_effect=fail,
+            ),
+            patch("survng.app.semantic_search.SEMANTIC_WORKER_RETRY_INITIAL_SECONDS", 30.0),
+        ):
+            service.start(object(), Path(self.temporary.name))
+            self.assertTrue(failed.wait(1.0))
+            deadline = time.monotonic() + 1.0
+            while service.status()["state"] != "recovering" and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(service.status()["state"], "recovering")
+            started = time.monotonic()
+            service.close()
+
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(service.status()["state"], "stopped")
+
+    def test_initialization_falls_back_to_cpu_after_configured_device_crashes(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        class EventStore:
+            def recent_compact(self, *_args):
+                return []
+
+        class FakeEncoder:
+            identity = self.identity
+            worker_pid = 456
+
+            def close(self):
+                return
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True, device="GPU"),
+            self.index,
+            Path(self.temporary.name),
+            {},
+        )
+        with (
+            patch(
+                "survng.app.semantic_search.IsolatedOpenVinoManifestEncoder",
+                side_effect=[
+                    RuntimeError("GPU compiler crash"),
+                    RuntimeError("GPU compiler crash"),
+                    FakeEncoder(),
+                ],
+            ) as encoder,
+            patch("survng.app.semantic_search.SEMANTIC_WORKER_RETRY_INITIAL_SECONDS", 0.001),
+            patch("survng.app.semantic_search.SEMANTIC_WORKER_FALLBACK_DELAY_SECONDS", 0.001),
+        ):
+            service.start(EventStore(), Path(self.temporary.name))
+            deadline = time.monotonic() + 2.0
+            while service.status()["state"] != "ready" and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+        status = service.status()
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["configured_device"], "GPU")
+        self.assertEqual(status["device"], "CPU")
+        self.assertTrue(status["fallback_active"])
+        self.assertEqual(status["initialization_attempts"], 2)
+        self.assertEqual([call.args[2] for call in encoder.call_args_list], ["GPU", "GPU", "CPU"])
+        service.close()
 
     def test_backfill_supervisor_retries_transient_failures(self) -> None:
         from survng.app.config import SemanticSearchConfig

@@ -8,6 +8,7 @@ import logging
 import queue
 import itertools
 import multiprocessing
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,10 @@ from .openclip_tokenizer import OpenClipBpeTokenizer
 LOGGER = logging.getLogger("uvicorn.error")
 SEMANTIC_WORKER_START_TIMEOUT_SECONDS = 60.0
 SEMANTIC_WORKER_REQUEST_TIMEOUT_SECONDS = 60.0
+SEMANTIC_WORKER_RETRY_INITIAL_SECONDS = 15.0
+SEMANTIC_WORKER_RETRY_MAX_SECONDS = 300.0
+SEMANTIC_WORKER_CONFIGURED_DEVICE_ATTEMPTS = 2
+SEMANTIC_WORKER_FALLBACK_DELAY_SECONDS = 1.0
 MODEL_FINGERPRINT_CHUNK_SIZE = 1024 * 1024
 SEMANTIC_BACKFILL_RETRY_SECONDS = 5.0
 
@@ -857,7 +862,20 @@ class IsolatedOpenVinoManifestEncoder:
             child.close()
             if not parent.poll(SEMANTIC_WORKER_START_TIMEOUT_SECONDS):
                 raise RuntimeError("semantic inference worker startup timed out")
-            message = parent.recv()
+            try:
+                message = parent.recv()
+            except EOFError as exc:
+                process.join(timeout=0.25)
+                exitcode = process.exitcode
+                if exitcode is None:
+                    detail = ""
+                elif exitcode < 0:
+                    detail = f" (signal {-exitcode})"
+                else:
+                    detail = f" (exit code {exitcode})"
+                raise RuntimeError(
+                    f"semantic inference worker exited during startup{detail}"
+                ) from exc
             if message.get("type") != "ready":
                 raise RuntimeError(
                     str(message.get("error") or "semantic inference worker failed to start")
@@ -991,12 +1009,16 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._indexed = 0
         self._skipped_missing = 0
         self._state = "stopped"
+        self._initialization_attempts = 0
+        self._next_retry_at = 0.0
+        self._active_device = str(config.device)
+        self._fallback_active = False
         self._encoder_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
 
     def start(self, event_store: Any, storage_dir: Path) -> None:
         with self._lifecycle_lock:
-            if self._state in {"initializing", "ready", "stopping"}:
+            if self._state in {"initializing", "recovering", "ready", "stopping"}:
                 return
             self._storage_dir = Path(storage_dir)
             self._stop.clear()
@@ -1010,25 +1032,88 @@ class SemanticSearchService(DisabledSemanticSearch):
             self._bootstrap_thread.start()
 
     def _initialize(self, event_store: Any) -> None:
-        try:
-            encoder = IsolatedOpenVinoManifestEncoder(
-                self.model_dir,
-                self.manifest,
-                self.config.device,
-            )
-        except Exception as exc:
-            with self._lifecycle_lock:
-                if self._state == "initializing":
-                    self._error = str(exc)
-                    self._state = "unavailable"
-            LOGGER.warning("semantic search unavailable: %s", exc)
+        retry_seconds = SEMANTIC_WORKER_RETRY_INITIAL_SECONDS
+        configured_device = str(self.config.device)
+        target_device = configured_device
+        configured_device_failures = 0
+        while not self._stop.is_set():
+            try:
+                encoder = IsolatedOpenVinoManifestEncoder(
+                    self.model_dir,
+                    self.manifest,
+                    target_device,
+                )
+            except Exception as exc:
+                reason = str(exc).strip() or "semantic inference worker exited during startup"
+                if target_device == configured_device:
+                    configured_device_failures += 1
+                use_cpu_fallback = bool(
+                    target_device == configured_device
+                    and configured_device.strip().upper() != "CPU"
+                    and configured_device_failures
+                    >= SEMANTIC_WORKER_CONFIGURED_DEVICE_ATTEMPTS
+                )
+                wait_seconds = (
+                    SEMANTIC_WORKER_FALLBACK_DELAY_SECONDS
+                    if use_cpu_fallback
+                    else retry_seconds
+                )
+                if use_cpu_fallback:
+                    target_device = "CPU"
+                with self._lifecycle_lock:
+                    if self._stop.is_set() or self._state not in {"initializing", "recovering"}:
+                        return
+                    self._initialization_attempts += 1
+                    self._error = reason
+                    self._state = "recovering"
+                    self._active_device = target_device
+                    self._fallback_active = use_cpu_fallback or target_device != configured_device
+                    self._next_retry_at = time.monotonic() + wait_seconds
+                    attempt = self._initialization_attempts
+                if use_cpu_fallback:
+                    LOGGER.warning(
+                        "semantic search %s worker startup failed after %d attempts: %s; "
+                        "falling back to CPU in %.0fs",
+                        configured_device,
+                        configured_device_failures,
+                        reason,
+                        wait_seconds,
+                    )
+                else:
+                    LOGGER.warning(
+                        "semantic search %s worker startup failed (attempt %d): %s; "
+                        "retrying in %.0fs",
+                        target_device,
+                        attempt,
+                        reason,
+                        wait_seconds,
+                    )
+                if self._stop.wait(wait_seconds):
+                    return
+                if not use_cpu_fallback:
+                    retry_seconds = min(
+                        SEMANTIC_WORKER_RETRY_MAX_SECONDS,
+                        retry_seconds * 2.0,
+                    )
+                continue
+            break
+        else:
             return
+
+        if self._stop.is_set():
+            encoder.close()
+            return
+
         with self._lifecycle_lock:
-            if self._stop.is_set() or self._state != "initializing":
+            if self._stop.is_set() or self._state not in {"initializing", "recovering"}:
                 should_close = True
             else:
                 should_close = False
                 self.encoder = encoder
+                self._error = ""
+                self._next_retry_at = 0.0
+                self._active_device = target_device
+                self._fallback_active = target_device != configured_device
                 self._state = "ready"
                 self._thread = threading.Thread(
                     target=self._run, name="survng-semantic", daemon=True
@@ -1259,10 +1344,16 @@ class SemanticSearchService(DisabledSemanticSearch):
 
     def status(self) -> dict[str, Any]:
         identity = self.encoder.identity if self.encoder else None
+        retry_in_seconds = max(0.0, self._next_retry_at - time.monotonic())
         return {
             "enabled": True, "state": self._state,
-            "implementation": self.config.implementation, "device": self.config.device,
+            "implementation": self.config.implementation,
+            "device": self._active_device,
+            "configured_device": self.config.device,
+            "fallback_active": self._fallback_active,
             "generation": identity.generation if identity else "", "error": self._error,
+            "initialization_attempts": self._initialization_attempts,
+            "retry_in_seconds": round(retry_in_seconds, 1),
             "queue_depth": self._queue.qsize(), "indexed_since_start": self._indexed,
             "skipped_missing_since_start": self._skipped_missing,
             "worker_pid": getattr(self.encoder, "worker_pid", None),
@@ -1295,3 +1386,4 @@ class SemanticSearchService(DisabledSemanticSearch):
             self.encoder = None
         with self._lifecycle_lock:
             self._state = "stopped"
+            self._next_retry_at = 0.0
