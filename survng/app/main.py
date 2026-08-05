@@ -10,7 +10,6 @@ import asyncio
 import functools
 import queue
 import os
-import re
 import signal
 import secrets
 import platform
@@ -38,7 +37,7 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 
-from .config import AppConfig, CameraConfig, CameraMotionQualificationConfig, DetectionZone, camera_by_id, load_config, normalize_config, save_config, slugify_camera_id
+from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, normalize_config, save_config, slugify_camera_id
 from .audit_ai import (
     AuditAiAdvisor,
     AuditAiChange,

@@ -835,25 +835,6 @@ function formatDuration(seconds) {
   return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 }
 
-function formatClock(seconds) {
-  if (!Number.isFinite(seconds)) return "00:00";
-  const whole = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(whole / 3600);
-  const minutes = Math.floor((whole % 3600) / 60);
-  const secs = whole % 60;
-  return hours
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
-    : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-}
-
-function formatDayClock(seconds) {
-  const whole = Math.max(0, Math.min(24 * 60 * 60, Math.floor(Number(seconds) || 0)));
-  const hours = Math.floor(whole / 3600);
-  const minutes = Math.floor((whole % 3600) / 60);
-  const secs = whole % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-}
-
 function isMobileViewport() {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
 }
@@ -1560,16 +1541,6 @@ function LiveHeaderStats() {
   );
 }
 
-function StatCard({ icon, label, value, tone = "default" }) {
-  return (
-    <section className={`bento-card stat-card ${tone}`}>
-      <div className="icon-badge">{icon}</div>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </section>
-  );
-}
-
 function usePollingData() {
   const [cameras, setCameras] = useState([]);
   const [appConfig, setAppConfig] = useState(null);
@@ -1621,6 +1592,57 @@ function usePollingData() {
   }, []);
 
   return { cameras, appConfig, loading, refresh: load };
+}
+
+function useIncidentDetails() {
+  const incidentDetailCacheRef = useRef(null);
+  if (!incidentDetailCacheRef.current) {
+    incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
+      const response = await fetch(`/api/incidents/detail?${query}`);
+      if (!response.ok) throw new Error("Unable to load incident details");
+      return response.json();
+    });
+  }
+  const [incidentDetails, setIncidentDetails] = useState({});
+  const incidentSelectionRequestRef = useRef(0);
+  const [selectedEvent, setSelectedEvent] = useState(null);
+
+  async function loadIncidentDetail(incident) {
+    const query = incidentDetailQuery(incident);
+    if (!query) return incident;
+    const cached = incidentDetails[query];
+    if (cached) return cached;
+    try {
+      const detail = await incidentDetailCacheRef.current.load(query);
+      setIncidentDetails((current) => ({ ...current, [query]: detail }));
+      return detail;
+    } catch {
+      return incident;
+    }
+  }
+
+  async function openIncidentOverlay(incident) {
+    const request = ++incidentSelectionRequestRef.current;
+    setSelectedEvent(incident);
+    const detail = await loadIncidentDetail(incident);
+    if (request === incidentSelectionRequestRef.current) setSelectedEvent(detail);
+  }
+
+  function closeIncidentOverlay() {
+    incidentSelectionRequestRef.current += 1;
+    setSelectedEvent(null);
+  }
+
+  return {
+    incidentDetailCacheRef,
+    incidentDetails,
+    setIncidentDetails,
+    incidentSelectionRequestRef,
+    selectedEvent,
+    setSelectedEvent,
+    openIncidentOverlay,
+    closeIncidentOverlay,
+  };
 }
 
 const STREAM_MODES = ["motion", "mjpeg", "webrtc"];
@@ -2020,16 +2042,6 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
           />
         </div>
       </section>
-    </div>
-  );
-}
-
-function Segmented({ value, onChange, options }) {
-  return (
-    <div className="segmented">
-      {options.map(([id, label]) => (
-        <button key={id} className={value === id ? "active" : ""} onClick={() => onChange(id)}>{label}</button>
-      ))}
     </div>
   );
 }
@@ -2503,38 +2515,8 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
       setPlaybackOriginTime(null);
       setClipLoading(true);
       setClipError("");
-      let before = 5;
-      let after = 5;
-      try {
-        const response = await fetch("/api/event-clip/settings");
-        if (response.ok) {
-          const settings = await response.json();
-          before = Number(settings.before_seconds ?? before);
-          after = Number(settings.after_seconds ?? after);
-        }
-      } catch {
-        // Defaults keep inline playback useful if settings are temporarily unavailable.
-      }
-      if (cancelled) return;
-      const safeBefore = Number.isFinite(before) ? before : 5;
-      const safeAfter = Number.isFinite(after) ? after : 5;
-      const window = incidentClipWindow(event, safeBefore, safeAfter);
-      const anchorEpoch = eventEpoch(event);
-      const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
-      const streamUrl = eventStreamUrl(eventId, window.before, window.after);
-      const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
-        ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
-        : null;
-      if (cancelled) return;
-      const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
-      const info = {
-        streamUrl,
-        downloadUrl: eventClipUrl(eventId, window.before, window.after),
-        windowStartEpoch: timelineStartEpoch,
-        requestedWindowStartEpoch,
-        initialPlaybackOffset,
-        playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
-      };
+      const info = await loadIncidentClipInfo(event, () => cancelled);
+      if (!info) return;
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
@@ -3189,41 +3171,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
       setClipLoading(true);
       setClipError("");
       setVideoActive(false);
-      let before = 5;
-      let after = 5;
-      try {
-        const response = await fetch("/api/event-clip/settings");
-        if (response.ok) {
-          const settings = await response.json();
-          before = Number(settings.before_seconds ?? before);
-          after = Number(settings.after_seconds ?? after);
-        }
-      } catch {
-        // Keep the default review window if settings are temporarily unavailable.
-      }
-      if (cancelled) return;
-      const safeBefore = Number.isFinite(before) ? before : 5;
-      const safeAfter = Number.isFinite(after) ? after : 5;
-      const window = incidentClipWindow(viewerEvent, safeBefore, safeAfter);
-      const anchorEpoch = eventEpoch(viewerEvent);
-      const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
-      const streamUrl = eventStreamUrl(eventId, window.before, window.after);
-      const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
-        ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
-        : null;
-      if (cancelled) return;
-      const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
-      const info = {
-        streamUrl,
-        downloadUrl: eventClipUrl(eventId, window.before, window.after),
-        before: window.before,
-        after: window.after,
-        duration: window.before + window.after,
-        windowStartEpoch: timelineStartEpoch,
-        requestedWindowStartEpoch,
-        initialPlaybackOffset,
-        playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
-      };
+      const info = await loadIncidentClipInfo(viewerEvent, () => cancelled);
+      if (!info) return;
       setClipInfo(info);
       setPlayback({ url: info.streamUrl, mimeType: "application/vnd.apple.mpegurl" });
     }
@@ -3907,17 +3856,16 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
-  const incidentDetailCacheRef = useRef(null);
-  if (!incidentDetailCacheRef.current) {
-    incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
-      const response = await fetch(`/api/incidents/detail?${query}`);
-      if (!response.ok) throw new Error("Unable to load incident details");
-      return response.json();
-    });
-  }
-  const [incidentDetails, setIncidentDetails] = useState({});
-  const incidentSelectionRequestRef = useRef(0);
-  const [selectedEvent, setSelectedEvent] = useState(null);
+  const {
+    incidentDetailCacheRef,
+    incidentDetails,
+    setIncidentDetails,
+    incidentSelectionRequestRef,
+    selectedEvent,
+    setSelectedEvent,
+    openIncidentOverlay,
+    closeIncidentOverlay,
+  } = useIncidentDetails();
   const [focusedFaceEventId, setFocusedFaceEventId] = useState(null);
   const [selectedFace, setSelectedFace] = useState(null);
   const [facePeople, setFacePeople] = useState([]);
@@ -4004,32 +3952,6 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     incidentDetailCacheRef.current.clear();
     setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
-  }
-
-  async function loadIncidentDetail(incident) {
-    const query = incidentDetailQuery(incident);
-    if (!query) return incident;
-    const cached = incidentDetails[query];
-    if (cached) return cached;
-    try {
-      const detail = await incidentDetailCacheRef.current.load(query);
-      setIncidentDetails((current) => ({ ...current, [query]: detail }));
-      return detail;
-    } catch {
-      return incident;
-    }
-  }
-
-  async function openIncidentOverlay(incident) {
-    const request = ++incidentSelectionRequestRef.current;
-    setSelectedEvent(incident);
-    const detail = await loadIncidentDetail(incident);
-    if (request === incidentSelectionRequestRef.current) setSelectedEvent(detail);
-  }
-
-  function closeIncidentOverlay() {
-    incidentSelectionRequestRef.current += 1;
-    setSelectedEvent(null);
   }
 
   useAppEvents(({ type }) => {
@@ -4382,7 +4304,16 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [cameraOrder, setCameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [dragCameraId, setDragCameraId] = useState("");
   const [dragOverCameraId, setDragOverCameraId] = useState("");
-  const [selectedEvent, setSelectedEvent] = useState(null);
+  const {
+    incidentDetailCacheRef,
+    incidentDetails,
+    setIncidentDetails,
+    incidentSelectionRequestRef,
+    selectedEvent,
+    setSelectedEvent,
+    openIncidentOverlay,
+    closeIncidentOverlay,
+  } = useIncidentDetails();
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
   const [expandedCamera, setExpandedCamera] = useState(null);
   const [liveDefaultsReady, setLiveDefaultsReady] = useState(false);
@@ -4397,16 +4328,6 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
-  const incidentDetailCacheRef = useRef(null);
-  if (!incidentDetailCacheRef.current) {
-    incidentDetailCacheRef.current = createIncidentPageCache(async (query) => {
-      const response = await fetch(`/api/incidents/detail?${query}`);
-      if (!response.ok) throw new Error("Unable to load incident details");
-      return response.json();
-    });
-  }
-  const [incidentDetails, setIncidentDetails] = useState({});
-  const incidentSelectionRequestRef = useRef(0);
   const incidentFeedCacheRef = useRef(null);
   if (!incidentFeedCacheRef.current) {
     incidentFeedCacheRef.current = createIncidentPageCache(async (query) => {
@@ -4564,32 +4485,6 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     incidentDetailCacheRef.current.clear();
     setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
-  }
-
-  async function loadIncidentDetail(incident) {
-    const query = incidentDetailQuery(incident);
-    if (!query) return incident;
-    const cached = incidentDetails[query];
-    if (cached) return cached;
-    try {
-      const detail = await incidentDetailCacheRef.current.load(query);
-      setIncidentDetails((current) => ({ ...current, [query]: detail }));
-      return detail;
-    } catch {
-      return incident;
-    }
-  }
-
-  async function openIncidentOverlay(incident) {
-    const request = ++incidentSelectionRequestRef.current;
-    setSelectedEvent(incident);
-    const detail = await loadIncidentDetail(incident);
-    if (request === incidentSelectionRequestRef.current) setSelectedEvent(detail);
-  }
-
-  function closeIncidentOverlay() {
-    incidentSelectionRequestRef.current += 1;
-    setSelectedEvent(null);
   }
 
   useAppEvents(({ type }) => {
@@ -4869,6 +4764,46 @@ async function eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch) {
   } catch {
     return requestedWindowStartEpoch;
   }
+}
+
+async function loadIncidentClipInfo(event, isCancelled = () => false) {
+  const eventId = Number(event?.representative_event_id || event?.id);
+  if (!Number.isFinite(eventId)) return null;
+  let before = 5;
+  let after = 5;
+  try {
+    const response = await fetch("/api/event-clip/settings");
+    if (response.ok) {
+      const settings = await response.json();
+      before = Number(settings.before_seconds ?? before);
+      after = Number(settings.after_seconds ?? after);
+    }
+  } catch {
+    // Defaults keep incident playback useful if settings are temporarily unavailable.
+  }
+  if (isCancelled()) return null;
+  const safeBefore = Number.isFinite(before) ? before : 5;
+  const safeAfter = Number.isFinite(after) ? after : 5;
+  const window = incidentClipWindow(event, safeBefore, safeAfter);
+  const anchorEpoch = eventEpoch(event);
+  const requestedWindowStartEpoch = Number.isFinite(anchorEpoch) ? anchorEpoch - window.before : null;
+  const streamUrl = eventStreamUrl(eventId, window.before, window.after);
+  const timelineStartEpoch = Number.isFinite(requestedWindowStartEpoch)
+    ? await eventStreamTimelineStart(streamUrl, requestedWindowStartEpoch)
+    : null;
+  if (isCancelled()) return null;
+  const initialPlaybackOffset = Math.max(0, window.before - safeBefore);
+  return {
+    streamUrl,
+    downloadUrl: eventClipUrl(eventId, window.before, window.after),
+    before: window.before,
+    after: window.after,
+    duration: window.before + window.after,
+    windowStartEpoch: timelineStartEpoch,
+    requestedWindowStartEpoch,
+    initialPlaybackOffset,
+    playbackStartOffset: hlsPlaybackOffset(requestedWindowStartEpoch, timelineStartEpoch, initialPlaybackOffset),
+  };
 }
 
 function recordingDayUrl(cameraId, startEpoch, endEpoch, source) {

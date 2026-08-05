@@ -571,7 +571,7 @@ class EventStore:
         return protected
 
     @staticmethod
-    def _tracking_comparison_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    def _result_json_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
         payload = dict(row)
@@ -640,7 +640,7 @@ class EventStore:
                     self.TRACKING_COMPARISON_HISTORY_PER_CAMERA,
                 ),
             )
-        comparison = self._tracking_comparison_row(row)
+        comparison = self._result_json_row(row)
         if comparison is None:
             raise RuntimeError("tracking comparison could not be persisted")
         return comparison
@@ -665,7 +665,7 @@ class EventStore:
                 "select * from tracking_comparisons where id = ?",
                 (int(comparison_id),),
             ).fetchone()
-        return self._tracking_comparison_row(row)
+        return self._result_json_row(row)
 
     def tracking_comparison_history(
         self,
@@ -687,7 +687,7 @@ class EventStore:
                 """,
                 [*values, bounded_limit],
             ).fetchall()
-        return [self._tracking_comparison_row(row) or {} for row in rows]
+        return [self._result_json_row(row) or {} for row in rows]
 
     def tracking_comparison_summary(self, *, camera_id: str = "") -> dict[str, Any]:
         normalized_camera_id = str(camera_id or "").strip()
@@ -1547,7 +1547,7 @@ class EventStore:
                 raise KeyError("motion AI review not found")
             current_status = str(current["status"])
             if current_status in {"completed", "failed", "interrupted"}:
-                return self._motion_ai_review_row(
+                return self._result_json_row(
                     conn.execute(
                         "select * from motion_ai_reviews where id = ?",
                         (int(review_id),),
@@ -1580,25 +1580,13 @@ class EventStore:
                 raise KeyError("motion AI review not found")
         return self.get_motion_ai_review(review_id) or {}
 
-    @staticmethod
-    def _motion_ai_review_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
-        if row is None:
-            return None
-        payload = dict(row)
-        try:
-            result = json.loads(str(payload.pop("result_json") or "{}"))
-        except (json.JSONDecodeError, TypeError):
-            result = {}
-        payload["result"] = result if isinstance(result, dict) else {}
-        return payload
-
     def get_motion_ai_review(self, review_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "select * from motion_ai_reviews where id = ?",
                 (int(review_id),),
             ).fetchone()
-        return self._motion_ai_review_row(row)
+        return self._result_json_row(row)
 
     def latest_motion_ai_review(self, camera_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -1610,7 +1598,7 @@ class EventStore:
                 """,
                 (camera_id,),
             ).fetchone()
-        return self._motion_ai_review_row(row)
+        return self._result_json_row(row)
 
     @staticmethod
     def _camera_intelligence_evaluation_row(
