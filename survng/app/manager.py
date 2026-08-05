@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .camera import CameraWorker
 from .appearance_index import AppearanceIndex
+from .appearance_backfill import DeferredAppearanceBackfill
 from .config import (
     AppConfig,
     CameraConfig,
@@ -29,7 +30,11 @@ from .inference import InferenceSupervisor, IsolatedFaceRecognizer, IsolatedPers
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
-from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
+from .object_tracking import (
+    AdaptiveTrackingLimiter,
+    ObjectTrackingSession,
+    ObjectTrackingSessionFactory,
+)
 from .process_memory import (
     AllocatorMemoryTrimmer,
     process_memory_status,
@@ -138,8 +143,11 @@ class AppManager:
         )
         self.go2rtc = Go2RtcAdapter()
         self.state_events = StateEventBroker()
-        self._object_tracking_limiter = threading.BoundedSemaphore(
-            config.detector.tracking.max_active_cameras
+        self._object_tracking_limiter = AdaptiveTrackingLimiter(
+            config.detector.tracking.max_active_cameras,
+            config.detector.tracking.burst_max_active_cameras,
+            burst_enabled=config.detector.tracking.adaptive_burst_enabled,
+            burst_guard=self._tracking_burst_available,
         )
         self.motion_pipeline_registry = build_builtin_motion_registry()
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
@@ -158,6 +166,14 @@ class AppManager:
             limiter=self._object_tracking_limiter,
             appearance_encoder=self.person_reidentifier,
             appearance_indexer=self.appearance_index.replace_event,
+        )
+        self.appearance_backfill = DeferredAppearanceBackfill(
+            self.events.db_path,
+            self.storage_dir,
+            config.detector.tracking,
+            self.events,
+            self.appearance_index,
+            self.person_reidentifier,
         )
         self.mqtt = self._build_mqtt_service(config.mqtt)
         self._process_started_monotonic = time.monotonic()
@@ -207,6 +223,23 @@ class AppManager:
                     LOGGER.exception("%s cleanup failed during manager construction", label)
             raise
         self.workers = workers
+
+    def _tracking_burst_available(self) -> bool:
+        """Allow the optional extra tracker only while inference and memory are healthy."""
+        if self._stopping or self._closed:
+            return False
+        try:
+            runtime = self.detector.cached_object_status().get("runtime") or {}
+            _total, _used, memory_percent = self._memory_usage()
+            return (
+                int(runtime.get("queue_depth") or 0) == 0
+                and int(runtime.get("pending_frames") or 0) == 0
+                and int(runtime.get("active_inferences") or 0) <= 1
+                and (memory_percent <= 0.0 or memory_percent < 85.0)
+            )
+        except Exception:
+            LOGGER.exception("could not evaluate adaptive tracking burst capacity")
+            return False
 
     def _create_camera_worker(self, camera: CameraConfig) -> CameraWorker:
         motion_config = self.config.motion_qualification
@@ -447,6 +480,9 @@ class AppManager:
                 # receive the active manager's preferences before this point.
                 self._save_runtime_state()
                 self.detector.start()
+                appearance_backfill = getattr(self, "appearance_backfill", None)
+                if appearance_backfill is not None:
+                    appearance_backfill.start()
                 self.faces.start()
                 cameras = list(self._unique_cameras())
                 recorder_keys = set()
@@ -616,6 +652,11 @@ class AppManager:
         semantic_search = getattr(self, "semantic_search", None)
         if semantic_search is not None:
             attempt("semantic search", semantic_search.close)
+
+        LOGGER.info("SurvNG shutdown: stopping deferred appearance backfill")
+        appearance_backfill = getattr(self, "appearance_backfill", None)
+        if appearance_backfill is not None:
+            attempt("appearance backfill", appearance_backfill.close)
 
         LOGGER.info("SurvNG shutdown: stopping isolated inference workers")
         attempt("inference", self.detector.stop)
@@ -925,7 +966,12 @@ class AppManager:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
             tracking = config.tracking.model_copy(deep=True)
-            next_limiter = threading.BoundedSemaphore(tracking.max_active_cameras)
+            next_limiter = AdaptiveTrackingLimiter(
+                tracking.max_active_cameras,
+                tracking.burst_max_active_cameras,
+                burst_enabled=tracking.adaptive_burst_enabled,
+                burst_guard=self._tracking_burst_available,
+            )
             next_factory = ObjectTrackingSessionFactory(
                 config=tracking,
                 detector=self.detector,
@@ -944,6 +990,19 @@ class AppManager:
             previous_config = self.detector.config
             previous_factory = self.object_tracking_session_factory
             previous_limiter = self._object_tracking_limiter
+            previous_backfill = getattr(self, "appearance_backfill", None)
+            next_backfill = (
+                DeferredAppearanceBackfill(
+                    self.events.db_path,
+                    self.storage_dir,
+                    tracking,
+                    self.events,
+                    self.appearance_index,
+                    self.person_reidentifier,
+                )
+                if previous_backfill is not None
+                else None
+            )
             try:
                 for worker, replacement in zip(workers, replacements, strict=True):
                     previous = worker.replace_object_tracking_session(replacement)
@@ -953,6 +1012,11 @@ class AppManager:
                 self.person_reidentifier.config = self.detector.config.tracking
                 self.object_tracking_session_factory = next_factory
                 self._object_tracking_limiter = next_limiter
+                if next_backfill is not None and previous_backfill is not None:
+                    self.appearance_backfill = next_backfill
+                    if self._started:
+                        next_backfill.start()
+                    previous_backfill.close()
             except BaseException:
                 for worker, previous in reversed(previous_sessions):
                     try:
@@ -967,6 +1031,10 @@ class AppManager:
                 self.person_reidentifier.config = self.detector.config.tracking
                 self.object_tracking_session_factory = previous_factory
                 self._object_tracking_limiter = previous_limiter
+                if previous_backfill is not None:
+                    self.appearance_backfill = previous_backfill
+                if next_backfill is not None:
+                    next_backfill.close()
                 raise
 
     def reconfigure_inference(
@@ -1111,6 +1179,7 @@ class AppManager:
                 if event:
                     self.faces.ingest_events([event])
                     self.semantic_search.queue_event(event)
+                    self.appearance_backfill.enqueue(int(event_id), camera_id)
             payload = {
                 **payload,
                 "classes": sorted({str(item.get("label")) for item in objects if item.get("label")}),

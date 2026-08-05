@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from survng.app.appearance_backfill import DeferredAppearanceBackfill
+from survng.app.appearance_index import AppearanceIndex
+from survng.app.config import ObjectTrackingConfig
+
+
+class _Events:
+    def __init__(self, event: dict) -> None:
+        self.event = event
+
+    def get(self, event_id: int):
+        return self.event if event_id == self.event["id"] else None
+
+
+class _Encoder:
+    def supports_label(self, label: str) -> bool:
+        return label == "car"
+
+    def embed_for_label(self, label: str, crop: np.ndarray) -> np.ndarray:
+        assert label == "car"
+        assert crop.size > 0
+        return np.asarray([0.6, 0.8], dtype=np.float32)
+
+    def model_identity_for_label(self, label: str):
+        return {
+            "model_kind": "vehicle",
+            "model_fingerprint": "vehicle-test",
+            "embedding_size": 2,
+            "match_threshold": 0.8,
+        }
+
+
+class DeferredAppearanceBackfillTest(unittest.TestCase):
+    def test_snapshot_fallback_indexes_missing_event_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "events.db"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "create table events (id integer primary key, created_at text not null)"
+                )
+                connection.execute(
+                    "insert into events values (7, '2026-08-05T21:52:05+00:00')"
+                )
+            snapshot = root / "snapshots" / "gate" / "event.webp"
+            snapshot.parent.mkdir(parents=True)
+            cv2.imwrite(str(snapshot), np.full((100, 200, 3), 127, dtype=np.uint8))
+            event = {
+                "id": 7,
+                "camera_id": "gate",
+                "created_at": "2026-08-05T21:52:05+00:00",
+                "snapshot_path": "snapshots/gate/event.webp",
+                "objects_json": json.dumps([{
+                    "label": "car",
+                    "incident_eligible": True,
+                    "box": {"x1": 20, "y1": 10, "x2": 180, "y2": 90},
+                    "detection_frame_width": 200,
+                    "detection_frame_height": 100,
+                    "snapshot_quality_score": 0.9,
+                }]),
+            }
+            index = AppearanceIndex(database)
+            service = DeferredAppearanceBackfill(
+                database,
+                root,
+                ObjectTrackingConfig(
+                    vehicle_reid_enabled=True,
+                    vehicle_reid_model_path="vehicle.xml",
+                    deferred_reid_min_crop_pixels=256,
+                ),
+                _Events(event),
+                index,
+                _Encoder(),
+            )
+
+            state, count, reason = service.process_event(7)
+            self.assertEqual((state, count), ("completed", 1), reason)
+            self.assertTrue(index.has_event(7))
+            self.assertEqual(service.process_event(7)[0], "skipped")
+
+
+if __name__ == "__main__":
+    unittest.main()

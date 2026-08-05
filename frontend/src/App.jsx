@@ -90,12 +90,15 @@ import {
 import { resetLiveDefaultsForServer } from "./liveDefaults.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
+import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
+import { rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
+import { relatedEvidenceLabel, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const LEGACY_INCIDENT_FILTER_KEYS = [
@@ -1300,10 +1303,10 @@ function AssistantPanel({ pageContext, timeZone }) {
             {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Detailed analysis" : "Quick answer"}{message.model ? ` · ${message.model}` : ""}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">
               {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`}>
-                {item.image_url ? <a className="assistant-evidence-image" href={item.href ? appUrl(item.href) : appUrl(item.image_url)}><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
-                <a href={item.href ? appUrl(item.href) : undefined}><span title={item.id}>Source</span><strong>{item.title}</strong><small>{item.summary}</small></a>
+                {item.image_url ? <a className="assistant-evidence-image" href={appUrl(assistantEvidenceHref(item))} aria-label={`Open ${item.title || "incident"}`} title="Open incident"><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
+                <a href={assistantEvidenceHref(item) ? appUrl(assistantEvidenceHref(item)) : undefined}><span title={item.id}>Source</span><strong>{item.title}</strong><small>{item.summary}</small></a>
                 {item.details?.timeline ? <div className="assistant-timeline">
-                  {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <div key={match.event_id}><span>{formatDateTime(match.start_at)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></div>) : <small>No related incidents were found in this time window.</small>}
+                  {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <a className="assistant-timeline-link" href={appUrl(assistantIncidentHref(match.event_id))} key={match.event_id} title="Open incident"><span>{formatDateTime(match.start_at)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></a>) : <small>No related incidents were found in this time window.</small>}
                   <p>{item.details.timeline.limitations?.[3]}</p>
                 </div> : null}
                 {item.details?.media_export ? <div className={`assistant-media-export ${item.details.media_export.status}`}>
@@ -2870,7 +2873,65 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   );
 }
 
-function IncidentInspector({ incident, faceEvent, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen }) {
+function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEventId, cameraNameById, timeZone, onSelect, onReturn }) {
+  const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
+      setMatches([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    fetch(`/api/events/${Number(anchorEventId)}/related-incidents?hours=24&limit=16`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Related incidents unavailable")))
+      .then((payload) => {
+        if (!cancelled) setMatches(visibleRelatedAppearances(payload, anchorEventId, 8));
+      })
+      .catch((requestError) => {
+        if (!cancelled) {
+          setMatches([]);
+          setError(requestError.message || "Related incidents unavailable");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [anchorEventId]);
+
+  return (
+    <section className="incident-related">
+      <div className="incident-related-head">
+        <div><h3>Related incidents</h3><small>Visual matches and nearby camera sequence candidates</small></div>
+        {selectedEventId ? <button type="button" onClick={onReturn}>Selected incident</button> : null}
+      </div>
+      {loading ? <p>Finding related incidents…</p> : null}
+      {!loading && error ? <p>{error}</p> : null}
+      {!loading && !error && !matches.length ? <p>No related appearances or nearby camera events.</p> : null}
+      {matches.length ? <div className="incident-related-grid">
+        {matches.map((match) => {
+          const eventId = Number(match.event_id);
+          const selected = eventId === Number(selectedEventId);
+          const pending = eventId === Number(loadingEventId);
+          return (
+            <button type="button" className={selected ? "selected" : ""} key={eventId} onClick={() => onSelect(match)} disabled={pending} aria-pressed={selected} title={match.route_name ? `${match.route_name}: ${relatedEvidenceLabel(match)}` : `Preview related incident from ${cameraNameById.get(match.camera_id) || match.camera_id}`}>
+              <img src={`/api/events/${eventId}/thumbnail.jpg?width=360&quality=80`} alt={`${cameraNameById.get(match.camera_id) || match.camera_id} related incident`} loading="lazy" />
+              <span><strong>{cameraNameById.get(match.camera_id) || match.camera_id}</strong><b>{relatedEvidenceLabel(match)}</b></span>
+              <small>{pending ? "Loading…" : formatDateTime(match.created_at, timeZone)}</small>
+            </button>
+          );
+        })}
+      </div> : null}
+      <small>Visual similarity supports an investigation. “Expected route” follows your configured camera map; “Likely sequence” uses time and object family only. Neither claims identity without appearance evidence.</small>
+    </section>
+  );
+}
+
+function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn }) {
   if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
@@ -2889,6 +2950,7 @@ function IncidentInspector({ incident, faceEvent, appConfig, timeZone, imageSize
       <div className="incident-inspector-head">
         <div><strong>{incident.camera_id}</strong><time>{formatDateTime(incident.created_at, timeZone)}</time></div>
       </div>
+      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <section className="incident-replay-analysis">
         <h3>Replay analysis</h3>
         <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
@@ -3855,6 +3917,12 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const [incidentLoading, setIncidentLoading] = useState(true);
   const [incidentLoadError, setIncidentLoadError] = useState("");
   const [incidentRefreshToken, setIncidentRefreshToken] = useState(0);
+  const [semanticIncidentQuery, setSemanticIncidentQuery] = useState("");
+  const [semanticIncidentActiveQuery, setSemanticIncidentActiveQuery] = useState("");
+  const [semanticIncidentResults, setSemanticIncidentResults] = useState([]);
+  const [semanticIncidentLoading, setSemanticIncidentLoading] = useState(false);
+  const [semanticIncidentError, setSemanticIncidentError] = useState("");
+  const semanticIncidentRequestRef = useRef(null);
   const incidentLoadedQueryRef = useRef("");
   const incidentEventRefreshTimer = useRef(null);
   const {
@@ -3878,6 +3946,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const [desktopAnalysisStats, setDesktopAnalysisStats] = useState(null);
   const [desktopReplayRequest, setDesktopReplayRequest] = useState(0);
   const [focusedImageSize, setFocusedImageSize] = useState(null);
+  const [relatedPreviewIncident, setRelatedPreviewIncident] = useState(null);
+  const [relatedPreviewEventId, setRelatedPreviewEventId] = useState(null);
+  const [relatedPreviewLoadingEventId, setRelatedPreviewLoadingEventId] = useState(null);
+  const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
   const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
   const incidentsPerPage = mobileView ? 12 : incidentThumbnailPageSize({ ...incidentRailSize, density: incidentDensity });
@@ -3886,7 +3958,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const incidentCameraOptions = incidentFacets.camera_ids || [];
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
-  const visibleIncidents = incidents;
+  const semanticIncidentActive = Boolean(semanticIncidentActiveQuery);
+  const incidentResultSource = semanticIncidentActive ? semanticIncidentResults : incidents;
+  const displayedIncidentTotal = semanticIncidentActive ? semanticIncidentResults.length : incidentTotal;
+  const displayedIncidentLoading = semanticIncidentActive ? semanticIncidentLoading : incidentLoading;
+  const displayedIncidentError = semanticIncidentActive ? semanticIncidentError : incidentLoadError;
+  const visibleIncidents = semanticIncidentActive
+    ? incidentResultSource.slice(incidentPage * incidentsPerPage, (incidentPage + 1) * incidentsPerPage)
+    : incidentResultSource;
   const explicitlyFocusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
   const focusedSummary = mobileView ? explicitlyFocusedSummary : explicitlyFocusedSummary || visibleIncidents[0] || null;
   const focusedDetailQuery = incidentDetailQuery(focusedSummary);
@@ -3894,11 +3973,17 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const focusedEvent = (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
     || (focusedIncident?.events || []).find((event) => Number(event.id) === Number(focusedIncident.representative_event_id))
     || focusedIncident;
-  const focusedSnapshotEvent = focusedEvent;
+  const relatedAnchorEvent = incidentTrackingSource(focusedEvent, focusedIncident) || focusedEvent;
+  const relatedAnchorEventId = Number(relatedAnchorEvent?.representative_event_id || relatedAnchorEvent?.id) || null;
+  const displayedIncident = relatedPreviewIncident || focusedIncident;
+  const displayedEvent = (displayedIncident?.events || []).find((event) => Number(event.id) === Number(focusedFaceEventId))
+    || (displayedIncident?.events || []).find((event) => Number(event.id) === Number(displayedIncident?.representative_event_id))
+    || displayedIncident;
+  const focusedSnapshotEvent = displayedEvent;
   const focusedSnapshotEventId = Number(focusedSnapshotEvent?.representative_event_id || focusedSnapshotEvent?.id);
   const focusedLoadedImageSize = Number(focusedImageSize?.eventId) === focusedSnapshotEventId ? focusedImageSize : null;
   const galleryIncidents = visibleIncidents;
-  const incidentPageCount = Math.max(1, Math.ceil(incidentTotal / incidentsPerPage));
+  const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
 
@@ -3954,6 +4039,77 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     setIncidentDetails({});
     setIncidentRefreshToken((value) => value + 1);
   }
+
+  async function runSemanticIncidentSearch(event, requestedQuery = semanticIncidentQuery) {
+    event?.preventDefault();
+    const queryText = String(requestedQuery || "").trim();
+    if (!queryText) return;
+    semanticIncidentRequestRef.current?.abort();
+    const controller = new AbortController();
+    semanticIncidentRequestRef.current = controller;
+    setSemanticIncidentQuery(queryText);
+    setSemanticIncidentActiveQuery(queryText);
+    setSemanticIncidentResults([]);
+    setSemanticIncidentLoading(true);
+    setSemanticIncidentError("");
+    setIncidentPage(0);
+    setEventFilter("object");
+    try {
+      const nextDay = addDaysToDateKey(incidentDay || today, 1);
+      const startEpoch = zonedDateSecondToEpoch(incidentDay || today, 0, timeZone);
+      const endEpoch = zonedDateSecondToEpoch(nextDay, 0, timeZone);
+      const response = await fetch("/api/semantic-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify(semanticIncidentRequest({
+          query: queryText,
+          cameraFilter: incidentCameraFilter,
+          objectFilter: incidentObjectFilter,
+          startAt: new Date(startEpoch * 1000).toISOString(),
+          endAt: new Date(endEpoch * 1000).toISOString(),
+        })),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Semantic incident search failed");
+      const hits = Array.isArray(payload.results) ? payload.results : [];
+      const hydrated = await Promise.all(hits.map(async (hit) => {
+        const eventId = Number(hit?.event?.id);
+        if (!Number.isInteger(eventId) || eventId <= 0) return null;
+        const detailResponse = await fetch(`/api/incidents/by-event/${eventId}`, { signal: controller.signal });
+        if (!detailResponse.ok) return null;
+        const detail = await detailResponse.json();
+        return { ...detail, semantic_search: { query: queryText, score: Number(hit.score), evidence: hit.evidence || null, event_id: eventId } };
+      }));
+      if (semanticIncidentRequestRef.current !== controller) return;
+      setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter));
+    } catch (error) {
+      if (error?.name !== "AbortError") setSemanticIncidentError(error.message || "Semantic incident search failed");
+    } finally {
+      if (semanticIncidentRequestRef.current === controller) {
+        semanticIncidentRequestRef.current = null;
+        setSemanticIncidentLoading(false);
+      }
+    }
+  }
+
+  function resetSemanticIncidentSearch() {
+    semanticIncidentRequestRef.current?.abort();
+    semanticIncidentRequestRef.current = null;
+    setSemanticIncidentQuery("");
+    setSemanticIncidentActiveQuery("");
+    setSemanticIncidentResults([]);
+    setSemanticIncidentLoading(false);
+    setSemanticIncidentError("");
+    setIncidentPage(0);
+  }
+
+  useEffect(() => () => semanticIncidentRequestRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!semanticIncidentActiveQuery) return;
+    runSemanticIncidentSearch(null, semanticIncidentActiveQuery);
+  }, [incidentCameraFilter, incidentDay, incidentObjectFilter, incidentZoneFilter]);
 
   useAppEvents(({ type }) => {
     if (type !== "incident" || incidentDay !== today || incidentPage !== 0 || document.hidden) return;
@@ -4075,6 +4231,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   useEffect(() => {
     setFocusedFaceEventId(null);
     setDesktopAnalysisStats(null);
+    relatedPreviewRequestRef.current += 1;
+    setRelatedPreviewIncident(null);
+    setRelatedPreviewEventId(null);
+    setRelatedPreviewLoadingEventId(null);
   }, [focusedIncident?.id]);
 
   useEffect(() => {
@@ -4090,9 +4250,9 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
 
   useEffect(() => {
     if (desktopAnalysisMode !== "tracks") return;
-    const trackingEvent = incidentTrackingSource(focusedEvent, focusedIncident);
+    const trackingEvent = incidentTrackingSource(displayedEvent, displayedIncident);
     if (!storedObjectTracks(trackingEvent).length) setDesktopAnalysisMode("clean");
-  }, [desktopAnalysisMode, focusedEvent, focusedIncident, setDesktopAnalysisMode]);
+  }, [desktopAnalysisMode, displayedEvent, displayedIncident, setDesktopAnalysisMode]);
 
   useEffect(() => {
     const context = incidentRecordingContext(selectedEvent || focusedEvent);
@@ -4139,6 +4299,38 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     setDesktopReplayRequest((request) => request + 1);
   }
 
+  async function selectRelatedIncident(match) {
+    const eventId = Number(match?.event_id);
+    if (!Number.isInteger(eventId) || eventId <= 0) return;
+    const request = ++relatedPreviewRequestRef.current;
+    setRelatedPreviewLoadingEventId(eventId);
+    try {
+      const response = await fetch(`/api/incidents/by-event/${eventId}`);
+      if (!response.ok) throw new Error("Related incident unavailable");
+      const detail = await response.json();
+      if (request !== relatedPreviewRequestRef.current) return;
+      setRelatedPreviewIncident(detail);
+      setRelatedPreviewEventId(eventId);
+      setFocusedFaceEventId(eventId);
+      setDesktopAnalysisMode("clean");
+      setDesktopAnalysisStats(null);
+    } catch {
+      // Keep the currently displayed incident if a stale related event was removed.
+    } finally {
+      if (request === relatedPreviewRequestRef.current) setRelatedPreviewLoadingEventId(null);
+    }
+  }
+
+  function returnToSelectedIncident() {
+    relatedPreviewRequestRef.current += 1;
+    setRelatedPreviewIncident(null);
+    setRelatedPreviewEventId(null);
+    setRelatedPreviewLoadingEventId(null);
+    setFocusedFaceEventId(Number(focusedIncident?.representative_event_id || focusedIncident?.id) || null);
+    setDesktopAnalysisMode("clean");
+    setDesktopAnalysisStats(null);
+  }
+
   useEffect(() => {
     if (mobileView || selectedEvent) return undefined;
     function onIncidentArrow(event) {
@@ -4157,6 +4349,18 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     return () => window.removeEventListener("keydown", onIncidentArrow);
   }, [mobileView, selectedEvent, focusedIndex, visibleIncidents]);
 
+  const semanticIncidentControl = (
+    <div className={`incident-semantic-search ${semanticIncidentActive ? "active" : ""} ${semanticIncidentError ? "error" : ""}`}>
+      <form onSubmit={runSemanticIncidentSearch} role="search" aria-label="Semantic incident search">
+        <Search size={15} aria-hidden="true" />
+        <input value={semanticIncidentQuery} onChange={(event) => setSemanticIncidentQuery(event.target.value)} placeholder='Describe an incident, e.g. “white delivery truck”' aria-label="Describe incidents to find" disabled={semanticIncidentLoading} />
+        {semanticIncidentActive ? <button type="button" className="secondary" onClick={resetSemanticIncidentSearch} aria-label="Reset semantic incident search">Reset</button> : null}
+        <button type="submit" disabled={semanticIncidentLoading || !semanticIncidentQuery.trim()}>{semanticIncidentLoading ? "Searching…" : "Search"}</button>
+      </form>
+      {semanticIncidentError ? <small>{semanticIncidentError}</small> : semanticIncidentActive ? <small>Showing visual matches for “{semanticIncidentActiveQuery}” using the selected day and filters.</small> : null}
+    </div>
+  );
+
   if (!mobileView) {
     return (
       <main className="incidents-desktop-page with-inspector">
@@ -4164,7 +4368,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
           <div className="incidents-desktop-toolbar">
             <div className="incident-filter-toggle compact" aria-label="Incident type filter">
               <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}>Motion</button>
+              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
             </div>
             <div className="incident-filter-selects desktop">
               <label className="incident-day-field"><span>Day</span><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
@@ -4172,7 +4376,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               <label><span>Object</span><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
               <label><span>Zone</span><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
             </div>
-            <span className="shown-bubble">{incidentTotal} shown</span>
+            {semanticIncidentControl}
+            <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
           </div>
 
           <div className="incidents-desktop-workspace">
@@ -4185,14 +4390,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
                 </div>
               </div>
               <div className="incident-rail-list" ref={incidentRailListRef}>
-                {incidentLoading && !galleryIncidents.length ? <div className="empty-state">Loading incidents...</div> : null}
-                {!galleryIncidents.length && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
+                {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
+                {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
                   <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace onToggle={toggleIncident} />
                 )) : null}
-                {!incidentLoading && !incidentLoadError && !galleryIncidents.length ? <div className="empty-state">No other incidents.</div> : null}
+                {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No other incidents."}</div> : null}
               </div>
-              <div className={`incident-pager ${incidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={incidentTotal <= incidentsPerPage}>
+              <div className={`incident-pager ${displayedIncidentTotal > incidentsPerPage ? "" : "placeholder"}`} aria-label="Incident pages" aria-hidden={displayedIncidentTotal <= incidentsPerPage}>
                 <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
                 <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
                 <button type="button" onClick={() => setIncidentPage((page) => Math.min(incidentPageCount - 1, page + 1))} disabled={clampedIncidentPage >= incidentPageCount - 1}>Next</button>
@@ -4201,7 +4406,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
 
             <section className="incident-investigation">
               <div className="incident-focus-nav">
-                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${incidentTotal}` : "No incident selected"}</span>
+                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${displayedIncidentTotal}` : "No incident selected"}</span>
+                {relatedPreviewIncident ? <button type="button" onClick={returnToSelectedIncident}>Viewing related appearance · return to selected incident</button> : null}
               </div>
               <div className="incident-desktop-focus">
                 {focusedIncident ? (
@@ -4210,11 +4416,11 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
                     <button type="button" className="incident-focus-arrow next" onClick={() => moveFocus(1)} disabled={focusedIndex < 0 || focusedIndex >= visibleIncidents.length - 1} title="Next incident" aria-label="Next incident"><ChevronRight size={26} /></button>
                   </>
                 ) : null}
-                {focusedIncident ? <IncidentCard incident={focusedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
+                {displayedIncident ? <IncidentCard key={`${focusedIncident?.id || "none"}:${displayedIncident.id || displayedIncident.representative_event_id}`} incident={displayedIncident} timeZone={timeZone} expanded thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace analysisMode={desktopAnalysisMode} replayRequest={desktopReplayRequest} onAnalysisStats={setDesktopAnalysisStats} onToggle={toggleIncident} onPreviewChange={setFocusedFaceEventId} onImageSize={setFocusedImageSize} /> : <div className="empty-state">No incidents match the current filters.</div>}
               </div>
             </section>
 
-            <IncidentInspector incident={focusedIncident} faceEvent={focusedEvent} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} />
+            <IncidentInspector incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
@@ -4230,9 +4436,9 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
           <div className="incident-head-actions">
             <div className="incident-filter-toggle compact" aria-label="Incident type filter">
               <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => setEventFilter("motion")}>Motion</button>
+              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
             </div>
-            <span className="shown-bubble">{incidentTotal} shown</span>
+            <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
           </div>
         </div>
         <div className="event-filter incident-filter-panel" aria-label="Incident filters">
@@ -4263,11 +4469,12 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               </select>
             </label>
           </div>
+          {semanticIncidentControl}
         </div>
         <div className="incident-gallery">
-          {incidentLoading ? <div className="empty-state">Loading incidents...</div> : null}
-          {!incidentLoading && incidentLoadError ? <div className="empty-state">{incidentLoadError}</div> : null}
-          {!incidentLoading && !incidentLoadError && visibleIncidents.length
+          {displayedIncidentLoading ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
+          {!displayedIncidentLoading && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
+          {!displayedIncidentLoading && !displayedIncidentError && visibleIncidents.length
             ? pagedIncidents.map((incident) => (
               <IncidentCard
                 key={incident.id}
@@ -4280,9 +4487,9 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               />
             ))
             : null}
-          {!incidentLoading && !incidentLoadError && !visibleIncidents.length ? <div className="empty-state">No incidents match the current filters.</div> : null}
+          {!displayedIncidentLoading && !displayedIncidentError && !visibleIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No incidents match the current filters."}</div> : null}
         </div>
-        {incidentTotal > incidentsPerPage ? (
+        {displayedIncidentTotal > incidentsPerPage ? (
           <div className="incident-pager" aria-label="Incident pages">
             <button type="button" onClick={() => setIncidentPage((page) => Math.max(0, page - 1))} disabled={clampedIncidentPage === 0}>Prev</button>
             <span>{clampedIncidentPage + 1} / {incidentPageCount}</span>
@@ -7505,6 +7712,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const memoryShort = data.process_memory_history?.short || [];
   const memoryLong = data.process_memory_history?.long || [];
   const trackingCapacity = data.tracking_capacity || {};
+  const appearanceBackfill = data.appearance_backfill || {};
+  const backfillCounts = appearanceBackfill.counts || {};
   const capacityTotals = capacityShort.reduce((total, point) => ({
     attempts: total.attempts + Number(point.attempts || 0),
     waited: total.waited + Number(point.waited || 0),
@@ -7532,7 +7741,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <article><span>Object detector</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{formatRate(runtime.detection_fps)} · queue {runtime.queue_depth || 0} · {Number(runtime.failed_inferences || 0).toLocaleString()} failures since restart</small></article>
           <article><span>GPU · SurvNG inference</span><strong>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : gpu.available ? "Sampling…" : "Unavailable"}</strong><small>{formatBytes(gpu.resident_bytes)} resident · {gpu.current_frequency_mhz || 0}/{gpu.maximum_frequency_mhz || 0} MHz</small></article>
           <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
-          <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} active now · {capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
+          <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} baseline · burst to {trackingCapacity.burst_limit || trackingCapacity.limit || 0} · {capacityTotals.waited} waited</small></article>
+          <article><span>Deferred appearance evidence</span><strong>{Number(backfillCounts.completed || 0).toLocaleString()} recovered</strong><small>{Number(backfillCounts.queued || 0).toLocaleString()} queued · {Number(backfillCounts.failed || 0).toLocaleString()} failed · {appearanceBackfill.running ? "worker online" : "worker idle"}</small></article>
         </>}
       </div>
 
@@ -9726,6 +9936,31 @@ function RetentionSummary({ status }) {
 function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, trackingCatalog, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const reidStatus = detectorStatus?.reid || null;
+  const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
+  const routeCameras = config.cameras || [];
+  const updateCameraRoute = (index, field, value) => updateConfig(
+    ["detector", "tracking", "camera_transition_routes"],
+    cameraTransitionRoutes.map((route, routeIndex) => routeIndex === index ? { ...route, [field]: value } : route),
+  );
+  const addCameraRoute = () => {
+    if (routeCameras.length < 2) return;
+    const existing = new Set(cameraTransitionRoutes.map((route) => `${route.from_camera}->${route.to_camera}`));
+    let pair = null;
+    for (const from of routeCameras) {
+      for (const to of routeCameras) {
+        if (from.id !== to.id && !existing.has(`${from.id}->${to.id}`)) {
+          pair = [from.id, to.id];
+          break;
+        }
+      }
+      if (pair) break;
+    }
+    if (!pair) return;
+    updateConfig(["detector", "tracking", "camera_transition_routes"], [
+      ...cameraTransitionRoutes,
+      { from_camera: pair[0], to_camera: pair[1], min_seconds: 0, max_seconds: 30, bidirectional: false, enabled: true, name: "" },
+    ]);
+  };
   const openvinoDevices = accelerator?.openvino_devices || [];
   const hasOpenvinoGpu = openvinoDevices.includes("GPU");
   const detectorBackend = config.detector?.backend || "openvino";
@@ -9978,7 +10213,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           </div>
           <label>Maximum duration<input type="number" min="3" max="120" step="1" value={config.detector?.tracking?.max_session_seconds ?? 15} onChange={(event) => updateConfig(["detector", "tracking", "max_session_seconds"], Number(event.target.value))} /><small>Seconds after initial detection.</small></label>
           <label>Lost-object grace<input type="number" min="0.5" max="15" step="0.5" value={config.detector?.tracking?.lost_timeout_seconds ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "lost_timeout_seconds"], Number(event.target.value))} /><small>Seconds to retain an obstructed object.</small></label>
-          <label>Camera limit<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Maximum simultaneous tracking sessions.</small></label>
+          <label>Baseline camera limit<input type="number" min="1" max="16" step="1" value={config.detector?.tracking?.max_active_cameras ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "max_active_cameras"], Number(event.target.value))} /><small>Normal simultaneous tracking sessions.</small></label>
+          <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.adaptive_burst_enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "adaptive_burst_enabled"], event.target.checked)} /><span>Allow an extra tracker when healthy</span><small>Temporarily uses the burst limit only while inference has no backlog and system memory is healthy.</small></label>
+          <label>Burst camera limit<input type="number" min={config.detector?.tracking?.max_active_cameras ?? 2} max="16" step="1" value={config.detector?.tracking?.burst_max_active_cameras ?? 3} onChange={(event) => updateConfig(["detector", "tracking", "burst_max_active_cameras"], Number(event.target.value))} /><small>Maximum only during a healthy short burst.</small></label>
           <label>Wait for tracking capacity<input type="number" min="0" max="30" step="0.5" value={config.detector?.tracking?.capacity_wait_seconds ?? 5} onChange={(event) => updateConfig(["detector", "tracking", "capacity_wait_seconds"], Number(event.target.value))} /><small>Wait briefly for a busy tracking slot, then recover the gap from recordings. Zero skips immediately.</small></label>
           </div>
         <details className="detection-compact-details">
@@ -10011,6 +10248,23 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>Vehicle appearance similarity<input type="number" min="0" max="1" step="0.01" value={config.detector?.tracking?.vehicle_reid_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "vehicle_reid_match_threshold"], Number(event.target.value))} /><small>Higher values reduce accidental merging of similar-looking vehicles.</small></label>
             <label>Maximum appearance checks<input type="number" min="1" max="64" step="1" value={config.detector?.tracking?.reid_max_embeddings_per_frame ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_max_embeddings_per_frame"], Number(event.target.value))} /><small>Bounds combined person and vehicle ReID work in a crowded frame.</small></label>
             <label>Refresh appearance every<input type="number" min="1" max="120" step="1" value={config.detector?.tracking?.reid_refresh_interval_frames ?? 8} onChange={(event) => updateConfig(["detector", "tracking", "reid_refresh_interval_frames"], Number(event.target.value))} /><small>Matched samples between appearance refreshes. Geometry handles the intervening frames; lower values use more GPU.</small></label>
+            <div className="detection-settings-subhead"><strong>Missed-session recovery</strong><small>Recover durable appearance evidence from the saved incident image after full tracking finishes or is skipped.</small></div>
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.deferred_reid_enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "deferred_reid_enabled"], event.target.checked)} /><span>Recover missed appearance evidence</span></label>
+            <label>Recovery delay<input type="number" min="0" max="300" step="1" value={config.detector?.tracking?.deferred_reid_delay_seconds ?? 20} onChange={(event) => updateConfig(["detector", "tracking", "deferred_reid_delay_seconds"], Number(event.target.value))} /><small>Waits for stronger multi-frame tracking evidence before using a single saved snapshot.</small></label>
+            <label>Nearby-camera window<input type="number" min="1" max="300" step="1" value={config.detector?.tracking?.related_sequence_window_seconds ?? 30} onChange={(event) => updateConfig(["detector", "tracking", "related_sequence_window_seconds"], Number(event.target.value))} /><small>Seconds on either side used to show clearly labeled sequence candidates. Time alone never claims identity.</small></label>
+            <div className="detection-settings-subhead camera-route-heading"><div><strong>Expected camera routes</strong><small>Describe physically plausible camera-to-camera movement. Direction follows event time; routes strengthen ordering but never establish identity by themselves.</small></div><button type="button" onClick={addCameraRoute} disabled={routeCameras.length < 2}>Add route</button></div>
+            <div className="camera-route-list">
+              {cameraTransitionRoutes.length ? cameraTransitionRoutes.map((route, index) => <div className="camera-route-row" key={`${route.from_camera}-${route.to_camera}-${index}`}>
+                <label>From<select value={route.from_camera} onChange={(event) => updateCameraRoute(index, "from_camera", event.target.value)}>{routeCameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}</select></label>
+                <span className="camera-route-arrow">→</span>
+                <label>To<select value={route.to_camera} onChange={(event) => updateCameraRoute(index, "to_camera", event.target.value)}>{routeCameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}</select></label>
+                <label>Earliest<input type="number" min="0" max="299" step="1" value={route.min_seconds ?? 0} onChange={(event) => updateCameraRoute(index, "min_seconds", Number(event.target.value))} /><small>seconds</small></label>
+                <label>Latest<input type="number" min="1" max="300" step="1" value={route.max_seconds ?? 30} onChange={(event) => updateCameraRoute(index, "max_seconds", Number(event.target.value))} /><small>seconds</small></label>
+                <label className="compact-toggle"><input type="checkbox" checked={route.bidirectional ?? false} onChange={(event) => updateCameraRoute(index, "bidirectional", event.target.checked)} /><span>Both directions</span></label>
+                <label className="compact-toggle"><input type="checkbox" checked={route.enabled ?? true} onChange={(event) => updateCameraRoute(index, "enabled", event.target.checked)} /><span>Enabled</span></label>
+                <button type="button" className="danger" onClick={() => updateConfig(["detector", "tracking", "camera_transition_routes"], cameraTransitionRoutes.filter((_item, routeIndex) => routeIndex !== index))}>Remove</button>
+              </div>) : <p className="settings-help">No expected routes yet. Nearby incidents still appear as general sequence candidates.</p>}
+            </div>
             {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <>
               <label>BoT-SORT match tolerance<input type="number" min="0.1" max="1" step="0.05" value={config.detector?.tracking?.botsort_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "botsort_match_threshold"], Number(event.target.value))} /><small>Higher values allow more motion difference while retaining an ID.</small></label>
               <label>Appearance proximity<input type="number" min="0" max="1" step="0.05" value={config.detector?.tracking?.botsort_proximity_threshold ?? 0.1} onChange={(event) => updateConfig(["detector", "tracking", "botsort_proximity_threshold"], Number(event.target.value))} /><small>Minimum box overlap before appearance can reconnect a person. Zero allows appearance recovery anywhere in the frame.</small></label>

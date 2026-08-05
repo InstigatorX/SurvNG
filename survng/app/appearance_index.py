@@ -47,12 +47,21 @@ class AppearanceIndex:
                     quality real not null default 0,
                     first_seen text not null default '',
                     last_seen text not null default '',
+                    source text not null default 'tracking_multiframe',
                     created_at text not null,
                     foreign key(event_id) references events(id) on delete cascade,
                     unique(event_id, track_id, model_kind, model_fingerprint)
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("pragma table_info(appearance_embeddings)")
+            }
+            if "source" not in columns:
+                connection.execute(
+                    "alter table appearance_embeddings add column source text not null default 'tracking_multiframe'"
+                )
             connection.execute(
                 "create index if not exists idx_appearance_event on appearance_embeddings(event_id)"
             )
@@ -76,13 +85,12 @@ class AppearanceIndex:
             return None
         return np.ascontiguousarray(vector / norm, dtype=np.float32)
 
-    def replace_event(
+    def _prepare_records(
         self,
         event_id: int,
         camera_id: str,
         records: Iterable[dict[str, Any]],
-    ) -> int:
-        """Atomically replace an event's valid vectors without exposing them in event JSON."""
+    ) -> list[tuple[Any, ...]]:
         prepared: list[tuple[Any, ...]] = []
         for record in records:
             vector = self._normalized_embedding(record.get("embedding"))
@@ -113,8 +121,19 @@ class AppearanceIndex:
                 min(1.0, max(0.0, float(record.get("quality") or 0.0))),
                 str(record.get("first_seen") or ""),
                 str(record.get("last_seen") or ""),
+                str(record.get("source") or "tracking_multiframe"),
                 str(record.get("created_at") or record.get("last_seen") or ""),
             ))
+        return prepared
+
+    def replace_event(
+        self,
+        event_id: int,
+        camera_id: str,
+        records: Iterable[dict[str, Any]],
+    ) -> int:
+        """Atomically replace an event's valid vectors without exposing them in event JSON."""
+        prepared = self._prepare_records(event_id, camera_id, records)
         if not prepared:
             return 0
         with self._lock, self._connect() as connection:
@@ -128,12 +147,45 @@ class AppearanceIndex:
                     event_id, camera_id, track_id, label, model_kind,
                     model_fingerprint, embedding_size, embedding_blob,
                     match_threshold, observation_count, quality,
-                    first_seen, last_seen, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    first_seen, last_seen, source, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 prepared,
             )
         return len(prepared)
+
+    def append_event(
+        self,
+        event_id: int,
+        camera_id: str,
+        records: Iterable[dict[str, Any]],
+    ) -> int:
+        """Add fallback vectors without replacing stronger multi-frame evidence."""
+        prepared = self._prepare_records(event_id, camera_id, records)
+        if not prepared:
+            return 0
+        with self._lock, self._connect() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                """
+                insert or ignore into appearance_embeddings (
+                    event_id, camera_id, track_id, label, model_kind,
+                    model_fingerprint, embedding_size, embedding_blob,
+                    match_threshold, observation_count, quality,
+                    first_seen, last_seen, source, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                prepared,
+            )
+            return connection.total_changes - before
+
+    def has_event(self, event_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "select 1 from appearance_embeddings where event_id = ? limit 1",
+                (int(event_id),),
+            ).fetchone()
+        return row is not None
 
     @staticmethod
     def _vector(row: sqlite3.Row) -> np.ndarray | None:

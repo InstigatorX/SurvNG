@@ -1054,6 +1054,16 @@ class InferenceSupervisor:
         status["workers"] = self.worker_status()
         return status
 
+    def cached_object_status(self) -> dict[str, Any]:
+        """Read the last object-worker status without IPC from scheduling hot paths."""
+        status = self._object.cached_status()
+        runtime = dict(status.get("runtime") or {})
+        pending = self._object.isolation_status()["pending_requests"]
+        runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
+        runtime["pending_frames"] = runtime["queue_depth"]
+        status["runtime"] = runtime
+        return status
+
     def face_status(self) -> dict[str, Any]:
         status = self._face.status()
         status["enabled"] = bool(self.config.face_recognition_enabled)

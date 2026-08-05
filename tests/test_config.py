@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from survng.app.config import (
     AppConfig,
     CameraConfig,
+    CameraTransitionRoute,
     MqttConfig,
     ObjectTrackingConfig,
     load_config,
@@ -21,6 +22,36 @@ from survng.app.config import (
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_camera_transition_routes_validate_topology_and_timing(self) -> None:
+        config = AppConfig.model_validate({
+            "cameras": [
+                {"id": "back-left", "name": "Back Left", "stream_url": "rtsp://example.invalid/a"},
+                {"id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/b"},
+            ],
+            "detector": {"tracking": {"camera_transition_routes": [{
+                "from_camera": "back-left",
+                "to_camera": "gate",
+                "min_seconds": 2,
+                "max_seconds": 12,
+            }]}},
+        })
+        self.assertEqual(config.detector.tracking.camera_transition_routes[0].to_camera, "gate")
+        with self.assertRaisesRegex(ValidationError, "unknown camera"):
+            AppConfig.model_validate({
+                "cameras": [{"id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/a"}],
+                "detector": {"tracking": {"camera_transition_routes": [{
+                    "from_camera": "missing",
+                    "to_camera": "gate",
+                }]}},
+            })
+        with self.assertRaisesRegex(ValidationError, "maximum time"):
+            CameraTransitionRoute(
+                from_camera="back-left",
+                to_camera="gate",
+                min_seconds=10,
+                max_seconds=10,
+            )
+
     def test_durable_image_storage_defaults_to_high_quality_webp(self) -> None:
         config = AppConfig()
 

@@ -61,6 +61,7 @@ from .camera_intelligence import (
     compare_camera_intelligence_results,
     select_balanced_samples,
 )
+from .camera_routes import match_camera_route
 from .calibration import (
     apply_calibration_changes,
     build_calibration_report,
@@ -763,7 +764,15 @@ TRACKING_SESSION_FIELDS = frozenset({
     "match_iou_threshold",
     "match_center_distance_ratio",
     "max_active_cameras",
+    "adaptive_burst_enabled",
+    "burst_max_active_cameras",
     "capacity_wait_seconds",
+    "deferred_reid_enabled",
+    "deferred_reid_delay_seconds",
+    "deferred_reid_min_crop_pixels",
+    "deferred_reid_rate_per_minute",
+    "related_sequence_window_seconds",
+    "camera_transition_routes",
     "max_tracks_per_session",
     "reid_max_age_seconds",
     "reid_max_embeddings_per_frame",
@@ -2512,12 +2521,24 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
         "process_memory_history": process_memory_history,
         "tracking_capacity": {
             "limit": int(config.detector.tracking.max_active_cameras),
+            "burst_limit": int(config.detector.tracking.burst_max_active_cameras),
+            "adaptive_burst_enabled": bool(config.detector.tracking.adaptive_burst_enabled),
             "wait_seconds": float(config.detector.tracking.capacity_wait_seconds),
             "active": sum(1 for item in cameras if item["tracking"]["active"]),
             "requests_since_restart": sum(item["tracking"]["capacity_requests"] for item in cameras),
             "waits_since_restart": sum(item["tracking"]["capacity_waits"] for item in cameras),
             "timeouts_since_restart": sum(item["tracking"]["capacity_timeouts"] for item in cameras),
+            "limiter": (
+                manager._object_tracking_limiter.status()
+                if hasattr(manager, "_object_tracking_limiter")
+                else {}
+            ),
         },
+        "appearance_backfill": (
+            manager.appearance_backfill.status()
+            if hasattr(manager, "appearance_backfill")
+            else {"enabled": False, "running": False, "counts": {}}
+        ),
         "activity": activity,
         "cameras": cameras,
     }
@@ -4844,10 +4865,196 @@ def event_appearance_matches(
     }
 
 
+def _appearance_family_labels(event: dict[str, Any], tracking: Any) -> set[str]:
+    try:
+        objects = json.loads(str(event.get("objects_json") or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return set()
+    if not isinstance(objects, list):
+        return set()
+    labels = {
+        str(item.get("label") or "").strip().lower()
+        for item in objects
+        if isinstance(item, dict) and item.get("label")
+    }
+    families: set[str] = set()
+    if "person" in labels:
+        families.add("person")
+    vehicle_labels = set(getattr(tracking, "vehicle_reid_labels", []) or [])
+    if labels & vehicle_labels:
+        families.add("vehicle")
+    return families
+
+
+@app.get("/api/events/{event_id}/related-incidents")
+def event_related_incidents(
+    event_id: int,
+    hours: float = 24.0,
+    sequence_seconds: float | None = None,
+    limit: int = 16,
+) -> dict[str, Any]:
+    """Combine durable visual matches with explicitly qualified time-only candidates."""
+    bounded_hours = max(0.25, min(float(hours), 24.0 * 30.0))
+    bounded_limit = max(1, min(int(limit), 100))
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        event = active_manager.events.get(event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        try:
+            anchor_at = datetime.fromisoformat(
+                str(event.get("created_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="event timestamp is invalid") from exc
+        if anchor_at.tzinfo is None:
+            anchor_at = anchor_at.replace(tzinfo=timezone.utc)
+        tracking = active_manager.config.detector.tracking
+        base_window = max(
+            1.0,
+            min(
+                float(sequence_seconds if sequence_seconds is not None else tracking.related_sequence_window_seconds),
+                300.0,
+            ),
+        )
+        route_window = max(
+            (
+                route.max_seconds
+                for route in tracking.camera_transition_routes
+                if route.enabled
+            ),
+            default=0.0,
+        )
+        window = min(300.0, max(base_window, route_window))
+        anchor_families = _appearance_family_labels(event, tracking)
+        visual_matches = active_manager.appearance_index.matches(
+            event_id,
+            start_at=(anchor_at - timedelta(hours=bounded_hours)).isoformat(),
+            end_at=(anchor_at + timedelta(hours=bounded_hours)).isoformat(),
+            cross_camera_only=True,
+            limit=100,
+        )
+        visual_by_event = {int(item["event_id"]): item for item in visual_matches}
+        temporal = active_manager.events.between(
+            (anchor_at - timedelta(seconds=window)).isoformat(),
+            (anchor_at + timedelta(seconds=window, microseconds=1)).isoformat(),
+            limit=500,
+        )
+
+    combined: dict[int, dict[str, Any]] = {}
+    for match in visual_matches:
+        if not match.get("visually_similar"):
+            continue
+        candidate_id = int(match["event_id"])
+        combined[candidate_id] = {**match, "relation_type": "appearance"}
+    for candidate in temporal:
+        candidate_id = int(candidate.get("id") or 0)
+        if (
+            candidate_id <= 0
+            or candidate_id == event_id
+            or str(candidate.get("camera_id") or "") == str(event.get("camera_id") or "")
+        ):
+            continue
+        candidate_families = _appearance_family_labels(candidate, tracking)
+        shared_families = sorted(anchor_families & candidate_families)
+        if not shared_families:
+            continue
+        try:
+            candidate_at = datetime.fromisoformat(
+                str(candidate.get("created_at") or "").replace("Z", "+00:00")
+            )
+            if candidate_at.tzinfo is None:
+                candidate_at = candidate_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        delta = abs((candidate_at - anchor_at).total_seconds())
+        if candidate_at <= anchor_at:
+            route_from_camera = str(candidate.get("camera_id") or "")
+            route_to_camera = str(event.get("camera_id") or "")
+        else:
+            route_from_camera = str(event.get("camera_id") or "")
+            route_to_camera = str(candidate.get("camera_id") or "")
+        route = match_camera_route(
+            tracking.camera_transition_routes,
+            route_from_camera,
+            route_to_camera,
+            delta,
+        )
+        visual = visual_by_event.get(candidate_id)
+        similar = bool(visual and visual.get("visually_similar"))
+        relation_type = (
+            "appearance_route" if route is not None and similar else
+            "expected_route" if route is not None else
+            "appearance_sequence" if similar else
+            "sequence_candidate"
+        )
+        combined[candidate_id] = {
+            **(visual or {}),
+            "event_id": candidate_id,
+            "camera_id": str(candidate.get("camera_id") or ""),
+            "created_at": str(candidate.get("created_at") or ""),
+            "model_kind": shared_families[0],
+            "sequence_delta_seconds": round(delta, 3),
+            "relation_type": relation_type,
+            "visually_similar": similar,
+            **(route.as_dict() if route is not None else {}),
+        }
+    related = sorted(
+        combined.values(),
+        key=lambda item: (
+            0 if item.get("relation_type") == "appearance_route" else
+            1 if item.get("relation_type") == "appearance_sequence" else
+            2 if item.get("relation_type") == "expected_route" else
+            3 if item.get("relation_type") == "appearance" else 4,
+            float(item.get("sequence_delta_seconds") or 1e12),
+            -float(item.get("similarity") or 0.0),
+        ),
+    )[:bounded_limit]
+    return {
+        "event_id": event_id,
+        "hours": bounded_hours,
+        "sequence_seconds": window,
+        "configured_routes": sum(
+            1 for route in tracking.camera_transition_routes if route.enabled
+        ),
+        "matches": related,
+        "identity_notice": "Time proximity alone is a sequence candidate, not identity proof.",
+    }
+
+
 @app.get("/api/appearance-index/status")
 def appearance_index_status() -> dict[str, Any]:
     with MANAGER_RELOAD_LOCK:
         return manager.appearance_index.status()
+
+
+@app.post("/api/appearance-index/backfill")
+def queue_appearance_backfill(start_at: str, end_at: str) -> dict[str, Any]:
+    try:
+        start = datetime.fromisoformat(str(start_at).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(end_at).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="backfill timestamps are invalid") from exc
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if end <= start or (end - start) > timedelta(days=1):
+        raise HTTPException(status_code=422, detail="backfill window must be between 0 and 24 hours")
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        events = active_manager.events.between(start.isoformat(), end.isoformat(), limit=10_000)
+        queued = [
+            int(event["id"])
+            for event in events
+            if _appearance_family_labels(event, active_manager.config.detector.tracking)
+            and active_manager.appearance_backfill.enqueue(
+                int(event["id"]),
+                str(event.get("camera_id") or ""),
+                delay_seconds=0,
+            )
+        ]
+    return {"queued": len(queued), "event_ids": sorted(queued), "start_at": start.isoformat(), "end_at": end.isoformat()}
 
 
 @app.get("/api/incidents")
@@ -5347,6 +5554,17 @@ def _assistant_incident_for_event(
             )
             return hydrated[0] if hydrated else summary
     return None
+
+
+@app.get("/api/incidents/by-event/{event_id}")
+def incident_for_event(event_id: int) -> dict[str, Any]:
+    """Resolve one event to its complete grouped incident for linked previews."""
+    with MANAGER_RELOAD_LOCK:
+        active_manager = manager
+        incident = _assistant_incident_for_event(event_id, active_manager)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident was not found")
+    return incident
 
 
 def _assistant_incident_evidence(

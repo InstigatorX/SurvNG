@@ -307,6 +307,27 @@ class CameraConfig(BaseModel):
 
 
 
+class CameraTransitionRoute(BaseModel):
+    from_camera: str = Field(min_length=1, max_length=128)
+    to_camera: str = Field(min_length=1, max_length=128)
+    min_seconds: float = Field(default=0.0, ge=0.0, le=300.0)
+    max_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    bidirectional: bool = False
+    enabled: bool = True
+    name: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def validate_route(self) -> "CameraTransitionRoute":
+        self.from_camera = self.from_camera.strip()
+        self.to_camera = self.to_camera.strip()
+        self.name = self.name.strip()
+        if self.from_camera == self.to_camera:
+            raise ValueError("camera transition route must connect two different cameras")
+        if self.max_seconds <= self.min_seconds:
+            raise ValueError("camera transition route maximum time must exceed its minimum")
+        return self
+
+
 class ObjectTrackingConfig(BaseModel):
     enabled: bool = True
     implementation: str = Field(default="survng_hybrid", min_length=1, max_length=64)
@@ -319,7 +340,18 @@ class ObjectTrackingConfig(BaseModel):
     match_iou_threshold: float = Field(default=0.20, ge=0.05, le=0.90)
     match_center_distance_ratio: float = Field(default=0.65, ge=0.1, le=2.0)
     max_active_cameras: int = Field(default=2, ge=1, le=16)
+    adaptive_burst_enabled: bool = True
+    burst_max_active_cameras: int = Field(default=3, ge=1, le=16)
     capacity_wait_seconds: float = Field(default=5.0, ge=0.0, le=30.0)
+    deferred_reid_enabled: bool = True
+    deferred_reid_delay_seconds: float = Field(default=20.0, ge=0.0, le=300.0)
+    deferred_reid_min_crop_pixels: int = Field(default=4096, ge=256, le=10_000_000)
+    deferred_reid_rate_per_minute: int = Field(default=6, ge=1, le=120)
+    related_sequence_window_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    camera_transition_routes: list[CameraTransitionRoute] = Field(
+        default_factory=list,
+        max_length=256,
+    )
     max_tracks_per_session: int = Field(default=100, ge=1, le=1000)
     reid_enabled: bool = False
     reid_model_path: str = Field(default="", max_length=4096)
@@ -366,6 +398,10 @@ class ObjectTrackingConfig(BaseModel):
         ))
         if self.vehicle_reid_enabled and not self.vehicle_reid_labels:
             raise ValueError("vehicle_reid_labels must contain at least one label")
+        if self.burst_max_active_cameras < self.max_active_cameras:
+            raise ValueError(
+                "burst_max_active_cameras cannot be lower than max_active_cameras"
+            )
         return self
 
     def tracks_label(self, label: object) -> bool:
@@ -528,6 +564,21 @@ class AppConfig(BaseModel):
         camera_ids = [camera.id for camera in self.cameras]
         if len(camera_ids) != len(set(camera_ids)):
             raise ValueError("camera ids must be unique")
+        known_camera_ids = set(camera_ids)
+        route_edges: set[tuple[str, str]] = set()
+        for route in self.detector.tracking.camera_transition_routes:
+            unknown = {route.from_camera, route.to_camera} - known_camera_ids
+            if unknown:
+                raise ValueError(
+                    "camera transition route references unknown camera(s): "
+                    + ", ".join(sorted(unknown))
+                )
+            edges = {(route.from_camera, route.to_camera)}
+            if route.bidirectional:
+                edges.add((route.to_camera, route.from_camera))
+            if edges & route_edges:
+                raise ValueError("camera transition routes cannot contain duplicates")
+            route_edges.update(edges)
         return self
 
 

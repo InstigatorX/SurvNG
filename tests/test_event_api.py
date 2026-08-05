@@ -132,6 +132,80 @@ class EventApiSerializationTest(unittest.TestCase):
             "2026-07-02T12:00:00+00:00",
         )
 
+    def test_related_incidents_promotes_configured_directional_camera_route(self) -> None:
+        car_objects = json.dumps([{"label": "car", "incident_eligible": True}])
+        anchor = {
+            "id": 7,
+            "camera_id": "back-left",
+            "created_at": "2026-08-05T21:52:05+00:00",
+            "objects_json": car_objects,
+        }
+        candidate = {
+            "id": 8,
+            "camera_id": "gate",
+            "created_at": "2026-08-05T21:52:09+00:00",
+            "objects_json": car_objects,
+        }
+        app_config = AppConfig.model_validate({
+            "cameras": [
+                {"id": "back-left", "name": "Back Left", "stream_url": "rtsp://example.invalid/a"},
+                {"id": "gate", "name": "Gate", "stream_url": "rtsp://example.invalid/b"},
+            ],
+            "detector": {"tracking": {
+                "vehicle_reid_labels": ["car"],
+                "camera_transition_routes": [{
+                    "from_camera": "back-left",
+                    "to_camera": "gate",
+                    "min_seconds": 1,
+                    "max_seconds": 10,
+                    "name": "Back yard to gate",
+                }],
+            }},
+        })
+        events = SimpleNamespace(
+            get=lambda event_id: anchor if event_id == 7 else None,
+            between=Mock(return_value=[candidate, anchor]),
+        )
+        active_manager = SimpleNamespace(
+            events=events,
+            appearance_index=SimpleNamespace(matches=Mock(return_value=[])),
+            config=app_config,
+        )
+
+        with patch.object(main, "manager", active_manager):
+            response = main.event_related_incidents(7)
+
+        self.assertEqual(response["configured_routes"], 1)
+        self.assertEqual(response["matches"][0]["relation_type"], "expected_route")
+        self.assertEqual(response["matches"][0]["route_name"], "Back yard to gate")
+        self.assertEqual(response["matches"][0]["sequence_delta_seconds"], 4.0)
+
+    def test_incident_for_event_returns_complete_resolved_incident(self) -> None:
+        expected = {
+            "id": "incident-gate-7",
+            "representative_event_id": 7,
+            "events": [{"id": 7}, {"id": 8}],
+        }
+        active_manager = SimpleNamespace()
+        with (
+            patch.object(main, "manager", active_manager),
+            patch.object(main, "_assistant_incident_for_event", return_value=expected) as resolve,
+        ):
+            response = main.incident_for_event(7)
+
+        self.assertEqual(response, expected)
+        resolve.assert_called_once_with(7, active_manager)
+
+    def test_incident_for_event_returns_not_found_for_stale_match(self) -> None:
+        with (
+            patch.object(main, "manager", SimpleNamespace()),
+            patch.object(main, "_assistant_incident_for_event", return_value=None),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            main.incident_for_event(999)
+
+        self.assertEqual(raised.exception.status_code, 404)
+
     def test_motion_audit_endpoint_filters_visual_backup_category(self) -> None:
         events = SimpleNamespace(motion_audits=Mock(return_value=([], 0)))
         active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"))
