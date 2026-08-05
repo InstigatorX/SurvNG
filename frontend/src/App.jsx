@@ -1011,6 +1011,7 @@ function defaultCamera(cameras, seed = {}) {
       mode: seed.motion_qualification?.mode || "inherit",
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
       stationary_object_tolerance: seed.motion_qualification?.stationary_object_tolerance || "inherit",
+      illumination_filter_enabled: seed.motion_qualification?.illumination_filter_enabled ?? null,
       frame_width: seed.motion_qualification?.frame_width ?? null,
       visual_backup_grace_seconds: seed.motion_qualification?.visual_backup_grace_seconds ?? null,
       visual_backup_min_score: seed.motion_qualification?.visual_backup_min_score ?? null,
@@ -8816,6 +8817,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     <option value="balanced">Standard</option>
                     <option value="high">Strong</option>
                   </select><small>Controls how aggressively outline shimmer and reflections around parked objects are ignored. Strong may ignore unusually slow or distant movement.</small></label>
+                  <label>Light and shadow filtering<select value={selectedCamera.motion_qualification?.illumination_filter_enabled == null ? "" : String(selectedCamera.motion_qualification.illumination_filter_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "illumination_filter_enabled"], event.target.value === "" ? null : event.target.value === "true")}><option value="">Use global setting</option><option value="true">Enabled</option><option value="false">Disabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection.</small></label>
                   <label>Analysis Width<select value={selectedCamera.motion_qualification?.frame_width ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "frame_width"], event.target.value ? Number(event.target.value) : null)}>
                     <option value="">Use global setting</option>
                     <option value="320">320 px</option>
@@ -9096,6 +9098,8 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
 
 function motionAuditOutcome(item) {
   const visualBackup = item.category === "visual_backup";
+  if (item.reason === "illumination_change") return { label: "Filtered · light or shadow change", className: "not-run" };
+  if (item.features?.illumination_verification_probe) return { label: item.object_detected ? "Light filter check · object rescued" : "Light filter check · no object", className: item.object_detected ? "object" : "clear" };
   if (item.interpretation?.category === "visual_backup_scene_learning") return { label: "Visual backup · scene learning", className: "not-run" };
   if (item.interpretation?.category === "object_not_motion_correlated") return { label: "Motion confirmed · detected object outside motion area", className: "clear" };
   if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
@@ -10085,6 +10089,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <div className="field-row">
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
           <label>Parked-object suppression<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Light</option><option value="balanced">Standard</option><option value="high">Strong</option></select><small>Controls how aggressively outline shimmer and reflections around parked objects are ignored. Strong may ignore unusually slow or distant movement.</small></label>
+          <label>Light and shadow filtering<select value={String(config.motion_qualification?.illumination_filter_enabled ?? false)} onChange={(event) => updateConfig(["motion_qualification", "illumination_filter_enabled"], event.target.value === "true")}><option value="false">Disabled</option><option value="true">Enabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection. Disabled still records evidence for evaluation.</small></label>
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>
           <label>ONVIF background upkeep<select value={String(config.motion_qualification?.camera_mode_background_fps ?? 2)} onChange={(event) => updateConfig(["motion_qualification", "camera_mode_background_fps"], Number(event.target.value))}><option value="1">Low CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Faster adaptation (3 frames/sec)</option><option value="5">Maximum adaptation (5 frames/sec)</option></select><small>When camera alerts trigger motion, SurvNG maintains the visual background at this lower rate. Trigger validation still analyzes the full buffered window.</small></label>
@@ -10455,6 +10460,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
             <span>{motionModeInfo(status.motion_qualification.mode).status} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
             <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} legacy preview rejects · {status.motion_qualification.suppressed || 0} filtered</span>
             <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
+            <span>Light and shadow filtering {status.motion_qualification.illumination_filter_enabled ? "enabled" : "measuring only"} · {status.motion_qualification.illumination_evaluations || 0} evaluated · {status.motion_qualification.illumination_candidates || 0} likely illumination changes · {status.motion_qualification.illumination_filtered || 0} filtered</span>
             <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
             {missingCameraTrigger ? <span className="motion-runtime-warning">{visualBackupEnabled ? "ONVIF is disabled, so the conservative visual backup is the only automatic trigger. Restore ONVIF for primary coverage." : "ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection."}</span> : null}
             {missingMotionNotices ? <span className="motion-runtime-warning">{visualBackupEnabled ? "No recognized ONVIF motion notices since this worker started. Strong persistent visual motion can still invoke the backup detector path." : "No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident."}</span> : null}

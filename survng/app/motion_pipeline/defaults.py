@@ -65,6 +65,14 @@ def adaptive_motion_stage_configs() -> list[MotionStageConfig]:
                 "maximum_credible_track_seconds": 6.0,
             },
         ),
+        MotionStageConfig(
+            stage_id="illumination_filter",
+            implementation="illumination_change_filter",
+            options={
+                "minimum_evidence_frames": 2,
+                "rejection_threshold": 0.78,
+            },
+        ),
     ]
 
 

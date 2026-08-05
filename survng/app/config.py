@@ -186,6 +186,7 @@ class MotionQualificationConfig(BaseModel):
     mode: Literal["camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "camera"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     stationary_object_tolerance: Literal["low", "balanced", "high"] = "balanced"
+    illumination_filter_enabled: bool = False
     frame_width: int = Field(default=320, ge=240, le=960)
     sample_fps: float = Field(default=5.0, ge=2.0, le=10.0)
     camera_mode_background_fps: float = Field(default=2.0, ge=0.5, le=5.0)
@@ -212,6 +213,7 @@ class CameraMotionQualificationConfig(BaseModel):
     mode: Literal["inherit", "camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "inherit"
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
     stationary_object_tolerance: Literal["inherit", "low", "balanced", "high"] = "inherit"
+    illumination_filter_enabled: bool | None = None
     frame_width: int | None = Field(default=None, ge=240, le=960)
     visual_backup_grace_seconds: float | None = Field(default=None, ge=0.0, le=5.0)
     visual_backup_min_score: float | None = Field(default=None, ge=0.0, le=1.0)

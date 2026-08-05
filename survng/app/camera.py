@@ -152,6 +152,7 @@ class CameraWorker:
             ),
         )
         self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
+        self._motion_color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
         self._motion_last_sample = 0.0
         self._motion_last_continuous_result: MotionQualificationResult | None = None
         self._motion_analysis_last_processed_at = 0.0
@@ -200,6 +201,11 @@ class CameraWorker:
             "visual_backup_rate_limited": 0,
             "visual_backup_not_ready": 0,
             "visual_backup_uncorrelated_objects": 0,
+            "illumination_evaluations": 0,
+            "illumination_candidates": 0,
+            "illumination_filtered": 0,
+            "illumination_verification_probes": 0,
+            "illumination_verification_rescues": 0,
             "analysis_worker_errors": 0,
             "event_worker_errors": 0,
             "event_callback_errors": 0,
@@ -341,6 +347,7 @@ class CameraWorker:
                 self._tracking_frames.clear()
                 self._tracking_last_sample_epoch = 0.0
                 self._motion_frames.clear()
+                self._motion_color_frames.clear()
                 self._motion_last_sample = 0.0
                 self._motion_last_continuous_result = None
                 self._motion_analysis_last_processed_at = 0.0
@@ -450,7 +457,17 @@ class CameraWorker:
                 for source, dimensions in self._source_frame_dimensions.items()
             }
             motion_buffered_frames = len(self._motion_frames)
-            motion_frame_shape = list(self._motion_frames[-1][1].shape) if self._motion_frames else None
+            motion_frame_shape = (
+                list(self._motion_frames[-1][1].shape[:2])
+                if self._motion_frames
+                else None
+            )
+            motion_color_buffered_frames = len(self._motion_color_frames)
+            motion_color_frame_shape = (
+                list(self._motion_color_frames[-1][1].shape)
+                if self._motion_color_frames
+                else None
+            )
             capture_stats: dict[str, dict[str, int | float]] = {}
             sample_now = time.monotonic()
             for source in ("live", "main"):
@@ -529,6 +546,7 @@ class CameraWorker:
                 "mode": mode,
                 "sensitivity": sensitivity,
                 "stationary_object_tolerance": stationary_object_tolerance,
+                "illumination_filter_enabled": self._illumination_filter_enabled(),
                 "frame_width": frame_width,
                 "camera_mode_background_fps": self.motion_config.camera_mode_background_fps,
                 "visual_backup": {
@@ -569,6 +587,8 @@ class CameraWorker:
                 ),
                 "buffered_frames": motion_buffered_frames,
                 "frame_shape": motion_frame_shape,
+                "color_buffered_frames": motion_color_buffered_frames,
+                "color_frame_shape": motion_color_frame_shape,
                 "pipeline": self.motion_pipeline.status(),
                 "observation_pipeline": self.motion_observation_pipeline.status(),
                 "fusion_pipeline": self.motion_fusion_pipeline.status(),
@@ -831,7 +851,10 @@ class CameraWorker:
             return
         captured_at = time.time()
         with self._frame_lock:
+            # The full analysis window remains compact grayscale. Only the
+            # three samples needed by the illumination stage retain color.
             self._motion_frames.append((captured_at, gray))
+            self._motion_color_frames.append((captured_at, resized))
         self._schedule_motion_analysis(captured_at)
 
     def _run_motion_analysis(self) -> None:
@@ -879,7 +902,15 @@ class CameraWorker:
     def _analyze_continuous_motion(self, captured_at: float) -> None:
         mode, sensitivity, _frame_width = self._motion_settings()
         with self._frame_lock:
-            samples = [(timestamp, frame.copy()) for timestamp, frame in list(self._motion_frames)[-2:]]
+            source_samples = (
+                self._motion_color_frames
+                if len(self._motion_color_frames) >= 2
+                else list(self._motion_frames)[-3:]
+            )
+            samples = [
+                (timestamp, frame.copy())
+                for timestamp, frame in source_samples
+            ]
         if len(samples) < 2:
             return
         try:
@@ -901,6 +932,23 @@ class CameraWorker:
         with self._motion_stats_lock:
             self._motion_stats["continuous_frames"] += 1
             self._motion_stats["continuous_candidates"] += int(result.accepted)
+            illumination_available = bool(
+                result.features.get("illumination_evidence_available")
+            )
+            illumination_candidate = bool(
+                result.features.get("illumination_would_reject")
+            )
+            self._motion_stats["illumination_evaluations"] += int(
+                illumination_available
+            )
+            self._motion_stats["illumination_candidates"] += int(
+                illumination_candidate
+            )
+            self._motion_stats["illumination_filtered"] += int(
+                illumination_candidate
+                and self._illumination_filter_enabled()
+                and not result.accepted
+            )
         trigger_mode = self._trigger_mode()
         if trigger_mode == "camera_rescue":
             self._consider_visual_backup(result, samples, captured_at)
@@ -968,6 +1016,7 @@ class CameraWorker:
             not result.accepted
             and result.reason not in {
                 "global_illumination_change",
+                "illumination_change",
                 "insufficient_frames",
                 "validation_unavailable_fail_open",
             }
@@ -1001,6 +1050,30 @@ class CameraWorker:
             return
         scene_ready = self._visual_backup_readiness(result, captured_at)
         visual_backup = self._visual_backup_settings()
+        illumination_probe = bool(
+            result.reason == "illumination_change"
+            and result.features.get("illumination_would_reject")
+            and self._should_verify_suppression(
+                (
+                    f"illumination:{self.camera.id}:"
+                    f"{int(captured_at // max(5.0, float(visual_backup['cooldown_seconds'])))}"
+                ),
+                self._suppression_verification_rate(),
+            )
+        )
+        if illumination_probe:
+            result = MotionQualificationResult(
+                accepted=True,
+                score=result.score,
+                threshold=result.threshold,
+                reason="illumination_verification_probe",
+                frame_count=result.frame_count,
+                features={
+                    **result.features,
+                    "illumination_verification_probe": True,
+                },
+                telemetry=dict(result.telemetry),
+            )
         required_score = max(
             float(visual_backup["minimum_score"]),
             float(result.threshold) + float(self.motion_config.visual_backup_score_margin),
@@ -1010,6 +1083,7 @@ class CameraWorker:
             and result.score >= required_score
             and result.reason not in {
                 "global_illumination_change",
+                "illumination_change",
                 "insect_like_motion",
                 "persistent_scene_motion",
                 "stationary_foreground",
@@ -1116,6 +1190,9 @@ class CameraWorker:
             return
         with self._motion_stats_lock:
             self._motion_stats["visual_backup_triggers"] += 1
+            self._motion_stats["illumination_verification_probes"] += int(
+                illumination_probe
+            )
             self._visual_backup_trigger_times.append(captured_at)
         self.last_motion_at = event_at.isoformat()
         self._publish_event_safely("motion", {
@@ -1416,6 +1493,14 @@ class CameraWorker:
         override = self.camera.motion_qualification.suppression_verification_rate
         return float(
             self.motion_config.suppression_verification_rate
+            if override is None
+            else override
+        )
+
+    def _illumination_filter_enabled(self) -> bool:
+        override = self.camera.motion_qualification.illumination_filter_enabled
+        return bool(
+            self.motion_config.illumination_filter_enabled
             if override is None
             else override
         )
@@ -1783,6 +1868,7 @@ class CameraWorker:
                 "mode": mode,
                 "sensitivity": sensitivity,
                 "stationary_object_tolerance": self._stationary_object_tolerance(),
+                "illumination_filter_enabled": self._illumination_filter_enabled(),
                 "frame_width": frame_width,
                 "motion_zones": [
                     zone.model_dump(mode="python")
@@ -2183,6 +2269,9 @@ class CameraWorker:
                     with self._motion_stats_lock:
                         self._motion_stats["audit_object_matches"] += 1
                 if visual_backup:
+                    if result.features.get("illumination_verification_probe") and found_object:
+                        with self._motion_stats_lock:
+                            self._motion_stats["illumination_verification_rescues"] += 1
                     correlation = outcome.get("motion_correlation")
                     if (
                         outcome.get("rejection_reason") == "object_not_motion_correlated"

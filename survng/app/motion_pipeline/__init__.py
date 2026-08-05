@@ -18,6 +18,7 @@ from .adaptive_stages import (
     AdaptiveMotionScoringStage,
     AdaptiveStatisticalThresholdStage,
     ConnectedComponentBlobStage,
+    IlluminationChangeFilterStage,
     PersistentCentroidTrackerStage,
     register_adaptive_motion_stages,
 )
@@ -133,6 +134,7 @@ __all__ = [
     "BlobFilteringStage",
     "BufferedMotionFusionStage",
     "ConnectedComponentBlobStage",
+    "IlluminationChangeFilterStage",
     "DominantCentroidTrackingStage",
     "LoggingMotionPipelineObserver",
     "MotionBlob",

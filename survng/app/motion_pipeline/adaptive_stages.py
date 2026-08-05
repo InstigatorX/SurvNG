@@ -119,6 +119,32 @@ class _ScoringRuntime:
 
 
 @dataclass(slots=True)
+class _IlluminationRuntime:
+    anchor_frame: np.ndarray | None = None
+    anchor_at: float | None = None
+    color_background: np.ndarray | None = None
+    clear_streak: int = 0
+    last_evaluated_at: float | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def snapshot(self) -> "_IlluminationRuntime":
+        with self.lock:
+            return _IlluminationRuntime(
+                anchor_frame=(
+                    None if self.anchor_frame is None else self.anchor_frame.copy()
+                ),
+                anchor_at=self.anchor_at,
+                color_background=(
+                    None
+                    if self.color_background is None
+                    else self.color_background.copy()
+                ),
+                clear_streak=self.clear_streak,
+                last_evaluated_at=self.last_evaluated_at,
+            )
+
+
+@dataclass(slots=True)
 class _StationaryRegion:
     box: tuple[float, float, float, float]
     first_seen: float
@@ -1133,6 +1159,296 @@ class AdaptiveMotionScoringStage:
             del regions[:len(regions) - 64]
 
 
+class IlluminationChangeFilterStage:
+    """Reject only high-confidence brightness motion with preserved structure.
+
+    EMA operates on luminance, so a moving shadow can resemble a translating
+    object.  This stage uses the original downscaled color frames to measure
+    chroma change, luminance polarity, and gradient-structure preservation.
+    Missing or ambiguous evidence is deliberately fail-open.
+    """
+
+    def __init__(
+        self,
+        stage_id: str,
+        *,
+        minimum_evidence_frames: int = 2,
+        rejection_threshold: float = 0.78,
+    ) -> None:
+        self._stage_id = stage_id
+        self.minimum_evidence_frames = max(1, int(minimum_evidence_frames))
+        self.rejection_threshold = min(1.0, max(0.5, float(rejection_threshold)))
+
+    @property
+    def stage_id(self) -> str:
+        return self._stage_id
+
+    @staticmethod
+    def _unit(value: float) -> float:
+        return min(1.0, max(0.0, value))
+
+    @classmethod
+    def _pair_evidence(
+        cls,
+        previous: np.ndarray,
+        current: np.ndarray,
+        mask: np.ndarray,
+    ) -> dict[str, float] | None:
+        if (
+            previous.ndim != 3
+            or current.ndim != 3
+            or previous.shape != current.shape
+            or previous.shape[:2] != mask.shape[:2]
+        ):
+            return None
+        active = mask > 0
+        if int(np.count_nonzero(active)) < max(64, round(active.size * 0.001)):
+            return None
+
+        previous_lab = cv2.cvtColor(previous, cv2.COLOR_BGR2LAB).astype(
+            np.float32,
+            copy=False,
+        )
+        current_lab = cv2.cvtColor(current, cv2.COLOR_BGR2LAB).astype(
+            np.float32,
+            copy=False,
+        )
+        delta = current_lab - previous_lab
+        luminance_delta = delta[..., 0]
+        luminance_abs = np.abs(luminance_delta[active])
+        luminance_change = float(np.mean(luminance_abs))
+        if luminance_change < 4.0:
+            return None
+
+        chroma_delta = np.linalg.norm(delta[..., 1:3], axis=2)
+        chroma_change = float(np.mean(chroma_delta[active]))
+        chroma_ratio = chroma_change / max(1e-6, luminance_change + chroma_change)
+        brightness_only = cls._unit(1.0 - chroma_ratio / 0.35)
+
+        # Illumination usually moves pixels predominantly brighter or darker.
+        # A physical object crossing a region tends to create both leading and
+        # trailing changes, reducing this signed-to-absolute ratio.
+        polarity = cls._unit(
+            abs(float(np.mean(luminance_delta[active])))
+            / max(1e-6, luminance_change)
+        )
+        polarity_score = cls._unit((polarity - 0.55) / 0.35)
+
+        previous_gray = cv2.cvtColor(previous, cv2.COLOR_BGR2GRAY)
+        current_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+        previous_x = cv2.Sobel(previous_gray, cv2.CV_32F, 1, 0, ksize=3)
+        previous_y = cv2.Sobel(previous_gray, cv2.CV_32F, 0, 1, ksize=3)
+        current_x = cv2.Sobel(current_gray, cv2.CV_32F, 1, 0, ksize=3)
+        current_y = cv2.Sobel(current_gray, cv2.CV_32F, 0, 1, ksize=3)
+        previous_magnitude = cv2.magnitude(previous_x, previous_y)
+        current_magnitude = cv2.magnitude(current_x, current_y)
+        textured = active & (previous_magnitude > 12.0) & (current_magnitude > 12.0)
+        if int(np.count_nonzero(textured)) < 32:
+            structure_preservation = 0.0
+        else:
+            dot = previous_x * current_x + previous_y * current_y
+            denominator = previous_magnitude * current_magnitude
+            cosine = np.divide(
+                dot,
+                denominator,
+                out=np.zeros_like(dot),
+                where=denominator > 1e-6,
+            )
+            structure_preservation = cls._unit(
+                float(np.median(np.clip(cosine[textured], 0.0, 1.0)))
+            )
+        structure_score = cls._unit((structure_preservation - 0.55) / 0.35)
+        illumination_score = (
+            brightness_only * 0.40
+            + polarity_score * 0.30
+            + structure_score * 0.30
+        )
+        return {
+            "score": illumination_score,
+            "luminance_change": luminance_change,
+            "chroma_change": chroma_change,
+            "chroma_ratio": chroma_ratio,
+            "brightness_only": brightness_only,
+            "polarity": polarity,
+            "structure_preservation": structure_preservation,
+            "active_ratio": float(np.count_nonzero(active)) / max(1, active.size),
+        }
+
+    def process(self, context: MotionContext) -> MotionContext:
+        frames = context.frame_history
+        masks = context.motion_mask_history
+        evidence: list[dict[str, float]] = []
+        evaluate = context.scoring.accepted
+        if evaluate:
+            for index, (previous, current) in enumerate(zip(frames, frames[1:])):
+                if index >= len(masks):
+                    break
+                pair = self._pair_evidence(previous, current, masks[index])
+                if pair is not None:
+                    evidence.append(pair)
+
+        state = context.runtime.state_for(self.stage_id, _IlluminationRuntime)
+        current_color = frames[-1] if frames and frames[-1].ndim == 3 else None
+        with state.lock:
+            color_background = (
+                None
+                if state.color_background is None
+                else np.clip(state.color_background, 0, 255).astype(np.uint8)
+            )
+            if (
+                evaluate
+                and current_color is not None
+                and masks
+                and state.anchor_frame is not None
+                and state.anchor_frame.shape == current_color.shape
+                and state.anchor_at is not None
+                and 0.55 <= context.captured_at - state.anchor_at <= 3.0
+            ):
+                anchored = self._pair_evidence(
+                    state.anchor_frame,
+                    current_color,
+                    masks[-1],
+                )
+                if anchored is not None:
+                    evidence.append(anchored)
+            if current_color is not None and (
+                state.anchor_frame is None
+                or state.anchor_frame.shape != current_color.shape
+                or state.anchor_at is None
+                or context.captured_at < state.anchor_at
+                or context.captured_at - state.anchor_at >= 0.8
+            ):
+                state.anchor_frame = current_color.copy()
+                state.anchor_at = context.captured_at
+        if (
+            evaluate
+            and current_color is not None
+            and masks
+            and color_background is not None
+            and color_background.shape == current_color.shape
+        ):
+            background_evidence = self._pair_evidence(
+                color_background,
+                current_color,
+                masks[-1],
+            )
+            if background_evidence is not None:
+                evidence.append(background_evidence)
+        if current_color is not None:
+            with state.lock:
+                current_float = current_color.astype(np.float32, copy=False)
+                if (
+                    state.color_background is None
+                    or state.color_background.shape != current_color.shape
+                ):
+                    state.color_background = current_float.copy()
+                elif masks:
+                    active_mask = (masks[-1] > 0).astype(np.uint8)
+                    stable_mask = np.logical_not(active_mask).astype(np.uint8)
+                    cv2.accumulateWeighted(
+                        current_float,
+                        state.color_background,
+                        0.04,
+                        mask=stable_mask,
+                    )
+                    cv2.accumulateWeighted(
+                        current_float,
+                        state.color_background,
+                        0.001,
+                        mask=active_mask,
+                    )
+
+        features = context.scoring.features
+        enabled = bool(context.configuration.get("illumination_filter_enabled", False))
+        features["illumination_filter_enabled"] = enabled
+        features["illumination_filter_threshold"] = round(self.rejection_threshold, 4)
+        if not evidence:
+            with state.lock:
+                if (
+                    state.last_evaluated_at is not None
+                    and context.captured_at - state.last_evaluated_at > 3.0
+                ):
+                    state.clear_streak = 0
+                clear_streak = state.clear_streak
+            features["illumination_evidence_frames"] = 0
+            features["illumination_clear_streak"] = clear_streak
+            features["illumination_evidence_available"] = False
+            features["illumination_would_reject"] = False
+            return context
+
+        aggregate = {
+            key: float(np.median([sample[key] for sample in evidence]))
+            for key in evidence[0]
+        }
+        score = aggregate["score"]
+        area_ratio = float(features.get("median_area_ratio", 0.0) or 0.0)
+        displacement = float(features.get("robust_displacement", 0.0) or 0.0)
+        motion_progress = float(features.get("motion_progress", 0.0) or 0.0)
+        physical_translation_override = bool(
+            area_ratio >= 0.02
+            and displacement >= 0.18
+            and motion_progress >= 0.55
+        )
+        instantaneous_clear = bool(
+            score >= self.rejection_threshold
+            and aggregate["brightness_only"] >= 0.75
+            and aggregate["polarity"] >= 0.80
+            and aggregate["structure_preservation"] >= 0.70
+            and not physical_translation_override
+        )
+        supporting_pairs = sum(
+            1
+            for sample in evidence
+            if sample["score"] >= self.rejection_threshold
+            and sample["brightness_only"] >= 0.75
+            and sample["polarity"] >= 0.80
+            and sample["structure_preservation"] >= 0.70
+        )
+        with state.lock:
+            if (
+                state.last_evaluated_at is None
+                or context.captured_at < state.last_evaluated_at
+                or context.captured_at - state.last_evaluated_at > 3.0
+            ):
+                state.clear_streak = 0
+            if context.scoring.accepted and instantaneous_clear:
+                state.clear_streak += 1
+            else:
+                state.clear_streak = 0
+            state.last_evaluated_at = context.captured_at
+            clear_streak = state.clear_streak
+        evidence_support = max(supporting_pairs, clear_streak)
+        clear_illumination = bool(
+            context.scoring.accepted
+            and instantaneous_clear
+            and evidence_support >= self.minimum_evidence_frames
+        )
+        features.update({
+            "illumination_evidence_available": True,
+            "illumination_evidence_frames": len(evidence),
+            "illumination_supporting_frames": evidence_support,
+            "illumination_clear_streak": clear_streak,
+            "illumination_score": round(score, 4),
+            "illumination_luminance_change": round(aggregate["luminance_change"], 4),
+            "illumination_chroma_change": round(aggregate["chroma_change"], 4),
+            "illumination_chroma_ratio": round(aggregate["chroma_ratio"], 4),
+            "illumination_brightness_only": round(aggregate["brightness_only"], 4),
+            "illumination_polarity": round(aggregate["polarity"], 4),
+            "illumination_structure_preservation": round(
+                aggregate["structure_preservation"],
+                4,
+            ),
+            "illumination_active_ratio": round(aggregate["active_ratio"], 6),
+            "illumination_physical_translation_override": physical_translation_override,
+            "illumination_would_reject": clear_illumination,
+        })
+        if enabled and clear_illumination:
+            features["pre_illumination_reason"] = context.scoring.reason
+            context.scoring.accepted = False
+            context.scoring.reason = "illumination_change"
+        return context
+
+
 def _build_background(stage_id: str, options: Mapping[str, Any], dependencies: MotionStageDependencies) -> AdaptiveEmaBackgroundStage:
     del dependencies
     return AdaptiveEmaBackgroundStage(
@@ -1206,6 +1522,19 @@ def _build_scorer(stage_id: str, options: Mapping[str, Any], dependencies: Motio
         maximum_credible_track_seconds=float(
             options.get("maximum_credible_track_seconds", 6.0)
         ),
+    )
+
+
+def _build_illumination_filter(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> IlluminationChangeFilterStage:
+    del dependencies
+    return IlluminationChangeFilterStage(
+        stage_id,
+        minimum_evidence_frames=int(options.get("minimum_evidence_frames", 2)),
+        rejection_threshold=float(options.get("rejection_threshold", 0.78)),
     )
 
 
@@ -1305,5 +1634,42 @@ def register_adaptive_motion_stages(registry: MotionStageRegistry) -> None:
             MotionStageOption("micro_displacement_ratio", "Tiny disturbance travel", "number", 0.04, minimum=0, maximum=0.5, advanced=True),
             MotionStageOption("credible_displacement_ratio", "Full movement credit distance", "number", 0.03, minimum=0.0001, maximum=0.5, advanced=True),
             MotionStageOption("maximum_credible_track_seconds", "Maximum single motion age", "number", 6.0, minimum=0.5, maximum=60, advanced=True),
+        ),
+    ))
+    registry.register(MotionStageRegistration(
+        implementation="illumination_change_filter",
+        builder=_build_illumination_filter,
+        requires=frozenset({
+            "frame_history",
+            "motion_mask_history",
+            "scoring",
+        }),
+        provides=frozenset({"scoring"}),
+        graph="qualification",
+        category="scoring",
+        display_name="Light and shadow filtering",
+        description=(
+            "Distinguishes brightness movement from physical scene changes using "
+            "color, luminance direction, and preserved image structure."
+        ),
+        options=(
+            MotionStageOption(
+                "minimum_evidence_frames",
+                "Minimum evidence samples",
+                "integer",
+                2,
+                minimum=1,
+                maximum=20,
+                advanced=True,
+            ),
+            MotionStageOption(
+                "rejection_threshold",
+                "Rejection confidence",
+                "number",
+                0.78,
+                minimum=0.5,
+                maximum=1.0,
+                advanced=True,
+            ),
         ),
     ))

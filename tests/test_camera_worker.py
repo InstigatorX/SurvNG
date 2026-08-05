@@ -152,6 +152,37 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_illumination_filter_uses_global_and_camera_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            inherited = make_worker(
+                CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url="rtsp://camera/main",
+                ),
+                Path(tmpdir),
+                motion_config=MotionQualificationConfig(
+                    illumination_filter_enabled=True,
+                ),
+            )
+            overridden = make_worker(
+                CameraConfig.model_validate({
+                    "id": "boiler",
+                    "name": "Boiler",
+                    "stream_url": "rtsp://camera/main",
+                    "motion_qualification": {
+                        "illumination_filter_enabled": False,
+                    },
+                }),
+                Path(tmpdir),
+                motion_config=MotionQualificationConfig(
+                    illumination_filter_enabled=True,
+                ),
+            )
+
+        self.assertTrue(inherited._illumination_filter_enabled())
+        self.assertFalse(overridden._illumination_filter_enabled())
+
     def test_visual_backup_settings_use_camera_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(
@@ -627,6 +658,12 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(worker._motion_settings(), ("camera", "balanced", 480))
             self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
             self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
+            self.assertEqual(
+                worker.status()["motion_qualification"]["color_frame_shape"],
+                [270, 480, 3],
+            )
+            self.assertEqual(worker._motion_frames[-1][1].ndim, 2)
+            self.assertEqual(worker._motion_color_frames[-1][1].ndim, 3)
             self.assertFalse(worker.status()["motion_qualification"]["mog2_audit_enabled"])
             self.assertIsNone(worker.status()["motion_qualification"]["mog2_last"])
             worker._stop.set()
@@ -852,6 +889,53 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertTrue(worker._motion_queue.empty())
         self.assertEqual(worker._motion_stats["visual_backup_triggers"], 0)
+
+    def test_visual_backup_periodically_verifies_filtered_illumination(self) -> None:
+        camera = CameraConfig(
+            id="boiler",
+            name="Boiler",
+            stream_url="rtsp://example.invalid/main",
+        )
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            illumination_filter_enabled=True,
+            suppression_verification_rate=1.0,
+            visual_backup_warmup_seconds=0,
+            visual_backup_grace_seconds=0,
+            visual_backup_min_consecutive=2,
+            visual_backup_cooldown_seconds=5,
+        )
+        filtered = MotionQualificationResult(
+            False,
+            0.82,
+            0.5,
+            "illumination_change",
+            4,
+            {"illumination_would_reject": True},
+        )
+        samples = [(100.0, np.zeros((90, 160, 3), dtype=np.uint8))]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            prime_visual_backup_scene(worker, 90.0)
+            with patch.object(
+                worker,
+                "_with_source_evidence",
+                side_effect=lambda result, *_args, **_kwargs: result,
+            ):
+                worker._consider_visual_backup(filtered, samples, 100.0)
+                worker._consider_visual_backup(filtered, samples, 100.5)
+
+            trigger = worker._motion_queue.get_nowait()
+
+        self.assertEqual(trigger["topic"], "adaptive/visual_backup")
+        self.assertEqual(
+            trigger["prequalified"].reason,
+            "illumination_verification_probe",
+        )
+        self.assertTrue(
+            trigger["prequalified"].features["illumination_verification_probe"]
+        )
+        self.assertEqual(worker._motion_stats["illumination_verification_probes"], 1)
 
     def test_visual_backup_detection_requires_eligible_object_and_is_audited(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

@@ -8,6 +8,7 @@ import numpy as np
 from survng.app.motion_pipeline import (
     MotionContext,
     MotionPipelineFactory,
+    MotionScoring,
     MotionStageConfig,
     adaptive_motion_stage_configs,
     build_builtin_motion_registry,
@@ -258,6 +259,118 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertFalse(result.scoring.accepted)
         self.assertEqual(result.scoring.reason, "stationary_foreground")
         self.assertEqual(result.scoring.features["net_displacement"], 0.0)
+
+    def test_illumination_filter_rejects_clear_brightness_change_when_enabled(self) -> None:
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "light-change",
+            [MotionStageConfig(
+                "illumination",
+                "illumination_change_filter",
+                {"minimum_evidence_frames": 2, "rejection_threshold": 0.82},
+            )],
+            initial_artifacts={"motion_mask_history", "scoring"},
+        )
+        try:
+            rng = np.random.default_rng(7)
+            texture = rng.integers(35, 220, (90, 160), dtype=np.uint8)
+            base = cv2.cvtColor(texture, cv2.COLOR_GRAY2BGR)
+            darker = np.clip(base.astype(np.float32) * 0.62, 0, 255).astype(np.uint8)
+            darkest = np.clip(base.astype(np.float32) * 0.42, 0, 255).astype(np.uint8)
+            mask = np.full(base.shape[:2], 255, dtype=np.uint8)
+            result = pipeline.process(MotionContext(
+                camera_id="light-change",
+                captured_at=100.0,
+                original_frame=darkest,
+                frame_history=(base, darker, darkest),
+                motion_mask_history=(mask, mask),
+                configuration={"illumination_filter_enabled": True},
+                runtime=pipeline.runtime,
+                scoring=MotionScoring(
+                    accepted=True,
+                    score=0.82,
+                    threshold=0.48,
+                    reason="qualified",
+                ),
+            ))
+        finally:
+            pipeline.close()
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "illumination_change")
+        self.assertTrue(result.scoring.features["illumination_would_reject"])
+
+    def test_illumination_filter_observes_without_rejecting_when_disabled(self) -> None:
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "light-observe",
+            [MotionStageConfig("illumination", "illumination_change_filter")],
+            initial_artifacts={"motion_mask_history", "scoring"},
+        )
+        try:
+            rng = np.random.default_rng(13)
+            texture = rng.integers(35, 220, (90, 160), dtype=np.uint8)
+            base = cv2.cvtColor(texture, cv2.COLOR_GRAY2BGR)
+            darker = np.clip(base.astype(np.float32) * 0.65, 0, 255).astype(np.uint8)
+            darkest = np.clip(base.astype(np.float32) * 0.45, 0, 255).astype(np.uint8)
+            mask = np.full(base.shape[:2], 255, dtype=np.uint8)
+            result = pipeline.process(MotionContext(
+                camera_id="light-observe",
+                captured_at=100.0,
+                original_frame=darkest,
+                frame_history=(base, darker, darkest),
+                motion_mask_history=(mask, mask),
+                configuration={"illumination_filter_enabled": False},
+                runtime=pipeline.runtime,
+                scoring=MotionScoring(
+                    accepted=True,
+                    score=0.82,
+                    threshold=0.48,
+                    reason="qualified",
+                ),
+            ))
+        finally:
+            pipeline.close()
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.scoring.reason, "qualified")
+        self.assertTrue(result.scoring.features["illumination_would_reject"])
+
+    def test_illumination_filter_fails_open_for_physical_structure_change(self) -> None:
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "physical-change",
+            [MotionStageConfig("illumination", "illumination_change_filter")],
+            initial_artifacts={"motion_mask_history", "scoring"},
+        )
+        try:
+            rng = np.random.default_rng(11)
+            base = rng.integers(20, 210, (90, 160, 3), dtype=np.uint8)
+            first = base.copy()
+            second = base.copy()
+            cv2.rectangle(first, (25, 20), (65, 75), (20, 30, 230), -1)
+            cv2.rectangle(second, (70, 20), (110, 75), (20, 30, 230), -1)
+            first_mask = np.zeros(base.shape[:2], dtype=np.uint8)
+            second_mask = np.zeros(base.shape[:2], dtype=np.uint8)
+            cv2.rectangle(first_mask, (25, 20), (65, 75), 255, -1)
+            cv2.rectangle(second_mask, (25, 20), (110, 75), 255, -1)
+            result = pipeline.process(MotionContext(
+                camera_id="physical-change",
+                captured_at=100.0,
+                original_frame=second,
+                frame_history=(base, first, second),
+                motion_mask_history=(first_mask, second_mask),
+                configuration={"illumination_filter_enabled": True},
+                runtime=pipeline.runtime,
+                scoring=MotionScoring(
+                    accepted=True,
+                    score=0.82,
+                    threshold=0.48,
+                    reason="qualified",
+                ),
+            ))
+        finally:
+            pipeline.close()
+
+        self.assertTrue(result.scoring.accepted)
+        self.assertFalse(result.scoring.features["illumination_would_reject"])
 
     def test_stationary_object_tolerance_selects_safe_scoring_thresholds(self) -> None:
         scorer = MotionPipelineFactory(build_builtin_motion_registry()).create(

@@ -25,6 +25,7 @@ ALLOWED_GLOBAL_SETTINGS = {
     "analysis_preset",
     "sensitivity",
     "stationary_object_tolerance",
+    "illumination_filter_enabled",
     "frame_width",
     "sample_fps",
     "window_seconds",
@@ -45,6 +46,7 @@ ALLOWED_CAMERA_SETTINGS = {
     "analysis_preset",
     "sensitivity",
     "stationary_object_tolerance",
+    "illumination_filter_enabled",
     "frame_width",
     "borderline_rescue_enabled",
     "borderline_margin",
@@ -81,6 +83,7 @@ class AuditAiChange(BaseModel):
     setting: Literal[
         "sensitivity",
         "stationary_object_tolerance",
+        "illumination_filter_enabled",
         "frame_width",
         "sample_fps",
         "window_seconds",
@@ -130,7 +133,7 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         if normalized not in {"high", "balanced", "low"}:
             raise ValueError(f"{setting} must be high, balanced, or low")
         return normalized
-    if setting == "borderline_rescue_enabled":
+    if setting in {"borderline_rescue_enabled", "illumination_filter_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{setting} must be boolean")
         return value

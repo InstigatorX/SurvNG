@@ -2989,6 +2989,11 @@ def _audit_ai_context(
             if override.stationary_object_tolerance == "inherit"
             else override.stationary_object_tolerance
         ),
+        "illumination_filter_enabled": (
+            active_config.motion_qualification.illumination_filter_enabled
+            if override.illumination_filter_enabled is None
+            else override.illumination_filter_enabled
+        ),
         "frame_width": override.frame_width or active_config.motion_qualification.frame_width,
         "borderline_rescue_enabled": (
             active_config.motion_qualification.borderline_rescue_enabled
