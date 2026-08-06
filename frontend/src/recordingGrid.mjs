@@ -48,6 +48,75 @@ function portraitLayoutScale(aspect, portraitPriority) {
   return 1 + Math.min(0.5, ((1 / Math.max(0.25, aspect)) - 1) * 0.6);
 }
 
+function rectanglesOverlap(left, right, gap) {
+  return left.x < right.x + right.width + gap
+    && left.x + left.width + gap > right.x
+    && left.y < right.y + right.height + gap
+    && left.y + left.height + gap > right.y;
+}
+
+function packSpanningGrid(items, width, height, gap, portraitRowSpan) {
+  const layoutAtHeight = (baseHeight) => {
+    const placed = [];
+    for (const item of items) {
+      const spansRows = item.nativeAspect < 1;
+      const itemHeight = spansRows
+        ? baseHeight * portraitRowSpan + gap * (portraitRowSpan - 1)
+        : baseHeight;
+      const itemWidth = item.nativeAspect * itemHeight;
+      if (itemWidth > width + 0.001) return null;
+
+      const candidateXs = new Set([0]);
+      const candidateYs = new Set([0]);
+      placed.forEach((existing) => {
+        candidateXs.add(existing.x + existing.width + gap);
+        candidateXs.add(Math.max(0, existing.x - itemWidth - gap));
+        candidateYs.add(existing.y + existing.height + gap);
+      });
+      let bestPosition = null;
+      for (const y of [...candidateYs].sort((left, right) => left - right)) {
+        if (y + itemHeight > height + 0.001) continue;
+        for (const x of [...candidateXs].sort((left, right) => left - right)) {
+          if (x + itemWidth > width + 0.001) continue;
+          const candidate = { x, y, width: itemWidth, height: itemHeight };
+          if (placed.some((existing) => rectanglesOverlap(candidate, existing, gap))) continue;
+          if (!bestPosition || y < bestPosition.y || (y === bestPosition.y && x < bestPosition.x)) {
+            bestPosition = candidate;
+          }
+        }
+      }
+      if (!bestPosition) return null;
+      placed.push({ ...bestPosition, camera: item.camera });
+    }
+    return placed;
+  };
+
+  let low = 1;
+  let high = Math.max(1, height);
+  let best = layoutAtHeight(low);
+  for (let iteration = 0; iteration < 28; iteration += 1) {
+    const candidateHeight = (low + high) / 2;
+    const candidate = layoutAtHeight(candidateHeight);
+    if (candidate) {
+      best = candidate;
+      low = candidateHeight;
+    } else {
+      high = candidateHeight;
+    }
+  }
+  if (!best) return [];
+
+  const usedWidth = Math.max(...best.map((item) => item.x + item.width));
+  const usedHeight = Math.max(...best.map((item) => item.y + item.height));
+  const offsetX = Math.max(0, (width - usedWidth) / 2);
+  const offsetY = Math.max(0, (height - usedHeight) / 2);
+  return best.map((item) => ({
+    ...item,
+    x: item.x + offsetX,
+    y: item.y + offsetY,
+  }));
+}
+
 export function recordingGridLayout(
   cameras,
   source,
@@ -55,7 +124,7 @@ export function recordingGridLayout(
   height,
   gap = 6,
   aspectOverrides = {},
-  { portraitPriority = false } = {},
+  { portraitPriority = false, portraitRowSpan = 1 } = {},
 ) {
   if (!cameras.length || width <= 0 || height <= 0) return [];
   const items = cameras.map((camera) => {
@@ -71,6 +140,10 @@ export function recordingGridLayout(
       aspect: nativeAspect * scale,
     };
   });
+  const normalizedPortraitRowSpan = Math.max(1, Math.floor(Number(portraitRowSpan) || 1));
+  if (portraitPriority && normalizedPortraitRowSpan > 1 && items.some((item) => item.nativeAspect < 1)) {
+    return packSpanningGrid(items, width, height, gap, normalizedPortraitRowSpan);
+  }
   let best = null;
   const maximumRows = Math.min(items.length, 12);
   for (let rowCount = 1; rowCount <= maximumRows; rowCount += 1) {

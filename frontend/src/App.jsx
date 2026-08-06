@@ -4584,7 +4584,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       liveCameraGridSize.height,
       8,
       liveCameraAspects,
-      { portraitPriority: true },
+      { portraitPriority: true, portraitRowSpan: 2 },
     ),
     [liveCameraAspects, liveCameraGridSize.height, liveCameraGridSize.width, orderedCameras],
   );

@@ -16,7 +16,15 @@ const cameras = [
   },
 ];
 
-const desktop = recordingGridLayout(cameras, "live", 1400, 850, 8, {}, { portraitPriority: true });
+const desktop = recordingGridLayout(
+  cameras,
+  "live",
+  1400,
+  850,
+  8,
+  {},
+  { portraitPriority: true, portraitRowSpan: 2 },
+);
 assert.equal(desktop.length, cameras.length);
 desktop.forEach((item) => {
   assert.ok(item.x >= 0 && item.y >= 0);
@@ -28,6 +36,10 @@ const portrait = desktop.find((item) => item.camera.id === "portrait");
 assert.ok(Math.abs(portrait.width / portrait.height - 672 / 896) < 0.001);
 const landscape = desktop.find((item) => item.camera.id === "wide-0");
 assert.ok(portrait.height > landscape.height, "portrait cameras should receive additional height");
+assert.ok(
+  Math.abs(portrait.height - (landscape.height * 2 + 8)) < 0.01,
+  "portrait cameras should span exactly two landscape rows",
+);
 
 const unprioritized = recordingGridLayout(cameras, "live", 1400, 850, 8);
 const unprioritizedPortrait = unprioritized.find((item) => item.camera.id === "portrait");
@@ -36,7 +48,15 @@ assert.ok(
   "portrait priority should materially increase the portrait camera's displayed area",
 );
 
-const resized = recordingGridLayout(cameras, "live", 1000, 700, 8, {}, { portraitPriority: true });
+const resized = recordingGridLayout(
+  cameras,
+  "live",
+  1000,
+  700,
+  8,
+  {},
+  { portraitPriority: true, portraitRowSpan: 2 },
+);
 assert.equal(resized.length, cameras.length);
 assert.notDeepEqual(
   resized.map(({ x, y, width, height }) => [x, y, width, height]),
