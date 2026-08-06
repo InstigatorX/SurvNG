@@ -1889,6 +1889,45 @@ class CameraWorkerTest(unittest.TestCase):
             worker._motion_queue.put_nowait(None)
             thread.join(timeout=1)
 
+    def test_failed_adaptive_batch_stays_reserved_until_terminal_retry_drop(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(mode="off", burst_quiet_seconds=0.1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            worker._adaptive_trigger_pending = True
+            with patch.object(
+                worker,
+                "_process_motion_event",
+                side_effect=RuntimeError("persistent event failure"),
+            ):
+                thread = worker._motion_thread = threading.Thread(
+                    target=worker._run_motion_events
+                )
+                thread.start()
+                now = datetime.now(timezone.utc)
+                worker._enqueue_motion_trigger({
+                    "topic": "adaptive/motion",
+                    "message": "adaptive",
+                    "event_at": now,
+                    "received_at": now.timestamp(),
+                })
+                deadline = time.monotonic() + 3
+                while (
+                    worker._motion_stats["event_retry_drops"] == 0
+                    and time.monotonic() < deadline
+                ):
+                    self.assertTrue(worker._adaptive_trigger_pending)
+                    time.sleep(0.01)
+                while worker._adaptive_trigger_pending and time.monotonic() < deadline:
+                    time.sleep(0.005)
+
+            self.assertEqual(worker._motion_stats["event_retry_drops"], 1)
+            self.assertFalse(worker._adaptive_trigger_pending)
+            worker._stop.set()
+            worker._motion_queue.put_nowait(None)
+            thread.join(timeout=1)
+
     def test_enforce_retry_reuses_accepted_qualification_without_advancing_fusion(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(mode="enforce", burst_quiet_seconds=0.1)
@@ -2382,6 +2421,32 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertFalse(worker.status()["running"])
             self.assertIsNone(worker._motion_analysis_thread)
             self.assertIsNone(worker._motion_thread)
+
+    def test_stop_releases_camera_io_before_waiting_for_tracking(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        order: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(
+                    worker.capture,
+                    "request_stop",
+                    side_effect=lambda: order.append("capture"),
+                ),
+                patch.object(
+                    worker.onvif,
+                    "stop",
+                    side_effect=lambda: order.append("onvif"),
+                ),
+                patch.object(
+                    worker.object_tracking,
+                    "stop",
+                    side_effect=lambda: order.append("tracking") or True,
+                ),
+            ):
+                worker.stop()
+
+        self.assertEqual(order[:3], ["capture", "onvif", "tracking"])
 
     def test_close_refuses_to_race_an_active_motion_worker(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

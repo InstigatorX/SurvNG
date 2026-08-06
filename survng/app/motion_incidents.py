@@ -30,6 +30,8 @@ class MotionDecisionProcessor(Protocol):
 class TrackingConfig(Protocol):
     enabled: bool
 
+    def tracks_label(self, label: object) -> bool: ...
+
 
 class IncidentTrackingSession(Protocol):
     config: TrackingConfig
@@ -71,18 +73,36 @@ class MotionIncidentService:
         self.prewarm_tracking = prewarm_tracking
         self.image_reader = image_reader
         self._status_lock = threading.Lock()
+        self._prewarm_failures = 0
+        self._last_prewarm_failure: dict[str, Any] | None = None
         self._handoff_failures = 0
         self._last_handoff_failure: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         with self._status_lock:
             return {
+                "prewarm_failures": self._prewarm_failures,
+                "last_prewarm_failure": (
+                    dict(self._last_prewarm_failure)
+                    if self._last_prewarm_failure is not None
+                    else None
+                ),
                 "handoff_failures": self._handoff_failures,
                 "last_handoff_failure": (
                     dict(self._last_handoff_failure)
                     if self._last_handoff_failure is not None
                     else None
                 ),
+            }
+
+    def _record_prewarm_failure(self, error: Exception) -> None:
+        error_text = redact_secret_text(error)[:500]
+        with self._status_lock:
+            self._prewarm_failures += 1
+            self._last_prewarm_failure = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error": error_text,
+                "error_type": type(error).__name__,
             }
 
     def _record_handoff_failure(
@@ -111,10 +131,21 @@ class MotionIncidentService:
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome:
-        if self.tracking_provider().config.enabled:
-            # Start opening main concurrently with recorded validation so the
-            # tracking handoff does not pay another RTSP startup delay.
-            self.prewarm_tracking()
+        try:
+            if self.tracking_provider().config.enabled:
+                # Start opening main concurrently with recorded validation so
+                # the tracking handoff does not pay another RTSP startup delay.
+                self.prewarm_tracking()
+        except Exception as error:
+            # Prewarming is an optimization. It must never prevent the core
+            # detection and incident-persistence path from running.
+            self._record_prewarm_failure(error)
+            LOGGER.warning(
+                "tracking prewarm failed for %s: %s: %s",
+                self.camera_id,
+                type(error).__name__,
+                redact_secret_text(error)[:500],
+            )
         outcome = self.decision_processor.handle(
             topic,
             message,
@@ -126,17 +157,28 @@ class MotionIncidentService:
         if outcome.event_id is None or not outcome.object_detected:
             return outcome
 
-        tracking = self.tracking_provider()
-        if not tracking.config.enabled:
-            return outcome
         try:
+            tracking = self.tracking_provider()
+            if not tracking.config.enabled:
+                return outcome
+            trackable_objects = [
+                item
+                for item in outcome.detected_objects
+                if (
+                    item.get("label")
+                    and item.get("incident_eligible") is not False
+                    and tracking.config.tracks_label(item.get("label"))
+                )
+            ]
+            if not trackable_objects:
+                return outcome
             initial_frame = None
             if outcome.snapshot_path:
                 initial_frame = self.image_reader(outcome.snapshot_path)
             started = tracking.start(
                 outcome.event_id,
                 event_at,
-                list(outcome.detected_objects),
+                trackable_objects,
                 initial_frame,
             )
             if not started:

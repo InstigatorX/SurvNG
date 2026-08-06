@@ -7943,7 +7943,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Motion analysis frames dropped</dt><dd>{camera.motion.analysis_frames_dropped || 0}</dd></div>
                 <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>
                 <div><dt>Tracking waits / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {camera.tracking?.capacity_timeouts || 0}</dd></div>
-                <div><dt>Tracking handoff failures</dt><dd>{camera.tracking?.handoff_failures || 0}{camera.tracking?.last_handoff_failure?.timestamp ? ` · last ${formatDateTime(camera.tracking.last_handoff_failure.timestamp, timeZone)}` : ""}</dd></div>
+                <div><dt>Tracking prewarm / handoff failures</dt><dd>{camera.tracking?.prewarm_failures || 0} / {camera.tracking?.handoff_failures || 0}{camera.tracking?.last_handoff_failure?.timestamp ? ` · last handoff ${formatDateTime(camera.tracking.last_handoff_failure.timestamp, timeZone)}` : ""}</dd></div>
                 <div><dt>Longest tracking wait</dt><dd>{Number(camera.tracking?.capacity_wait_seconds_max || 0).toFixed(1)}s</dd></div>
                 <div><dt>ReID checks avoided</dt><dd>{camera.tracking?.reid_avoided_geometry_matches || 0}</dd></div>
                 <div><dt>ReID latency / failures</dt><dd>{formatMilliseconds(camera.tracking?.reid_average_ms)} / {camera.tracking?.reid_failures || 0}</dd></div>

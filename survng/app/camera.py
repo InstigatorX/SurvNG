@@ -35,7 +35,12 @@ from .motion_coordinator import (
     VisualBackupCoordinator,
     VisualBackupPolicy,
 )
-from .motion_events import MotionEventCoordinator, MotionTrigger, MotionTriggerBatch
+from .motion_events import (
+    MotionEventCoordinator,
+    MotionTrigger,
+    MotionTriggerBatch,
+    RetryDisposition,
+)
 from .motion_incidents import MotionIncidentService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
@@ -251,7 +256,7 @@ class CameraWorker:
         self,
         value: MotionTriggerBatch | list[MotionTrigger | dict[str, Any]] | None,
     ) -> None:
-        self.motion_events.active_triggers = (
+        self.motion_events.set_active(
             None if value is None else MotionTriggerBatch.coerce(value)
         )
 
@@ -329,9 +334,11 @@ class CameraWorker:
             self._enabled = False
             self._stop.set()
             self._active_incident_event_id = None
-            self.object_tracking.stop()
+            # Stop accepting camera I/O and release the scarce ONVIF
+            # subscription before waiting for tracking inference to finish.
             self.capture.request_stop()
             self.onvif.stop()
+            self.object_tracking.stop()
             self._signal_motion_analysis_stop()
             self.motion_events.signal_stop()
             motion_thread = self._motion_thread
@@ -1844,18 +1851,20 @@ class CameraWorker:
                 self._run_motion_events_until_error()
                 return
             except Exception:
-                failed_triggers = self.motion_events.fail_active(time.time())
+                failed_triggers = self.motion_events.take_failed_active()
                 with self._motion_stats_lock:
                     self._motion_stats["event_worker_errors"] += 1
                 LOGGER.exception("motion event cycle failed for %s", self.camera.id)
                 if failed_triggers and not self._stop.is_set():
-                    self._retry_motion_trigger_batch(failed_triggers)
+                    disposition = self._retry_motion_trigger_batch(failed_triggers)
+                    if disposition == RetryDisposition.DROPPED:
+                        self._complete_adaptive_trigger(failed_triggers)
 
     def _retry_motion_trigger_batch(
         self,
         triggers: MotionTriggerBatch | list[dict[str, Any]],
-    ) -> None:
-        self.motion_events.schedule_retry(
+    ) -> RetryDisposition:
+        return self.motion_events.schedule_retry(
             triggers,
             stop_event=self._stop,
             on_retry=self._increment_motion_stat,
@@ -2057,42 +2066,41 @@ class CameraWorker:
                     **qualification,
                 })
             if not effective_accepted:
-                try:
-                    snapshot_path = next(
-                        (
-                            item.audit_snapshot_path
-                            for item in triggers
-                            if item.audit_snapshot_path
-                        ),
-                        None,
+                snapshot_path = next(
+                    (
+                        item.audit_snapshot_path
+                        for item in triggers
+                        if item.audit_snapshot_path
+                    ),
+                    None,
+                )
+                if snapshot_path is None:
+                    snapshot_path = (
+                        ""
+                        if result.reason in INCIDENT_ACTIVITY_REASONS
+                        else self._sample_rejected_motion(event_at, result)
                     )
-                    if snapshot_path is None:
-                        snapshot_path = (
-                            ""
-                            if result.reason in INCIDENT_ACTIVITY_REASONS
-                            else self._sample_rejected_motion(event_at, result)
-                        )
-                        for item in triggers:
-                            item.audit_snapshot_path = snapshot_path
-                    self.motion_decision_handler.record_audit(
-                        decision_id=decision_id,
-                        snapshot_path=snapshot_path,
-                        event_at=event_at,
-                        mode=mode,
-                        sensitivity=sensitivity,
-                        score=result.score,
-                        threshold=result.threshold,
-                        reason=result.reason,
-                        object_detected=None,
-                        trigger_count=len(triggers),
-                        features=self._audit_features(result),
-                        related_event_id=self._related_incident_event_id(result),
-                    )
-                finally:
-                    self._complete_adaptive_trigger(triggers)
+                    for item in triggers:
+                        item.audit_snapshot_path = snapshot_path
+                self.motion_decision_handler.record_audit(
+                    decision_id=decision_id,
+                    snapshot_path=snapshot_path,
+                    event_at=event_at,
+                    mode=mode,
+                    sensitivity=sensitivity,
+                    score=result.score,
+                    threshold=result.threshold,
+                    reason=result.reason,
+                    object_detected=None,
+                    trigger_count=len(triggers),
+                    features=self._audit_features(result),
+                    related_event_id=self._related_incident_event_id(result),
+                )
+                self._complete_adaptive_trigger(triggers)
                 self._active_motion_triggers = None
                 continue
 
+            durable_incident = False
             try:
                 outcome = self._process_motion_event(
                     representative.topic,
@@ -2108,6 +2116,7 @@ class CameraWorker:
                 )
                 event_id = outcome.get("event_id")
                 if event_id is not None:
+                    durable_incident = True
                     self._active_incident_event_id = int(event_id)
                     # The incident is durable once the handler returns. Later audit or
                     # notification failures must not replay detection and duplicate it.
@@ -2189,9 +2198,13 @@ class CameraWorker:
                             "suppression_verification": suppression_verification_candidate,
                         },
                     )
-            finally:
+            except Exception:
+                if durable_incident:
+                    self._complete_adaptive_trigger(triggers)
+                raise
+            else:
                 self._complete_adaptive_trigger(triggers)
-            self._active_motion_triggers = None
+                self._active_motion_triggers = None
 
     def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
         if self.motion_config.rejected_sample_rate <= 0 or random.random() > self.motion_config.rejected_sample_rate:

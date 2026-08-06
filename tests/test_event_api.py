@@ -355,6 +355,11 @@ class EventApiSerializationTest(unittest.TestCase):
                         "reid_recoveries_by_label": {"car": 2},
                         "reid_avoided_geometry_matches": 19,
                         "reid_avoided_by_label": {"car": 19},
+                        "prewarm_failures": 1,
+                        "last_prewarm_failure": {
+                            "timestamp": "2026-08-06T11:59:00+00:00",
+                            "error": "main capture unavailable",
+                        },
                         "handoff_failures": 2,
                         "last_handoff_failure": {
                             "event_id": 41,
@@ -393,6 +398,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 5,
             )
             self.assertEqual(payload["cameras"][0]["tracking"]["handoff_failures"], 2)
+            self.assertEqual(payload["cameras"][0]["tracking"]["prewarm_failures"], 1)
             self.assertEqual(
                 payload["cameras"][0]["tracking"]["last_handoff_failure"]["event_id"],
                 41,

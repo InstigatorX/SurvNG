@@ -61,6 +61,22 @@ class FailingOpenBackend(FakeBackend):
         raise RuntimeError(f"unable to open {source_url}")
 
 
+class ClosedHandle(FakeHandle):
+    def set_buffer_size(self, size: int) -> None:
+        raise AssertionError("buffer configuration must not run on a closed handle")
+
+
+class ClosedBackend(FakeBackend):
+    def create_handle(self) -> CaptureHandle:
+        handle = ClosedHandle()
+        self.handles.append(handle)
+        return handle
+
+    def open(self, handle, source_url, cancelled) -> bool:
+        self.open_calls += 1
+        return False
+
+
 def _service(
     backend: FakeBackend | None = None,
     **kwargs,
@@ -291,6 +307,34 @@ def test_repeated_start_stop_leaves_no_capture_generations() -> None:
             assert not service._all_threads
 
 
+def test_clean_stop_clears_transient_error_and_fps_window() -> None:
+    service = _service()
+    with service._lock:
+        service._stop.clear()
+    service._publish_frame("live", np.ones((10, 20, 3), dtype=np.uint8))
+    service._publish_frame("live", np.ones((10, 20, 3), dtype=np.uint8))
+    service._set_error("live", "stream read failed")
+
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+    status = service.status()
+
+    assert status["last_error"] == ""
+    assert status["capture_stats"]["live"]["fps"] == 0.0
+    assert service.latest("live") is None
+
+
+def test_unknown_capture_source_is_rejected_instead_of_using_live() -> None:
+    service = _service()
+
+    try:
+        service.latest("mian")
+    except ValueError as error:
+        assert "unsupported camera capture source" in str(error)
+    else:
+        raise AssertionError("misspelled capture source should not select live")
+
+
 def test_backend_error_redacts_credentials_in_status() -> None:
     service = CameraCaptureService(
         camera_id="gate",
@@ -308,6 +352,19 @@ def test_backend_error_redacts_credentials_in_status() -> None:
 
     assert "secret" not in error
     assert "rtsp://admin:***@camera/live" in error
+
+
+def test_failed_open_does_not_configure_closed_native_handle() -> None:
+    service = _service(ClosedBackend())
+
+    assert service.start()
+    _wait_until(
+        lambda: service.status()["capture_stats"]["live"]["open_failures"] >= 1
+    )
+    service.request_stop()
+    service.wait_stopped(1.0)
+
+    assert service.status()["capture_stats"]["live"]["open_failures"] >= 1
 
 
 def test_close_rejects_active_capture_thread() -> None:

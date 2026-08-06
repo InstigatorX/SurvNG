@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from survng.app.motion_events import MotionEventCoordinator, MotionTrigger
+from survng.app.motion_events import (
+    MotionEventCoordinator,
+    MotionTrigger,
+    MotionTriggerBatch,
+    RetryDisposition,
+)
 
 
 def _trigger(index: int = 1, *, topic: str = "manual/test") -> MotionTrigger:
@@ -47,22 +52,22 @@ def test_retry_batch_is_prioritized_and_bounded() -> None:
     retries: list[str] = []
     drops: list[str] = []
     stop = threading.Event()
-    coordinator.schedule_retry(
+    assert coordinator.schedule_retry(
         [_trigger()],
         stop_event=stop,
         on_retry=retries.append,
         on_drop=drops.append,
-    )
+    ) == RetryDisposition.SCHEDULED
     wrapper = coordinator.next_trigger(timeout=0.01)
     assert wrapper is not None
     retry_batch = wrapper["_retry_batch"]
     assert retry_batch[0]["_event_retry_count"] == 1
-    coordinator.schedule_retry(
+    assert coordinator.schedule_retry(
         retry_batch,
         stop_event=stop,
         on_retry=retries.append,
         on_drop=drops.append,
-    )
+    ) == RetryDisposition.DROPPED
     assert retries == ["event_retries"]
     assert drops == ["event_retry_drops"]
 
@@ -127,6 +132,34 @@ def test_legacy_mapping_adapter_rejects_unknown_payload_fields() -> None:
         coordinator.enqueue(trigger)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("topic", "", "topic"),
+        ("event_at", "not-a-date", "event_at"),
+        ("received_at", float("nan"), "received_at"),
+        ("prequalified", {"accepted": True}, "prequalified"),
+        ("_event_retry_count", "1", "retry count"),
+    ],
+)
+def test_legacy_mapping_adapter_rejects_malformed_typed_fields(
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    trigger = {
+        "topic": "onvif/motion",
+        "message": "motion",
+        "event_at": datetime.now(timezone.utc),
+        "received_at": 1.0,
+        field: value,
+    }
+
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    with pytest.raises((TypeError, ValueError), match=error):
+        coordinator.enqueue(trigger)
+
+
 def test_typed_batch_assignments_do_not_change_trigger_order() -> None:
     coordinator = MotionEventCoordinator(queue_size=4, retry_limit=1)
     first = _trigger(1)
@@ -142,3 +175,19 @@ def test_typed_batch_assignments_do_not_change_trigger_order() -> None:
     assert batch is not None
     assert tuple(item.message for item in batch) == ("1", "2")
     assert batch.triggers == (first, second)
+
+
+def test_failed_adaptive_batch_remains_reserved_until_retry_finishes() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    adaptive = _trigger(topic="adaptive/visual_backup")
+    batch = MotionTriggerBatch((adaptive,))
+    coordinator.set_active(batch)
+    coordinator.adaptive_trigger_pending = True
+
+    assert coordinator.take_failed_active() is batch
+    assert coordinator.adaptive_trigger_pending
+    assert not coordinator.reserve_adaptive(
+        adaptive.received_at + 10.0,
+        rearm_seconds=5.0,
+        priority_tolerance_seconds=2.0,
+    )

@@ -224,7 +224,10 @@ class CameraCaptureService:
 
     @staticmethod
     def _normalize_source(source: str) -> str:
-        return "main" if source == "main" else "live"
+        normalized = str(source).strip().lower()
+        if normalized not in {"live", "main"}:
+            raise ValueError(f"unsupported camera capture source: {source!r}")
+        return normalized
 
     def start(self) -> bool:
         with self._lock:
@@ -338,11 +341,24 @@ class CameraCaptureService:
                 label = f"{source}#{suffix}"
                 suffix += 1
             alive[label] = thread
-        if not alive:
-            with self._lock:
+        with self._lock:
+            for thread, (source, stop_event) in tuple(self._all_threads.items()):
+                if thread.is_alive():
+                    continue
+                self._all_threads.pop(thread, None)
+                if (
+                    self._threads.get(source) is thread
+                    and self._source_stops.get(source) is stop_event
+                ):
+                    self._threads.pop(source, None)
+                    self._source_stops.pop(source, None)
+            if not alive:
                 self._frames.clear()
                 self._last_access.clear()
                 self._errors.clear()
+                self._last_live_error = ""
+                for times in self._frame_times.values():
+                    times.clear()
         return alive
 
     def close(self) -> None:
@@ -445,12 +461,12 @@ class CameraCaptureService:
                     )
                     if self._cancelled(stop_event):
                         return
-                    handle.set_buffer_size(1)
                     if not opened or not handle.is_opened():
                         failure_reason = "failed to open stream"
                         self._increment(source, "open_failures")
                         self._set_error(source, failure_reason)
                     else:
+                        handle.set_buffer_size(1)
                         with self._lock:
                             stats = self._stats[source]
                             if stats["frames_received"] > 0:
@@ -485,13 +501,13 @@ class CameraCaptureService:
                     if handle is not None:
                         try:
                             handle.close()
-                        except Exception:
+                        except Exception as exc:
                             self._increment(source, "close_failures")
                             LOGGER.warning(
-                                "camera stream close failed for %s/%s",
+                                "camera stream close failed for %s/%s: %s",
                                 self.camera_id,
                                 source,
-                                exc_info=True,
+                                redact_secret_text(exc)[:160],
                             )
                 if self._cancelled(stop_event) or self._should_exit_for_idle(
                     source, stop_event

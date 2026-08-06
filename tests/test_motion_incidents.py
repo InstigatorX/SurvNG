@@ -18,6 +18,7 @@ def _service(
     decision.handle.return_value = outcome
     tracking = Mock()
     tracking.config.enabled = tracking_enabled
+    tracking.config.tracks_label.side_effect = lambda label: label != "face"
     prewarm = Mock()
     image_reader = Mock()
     service = MotionIncidentService(
@@ -91,6 +92,23 @@ def test_disabled_tracking_avoids_prewarm_and_snapshot_read() -> None:
     assert service.status()["handoff_failures"] == 0
 
 
+def test_intentionally_untracked_objects_do_not_report_handoff_failure() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="snapshot.webp",
+        object_detected=True,
+        detected_objects=({"label": "face", "incident_eligible": True},),
+    )
+    service, _decision, tracking, prewarm, image_reader = _service(outcome)
+
+    service.process("motion", "face", datetime.now(timezone.utc), {})
+
+    prewarm.assert_called_once_with()
+    image_reader.assert_not_called()
+    tracking.start.assert_not_called()
+    assert service.status()["handoff_failures"] == 0
+
+
 def test_tracking_failure_after_persistence_does_not_escape_or_replay() -> None:
     outcome = MotionDecisionOutcome(
         event_id=42,
@@ -125,6 +143,7 @@ def test_process_resolves_current_tracking_session_for_hot_reload() -> None:
     first.config.enabled = False
     second = Mock()
     second.config.enabled = True
+    second.config.tracks_label.return_value = True
     second.start.return_value = True
     current = [first]
     service = MotionIncidentService(
@@ -176,3 +195,42 @@ def test_handoff_failure_telemetry_redacts_stream_credentials() -> None:
     failure = service.status()["last_handoff_failure"]
     assert "secret" not in failure["error"]
     assert "camera-admin:***@" in failure["error"]
+
+
+def test_post_persistence_tracking_configuration_failure_cannot_replay_incident() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="",
+        object_detected=True,
+        detected_objects=({"label": "person"},),
+    )
+    service, decision, tracking, _prewarm, _image_reader = _service(outcome)
+    tracking.config.tracks_label.side_effect = RuntimeError("invalid tracking labels")
+
+    result = service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    assert result is outcome
+    decision.handle.assert_called_once()
+    tracking.start.assert_not_called()
+    failure = service.status()["last_handoff_failure"]
+    assert failure["event_id"] == 42
+    assert failure["error_type"] == "RuntimeError"
+
+
+def test_prewarm_failure_does_not_prevent_detection_or_persistence() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="",
+        object_detected=False,
+    )
+    service, decision, _tracking, prewarm, _image_reader = _service(outcome)
+    prewarm.side_effect = RuntimeError("main capture unavailable")
+
+    result = service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    assert result is outcome
+    decision.handle.assert_called_once()
+    status = service.status()
+    assert status["prewarm_failures"] == 1
+    assert status["last_prewarm_failure"]["error_type"] == "RuntimeError"
+    assert status["handoff_failures"] == 0

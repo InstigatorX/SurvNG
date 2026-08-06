@@ -3,14 +3,22 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import math
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .motion import MotionQualificationResult
 
 StatCallback = Callable[[str], None]
+
+
+class RetryDisposition(StrEnum):
+    SCHEDULED = "scheduled"
+    DROPPED = "dropped"
+    STOPPED = "stopped"
 
 
 @dataclass(slots=True)
@@ -30,12 +38,48 @@ class MotionTrigger:
     audit_snapshot_path: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.topic, str) or not self.topic.strip():
+            raise ValueError("motion trigger topic must be a non-empty string")
+        if not isinstance(self.message, str):
+            raise TypeError("motion trigger message must be a string")
         if not isinstance(self.event_at, datetime):
             raise TypeError("motion trigger event_at must be a datetime")
-        self.topic = str(self.topic)
-        self.message = str(self.message)
+        if self.event_at.utcoffset() is None:
+            raise ValueError("motion trigger event_at must include a timezone")
+        if isinstance(self.received_at, bool) or not isinstance(
+            self.received_at, (int, float)
+        ):
+            raise TypeError("motion trigger received_at must be numeric")
         self.received_at = float(self.received_at)
-        self.retry_count = max(0, int(self.retry_count))
+        if not math.isfinite(self.received_at):
+            raise ValueError("motion trigger received_at must be finite")
+        if isinstance(self.retry_count, bool) or not isinstance(self.retry_count, int):
+            raise TypeError("motion trigger retry_count must be an integer")
+        if self.retry_count < 0:
+            raise ValueError("motion trigger retry_count cannot be negative")
+        if self.prequalified is not None and not isinstance(
+            self.prequalified, MotionQualificationResult
+        ):
+            raise TypeError("motion trigger prequalified result has an invalid type")
+        if not isinstance(self.decision_id, str):
+            raise TypeError("motion trigger decision ID must be a string")
+        if self.retry_batch is not None and (
+            not isinstance(self.retry_batch, tuple)
+            or not all(isinstance(item, MotionTrigger) for item in self.retry_batch)
+        ):
+            raise TypeError("motion trigger retry batch must contain typed triggers")
+        if self.retry_qualification_result is not None and not isinstance(
+            self.retry_qualification_result, MotionQualificationResult
+        ):
+            raise TypeError("motion trigger retry result has an invalid type")
+        if self.retry_diagnostics is not None and not isinstance(
+            self.retry_diagnostics, dict
+        ):
+            raise TypeError("motion trigger retry diagnostics must be a dictionary")
+        if self.audit_snapshot_path is not None and not isinstance(
+            self.audit_snapshot_path, str
+        ):
+            raise TypeError("motion trigger audit snapshot path must be a string")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> MotionTrigger:
@@ -50,41 +94,59 @@ class MotionTrigger:
             raise ValueError(
                 f"unsupported motion trigger fields: {', '.join(sorted(unknown))}"
             )
+        missing = {"topic", "event_at", "received_at"} - set(value)
+        if missing:
+            raise ValueError(
+                f"missing motion trigger fields: {', '.join(sorted(missing))}"
+            )
         raw_retry_batch = value.get("_retry_batch")
         retry_batch = None
-        if isinstance(raw_retry_batch, (list, tuple)):
+        if raw_retry_batch is not None:
+            if not isinstance(raw_retry_batch, (list, tuple)):
+                raise TypeError("motion trigger retry batch must be a sequence")
             retry_batch = tuple(coerce_motion_trigger(item) for item in raw_retry_batch)
+        prequalified = value.get("prequalified")
+        if prequalified is not None and not isinstance(
+            prequalified, MotionQualificationResult
+        ):
+            raise TypeError("motion trigger prequalified result has an invalid type")
+        retry_result = value.get("_retry_qualification_result")
+        if retry_result is not None and not isinstance(
+            retry_result, MotionQualificationResult
+        ):
+            raise TypeError("motion trigger retry result has an invalid type")
+        retry_diagnostics = value.get("_retry_diagnostics")
+        if retry_diagnostics is not None and not isinstance(
+            retry_diagnostics, Mapping
+        ):
+            raise TypeError("motion trigger retry diagnostics must be a mapping")
+        decision_id = value.get("_motion_decision_id", "")
+        if not isinstance(decision_id, str):
+            raise TypeError("motion trigger decision ID must be a string")
+        retry_count = value.get("_event_retry_count", 0)
+        if isinstance(retry_count, bool) or not isinstance(retry_count, int):
+            raise TypeError("motion trigger retry count must be an integer")
+        audit_snapshot_path = value.get("_motion_audit_snapshot_path")
+        if audit_snapshot_path is not None and not isinstance(
+            audit_snapshot_path, str
+        ):
+            raise TypeError("motion trigger audit snapshot path must be a string")
         return cls(
-            topic=str(value.get("topic") or ""),
-            message=str(value.get("message") or ""),
+            topic=value["topic"],
+            message=value.get("message", ""),
             event_at=value["event_at"],
-            received_at=float(value.get("received_at") or time.time()),
-            prequalified=(
-                value.get("prequalified")
-                if isinstance(value.get("prequalified"), MotionQualificationResult)
-                else None
-            ),
-            decision_id=str(value.get("_motion_decision_id") or ""),
-            retry_count=int(value.get("_event_retry_count") or 0),
+            received_at=value["received_at"],
+            prequalified=prequalified,
+            decision_id=decision_id,
+            retry_count=retry_count,
             retry_batch=retry_batch,
-            retry_qualification_result=(
-                value.get("_retry_qualification_result")
-                if isinstance(
-                    value.get("_retry_qualification_result"),
-                    MotionQualificationResult,
-                )
-                else None
-            ),
+            retry_qualification_result=retry_result,
             retry_diagnostics=(
-                dict(value["_retry_diagnostics"])
-                if isinstance(value.get("_retry_diagnostics"), dict)
+                dict(retry_diagnostics)
+                if retry_diagnostics is not None
                 else None
             ),
-            audit_snapshot_path=(
-                str(value["_motion_audit_snapshot_path"])
-                if value.get("_motion_audit_snapshot_path") is not None
-                else None
-            ),
+            audit_snapshot_path=audit_snapshot_path,
         )
 
     # Temporary read-only compatibility for callers migrating from trigger
@@ -127,6 +189,8 @@ class MotionTriggerBatch:
     def __post_init__(self) -> None:
         if not self.triggers:
             raise ValueError("motion trigger batch cannot be empty")
+        if not all(isinstance(item, MotionTrigger) for item in self.triggers):
+            raise TypeError("motion trigger batch must contain typed triggers")
 
     @classmethod
     def coerce(
@@ -198,6 +262,8 @@ class MotionEventCoordinator:
                 self.queue.put_nowait(trigger)
                 return True
             except queue.Full:
+                if on_drop is not None:
+                    on_drop("dropped_triggers")
                 return False
 
     def clear(self) -> None:
@@ -258,7 +324,7 @@ class MotionEventCoordinator:
         stop_event: threading.Event,
         on_retry: StatCallback | None = None,
         on_drop: StatCallback | None = None,
-    ) -> None:
+    ) -> RetryDisposition:
         batch = MotionTriggerBatch.coerce(triggers)
         retry_count = max(
             (item.retry_count for item in batch),
@@ -267,13 +333,13 @@ class MotionEventCoordinator:
         if retry_count > self._retry_limit:
             if on_drop is not None:
                 on_drop("event_retry_drops")
-            return
+            return RetryDisposition.DROPPED
         retry_triggers = [
             replace(item, retry_count=retry_count)
             for item in batch
         ]
         if stop_event.wait(0.25 * retry_count):
-            return
+            return RetryDisposition.STOPPED
         wrapper = MotionTrigger(
             topic="internal/retry_batch",
             message=f"motion event retry {retry_count}",
@@ -285,6 +351,7 @@ class MotionEventCoordinator:
             self.retry_batches.append(wrapper)
         if on_retry is not None:
             on_retry("event_retries")
+        return RetryDisposition.SCHEDULED
 
     def reserve_adaptive(
         self,
@@ -360,13 +427,14 @@ class MotionEventCoordinator:
             self.adaptive_trigger_pending = False
             self.adaptive_last_completed_at = completed_at
 
-    def fail_active(self, completed_at: float) -> MotionTriggerBatch | None:
+    def set_active(self, batch: MotionTriggerBatch | None) -> None:
+        with self._lock:
+            self.active_triggers = batch
+
+    def take_failed_active(self) -> MotionTriggerBatch | None:
         with self._lock:
             failed = self.active_triggers
             self.active_triggers = None
-            if self.adaptive_trigger_pending:
-                self.adaptive_trigger_pending = False
-                self.adaptive_last_completed_at = completed_at
             return failed
 
     def reset(self) -> None:
