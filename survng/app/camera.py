@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import queue
 import random
@@ -8,7 +7,6 @@ import sys
 import threading
 import time
 import traceback
-import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +38,14 @@ from .motion_events import (
     MotionTrigger,
     MotionTriggerBatch,
     RetryDisposition,
+)
+from .motion_decisions import (
+    MotionDecisionHooks,
+    MotionDecisionOrchestrator,
+    audit_features,
+    is_borderline_candidate,
+    priority_motion_topic,
+    should_verify_suppression,
 )
 from .motion_incidents import MotionIncidentService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
@@ -213,6 +219,62 @@ class CameraWorker:
             "suppression_verification_rescues": 0,
             "last_result": None,
         }
+        self.motion_decisions = MotionDecisionOrchestrator(
+            camera_id=camera.id,
+            events=self.motion_events,
+            audit_recorder=self.motion_decision_handler,
+            burst_quiet_seconds=lambda: self.motion_config.burst_quiet_seconds,
+            hooks=MotionDecisionHooks(
+                motion_settings=lambda: self._motion_settings(),
+                rescue_settings=lambda: self._motion_rescue_settings(),
+                suppression_verification_rate=(
+                    lambda: self._suppression_verification_rate()
+                ),
+                matches_recent_priority_motion=(
+                    lambda observed_at: self._matches_recent_priority_motion(observed_at)
+                ),
+                qualify_motion_burst=(
+                    lambda event_at, received_at, sensitivity: self._qualify_motion_burst(
+                        event_at, received_at, sensitivity
+                    )
+                ),
+                with_pipeline_telemetry=(
+                    lambda result: self._with_pipeline_telemetry(result)
+                ),
+                process_incident=lambda *args, **kwargs: self._process_motion_event(
+                    *args, **kwargs
+                ),
+                sample_rejected_motion=(
+                    lambda event_at, result: self._sample_rejected_motion(
+                        event_at, result
+                    )
+                ),
+                related_incident_event_id=(
+                    lambda result: self._related_incident_event_id(result)
+                ),
+                reset_motion_fusion_runtime=(
+                    lambda: self._reset_motion_fusion_runtime()
+                ),
+                record_visual_camera_match=(
+                    lambda observed_at: self._record_visual_camera_match(observed_at)
+                ),
+                complete_adaptive_trigger=(
+                    lambda triggers: self._complete_adaptive_trigger(triggers)
+                ),
+                set_active_incident_event_id=(
+                    lambda event_id: self._set_active_incident_event_id(event_id)
+                ),
+                publish_event=lambda event_type, payload: self._publish_event_safely(
+                    event_type, payload
+                ),
+                record_decision_stats=lambda **kwargs: self._record_decision_stats(
+                    **kwargs
+                ),
+                increment_stat=lambda name, amount: self._increment_motion_stat(
+                    name, amount
+                ),
+            ),
+        )
         self.last_motion_at = ""
         self._detection_enabled = True
         self.capture = CameraCaptureService(
@@ -730,9 +792,48 @@ class CameraWorker:
                 event_type,
             )
 
-    def _increment_motion_stat(self, name: str) -> None:
+    def _increment_motion_stat(self, name: str, amount: int = 1) -> None:
         with self._motion_stats_lock:
-            self._motion_stats[name] = int(self._motion_stats.get(name) or 0) + 1
+            self._motion_stats[name] = int(self._motion_stats.get(name) or 0) + amount
+
+    def _record_decision_stats(
+        self,
+        *,
+        result: MotionQualificationResult,
+        qualification: dict[str, Any],
+        retry_attempt: bool,
+        priority: bool,
+        mode: str,
+        borderline_candidate: bool,
+        suppression_verification_candidate: bool,
+    ) -> None:
+        with self._motion_stats_lock:
+            if not retry_attempt:
+                self._motion_stats["bursts"] += 1
+                if priority:
+                    self._motion_stats["priority_bypasses"] += 1
+                if result.reason == "insufficient_frames":
+                    self._motion_stats["insufficient_frames"] += 1
+                if result.reason == "no_temporal_signal":
+                    self._motion_stats["inconclusive"] += 1
+                if result.accepted:
+                    self._motion_stats["passed"] += 1
+                elif (
+                    mode in {"camera", "camera_rescue", "adaptive", "enforce"}
+                    and not borderline_candidate
+                    and not suppression_verification_candidate
+                ):
+                    self._motion_stats["suppressed"] += 1
+                elif mode == "audit":
+                    self._motion_stats["audit_rejected"] += 1
+            self._motion_stats["last_result"] = qualification
+
+    def _record_visual_camera_match(self, observed_at: float) -> bool:
+        with self._motion_stats_lock:
+            return self.visual_backup.record_camera_match(observed_at)
+
+    def _set_active_incident_event_id(self, event_id: int) -> None:
+        self._active_incident_event_id = event_id
 
     def handle_motion_event(
         self,
@@ -1424,15 +1525,7 @@ class CameraWorker:
 
     @staticmethod
     def _should_verify_suppression(decision_id: str, rate: float) -> bool:
-        if rate <= 0.0:
-            return False
-        if rate >= 1.0:
-            return True
-        sample = int.from_bytes(
-            hashlib.sha256(decision_id.encode("utf-8")).digest()[:8],
-            "big",
-        ) / float(2**64)
-        return sample < rate
+        return should_verify_suppression(decision_id, rate)
 
     @staticmethod
     def _is_borderline_candidate(
@@ -1440,12 +1533,7 @@ class CameraWorker:
         enabled: bool,
         margin: float,
     ) -> bool:
-        return bool(
-            enabled
-            and not result.accepted
-            and result.reason == "low_score"
-            and result.score >= max(0.0, result.threshold - margin)
-        )
+        return is_borderline_candidate(result, enabled, margin)
 
     def _with_source_evidence(
         self,
@@ -1597,10 +1685,7 @@ class CameraWorker:
 
     @staticmethod
     def _audit_features(result: MotionQualificationResult) -> dict[str, Any]:
-        features = dict(result.features)
-        if result.telemetry:
-            features["pipeline_telemetry"] = result.telemetry
-        return features
+        return audit_features(result)
 
     def _with_pipeline_telemetry(
         self,
@@ -1628,10 +1713,7 @@ class CameraWorker:
 
     @staticmethod
     def _priority_motion_topic(topic: str) -> bool:
-        searchable = topic.lower()
-        return topic.startswith("manual") or any(
-            word in searchable for word in ("person", "people", "human", "vehicle", "animal", "face")
-        )
+        return priority_motion_topic(topic)
 
     def _qualify_motion_burst(
         self,
@@ -1846,365 +1928,16 @@ class CameraWorker:
         return self.motion_debug.image(layer)
 
     def _run_motion_events(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self._run_motion_events_until_error()
-                return
-            except Exception:
-                failed_triggers = self.motion_events.take_failed_active()
-                with self._motion_stats_lock:
-                    self._motion_stats["event_worker_errors"] += 1
-                LOGGER.exception("motion event cycle failed for %s", self.camera.id)
-                if failed_triggers and not self._stop.is_set():
-                    disposition = self._retry_motion_trigger_batch(failed_triggers)
-                    if disposition == RetryDisposition.DROPPED:
-                        self._complete_adaptive_trigger(failed_triggers)
+        self.motion_decisions.run(self._stop)
 
     def _retry_motion_trigger_batch(
         self,
         triggers: MotionTriggerBatch | list[dict[str, Any]],
     ) -> RetryDisposition:
-        return self.motion_events.schedule_retry(
-            triggers,
-            stop_event=self._stop,
-            on_retry=self._increment_motion_stat,
-            on_drop=self._increment_motion_stat,
-        )
+        return self.motion_decisions.retry_batch(triggers, self._stop)
 
     def _run_motion_events_until_error(self) -> None:
-        while not self._stop.is_set():
-            try:
-                first = self.motion_events.next_trigger(timeout=0.5)
-            except queue.Empty:
-                continue
-            if first is None or self._stop.is_set():
-                return
-            triggers = self.motion_events.coalesce(
-                first,
-                quiet_seconds=self.motion_config.burst_quiet_seconds,
-                stop_event=self._stop,
-            )
-            if triggers is None:
-                return
-            self._active_motion_triggers = triggers
-
-            priority_triggers = [
-                item
-                for item in triggers
-                if self._priority_motion_topic(item.topic)
-            ]
-            representative = min(
-                priority_triggers or triggers,
-                key=lambda item: item.event_at,
-            )
-            event_at = representative.event_at
-            received_at = min(item.received_at for item in triggers)
-            decision_id = next(
-                (
-                    item.decision_id
-                    for item in triggers
-                    if item.decision_id
-                ),
-                "",
-            )
-            if not decision_id:
-                decision_id = uuid.uuid4().hex
-            for item in triggers:
-                item.decision_id = decision_id
-
-            mode, sensitivity, frame_width = self._motion_settings()
-            rescue_enabled, rescue_margin = self._motion_rescue_settings()
-            priority = bool(priority_triggers)
-            adaptive_only = all(
-                item.topic.startswith("adaptive/")
-                for item in triggers
-            )
-            visual_backup_queued = any(
-                item.topic == "adaptive/visual_backup"
-                for item in triggers
-            )
-            visual_backup = adaptive_only and visual_backup_queued
-            if visual_backup_queued and not visual_backup:
-                with self._motion_stats_lock:
-                    matched_camera_at = self.motion_events.latest_camera_motion()
-                    if self.visual_backup.record_camera_match(matched_camera_at):
-                        self._motion_stats["visual_backup_onvif_matches"] += 1
-            prequalified = [
-                item.prequalified
-                for item in triggers
-                if item.prequalified is not None
-            ]
-            retry_results = [
-                item.retry_qualification_result
-                for item in triggers
-                if item.retry_qualification_result is not None
-            ]
-            diagnostics: dict[str, Any] = {
-                "windows_evaluated": 0,
-                "event_receipt_delta_seconds": round(received_at - event_at.timestamp(), 3),
-            }
-            retry_diagnostics = next(
-                (
-                    dict(item.retry_diagnostics)
-                    for item in triggers
-                    if item.retry_diagnostics is not None
-                ),
-                None,
-            )
-            if adaptive_only and self._matches_recent_priority_motion(event_at.timestamp()):
-                result = MotionQualificationResult(
-                    False,
-                    0.0,
-                    1.0,
-                    "priority_event_deduplicated",
-                    0,
-                    {"primary_motion_source": "adaptive_background"},
-                )
-            elif mode == "off":
-                result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
-            elif priority:
-                result = MotionQualificationResult(
-                    True,
-                    1.0,
-                    0.0,
-                    "priority_topic",
-                    0,
-                    {"primary_motion_source": "onvif_priority"},
-                )
-            elif retry_results:
-                result = max(retry_results, key=lambda item: item.score)
-                if retry_diagnostics is not None:
-                    diagnostics = retry_diagnostics
-            elif prequalified:
-                result = self._with_pipeline_telemetry(
-                    max(prequalified, key=lambda item: item.score)
-                )
-            else:
-                result, diagnostics = self._qualify_motion_burst(event_at, received_at, sensitivity)
-
-            if self._stop.is_set():
-                self._complete_adaptive_trigger(triggers)
-                self._active_motion_triggers = None
-                return
-
-            borderline_candidate = self._is_borderline_candidate(
-                result,
-                rescue_enabled,
-                rescue_margin,
-            )
-            suppression_verification_candidate = bool(
-                mode in {"camera", "camera_rescue", "adaptive", "enforce"}
-                and not result.accepted
-                and not borderline_candidate
-                and not result.reason.startswith("event_state_")
-                and self._should_verify_suppression(
-                    decision_id,
-                    self._suppression_verification_rate(),
-                )
-            )
-            qualification = {
-                **result.as_dict(),
-                **diagnostics,
-                "mode": mode,
-                "sensitivity": sensitivity,
-                "frame_width": frame_width,
-                "borderline_rescue_enabled": rescue_enabled,
-                "borderline_margin": rescue_margin,
-                "borderline_candidate": borderline_candidate,
-                "suppression_verification_rate": self._suppression_verification_rate(),
-                "suppression_verification_candidate": suppression_verification_candidate,
-                "trigger_count": len(triggers),
-                "trigger_source": "visual_backup" if visual_backup else (
-                    "adaptive" if adaptive_only else "camera"
-                ),
-                "retry_count": max((item.retry_count for item in triggers), default=0),
-                "would_suppress": bool(
-                    mode in {"audit", "camera", "camera_rescue", "adaptive", "enforce"}
-                    and not result.accepted
-                ),
-            }
-            if mode == "off":
-                effective_accepted = True
-            elif mode == "audit":
-                effective_accepted = True
-            else:
-                effective_accepted = bool(
-                    result.accepted
-                    or borderline_candidate
-                    or suppression_verification_candidate
-                )
-            qualification["effective_accepted"] = effective_accepted
-            retry_attempt = qualification["retry_count"] > 0
-            for item in triggers:
-                item.retry_qualification_result = result
-                item.retry_diagnostics = dict(diagnostics)
-            with self._motion_stats_lock:
-                if not retry_attempt:
-                    self._motion_stats["bursts"] += 1
-                    if priority:
-                        self._motion_stats["priority_bypasses"] += 1
-                    if result.reason == "insufficient_frames":
-                        self._motion_stats["insufficient_frames"] += 1
-                    if result.reason == "no_temporal_signal":
-                        self._motion_stats["inconclusive"] += 1
-                    if result.accepted:
-                        self._motion_stats["passed"] += 1
-                    elif (
-                        mode in {"camera", "camera_rescue", "adaptive", "enforce"}
-                        and not borderline_candidate
-                        and not suppression_verification_candidate
-                    ):
-                        self._motion_stats["suppressed"] += 1
-                    elif mode == "audit":
-                        self._motion_stats["audit_rejected"] += 1
-                self._motion_stats["last_result"] = qualification
-
-            if not retry_attempt:
-                self._publish_event_safely("motion_qualification", {
-                    "camera_id": self.camera.id,
-                    "timestamp": event_at.isoformat(),
-                    **qualification,
-                })
-            if not effective_accepted:
-                snapshot_path = next(
-                    (
-                        item.audit_snapshot_path
-                        for item in triggers
-                        if item.audit_snapshot_path
-                    ),
-                    None,
-                )
-                if snapshot_path is None:
-                    snapshot_path = (
-                        ""
-                        if result.reason in INCIDENT_ACTIVITY_REASONS
-                        else self._sample_rejected_motion(event_at, result)
-                    )
-                    for item in triggers:
-                        item.audit_snapshot_path = snapshot_path
-                self.motion_decision_handler.record_audit(
-                    decision_id=decision_id,
-                    snapshot_path=snapshot_path,
-                    event_at=event_at,
-                    mode=mode,
-                    sensitivity=sensitivity,
-                    score=result.score,
-                    threshold=result.threshold,
-                    reason=result.reason,
-                    object_detected=None,
-                    trigger_count=len(triggers),
-                    features=self._audit_features(result),
-                    related_event_id=self._related_incident_event_id(result),
-                )
-                self._complete_adaptive_trigger(triggers)
-                self._active_motion_triggers = None
-                continue
-
-            durable_incident = False
-            try:
-                outcome = self._process_motion_event(
-                    representative.topic,
-                    representative.message,
-                    event_at,
-                    qualification,
-                    require_eligible_object=bool(
-                        visual_backup
-                        or borderline_candidate
-                        or suppression_verification_candidate
-                    ),
-                    require_motion_correlation=visual_backup,
-                )
-                event_id = outcome.get("event_id")
-                if event_id is not None:
-                    durable_incident = True
-                    self._active_incident_event_id = int(event_id)
-                    # The incident is durable once the handler returns. Later audit or
-                    # notification failures must not replay detection and duplicate it.
-                    self._active_motion_triggers = None
-                object_outcome = outcome.get("object_detected")
-                found_object = object_outcome is True
-                if borderline_candidate and found_object:
-                    with self._motion_stats_lock:
-                        self._motion_stats["borderline_rescues"] = self._motion_stats.get("borderline_rescues", 0) + 1
-                elif mode in {"camera", "camera_rescue", "adaptive", "enforce"} and borderline_candidate:
-                    with self._motion_stats_lock:
-                        self._motion_stats["suppressed"] += 1
-                if suppression_verification_candidate:
-                    with self._motion_stats_lock:
-                        self._motion_stats["suppression_verification_checks"] += 1
-                        if found_object:
-                            self._motion_stats["suppression_verification_rescues"] += 1
-                        else:
-                            self._motion_stats["suppressed"] += 1
-                if mode == "audit" and not result.accepted and found_object:
-                    with self._motion_stats_lock:
-                        self._motion_stats["audit_object_matches"] += 1
-                if visual_backup:
-                    if result.features.get("illumination_verification_probe") and found_object:
-                        with self._motion_stats_lock:
-                            self._motion_stats["illumination_verification_rescues"] += 1
-                    correlation = outcome.get("motion_correlation")
-                    if (
-                        outcome.get("rejection_reason") == "object_not_motion_correlated"
-                        and isinstance(correlation, dict)
-                    ):
-                        with self._motion_stats_lock:
-                            self._motion_stats["visual_backup_uncorrelated_objects"] += int(
-                                correlation.get("eligible_object_count") or 0
-                            )
-                    if not found_object:
-                        # A backup with no eligible object must not leave the
-                        # fusion event state ACTIVE. A real camera notice that
-                        # arrives just after the backup still deserves its own
-                        # ordinary detector pass.
-                        self._reset_motion_fusion_runtime()
-                    self.motion_decision_handler.record_audit(
-                        event_id=int(event_id) if event_id is not None else None,
-                        decision_id=decision_id if event_id is None else "",
-                        snapshot_path=str(outcome.get("snapshot_path") or ""),
-                        event_at=event_at,
-                        mode=mode,
-                        sensitivity=sensitivity,
-                        score=result.score,
-                        threshold=result.threshold,
-                        reason=str(outcome.get("rejection_reason") or "visual_backup_trigger"),
-                        object_detected=object_outcome,
-                        trigger_count=len(triggers),
-                        features={
-                            **self._audit_features(result),
-                            "visual_backup_original_reason": result.reason,
-                            "motion_correlation": correlation,
-                        },
-                        category="visual_backup",
-                    )
-                elif mode in {"audit", "camera", "camera_rescue", "adaptive", "enforce"} and not result.accepted:
-                    audit_snapshot_path = str(outcome.get("snapshot_path") or "")
-                    if not audit_snapshot_path and event_id is None:
-                        audit_snapshot_path = self._sample_rejected_motion(event_at, result)
-                    self.motion_decision_handler.record_audit(
-                        event_id=int(event_id) if event_id is not None else None,
-                        decision_id=decision_id if event_id is None else "",
-                        snapshot_path=audit_snapshot_path,
-                        event_at=event_at,
-                        mode=mode,
-                        sensitivity=sensitivity,
-                        score=result.score,
-                        threshold=result.threshold,
-                        reason=result.reason,
-                        object_detected=object_outcome,
-                        trigger_count=len(triggers),
-                        features={
-                            **self._audit_features(result),
-                            "suppression_verification": suppression_verification_candidate,
-                        },
-                    )
-            except Exception:
-                if durable_incident:
-                    self._complete_adaptive_trigger(triggers)
-                raise
-            else:
-                self._complete_adaptive_trigger(triggers)
-                self._active_motion_triggers = None
+        self.motion_decisions.run_until_error(self._stop)
 
     def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
         if self.motion_config.rejected_sample_rate <= 0 or random.random() > self.motion_config.rejected_sample_rate:
