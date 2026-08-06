@@ -102,6 +102,14 @@ class AppConfigTest(unittest.TestCase):
             ObjectTrackingConfig(implementation="ByteTrack").implementation,
             "survng_hybrid",
         )
+        self.assertEqual(
+            ObjectTrackingConfig(implementation="ultralytics_botsort").implementation,
+            "survng_hybrid",
+        )
+        self.assertEqual(
+            ObjectTrackingConfig(implementation="ultralytics_deepocsort").implementation,
+            "survng_hybrid",
+        )
     def test_base_path_defaults_to_survng(self) -> None:
         self.assertEqual(AppConfig().base_path, "/survng")
         self.assertEqual(AppConfig().database_dir, "")

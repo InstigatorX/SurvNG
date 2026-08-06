@@ -97,8 +97,12 @@ from .recording_media import (
     resolve_stream_fingerprints,
 )
 from .process_memory import process_memory_status
-from .object_tracking import ultralytics_botsort_dependency_status
-from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
+from .object_tracking import ultralytics_deepocsort_dependency_status
+from .tracking_comparison import (
+    TRACKING_COMPARISON_IMPLEMENTATIONS,
+    TrackingComparisonRunner,
+    sampled_video_frames,
+)
 from .zones import apply_detection_zones, detection_threshold
 from .security import redact_secret_text
 from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
@@ -780,9 +784,6 @@ TRACKING_SESSION_FIELDS = frozenset({
     "reid_match_threshold",
     "vehicle_reid_match_threshold",
     "vehicle_reid_labels",
-    "botsort_match_threshold",
-    "botsort_proximity_threshold",
-    "botsort_fuse_score",
 })
 DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({
     "enabled",
@@ -1968,27 +1969,14 @@ def detector_status() -> dict:
 
 @app.get("/api/object-tracking/catalog")
 def object_tracking_catalog() -> dict:
-    ultralytics_status = ultralytics_botsort_dependency_status()
     return {
-        "active": config.detector.tracking.implementation,
+        "active": "survng_hybrid",
         "implementations": [
             {
                 "id": "survng_hybrid",
                 "name": "SurvNG Hybrid",
                 "available": True,
                 "description": "Lightweight geometry tracking with SurvNG appearance recovery.",
-            },
-            {
-                "id": "ultralytics_botsort",
-                "name": "Ultralytics BoT-SORT",
-                "available": ultralytics_status["available"],
-                "description": "Official Kalman/BoT-SORT association using SurvNG person embeddings.",
-                "installed_version": ultralytics_status["installed_version"],
-                "required_version": ultralytics_status["required_version"],
-                "tested_version": ultralytics_status["tested_version"],
-                "is_tested_version": ultralytics_status["is_tested_version"],
-                "supported_version_range": ultralytics_status["supported_version_range"],
-                "reason": ultralytics_status["reason"] or "",
             },
         ],
     }
@@ -2878,7 +2866,7 @@ class CalibrationRollbackRequest(BaseModel):
 
 class TrackingComparisonVerdictRequest(BaseModel):
     verdict: str = Field(
-        pattern=r"^(survng_hybrid|ultralytics_botsort|inconclusive)$"
+        pattern=r"^(survng_hybrid|ultralytics_botsort|ultralytics_deepocsort|inconclusive)$"
     )
 
 
@@ -7151,7 +7139,7 @@ def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
 
 def _tracking_comparison_evidence(result: dict) -> dict:
     engines: dict[str, dict] = {}
-    for implementation in ("survng_hybrid", "ultralytics_botsort"):
+    for implementation in TRACKING_COMPARISON_IMPLEMENTATIONS:
         engine = result.get("engines", {}).get(implementation, {})
         engines[implementation] = {
             key: engine.get(key)
@@ -7236,7 +7224,7 @@ def _tracking_comparison_duration(duration_seconds: float | None) -> float:
 
 @app.post("/api/events/{event_id}/tracking-comparison")
 def compare_event_tracking(event_id: int, duration_seconds: float | None = None) -> dict:
-    dependency = ultralytics_botsort_dependency_status()
+    dependency = ultralytics_deepocsort_dependency_status()
     if not dependency["available"]:
         raise HTTPException(status_code=503, detail=dependency["reason"])
     if duration_seconds is not None and not math.isfinite(duration_seconds):

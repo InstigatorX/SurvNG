@@ -219,23 +219,39 @@ def _ultralytics_tracking_version_supported(installed_version: str) -> bool:
     return MINIMUM_ULTRALYTICS_TRACKING_VERSION <= release < MAXIMUM_ULTRALYTICS_TRACKING_VERSION
 
 
-def ultralytics_botsort_dependency_status() -> dict[str, Any]:
+def _ultralytics_tracking_dependency_status(
+    *,
+    tracker_name: str,
+    module_name: str,
+) -> dict[str, Any]:
     try:
         installed_version = version("ultralytics")
     except PackageNotFoundError:
         installed_version = ""
     package_present = importlib.util.find_spec("ultralytics") is not None
     lap_present = importlib.util.find_spec("lap") is not None
+    try:
+        tracker_present = importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        tracker_present = False
     version_supported = _ultralytics_tracking_version_supported(installed_version)
-    available = bool(installed_version and package_present and lap_present and version_supported)
+    available = bool(
+        installed_version
+        and package_present
+        and lap_present
+        and tracker_present
+        and version_supported
+    )
     if not installed_version:
         reason = "Ultralytics is not installed."
     elif not lap_present:
         reason = "The LAP assignment dependency is not installed."
+    elif not tracker_present:
+        reason = f"The installed Ultralytics build does not include {tracker_name}."
     elif not version_supported:
         reason = (
             f"Ultralytics {installed_version} is outside SurvNG's supported "
-            "BoT-SORT API range (8.4.108 through the latest 8.4.x release)."
+            f"{tracker_name} API range (8.4.108 through the latest 8.4.x release)."
         )
     else:
         reason = ""
@@ -253,17 +269,20 @@ def ultralytics_botsort_dependency_status() -> dict[str, Any]:
     }
 
 
-def ultralytics_botsort_available() -> bool:
-    return bool(ultralytics_botsort_dependency_status()["available"])
+def ultralytics_deepocsort_dependency_status() -> dict[str, Any]:
+    return _ultralytics_tracking_dependency_status(
+        tracker_name="Deep OC-SORT",
+        module_name="ultralytics.trackers.deep_oc_sort",
+    )
 
 
-def _build_ultralytics_botsort(
+def _build_ultralytics_deepocsort(
     config: ObjectTrackingConfig,
     high_confidence_threshold: float,
 ) -> ObjectTrackerBackend:
-    from .ultralytics_tracking import UltralyticsBotSortObjectTracker
+    from .ultralytics_tracking import UltralyticsDeepOCSortObjectTracker
 
-    return UltralyticsBotSortObjectTracker(config, high_confidence_threshold)
+    return UltralyticsDeepOCSortObjectTracker(config, high_confidence_threshold)
 
 
 class ObjectTrackerRegistry:
@@ -947,7 +966,10 @@ def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     # Compatibility alias for configurations created before the tracker gained
     # SurvNG-specific geometry and appearance association.
     registry.register("bytetrack", ByteTrackObjectTracker)
-    registry.register("ultralytics_botsort", _build_ultralytics_botsort)
+    # Deep OC-SORT is registered for the bounded offline Compare workflow.
+    # User configuration normalizes optional upstream trackers back to Hybrid,
+    # so production sessions cannot select this implementation.
+    registry.register("ultralytics_deepocsort", _build_ultralytics_deepocsort)
     return registry
 
 
@@ -1882,13 +1904,6 @@ class ObjectTrackingSessionFactory:
         self.appearance_indexer = appearance_indexer
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
-        if (
-            config.implementation == "ultralytics_botsort"
-            and not ultralytics_botsort_available()
-        ):
-            raise ValueError(
-                "ultralytics_botsort requires the optional Ultralytics tracking dependencies"
-            )
 
     def create(
         self,

@@ -7,9 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from ultralytics.trackers.basetrack import TrackState
-from ultralytics.trackers.bot_sort import BOTSORT, BOTrack
-from ultralytics.trackers.utils import matching
+from ultralytics.trackers.deep_oc_sort import DeepOCSORT, DeepOCSortTrack
 from ultralytics.trackers.utils.stracks import parse_bboxes
 
 from .config import ObjectTrackingConfig
@@ -44,16 +42,13 @@ class _TrackerDetections:
         )
 
 
-class _ClassAwareBOTSORT(BOTSORT):
-    """Prevent Ultralytics' class-agnostic association from crossing labels."""
+class _ClassAwareDeepOCSORT(DeepOCSORT):
+    """Deep OC-SORT with per-session IDs for concurrent camera comparisons."""
 
     def __init__(self, args: Any) -> None:
         super().__init__(args)
 
-        # Ultralytics' BaseTrack counter is process-global and every tracker
-        # constructor resets it. SurvNG can run multiple camera sessions at
-        # once, so each instance needs its own track class and counter.
-        class SessionBOTrack(BOTrack):
+        class SessionDeepOCSortTrack(DeepOCSortTrack):
             _session_count = 0
 
             @classmethod
@@ -65,16 +60,28 @@ class _ClassAwareBOTSORT(BOTSORT):
             def reset_id(cls) -> None:
                 cls._session_count = 0
 
-        self._session_track_type = SessionBOTrack
+        self._session_track_type = SessionDeepOCSortTrack
 
-    def init_track(self, results: Any, img: np.ndarray | None = None) -> list[BOTrack]:
+    def init_track(
+        self,
+        results: Any,
+        img: np.ndarray | None = None,
+    ) -> list[DeepOCSortTrack]:
         if len(results) == 0:
             return []
         boxes = parse_bboxes(results)
-        if self.args.with_reid and self.encoder is not None and img is not None:
-            features = self.encoder(img, boxes)
+        features = self.encoder(img, boxes) if self.encoder is not None and img is not None else None
+        if features is not None:
             return [
-                self._session_track_type(xywh, score, cls, feature)
+                self._session_track_type(
+                    xywh,
+                    score,
+                    cls,
+                    self.delta_t,
+                    feat=feature,
+                    alpha_fixed_emb=self.alpha_fixed_emb,
+                    det_thresh=self.args.track_high_thresh,
+                )
                 for xywh, score, cls, feature in zip(
                     boxes,
                     results.conf,
@@ -84,7 +91,14 @@ class _ClassAwareBOTSORT(BOTSORT):
                 )
             ]
         return [
-            self._session_track_type(xywh, score, cls)
+            self._session_track_type(
+                xywh,
+                score,
+                cls,
+                self.delta_t,
+                alpha_fixed_emb=self.alpha_fixed_emb,
+                det_thresh=self.args.track_high_thresh,
+            )
             for xywh, score, cls in zip(
                 boxes,
                 results.conf,
@@ -93,106 +107,11 @@ class _ClassAwareBOTSORT(BOTSORT):
             )
         ]
 
-    @staticmethod
-    def _block_cross_class(
-        distances: np.ndarray,
-        tracks: list[Any],
-        detections: list[Any],
-    ) -> np.ndarray:
-        if distances.size:
-            track_classes = np.asarray([int(track.cls) for track in tracks])[:, None]
-            detection_classes = np.asarray(
-                [int(detection.cls) for detection in detections]
-            )[None, :]
-            distances[track_classes != detection_classes] = 1.0
-        return distances
 
-    def get_dists(self, tracks: list[Any], detections: list[Any]) -> np.ndarray:
-        return self._block_cross_class(
-            super().get_dists(tracks, detections),
-            tracks,
-            detections,
-        )
-
-    def _second_association(
-        self,
-        strack_pool: list[Any],
-        u_track: list[int],
-        detections_second: list[Any],
-        activated: list[Any],
-        refind: list[Any],
-        lost: list[Any],
-    ) -> None:
-        remaining = [
-            strack_pool[index]
-            for index in u_track
-            if strack_pool[index].state == TrackState.Tracked
-        ]
-        if remaining and detections_second:
-            distances = self._block_cross_class(
-                matching.iou_distance(remaining, detections_second),
-                remaining,
-                detections_second,
-            )
-            matches, unmatched, _ = matching.linear_assignment(distances, thresh=0.5)
-            self._apply_matches(matches, remaining, detections_second, activated, refind)
-        else:
-            unmatched = list(range(len(remaining)))
-        for index in unmatched:
-            track = remaining[index]
-            if track.state != TrackState.Lost:
-                track.mark_lost()
-                lost.append(track)
-
-
-class UltralyticsBotSortObjectTracker:
-    """Adapter around Ultralytics BoT-SORT using SurvNG detections and ReID features."""
+class _UltralyticsObjectTrackerAdapter:
+    """Translate an upstream tracker into SurvNG's timestamped track contract."""
 
     _CLASS_COORDINATE_STRIDE = 100_000.0
-
-    def __init__(
-        self,
-        config: ObjectTrackingConfig,
-        high_confidence_threshold: float,
-    ) -> None:
-        self.config = config
-        self.high_confidence_threshold = max(
-            config.low_confidence_threshold,
-            float(high_confidence_threshold),
-        )
-        track_buffer = ceil(
-            config.sample_fps
-            * (
-                max(config.lost_timeout_seconds, config.reid_max_age_seconds)
-                if config.appearance_reid_enabled
-                else config.lost_timeout_seconds
-            )
-        )
-        appearance_thresholds = []
-        if config.reid_enabled:
-            appearance_thresholds.append(config.reid_match_threshold)
-        if config.vehicle_reid_enabled:
-            appearance_thresholds.append(config.vehicle_reid_match_threshold)
-        appearance_threshold = min(appearance_thresholds, default=1.0)
-        self._tracker = _ClassAwareBOTSORT(SimpleNamespace(
-            track_high_thresh=self.high_confidence_threshold,
-            track_low_thresh=config.low_confidence_threshold,
-            new_track_thresh=self.high_confidence_threshold,
-            track_buffer=max(1, track_buffer),
-            match_thresh=config.botsort_match_threshold,
-            fuse_score=config.botsort_fuse_score,
-            gmc_method="none",
-            proximity_thresh=config.botsort_proximity_threshold,
-            # Ultralytics thresholds its cosine distance after dividing by two,
-            # so convert SurvNG's direct cosine-similarity threshold to the
-            # equivalent [0, 1] similarity scale used by BoT-SORT.
-            appearance_thresh=(appearance_threshold + 1.0) / 2.0,
-            with_reid=config.appearance_reid_enabled,
-            model="auto",
-            device="cpu",
-        ))
-        self._records: dict[int, ObjectTrack] = {}
-        self._class_ids: dict[str, int] = {}
 
     def update(
         self,
@@ -225,7 +144,7 @@ class UltralyticsBotSortObjectTracker:
             record = self._records.get(track_id)
             if record is not None and record.label != str(detection["label"]):
                 raise RuntimeError(
-                    f"BoT-SORT associated track {track_id} across object classes"
+                    f"Deep OC-SORT associated track {track_id} across object classes"
                 )
             if record is None:
                 if len(self._records) >= self.config.max_tracks_per_session:
@@ -316,7 +235,7 @@ class UltralyticsBotSortObjectTracker:
         ]
 
     def diagnostics(self) -> dict[str, Any]:
-        # BoT-SORT owns its association internals. Keep the shared persistence
+        # Deep OC-SORT owns its association internals. Keep the shared persistence
         # contract explicit without claiming SurvNG Hybrid diagnostics.
         return {}
 
@@ -374,3 +293,52 @@ class UltralyticsBotSortObjectTracker:
         except (TypeError, ValueError):
             return captured_at
         return min(captured_at, value) if np.isfinite(value) and value >= 0.0 else captured_at
+
+
+class UltralyticsDeepOCSortObjectTracker(_UltralyticsObjectTrackerAdapter):
+    """Offline comparison adapter using observation-centric motion and SurvNG ReID."""
+
+    def __init__(
+        self,
+        config: ObjectTrackingConfig,
+        high_confidence_threshold: float,
+    ) -> None:
+        self.config = config
+        self.high_confidence_threshold = max(
+            config.low_confidence_threshold,
+            float(high_confidence_threshold),
+        )
+        track_buffer = ceil(
+            config.sample_fps
+            * (
+                max(config.lost_timeout_seconds, config.reid_max_age_seconds)
+                if config.appearance_reid_enabled
+                else config.lost_timeout_seconds
+            )
+        )
+        appearance_thresholds = []
+        if config.reid_enabled:
+            appearance_thresholds.append(config.reid_match_threshold)
+        if config.vehicle_reid_enabled:
+            appearance_thresholds.append(config.vehicle_reid_match_threshold)
+        appearance_threshold = min(appearance_thresholds, default=1.0)
+        self._tracker = _ClassAwareDeepOCSORT(SimpleNamespace(
+            track_high_thresh=self.high_confidence_threshold,
+            track_low_thresh=config.low_confidence_threshold,
+            new_track_thresh=self.high_confidence_threshold,
+            track_buffer=max(1, track_buffer),
+            match_thresh=0.8,
+            fuse_score=True,
+            delta_t=max(2, int(round(config.sample_fps))),
+            inertia=0.2,
+            use_byte=True,
+            gmc_method="none",
+            proximity_thresh=0.1,
+            appearance_thresh=(appearance_threshold + 1.0) / 2.0,
+            alpha_fixed_emb=0.95,
+            with_reid=config.appearance_reid_enabled,
+            model="auto",
+            device="cpu",
+        ))
+        self._records = {}
+        self._class_ids = {}

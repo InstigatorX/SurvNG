@@ -10,7 +10,7 @@ For the optional container installation, persistent-volume layout, migration,
 and Intel GPU/QSV support, see the [Docker README](docker/README.md). Generic
 deployment and upgrade guidance is in [Docker installation](docs/docker.md).
 Local visual-language search setup is documented in [Smart Search model packages](docs/semantic-search.md).
-The default Hybrid object tracker, optional Ultralytics BoT-SORT engine, and
+The production Hybrid object tracker, optional Deep OC-SORT comparison engine, and
 evidence-based selection process are covered in [Object tracking](README.tracking.md).
 
 For the end-to-end ingest, motion qualification, inference, incident, recording,

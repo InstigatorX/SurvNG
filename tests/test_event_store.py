@@ -961,6 +961,7 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(summary["total"], 1)
             self.assertEqual(summary["reviewed"], 1)
             self.assertEqual(summary["verdicts"]["survng_hybrid"], 1)
+            self.assertEqual(summary["verdicts"]["ultralytics_deepocsort"], 0)
 
     def test_tracking_comparison_rerun_resets_verdict_and_prunes_per_camera(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -990,6 +991,29 @@ class EventStoreTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "invalid tracking comparison verdict"):
                 store.set_tracking_comparison_verdict(history[0]["id"], "automatic")
+
+    def test_tracking_comparison_accepts_deep_ocsort_and_historic_botsort_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            current = store.save_tracking_comparison(
+                event_id=1,
+                camera_id="gate",
+                event_created_at="current",
+                result={"engines": {"ultralytics_deepocsort": {}}},
+            )
+            historic = store.save_tracking_comparison(
+                event_id=2,
+                camera_id="gate",
+                event_created_at="historic",
+                result={"engines": {"ultralytics_botsort": {}}},
+            )
+
+            store.set_tracking_comparison_verdict(current["id"], "ultralytics_deepocsort")
+            store.set_tracking_comparison_verdict(historic["id"], "ultralytics_botsort")
+            summary = store.tracking_comparison_summary(camera_id="gate")
+
+            self.assertEqual(summary["verdicts"]["ultralytics_deepocsort"], 1)
+            self.assertEqual(summary["verdicts"]["ultralytics_botsort"], 1)
 
 
 if __name__ == "__main__":

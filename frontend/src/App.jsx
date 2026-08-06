@@ -3616,7 +3616,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               className="tile-control-button"
               onClick={runTrackingComparison}
               disabled={trackingComparisonLoading || !Number.isFinite(manualEventId)}
-              title="Run Hybrid and BoT-SORT on the same 30-second recording window"
+              title="Run Hybrid and Deep OC-SORT on the same 30-second recording window"
             >
               <Gauge size={16} /> {trackingComparisonLoading ? "Comparing" : "Compare"}
             </button>
@@ -3809,7 +3809,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               </div>
               <div className="tracking-comparison-shared"><span>Recording decode <strong>{trackingComparison.average_frame_decode_ms} ms/frame</strong></span><span>OpenVINO detection <strong>{trackingComparison.average_detection_ms_per_frame} ms/frame</strong></span>{Number(trackingComparison.appearance_ms || 0) > 0 ? <span>Appearance extraction <strong>{trackingComparison.average_appearance_ms_per_frame} ms/frame</strong></span> : null}{trackingComparison.appearance_failures ? <span>Appearance failures <strong>{trackingComparison.appearance_failures}</strong></span> : null}<span>Clip preparation <strong>{(Number(trackingComparison.clip_preparation_ms || 0) / 1000).toFixed(1)}s</strong></span></div>
               <div className="tracking-comparison-grid">
-                {["survng_hybrid", "ultralytics_botsort"].map((implementation) => {
+                {["survng_hybrid", "ultralytics_deepocsort"].map((implementation) => {
                   const engine = trackingComparison.engines?.[implementation];
                   if (!engine) return null;
                   const comparisonEvent = { ...viewerEvent, object_tracking: {
@@ -3820,7 +3820,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                   } };
                   return (
                     <article className={`tracking-comparison-card ${trackingComparisonEngine === implementation ? "active" : ""}`} key={implementation}>
-                      <header><strong>{implementation === "survng_hybrid" ? "SurvNG Hybrid" : "Ultralytics BoT-SORT"}</strong><span>{engine.average_ms_per_frame} ms/frame · {engine.initialization_ms} ms init</span></header>
+                      <header><strong>{implementation === "survng_hybrid" ? "SurvNG Hybrid" : "Deep OC-SORT"}</strong><span>{engine.average_ms_per_frame} ms/frame · {engine.initialization_ms} ms init</span></header>
                       <SnapshotImage event={comparisonEvent} alt={`${implementation} tracking result`} allowObjectFocus={false} showAnnotations={false} showTracking />
                       <dl>
                         <div><dt>Tracks</dt><dd>{engine.track_count}</dd></div>
@@ -3839,7 +3839,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 <div className="tracking-comparison-verdict-actions">
                   {[
                     ["survng_hybrid", "Hybrid looked better"],
-                    ["ultralytics_botsort", "BoT-SORT looked better"],
+                    ["ultralytics_deepocsort", "Deep OC-SORT looked better"],
                     ["inconclusive", "No clear winner"],
                   ].map(([verdict, label]) => (
                     <button type="button" className={`tile-control-button ${trackingComparison.verdict === verdict ? "active" : ""}`} disabled={trackingVerdictLoading} onClick={() => saveTrackingVerdict(verdict)} key={verdict}>{label}</button>
@@ -3856,7 +3856,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
               </div>
               <div className="tracking-comparison-shared">
                 <span>Hybrid better <strong>{trackingComparisonHistory.summary.verdicts?.survng_hybrid || 0}</strong></span>
-                <span>BoT-SORT better <strong>{trackingComparisonHistory.summary.verdicts?.ultralytics_botsort || 0}</strong></span>
+                <span>Deep OC-SORT better <strong>{trackingComparisonHistory.summary.verdicts?.ultralytics_deepocsort || 0}</strong></span>
+                {trackingComparisonHistory.summary.verdicts?.ultralytics_botsort ? <span>BoT-SORT better (historic) <strong>{trackingComparisonHistory.summary.verdicts.ultralytics_botsort}</strong></span> : null}
                 <span>No clear winner <strong>{trackingComparisonHistory.summary.verdicts?.inconclusive || 0}</strong></span>
               </div>
               {trackingComparisonHistory.items.some((item) => item.verdict) ? (
@@ -3864,7 +3865,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                   {trackingComparisonHistory.items.filter((item) => item.verdict).slice(0, 5).map((item) => (
                     <div key={item.id}>
                       <time>{formatDateTime(item.event_created_at || item.created_at, timeZone)}</time>
-                      <strong>{item.verdict === "survng_hybrid" ? "Hybrid" : item.verdict === "ultralytics_botsort" ? "BoT-SORT" : "No clear winner"}</strong>
+                      <strong>{item.verdict === "survng_hybrid" ? "Hybrid" : item.verdict === "ultralytics_deepocsort" ? "Deep OC-SORT" : item.verdict === "ultralytics_botsort" ? "BoT-SORT (historic)" : "No clear winner"}</strong>
                       <span>{item.result?.frames_processed || 0} frames</span>
                     </div>
                   ))}
@@ -8182,7 +8183,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [retentionError, setRetentionError] = useState("");
   const [mqttStatus, setMqttStatus] = useState(null);
   const [detectorStatus, setDetectorStatus] = useState(null);
-  const [trackingCatalog, setTrackingCatalog] = useState(null);
   const [motionCatalog, setMotionCatalog] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
@@ -8240,7 +8240,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         fetch("/api/recordings/cache/status"),
         fetch("/api/system/status"),
         fetch("/api/motion/pipeline/catalog"),
-        fetch("/api/object-tracking/catalog"),
         fetch("/api/retention/status"),
       ]);
       const response = results[0].status === "fulfilled" ? results[0].value : null;
@@ -8251,8 +8250,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         if (result.status !== "fulfilled" || !result.value.ok) return null;
         try { return await result.value.json(); } catch { return null; }
       };
-      const [status, acceleratorPayload, models, cache, system, catalog, trackerCatalog, retention] = await Promise.all([
-        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6), optionalPayload(7), optionalPayload(8),
+      const [status, acceleratorPayload, models, cache, system, catalog, retention] = await Promise.all([
+        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6), optionalPayload(7),
       ]);
       if (sequence !== configLoadSequence.current) return false;
       setConfig(nextConfig);
@@ -8265,7 +8264,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         setDetectorStatus(system.detector || null);
       }
       if (catalog) setMotionCatalog(catalog);
-      if (trackerCatalog) setTrackingCatalog(trackerCatalog);
       if (retention) setRetentionStatus(retention);
       setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
       return true;
@@ -8796,7 +8794,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             runRetention={runRetention}
             mqttStatus={mqttStatus}
             detectorStatus={detectorStatus}
-            trackingCatalog={trackingCatalog}
             motionCatalog={motionCatalog}
             section={generalSection}
           />
@@ -9996,7 +9993,7 @@ function RetentionSummary({ status }) {
   );
 }
 
-function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, trackingCatalog, motionCatalog, section }) {
+function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
@@ -10284,13 +10281,11 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <details className="detection-compact-details">
           <summary>Association tuning</summary>
           <div className="detection-field-grid advanced-tracking-grid">
-            <label>Tracking engine<select value={config.detector?.tracking?.implementation ?? "survng_hybrid"} onChange={(event) => updateConfig(["detector", "tracking", "implementation"], event.target.value)}>{(trackingCatalog?.implementations || [{ id: "survng_hybrid", name: "SurvNG Hybrid", available: true }]).map((item) => <option key={item.id} value={item.id} disabled={!item.available}>{item.name}{item.available ? "" : " (not installed)"}</option>)}</select><small>{trackingCatalog?.implementations?.find((item) => item.id === (config.detector?.tracking?.implementation ?? "survng_hybrid"))?.description || "Choose how detections retain the same numbered track."}</small>{trackingCatalog?.implementations?.find((item) => item.id === "ultralytics_botsort" && !item.available)?.reason ? <small>{trackingCatalog.implementations.find((item) => item.id === "ultralytics_botsort").reason} Install the optional tracking requirements to enable it.</small> : null}</label>
+            <div className="detection-settings-subhead"><strong>SurvNG Hybrid tracking</strong><small>Production tracking uses SurvNG’s timestamp-aware geometry and selective appearance recovery. Deep OC-SORT is available only through the incident Compare tool.</small></div>
             <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Incident-starting objects have already passed the event-frame confirmation above.</small></label>
             <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
-            {config.detector?.tracking?.implementation !== "ultralytics_botsort" ? <>
-              <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
-              <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
-            </> : null}
+            <label>Box match overlap<input type="number" min="0.05" max="0.9" step="0.05" value={config.detector?.tracking?.match_iou_threshold ?? 0.2} onChange={(event) => updateConfig(["detector", "tracking", "match_iou_threshold"], Number(event.target.value))} /><small>How much predicted and detected boxes must overlap to retain an ID.</small></label>
+            <label>Movement match distance<input type="number" min="0.1" max="2" step="0.05" value={config.detector?.tracking?.match_center_distance_ratio ?? 0.65} onChange={(event) => updateConfig(["detector", "tracking", "match_center_distance_ratio"], Number(event.target.value))} /><small>Reconnects nearby boxes when overlap changes because someone moves quickly or approaches the camera.</small></label>
             <label>Maximum tracks per incident<input type="number" min="1" max="1000" step="10" value={config.detector?.tracking?.max_tracks_per_session ?? 100} onChange={(event) => updateConfig(["detector", "tracking", "max_tracks_per_session"], Number(event.target.value))} /><small>Safety limit for unusually noisy detector output.</small></label>
           </div>
         </details>
@@ -10328,13 +10323,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
                 <button type="button" className="danger" onClick={() => updateConfig(["detector", "tracking", "camera_transition_routes"], cameraTransitionRoutes.filter((_item, routeIndex) => routeIndex !== index))}>Remove</button>
               </div>) : <p className="settings-help">No expected routes yet. Nearby incidents still appear as general sequence candidates.</p>}
             </div>
-            {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <>
-              <label>BoT-SORT match tolerance<input type="number" min="0.1" max="1" step="0.05" value={config.detector?.tracking?.botsort_match_threshold ?? 0.8} onChange={(event) => updateConfig(["detector", "tracking", "botsort_match_threshold"], Number(event.target.value))} /><small>Higher values allow more motion difference while retaining an ID.</small></label>
-              <label>Appearance proximity<input type="number" min="0" max="1" step="0.05" value={config.detector?.tracking?.botsort_proximity_threshold ?? 0.1} onChange={(event) => updateConfig(["detector", "tracking", "botsort_proximity_threshold"], Number(event.target.value))} /><small>Minimum box overlap before appearance can reconnect a person. Zero allows appearance recovery anywhere in the frame.</small></label>
-              <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.botsort_fuse_score ?? true} onChange={(event) => updateConfig(["detector", "tracking", "botsort_fuse_score"], event.target.checked)} /><span>Blend detector confidence</span></label>
-            </> : null}
           </div>
-          {config.detector?.tracking?.implementation === "ultralytics_botsort" ? <div className="probe-result"><strong>Optional high-accuracy engine</strong><span>Runs official Ultralytics BoT-SORT with separate state for each camera event. Camera-motion compensation is disabled for fixed cameras. The optional runtime adds substantial disk and memory overhead.</span></div> : null}
           {config.detector?.tracking?.reid_enabled ? (
             reidStatus?.enabled ? (
               <div className={`probe-result ${(reidStatus.person?.ready ?? reidStatus.ready) ? "ok" : "bad"}`}>

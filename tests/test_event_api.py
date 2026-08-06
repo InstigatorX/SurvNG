@@ -394,14 +394,14 @@ class EventApiSerializationTest(unittest.TestCase):
             for call in fake_manager.events.tracking_capacity_activity.call_args_list:
                 self.assertEqual(call.kwargs["camera_id"], "gate")
 
-    def test_object_tracking_catalog_exposes_safe_default_and_optional_backend(self) -> None:
+    def test_object_tracking_catalog_exposes_only_safe_production_backend(self) -> None:
         catalog = main.object_tracking_catalog()
         implementations = {
             item["id"]: item for item in catalog["implementations"]
         }
 
         self.assertTrue(implementations["survng_hybrid"]["available"])
-        self.assertIn("ultralytics_botsort", implementations)
+        self.assertEqual(set(implementations), {"survng_hybrid"})
 
     def test_manual_detection_stays_on_one_manager_generation_during_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -487,7 +487,7 @@ class EventApiSerializationTest(unittest.TestCase):
         limiter = SimpleNamespace(acquire=Mock(return_value=True), release=Mock())
         comparison = {
             "frames_processed": 4,
-            "engines": {"survng_hybrid": {}, "ultralytics_botsort": {}},
+            "engines": {"survng_hybrid": {}, "ultralytics_deepocsort": {}},
         }
         runner = SimpleNamespace(run=Mock(return_value=comparison))
 
@@ -495,7 +495,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "config", active_config),
             patch.object(main, "manager", active_manager),
             patch.object(main, "TRACKING_COMPARISON_LIMITER", limiter),
-            patch.object(main, "ultralytics_botsort_dependency_status", return_value={"available": True, "reason": ""}),
+            patch.object(main, "ultralytics_deepocsort_dependency_status", return_value={"available": True, "reason": ""}),
             patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")) as ensure_clip,
             patch.object(main, "sampled_video_frames", return_value=[(1.0, np.zeros((2, 2, 3), dtype=np.uint8))]) as sampled_frames,
             patch.object(main, "TrackingComparisonRunner", return_value=runner),
@@ -554,13 +554,13 @@ class EventApiSerializationTest(unittest.TestCase):
             main.manager = replacement
             return {
                 "frames_processed": 1,
-                "engines": {"survng_hybrid": {}, "ultralytics_botsort": {}},
+                "engines": {"survng_hybrid": {}, "ultralytics_deepocsort": {}},
             }
 
         with (
             patch.object(main, "config", active_config),
             patch.object(main, "manager", active_manager),
-            patch.object(main, "ultralytics_botsort_dependency_status", return_value={"available": True, "reason": ""}),
+            patch.object(main, "ultralytics_deepocsort_dependency_status", return_value={"available": True, "reason": ""}),
             patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")),
             patch.object(main, "sampled_video_frames", return_value=[]),
             patch.object(main, "TrackingComparisonRunner", return_value=SimpleNamespace(run=run)),
@@ -574,7 +574,7 @@ class EventApiSerializationTest(unittest.TestCase):
     def test_tracking_comparison_rejects_missing_optional_backend_without_work(self) -> None:
         with patch.object(
             main,
-            "ultralytics_botsort_dependency_status",
+            "ultralytics_deepocsort_dependency_status",
             return_value={"available": False, "reason": "not installed"},
         ):
             with self.assertRaises(HTTPException) as unavailable:

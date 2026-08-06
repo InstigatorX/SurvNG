@@ -19,7 +19,7 @@ from survng.app.object_tracking import (
     ObjectTrackerRegistry,
     ObjectTrackingSession,
     _rescale_detection_boxes,
-    ultralytics_botsort_dependency_status,
+    ultralytics_deepocsort_dependency_status,
 )
 
 
@@ -44,7 +44,7 @@ class UltralyticsDependencyStatusTest(unittest.TestCase):
         _version,
         _find_spec,
     ) -> None:
-        status = ultralytics_botsort_dependency_status()
+        status = ultralytics_deepocsort_dependency_status()
 
         self.assertTrue(status["available"])
         self.assertFalse(status["is_tested_version"])
@@ -57,10 +57,21 @@ class UltralyticsDependencyStatusTest(unittest.TestCase):
         _version,
         _find_spec,
     ) -> None:
-        status = ultralytics_botsort_dependency_status()
+        status = ultralytics_deepocsort_dependency_status()
 
         self.assertFalse(status["available"])
         self.assertIn("outside", status["reason"])
+
+    @patch("survng.app.object_tracking.version", return_value="8.4.115")
+    def test_deep_ocsort_module_is_required(self, _version) -> None:
+        def find_spec(name: str):
+            return None if name == "ultralytics.trackers.deep_oc_sort" else object()
+
+        with patch("survng.app.object_tracking.importlib.util.find_spec", side_effect=find_spec):
+            status = ultralytics_deepocsort_dependency_status()
+
+        self.assertFalse(status["available"])
+        self.assertIn("does not include Deep OC-SORT", status["reason"])
 
 
 class ByteTrackObjectTrackerTest(unittest.TestCase):

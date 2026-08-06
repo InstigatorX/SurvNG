@@ -22,6 +22,12 @@ from .object_tracking import (
 from .zones import apply_detection_zones
 
 
+TRACKING_COMPARISON_IMPLEMENTATIONS = (
+    "survng_hybrid",
+    "ultralytics_deepocsort",
+)
+
+
 class DetectorBackend(Protocol):
     config: Any
 
@@ -202,7 +208,7 @@ def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
 
 
 class TrackingComparisonRunner:
-    IMPLEMENTATIONS = ("survng_hybrid", "ultralytics_botsort")
+    IMPLEMENTATIONS = TRACKING_COMPARISON_IMPLEMENTATIONS
 
     def __init__(
         self,

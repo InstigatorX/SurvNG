@@ -368,15 +368,18 @@ class ObjectTrackingConfig(BaseModel):
         default_factory=lambda: ["car", "truck", "bus", "motorcycle"],
         max_length=32,
     )
-    botsort_match_threshold: float = Field(default=0.8, ge=0.1, le=1.0)
-    botsort_proximity_threshold: float = Field(default=0.1, ge=0.0, le=1.0)
-    botsort_fuse_score: bool = True
 
     @field_validator("implementation", mode="before")
     @classmethod
     def normalize_tracking_implementation(cls, value: object) -> str:
         implementation = str(value or "").strip().lower()
-        return "survng_hybrid" if implementation == "bytetrack" else implementation
+        if implementation in {
+            "bytetrack",
+            "ultralytics_botsort",
+            "ultralytics_deepocsort",
+        }:
+            return "survng_hybrid"
+        return implementation
 
     @model_validator(mode="after")
     def validate_reid_model(self) -> "ObjectTrackingConfig":

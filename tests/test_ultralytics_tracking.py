@@ -14,7 +14,7 @@ ULTRALYTICS_AVAILABLE = (
 )
 
 if ULTRALYTICS_AVAILABLE:
-    from survng.app.ultralytics_tracking import UltralyticsBotSortObjectTracker
+    from survng.app.ultralytics_tracking import UltralyticsDeepOCSortObjectTracker
 
 
 def detection(
@@ -35,16 +35,15 @@ def detection(
 
 
 @unittest.skipUnless(ULTRALYTICS_AVAILABLE, "optional Ultralytics tracker is not installed")
-class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
+class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
     def config(self, **updates) -> ObjectTrackingConfig:
         return ObjectTrackingConfig(
-            implementation="ultralytics_botsort",
             lost_timeout_seconds=1.0,
             **updates,
         )
 
     def test_preserves_ids_and_never_associates_across_classes(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(), 0.7)
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)
         first = tracker.update([
             detection("person", 0.9, (10, 10, 40, 80)),
             detection("car", 0.9, (100, 10, 180, 80)),
@@ -63,7 +62,7 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertNotEqual(third_ids["car"], first_ids["person"])
 
     def test_persists_sampled_boxes_for_video_review(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(), 0.7)
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)
         tracker.update([
             detection("person", 0.9, (10, 10, 40, 80)),
         ], 10.0, confirm_new=True)
@@ -75,11 +74,23 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertEqual(summary["box_history"][0], [10.0, 10, 10, 40, 80])
         self.assertEqual(summary["box_history"][-1], [10.5, 12, 10, 42, 80])
 
-    def test_reid_can_recover_a_far_person_when_proximity_is_disabled(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(
+    def test_passes_survng_embeddings_to_deep_ocsort(self) -> None:
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
             reid_enabled=True,
             reid_model_path="person-reid.xml",
-            botsort_proximity_threshold=0.0,
+        ), 0.7)
+
+        tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80), (3.0, 4.0)),
+        ], 10.0, confirm_new=True)
+
+        native = tracker._tracker.tracked_stracks[0]
+        np.testing.assert_allclose(native.curr_feat, np.asarray([0.6, 0.8], dtype=np.float32))
+
+    def test_reid_can_recover_a_far_person_when_proximity_is_disabled(self) -> None:
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
+            reid_enabled=True,
+            reid_model_path="person-reid.xml",
         ), 0.7)
         first = tracker.update([
             detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
@@ -93,10 +104,9 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertNotIn("_tracking_embedding", recovered[0])
 
     def test_dissimilar_person_starts_a_new_track(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
             reid_enabled=True,
             reid_model_path="person-reid.xml",
-            botsort_proximity_threshold=0.0,
         ), 0.7)
         first = tracker.update([
             detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
@@ -109,11 +119,10 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertNotEqual(second[0]["track_id"], first[0]["track_id"])
 
     def test_reid_uses_survng_direct_cosine_similarity_threshold(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
             reid_enabled=True,
             reid_model_path="person-reid.xml",
             reid_match_threshold=0.82,
-            botsort_proximity_threshold=0.0,
         ), 0.7)
         first = tracker.update([
             detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
@@ -131,11 +140,10 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertNotEqual(second[0]["track_id"], first[0]["track_id"])
 
     def test_reid_never_recovers_beyond_configured_wall_clock_age(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
             reid_enabled=True,
             reid_model_path="person-reid.xml",
             reid_max_age_seconds=1.0,
-            botsort_proximity_threshold=0.0,
         ), 0.7)
         first = tracker.update([
             detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
@@ -153,7 +161,7 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertNotEqual(second[0]["track_id"], first[0]["track_id"])
 
     def test_ignored_detection_does_not_create_a_track(self) -> None:
-        tracker = UltralyticsBotSortObjectTracker(self.config(), 0.7)
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)
         ignored = detection("person", 0.9, (10, 10, 40, 80))
         ignored["incident_eligible"] = False
 
@@ -161,11 +169,11 @@ class UltralyticsBotSortObjectTrackerTest(unittest.TestCase):
         self.assertEqual(tracker.summaries(10.0), [])
 
     def test_concurrent_tracker_instances_have_independent_id_counters(self) -> None:
-        first_tracker = UltralyticsBotSortObjectTracker(self.config(), 0.7)
+        first_tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)
         first = first_tracker.update([
             detection("person", 0.9, (10, 10, 40, 80)),
         ], 10.0, confirm_new=True)
-        second_tracker = UltralyticsBotSortObjectTracker(self.config(), 0.7)
+        second_tracker = UltralyticsDeepOCSortObjectTracker(self.config(), 0.7)
         second = second_tracker.update([
             detection("person", 0.9, (10, 10, 40, 80)),
         ], 10.0, confirm_new=True)

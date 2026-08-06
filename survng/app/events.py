@@ -19,6 +19,7 @@ class EventStore:
     TRACKING_COMPARISON_VERDICTS = {
         "survng_hybrid",
         "ultralytics_botsort",
+        "ultralytics_deepocsort",
         "inconclusive",
     }
 
