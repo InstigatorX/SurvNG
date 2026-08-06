@@ -29,6 +29,7 @@ from survng.app.detector import objects_to_json
 from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
+from survng.app.motion_events import MotionTrigger, MotionTriggerBatch
 from survng.app.object_tracking import ObjectTrackingSessionFactory
 from survng.app.motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
@@ -2023,7 +2024,7 @@ class CameraWorkerTest(unittest.TestCase):
                 patch.object(
                     worker,
                     "_sample_rejected_motion",
-                    return_value="sample.jpg",
+                    return_value="",
                 ) as sample_rejected,
                 patch.object(
                     worker.motion_decision_handler,
@@ -2045,8 +2046,8 @@ class CameraWorkerTest(unittest.TestCase):
             first_audit = record_audit.call_args_list[0].kwargs
             retry_audit = record_audit.call_args_list[1].kwargs
             self.assertEqual(first_audit["decision_id"], retry_audit["decision_id"])
-            self.assertEqual(first_audit["snapshot_path"], "sample.jpg")
-            self.assertEqual(retry_audit["snapshot_path"], "sample.jpg")
+            self.assertEqual(first_audit["snapshot_path"], "")
+            self.assertEqual(retry_audit["snapshot_path"], "")
             process_event.assert_not_called()
             self.assertEqual(worker._motion_stats["event_retries"], 1)
             self.assertEqual(worker._motion_stats["bursts"], 1)
@@ -2448,6 +2449,45 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual(order[:3], ["capture", "onvif", "tracking"])
 
+    def test_stop_preserves_motion_state_when_workers_do_not_exit(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            worker._motion_frames.append(
+                (100.0, np.zeros((90, 160), dtype=np.uint8))
+            )
+            active = MotionTriggerBatch((MotionTrigger(
+                topic="adaptive/motion",
+                message="motion",
+                event_at=datetime.now(timezone.utc),
+                received_at=100.0,
+            ),))
+            worker.motion_events.set_active(active)
+            stuck_event_worker = Mock()
+            stuck_event_worker.is_alive.return_value = True
+            worker._motion_thread = stuck_event_worker
+
+            with (
+                patch.object(worker.motion_analysis, "wait_stopped", return_value=False),
+                patch.object(worker.motion_analysis, "reset") as reset_analysis,
+                patch.object(worker.motion_evidence, "clear") as clear_evidence,
+                patch.object(worker.capture, "wait_stopped", return_value={}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "motion workers"):
+                    worker.stop()
+
+            reset_analysis.assert_not_called()
+            clear_evidence.assert_not_called()
+            self.assertEqual(len(worker._motion_frames), 1)
+            self.assertIs(worker.motion_events.active_triggers, active)
+            with self.assertRaisesRegex(RuntimeError, "stale workers"):
+                worker.start()
+            self.assertTrue(worker._stop.is_set())
+
     def test_close_refuses_to_race_an_active_motion_worker(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2488,6 +2528,28 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(worker.last_motion_at, "")
         self.assertEqual(detector.calls, 0)
         self.assertIsNone(worker.motion_evidence.last("onvif"))
+
+    def test_late_motion_callback_is_ignored_after_shutdown_starts(self) -> None:
+        camera = CameraConfig(
+            id="back-middle",
+            name="Back Middle",
+            stream_url="rtsp://example.invalid/main",
+        )
+        published: list[tuple[str, dict]] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                camera,
+                Path(tmpdir),
+                event_callback=lambda *args: published.append(args),
+            )
+            worker._accepting_motion_events = False
+
+            worker.handle_motion_event("onvif/motion", "late callback")
+
+        self.assertEqual(worker.last_motion_at, "")
+        self.assertIsNone(worker.motion_evidence.last("onvif"))
+        self.assertTrue(worker._motion_queue.empty())
+        self.assertEqual(published, [])
 
     def test_motion_handler_enqueues_without_running_detection_inline(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

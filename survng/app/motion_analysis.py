@@ -48,9 +48,15 @@ class FairMotionAnalysisLimiter:
         )
 
     @contextmanager
-    def acquire(self, camera_id: str) -> Iterator[float]:
-        """Acquire a fair slot and yield the wait duration in seconds."""
+    def acquire(
+        self,
+        camera_id: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[float | None]:
+        """Acquire a fair slot, or yield ``None`` when the wait is cancelled."""
         started = time.monotonic()
+        acquired = False
         with self._condition:
             self._sequence += 1
             waiter = _Waiter(camera_id, self._sequence, started)
@@ -58,11 +64,21 @@ class FairMotionAnalysisLimiter:
             # request keeps the latest-frame queue bounded per camera.
             self._pending[camera_id] = waiter
             while self._active >= self.capacity or self._next_waiter() is not waiter:
-                self._condition.wait()
-            self._pending.pop(camera_id, None)
-            self._active += 1
-            self._grants += 1
-            self._last_granted[camera_id] = self._grants
+                if cancel_event is not None and cancel_event.is_set():
+                    if self._pending.get(camera_id) is waiter:
+                        self._pending.pop(camera_id, None)
+                    self._condition.notify_all()
+                    break
+                self._condition.wait(timeout=0.1 if cancel_event is not None else None)
+            else:
+                self._pending.pop(camera_id, None)
+                self._active += 1
+                self._grants += 1
+                self._last_granted[camera_id] = self._grants
+                acquired = True
+        if not acquired:
+            yield None
+            return
         try:
             yield max(0.0, time.monotonic() - started)
         finally:

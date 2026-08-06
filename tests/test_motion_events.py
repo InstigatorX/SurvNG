@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import pytest
 
@@ -33,6 +34,23 @@ def test_full_queue_evicts_oldest_trigger_and_reports_drop() -> None:
     assert coordinator.queue.get_nowait()["message"] == "2"
     assert coordinator.queue.get_nowait()["message"] == "3"
     assert stats == ["triggers", "triggers", "triggers", "dropped_triggers"]
+
+
+def test_full_queue_race_does_not_report_an_eviction_that_never_happened() -> None:
+    coordinator = MotionEventCoordinator(queue_size=1, retry_limit=2)
+    drops: list[str] = []
+    coordinator.queue.put_nowait(_trigger(1))
+    original_get = coordinator.queue.get_nowait
+
+    def drained_before_eviction() -> MotionTrigger:
+        original_get()
+        raise queue.Empty
+
+    coordinator.queue.get_nowait = Mock(side_effect=drained_before_eviction)
+
+    assert coordinator.enqueue(_trigger(2), on_drop=drops.append)
+    assert coordinator.queue.queue[0].received_at == 2.0
+    assert drops == []
 
 
 def test_coalesce_preserves_batch_order_and_stop_sentinel() -> None:

@@ -252,19 +252,22 @@ class MotionEventCoordinator:
                 if on_drop is not None:
                     on_drop("dropped_triggers")
                 return False
+            dropped = 0
             try:
                 self.queue.get_nowait()
+                dropped += 1
             except queue.Empty:
                 pass
-            if on_drop is not None:
-                on_drop("dropped_triggers")
             try:
                 self.queue.put_nowait(trigger)
-                return True
+                queued = True
             except queue.Full:
-                if on_drop is not None:
+                dropped += 1
+                queued = False
+            if on_drop is not None:
+                for _ in range(dropped):
                     on_drop("dropped_triggers")
-                return False
+            return queued
 
     def clear(self) -> None:
         with self._lock:

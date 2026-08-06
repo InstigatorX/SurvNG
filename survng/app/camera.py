@@ -140,6 +140,7 @@ class CameraWorker:
         self._stop = threading.Event()
         self._stop.set()
         self._enabled = False
+        self._accepting_motion_events = True
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
         self._motion_analysis_lock = threading.Lock()
@@ -472,7 +473,37 @@ class CameraWorker:
 
     def start(self) -> None:
         with self._lifecycle_lock:
+            if self._enabled:
+                return
+            residual_workers = [
+                label
+                for label, running in (
+                    (
+                        "motion events",
+                        self._motion_thread is not None
+                        and self._motion_thread.is_alive(),
+                    ),
+                    (
+                        "motion analysis",
+                        self._motion_analysis_thread is not None
+                        and self._motion_analysis_thread.is_alive(),
+                    ),
+                    (
+                        "capture",
+                        any(thread.is_alive() for thread in self.capture.threads().values()),
+                    ),
+                    ("ONVIF", self.onvif.running),
+                    ("object tracking", self.object_tracking.running()),
+                )
+                if running
+            ]
+            if residual_workers:
+                raise RuntimeError(
+                    f"cannot start camera {self.camera.id} while stale workers remain: "
+                    f"{', '.join(residual_workers)}"
+                )
             self._enabled = True
+            self._accepting_motion_events = True
             self._stop.clear()
             self.object_tracking.set_accepting(self._detection_enabled)
             try:
@@ -506,6 +537,7 @@ class CameraWorker:
     def stop(self) -> None:
         with self._lifecycle_lock:
             self._enabled = False
+            self._accepting_motion_events = False
             self._stop.set()
             self._active_incident_event_id = None
             # Stop accepting camera I/O and release the scarce ONVIF
@@ -521,7 +553,10 @@ class CameraWorker:
                 if motion_thread.is_alive():
                     LOGGER.error("motion worker did not stop for %s", self.camera.id)
             self._motion_thread = motion_thread if motion_thread is not None and motion_thread.is_alive() else None
-            if not self.motion_analysis.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS):
+            analysis_stopped = self.motion_analysis.wait_stopped(
+                CAPTURE_STOP_TIMEOUT_SECONDS
+            )
+            if not analysis_stopped:
                 LOGGER.error("motion analysis worker did not stop for %s", self.camera.id)
             alive_threads = self.capture.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS)
             alive = sorted(alive_threads)
@@ -546,13 +581,11 @@ class CameraWorker:
             with self._frame_lock:
                 self._tracking_frames.clear()
                 self._tracking_last_sample_epoch = 0.0
-            self.motion_analysis.reset()
-            self.motion_evidence.clear()
-            motion_workers_stopped = (
-                self._motion_thread is None
-                and self._motion_analysis_thread is None
-            )
+            event_worker_stopped = self._motion_thread is None
+            motion_workers_stopped = event_worker_stopped and analysis_stopped
             if motion_workers_stopped:
+                self.motion_analysis.reset()
+                self.motion_evidence.clear()
                 self.motion_observation_pipeline.runtime.reset()
                 self.motion_pipeline.runtime.reset()
                 with self._motion_fusion_lock:
@@ -563,7 +596,13 @@ class CameraWorker:
                     "preserving motion runtime for %s because a motion worker is still active",
                     self.camera.id,
                 )
-            self.motion_events.reset()
+            if motion_workers_stopped:
+                self.motion_events.reset()
+            else:
+                LOGGER.error(
+                    "preserving motion event state for %s because a motion worker is still active",
+                    self.camera.id,
+                )
             shutdown_failures: list[str] = []
             if alive:
                 shutdown_failures.append(f"capture sources: {', '.join(alive)}")
@@ -934,7 +973,7 @@ class CameraWorker:
         message: str = "",
         event_at: datetime | None = None,
     ) -> None:
-        if not self._detection_enabled:
+        if not self._accepting_motion_events or not self._detection_enabled:
             return
         received_at = time.time()
         self.last_motion_at = datetime.now(timezone.utc).isoformat()

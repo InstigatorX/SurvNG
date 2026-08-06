@@ -165,6 +165,10 @@ class MotionDecisionOrchestrator:
         triggers: MotionTriggerBatch,
         stop_event: threading.Event,
     ) -> None:
+        if stop_event.is_set():
+            self._hooks.complete_adaptive_trigger(triggers)
+            self._events.set_active(None)
+            return
         priority_triggers = [
             item for item in triggers if priority_motion_topic(item.topic)
         ]
@@ -378,7 +382,11 @@ class MotionDecisionOrchestrator:
         result: MotionQualificationResult,
     ) -> None:
         snapshot_path = next(
-            (item.audit_snapshot_path for item in triggers if item.audit_snapshot_path),
+            (
+                item.audit_snapshot_path
+                for item in triggers
+                if item.audit_snapshot_path is not None
+            ),
             None,
         )
         if snapshot_path is None:

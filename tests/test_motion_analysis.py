@@ -40,6 +40,40 @@ class FairMotionAnalysisLimiterTest(unittest.TestCase):
         self.assertEqual(order, ["gate-1", "foyer", "gate-2"])
         self.assertEqual(limiter.status(), {"capacity": 1, "active": 0, "pending": 0})
 
+    def test_waiting_camera_can_cancel_without_waiting_for_active_analysis(self) -> None:
+        limiter = FairMotionAnalysisLimiter(1)
+        active = threading.Event()
+        release = threading.Event()
+        cancelled = threading.Event()
+        result: list[float | None] = []
+
+        def holder() -> None:
+            with limiter.acquire("gate"):
+                active.set()
+                release.wait(timeout=1)
+
+        def waiter() -> None:
+            active.wait(timeout=1)
+            with limiter.acquire("foyer", cancel_event=cancelled) as wait_seconds:
+                result.append(wait_seconds)
+
+        holding_thread = threading.Thread(target=holder)
+        waiting_thread = threading.Thread(target=waiter)
+        holding_thread.start()
+        waiting_thread.start()
+        active.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while limiter.status()["pending"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        cancelled.set()
+        waiting_thread.join(timeout=0.5)
+
+        self.assertFalse(waiting_thread.is_alive())
+        self.assertEqual(result, [None])
+        self.assertEqual(limiter.status(), {"capacity": 1, "active": 1, "pending": 0})
+        release.set()
+        holding_thread.join(timeout=1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,11 +97,17 @@ class MotionAnalysisService:
         self.last_continuous_result: MotionQualificationResult | None = None
         self.debug_last_run_clock = 0.0
         self._visual_lock = threading.Lock()
+        self._stop_event: threading.Event | None = None
+        self._stop_requested = threading.Event()
+        self._accepting_frames = True
 
     def start(self, stop_event: threading.Event) -> None:
         if self.thread is not None and self.thread.is_alive():
             return
         self.clear_queue()
+        self._stop_event = stop_event
+        self._stop_requested.clear()
+        self._accepting_frames = True
         thread = threading.Thread(
             target=self.run,
             args=(stop_event,),
@@ -116,6 +122,8 @@ class MotionAnalysisService:
             raise
 
     def request_stop(self) -> None:
+        self._accepting_frames = False
+        self._stop_requested.set()
         self.clear_queue()
         try:
             self.queue.put_nowait(None)
@@ -152,21 +160,24 @@ class MotionAnalysisService:
             self.visual_backup.reset()
 
     def schedule(self, captured_at: float, stop_event: threading.Event) -> None:
-        if stop_event.is_set():
+        if stop_event.is_set() or not self._accepting_frames:
             return
         try:
             self.queue.put_nowait(captured_at)
             return
         except queue.Full:
+            dropped = 0
             try:
                 self.queue.get_nowait()
+                dropped += 1
             except queue.Empty:
                 pass
-        self.hooks.increment_stat("analysis_frames_dropped", 1)
         try:
             self.queue.put_nowait(captured_at)
         except queue.Full:
-            pass
+            dropped += 1
+        if dropped:
+            self.hooks.increment_stat("analysis_frames_dropped", dropped)
 
     def remember_frame(
         self,
@@ -175,7 +186,7 @@ class MotionAnalysisService:
         stop_event: threading.Event,
         captured_at: float | None = None,
     ) -> None:
-        if not self.hooks.frame_analysis_required():
+        if not self._accepting_frames or not self.hooks.frame_analysis_required():
             return
         interval = 1.0 / max(1.0, self.hooks.sample_fps())
         with self.frame_lock:
@@ -270,7 +281,8 @@ class MotionAnalysisService:
             self.visual_backup.reset_candidate()
 
     def run(self, stop_event: threading.Event) -> None:
-        while not stop_event.is_set():
+        self._stop_event = stop_event
+        while not self._stopping():
             try:
                 scheduled_at = self.queue.get(timeout=0.5)
             except queue.Empty:
@@ -278,8 +290,11 @@ class MotionAnalysisService:
             if scheduled_at is None or stop_event.is_set():
                 return
             try:
-                with self.limiter.acquire(self.camera_id) as wait_seconds:
-                    if stop_event.is_set():
+                with self.limiter.acquire(
+                    self.camera_id,
+                    cancel_event=self._stop_requested,
+                ) as wait_seconds:
+                    if wait_seconds is None or self._stopping():
                         return
                     self.hooks.record_analysis_wait(
                         max(0.0, wait_seconds * 1000.0)
@@ -352,6 +367,8 @@ class MotionAnalysisService:
         self.last_continuous_result = result
         self.primary_last_processed_at = captured_at
         self._record_continuous_stats(result)
+        if self._stopping():
+            return
         trigger_mode = self.hooks.trigger_mode()
         if trigger_mode == "camera_rescue":
             self.consider_visual_backup(result, samples, captured_at)
@@ -366,18 +383,29 @@ class MotionAnalysisService:
             require_primary_trigger=True,
         )
         self.last_continuous_result = fused
-        if not fused.accepted or not self.reserve_adaptive_trigger(captured_at):
+        if (
+            self._stopping()
+            or not fused.accepted
+            or not self.reserve_adaptive_trigger(captured_at)
+        ):
+            return
+        if self._stopping():
+            self.events.defer_adaptive(captured_at)
             return
         event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        queued = self._enqueue_trigger(
-            MotionTrigger(
-                topic="adaptive/motion",
-                message="adaptive motion transition",
-                event_at=event_at,
-                received_at=captured_at,
-                prequalified=fused,
+        try:
+            queued = self._enqueue_trigger(
+                MotionTrigger(
+                    topic="adaptive/motion",
+                    message="adaptive motion transition",
+                    event_at=event_at,
+                    received_at=captured_at,
+                    prequalified=fused,
+                )
             )
-        )
+        except Exception:
+            self.events.defer_adaptive(captured_at)
+            raise
         if not queued:
             self.events.defer_adaptive(captured_at)
             return
@@ -389,6 +417,8 @@ class MotionAnalysisService:
         samples: list[tuple[float, np.ndarray]],
         captured_at: float,
     ) -> None:
+        if self._stopping():
+            return
         settings = self.hooks.visual_backup_settings()
         illumination_probe_allowed = bool(
             self.hooks.detection_enabled()
@@ -440,56 +470,61 @@ class MotionAnalysisService:
             self.reset_visual_backup_candidate()
             return
 
-        fused = self.hooks.with_source_evidence(
-            result,
-            samples[0][0],
-            captured_at,
-            include_telemetry=False,
-            require_primary_trigger=True,
-        )
-        self.last_continuous_result = fused
-        if not fused.accepted:
-            self.events.defer_adaptive(captured_at)
-            self.reset_visual_backup_candidate()
-            return
-        fused = MotionQualificationResult(
-            accepted=fused.accepted,
-            score=fused.score,
-            threshold=fused.threshold,
-            reason=fused.reason,
-            frame_count=fused.frame_count,
-            features={
-                **fused.features,
-                "visual_backup": True,
-                "visual_backup_required_score": round(decision.required_score, 4),
-                "visual_backup_consecutive": decision.consecutive,
-                "visual_backup_grace_seconds": settings["grace_seconds"],
-            },
-            telemetry=dict(fused.telemetry),
-        )
-        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        queued = self._enqueue_trigger(
-            MotionTrigger(
-                topic="adaptive/visual_backup",
-                message="adaptive visual backup after missing camera notice",
-                event_at=event_at,
-                received_at=captured_at,
-                prequalified=fused,
+        trigger_enqueued = False
+        try:
+            if self._stopping():
+                return
+            fused = self.hooks.with_source_evidence(
+                result,
+                samples[0][0],
+                captured_at,
+                include_telemetry=False,
+                require_primary_trigger=True,
             )
-        )
-        if not queued:
-            self.events.defer_adaptive(captured_at)
+            self.last_continuous_result = fused
+            if self._stopping() or not fused.accepted:
+                return
+            fused = MotionQualificationResult(
+                accepted=fused.accepted,
+                score=fused.score,
+                threshold=fused.threshold,
+                reason=fused.reason,
+                frame_count=fused.frame_count,
+                features={
+                    **fused.features,
+                    "visual_backup": True,
+                    "visual_backup_required_score": round(
+                        decision.required_score, 4
+                    ),
+                    "visual_backup_consecutive": decision.consecutive,
+                    "visual_backup_grace_seconds": settings["grace_seconds"],
+                },
+                telemetry=dict(fused.telemetry),
+            )
+            event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+            trigger_enqueued = self._enqueue_trigger(
+                MotionTrigger(
+                    topic="adaptive/visual_backup",
+                    message="adaptive visual backup after missing camera notice",
+                    event_at=event_at,
+                    received_at=captured_at,
+                    prequalified=fused,
+                )
+            )
+            if not trigger_enqueued:
+                return
+            self.hooks.increment_stat("visual_backup_triggers", 1)
+            self.hooks.increment_stat(
+                "illumination_verification_probes",
+                int(decision.illumination_probe),
+            )
+            with self._visual_lock:
+                self.visual_backup.record_trigger(captured_at)
+            self._publish_motion(event_at, "visual_backup")
+        finally:
+            if not trigger_enqueued:
+                self.events.defer_adaptive(captured_at)
             self.reset_visual_backup_candidate()
-            return
-        self.hooks.increment_stat("visual_backup_triggers", 1)
-        self.hooks.increment_stat(
-            "illumination_verification_probes",
-            int(decision.illumination_probe),
-        )
-        with self._visual_lock:
-            self.visual_backup.record_trigger(captured_at)
-        self._publish_motion(event_at, "visual_backup")
-        self.reset_visual_backup_candidate()
 
     def capture_debug(self, captured_at: float) -> None:
         samples = self.samples()
@@ -605,4 +640,10 @@ class MotionAnalysisService:
                 "timestamp": timestamp,
                 "source": source,
             },
+        )
+
+    def _stopping(self) -> bool:
+        return bool(
+            self._stop_requested.is_set()
+            or (self._stop_event is not None and self._stop_event.is_set())
         )

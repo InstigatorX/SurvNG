@@ -12,7 +12,12 @@ from survng.app.motion_analysis_service import (
     MotionAnalysisHooks,
     MotionAnalysisService,
 )
-from survng.app.motion_coordinator import VisualBackupCoordinator, VisualBackupPolicy
+from survng.app.motion_coordinator import (
+    VisualBackupAction,
+    VisualBackupCoordinator,
+    VisualBackupDecision,
+    VisualBackupPolicy,
+)
 from survng.app.motion_events import MotionEventCoordinator
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
 
@@ -115,6 +120,34 @@ def test_latest_only_schedule_replaces_stale_pending_work() -> None:
     increment_stat.assert_called_once_with("analysis_frames_dropped", 1)
 
 
+def test_schedule_does_not_report_drop_when_consumer_wins_full_queue_race() -> None:
+    increment_stat = Mock()
+    service = _service(_hooks(increment_stat=increment_stat))
+    stop_event = threading.Event()
+    service.queue.put_nowait(100.0)
+    original_get = service.queue.get_nowait
+
+    def drained_before_eviction() -> float:
+        original_get()
+        raise queue.Empty
+
+    service.queue.get_nowait = Mock(side_effect=drained_before_eviction)
+
+    service.schedule(101.0, stop_event)
+
+    assert service.queue.queue[0] == 101.0
+    increment_stat.assert_not_called()
+
+
+def test_schedule_rejects_work_after_stop_requested() -> None:
+    service = _service(_hooks())
+    service.request_stop()
+
+    service.schedule(100.0, threading.Event())
+
+    assert list(service.queue.queue) == [None]
+
+
 def test_worker_loop_uses_injected_execution_boundary_and_stops_cleanly() -> None:
     stop_event = threading.Event()
     execute_continuous = Mock(side_effect=lambda _at: stop_event.set())
@@ -176,3 +209,114 @@ def test_request_stop_replaces_pending_work_with_sentinel() -> None:
         pass
     else:
         raise AssertionError("stop queue should contain only the sentinel")
+
+
+def test_stopped_service_rejects_late_capture_callbacks() -> None:
+    service = _service(_hooks())
+    stop_event = threading.Event()
+    stop_event.set()
+    service.request_stop()
+
+    service.remember_frame(
+        np.zeros((180, 320, 3), dtype=np.uint8),
+        10.0,
+        stop_event,
+        100.0,
+    )
+
+    assert not service.frames
+    assert service.queue.get_nowait() is None
+    assert service.queue.empty()
+
+
+def test_adaptive_enqueue_failure_releases_reservation() -> None:
+    accepted = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
+    service = _service(
+        _hooks(
+            run_pipeline=Mock(return_value=accepted),
+            with_source_evidence=Mock(return_value=accepted),
+            trigger_mode="adaptive",
+        )
+    )
+    with service.frame_lock:
+        service.color_frames.extend(
+            [
+                (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
+                (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+            ]
+        )
+    service.events.enqueue = Mock(side_effect=RuntimeError("queue unavailable"))
+
+    try:
+        service.analyze_continuous(100.0)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("enqueue failure should remain visible to the worker")
+
+    assert not service.events.adaptive_trigger_pending
+
+
+def test_stop_requested_during_adaptive_fusion_prevents_publication() -> None:
+    accepted = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
+    publish_event = Mock()
+    fusion = Mock()
+    service = _service(
+        _hooks(
+            run_pipeline=Mock(return_value=accepted),
+            with_source_evidence=fusion,
+            publish_event=publish_event,
+            trigger_mode="adaptive",
+        )
+    )
+
+    def stop_during_fusion(*_args: object, **_kwargs: object) -> MotionQualificationResult:
+        service.request_stop()
+        return accepted
+
+    fusion.side_effect = stop_during_fusion
+    with service.frame_lock:
+        service.color_frames.extend(
+            [
+                (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
+                (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+            ]
+        )
+
+    service.analyze_continuous(100.0)
+
+    assert not service.events.adaptive_trigger_pending
+    assert list(service.events.queue.queue) == []
+    publish_event.assert_not_called()
+
+
+def test_visual_fusion_failure_releases_reservation_and_candidate() -> None:
+    accepted = MotionQualificationResult(True, 0.9, 0.48, "qualified", 3, {})
+    service = _service(
+        _hooks(
+            with_source_evidence=Mock(side_effect=RuntimeError("fusion unavailable")),
+        )
+    )
+    service.visual_backup.evaluate = Mock(
+        return_value=VisualBackupDecision(
+            VisualBackupAction.READY,
+            accepted,
+            required_score=0.7,
+            consecutive=3,
+            scene_ready=True,
+        )
+    )
+    samples = [
+        (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
+        (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+    ]
+
+    try:
+        service.consider_visual_backup(accepted, samples, 100.0)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("fusion failure should remain visible to the worker")
+
+    assert not service.events.adaptive_trigger_pending
+    assert service.visual_backup.consecutive == 0
