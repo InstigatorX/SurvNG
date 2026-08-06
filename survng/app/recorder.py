@@ -37,6 +37,7 @@ DTS_WARNING_WINDOW_SECONDS = 5.0
 DTS_WARNING_RESTART_COUNT = 12
 TIMESTAMP_ROLLOVER_LIMIT = 3
 TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS = 300.0
+RECORDING_PATH_REBASE_BATCH_SIZE = 1000
 
 
 @dataclass(frozen=True)
@@ -205,40 +206,53 @@ class Recorder:
                     (root_value,),
                 )
                 return
-            indexed_paths = {
-                str(row["path"])
-                for row in connection.execute("SELECT path FROM recordings")
-            }
-            updates: list[tuple[str, str]] = []
-            duplicates: list[tuple[str]] = []
-            for old_path in tuple(indexed_paths):
-                path = Path(old_path)
-                try:
-                    marker_index = path.parts.index("recordings")
-                except ValueError:
+            previous_root = (
+                Path(str(metadata["value"])) if metadata is not None else None
+            )
+            changed = 0
+            last_rowid = 0
+            while True:
+                rows = connection.execute(
+                    """
+                    SELECT rowid, path FROM recordings
+                    WHERE rowid > ?
+                    ORDER BY rowid
+                    LIMIT ?
+                    """,
+                    (last_rowid, RECORDING_PATH_REBASE_BATCH_SIZE),
+                ).fetchall()
+                if not rows:
+                    break
+                last_rowid = int(rows[-1]["rowid"])
+                updates: list[tuple[str, str]] = []
+                for row in rows:
+                    old_path = str(row["path"])
+                    if root_prefix <= old_path < root_upper_bound:
+                        continue
+                    candidate = self._rebased_recording_path(
+                        old_path,
+                        recordings_root,
+                        previous_root,
+                    )
+                    if candidate is not None and str(candidate) != old_path:
+                        updates.append((str(candidate), old_path))
+                if not updates:
                     continue
-                relative_parts = path.parts[marker_index + 1:]
-                if not relative_parts or any(part in {"", ".", ".."} for part in relative_parts):
-                    continue
-                candidate = recordings_root.joinpath(*relative_parts)
-                new_path = str(candidate)
-                if new_path == old_path:
-                    continue
-                if new_path in indexed_paths:
-                    duplicates.append((old_path,))
-                else:
-                    updates.append((new_path, old_path))
-                    indexed_paths.add(new_path)
-            if duplicates:
+                before = connection.total_changes
+                # A target may already exist when two old roots indexed the
+                # same segment. Preserve that row, then discard the duplicate
+                # source path. Processing bounded batches avoids a multi-
+                # million-entry Python set during a real mount migration.
                 connection.executemany(
-                    "DELETE FROM recordings WHERE path = ?",
-                    duplicates,
-                )
-            if updates:
-                connection.executemany(
-                    "UPDATE recordings SET path = ? WHERE path = ?",
+                    "UPDATE OR IGNORE recordings SET path = ? WHERE path = ?",
                     updates,
                 )
+                connection.executemany(
+                    "DELETE FROM recordings WHERE path = ?",
+                    [(old_path,) for _new_path, old_path in updates],
+                )
+                changed += connection.total_changes - before
+                connection.commit()
             connection.execute(
                 """
                 INSERT INTO recording_index_metadata(key, value)
@@ -247,13 +261,51 @@ class Recorder:
                 """,
                 (root_value,),
             )
-        changed = len(updates) + len(duplicates)
         if changed:
             LOGGER.info(
                 "Rebased %d recording index paths for storage root %s",
                 changed,
                 self.storage_dir,
             )
+
+    @staticmethod
+    def _rebased_recording_path(
+        old_path: str,
+        recordings_root: Path,
+        previous_root: Path | None,
+    ) -> Path | None:
+        path = Path(old_path)
+        if previous_root is not None:
+            try:
+                relative = path.relative_to(previous_root)
+            except ValueError:
+                pass
+            else:
+                if relative.parts and all(
+                    part not in {"", ".", ".."} for part in relative.parts
+                ):
+                    return recordings_root.joinpath(*relative.parts)
+
+        # Legacy indexes have no root marker. Prefer the component whose
+        # suffix matches the current camera/source/date layout. This remains
+        # correct when an ancestor directory is itself named "recordings".
+        parts = path.parts
+        fallback: tuple[str, ...] | None = None
+        for index, part in enumerate(parts):
+            if part != "recordings":
+                continue
+            relative_parts = parts[index + 1 :]
+            if len(relative_parts) < 4 or any(
+                value in {"", ".", ".."} for value in relative_parts
+            ):
+                continue
+            if fallback is None:
+                fallback = relative_parts
+            if len(relative_parts) >= 5 and relative_parts[1] in {"main", "live"}:
+                return recordings_root.joinpath(*relative_parts)
+        if fallback is None:
+            return None
+        return recordings_root.joinpath(*fallback)
 
     def start(self, camera: CameraConfig, source: str = "main") -> None:
         source = camera.normalized_source(source, default="main")
@@ -785,17 +837,55 @@ class Recorder:
         owned = self._owned_ffmpeg_recorders(keys)
         with self._lock:
             tracked_pids = {item[0].pid for item in self.processes.values()}
+        extras: set[int] = set()
         for key, pids in owned.items():
-            extras = [pid for pid in pids if pid not in tracked_pids]
+            key_extras = [pid for pid in pids if pid not in tracked_pids]
             if len([pid for pid in pids if pid in tracked_pids]) > 1:
-                extras.extend(sorted(pid for pid in pids if pid in tracked_pids)[1:])
-            for pid in sorted(set(extras)):
-                self._kill_pid(pid)
+                key_extras.extend(
+                    sorted(pid for pid in pids if pid in tracked_pids)[1:]
+                )
+            extras.update(key_extras)
+        self._kill_pids(extras)
 
     def cleanup_stale_recorders(self, keys: set[RecorderKey]) -> None:
-        for pids in self._owned_ffmpeg_recorders(keys).values():
-            for pid in pids:
+        stale_pids = {
+            pid
+            for pids in self._owned_ffmpeg_recorders(keys).values()
+            for pid in pids
+        }
+        self._kill_pids(stale_pids)
+
+    def _kill_pids(self, pids: set[int]) -> None:
+        """Terminate independent recorder processes within one shared wait window."""
+        failures: list[tuple[int, Exception]] = []
+        failures_lock = threading.Lock()
+
+        def kill(pid: int) -> None:
+            try:
                 self._kill_pid(pid)
+            except Exception as exc:
+                with failures_lock:
+                    failures.append((pid, exc))
+
+        threads = [
+            threading.Thread(
+                target=kill,
+                args=(pid,),
+                name=f"cleanup-recorder-{pid}",
+                daemon=False,
+            )
+            for pid in sorted(pids)
+            if pid != os.getpid()
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if failures:
+            failed_pids = ", ".join(str(pid) for pid, _exc in failures)
+            raise RuntimeError(
+                f"failed to terminate recorder processes: {failed_pids}"
+            ) from failures[0][1]
 
     def _owned_ffmpeg_recorders(self, keys: set[RecorderKey]) -> dict[RecorderKey, list[int]]:
         result: dict[RecorderKey, list[int]] = {key: [] for key in keys}

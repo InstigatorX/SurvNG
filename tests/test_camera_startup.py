@@ -99,6 +99,27 @@ class CameraStartupCoordinatorTest(unittest.TestCase):
         self.assertEqual(status["cameras"]["broken"]["phase"], "failed")
         self.assertEqual(status["cameras"]["healthy"]["phase"], "ready")
 
+    def test_base_exception_cannot_leave_coordinator_complete_with_stuck_tasks(self) -> None:
+        second_started = threading.Event()
+        coordinator = CameraStartupCoordinator(
+            max_concurrency=1,
+            recorder_settle_seconds=0.0,
+        )
+
+        def abort_thread() -> None:
+            raise SystemExit("camera backend exited")
+
+        coordinator.start([
+            startup_task("aborted", start_camera=abort_thread),
+            startup_task("healthy", start_camera=second_started.set),
+        ])
+
+        self.assertTrue(coordinator.wait(timeout=1))
+        self.assertTrue(second_started.is_set())
+        status = coordinator.status()
+        self.assertEqual(status["cameras"]["aborted"]["phase"], "failed")
+        self.assertEqual(status["cameras"]["healthy"]["phase"], "ready")
+
     def test_failure_status_redacts_stream_credentials(self) -> None:
         coordinator = CameraStartupCoordinator(recorder_settle_seconds=0.0)
 

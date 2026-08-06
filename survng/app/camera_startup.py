@@ -293,7 +293,7 @@ class CameraStartupCoordinator:
                 "ready" if ready else "degraded",
                 self._monotonic_clock() - started,
             )
-        except Exception as exc:
+        except BaseException as exc:
             error = redact_secret_text(exc)[:240]
             self._finish(
                 task.camera_id,

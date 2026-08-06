@@ -10121,9 +10121,9 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <div className="field-row">
               <label>Concurrent cameras<input type="number" min="1" max="8" step="1" value={config.camera_startup?.max_concurrent_cameras ?? 2} onChange={(event) => updateConfig(["camera_startup", "max_concurrent_cameras"], Number(event.target.value))} /></label>
               <label>First-frame wait<input type="number" min="1" max="30" step="0.5" value={config.camera_startup?.first_frame_timeout_seconds ?? 5} onChange={(event) => updateConfig(["camera_startup", "first_frame_timeout_seconds"], Number(event.target.value))} /></label>
-              <label>Recorder spacing<input type="number" min="0" max="5" step="0.1" value={config.camera_startup?.recorder_settle_seconds ?? 0.5} onChange={(event) => updateConfig(["camera_startup", "recorder_settle_seconds"], Number(event.target.value))} /></label>
+              <label>Minimum camera spacing<input type="number" min="0" max="5" step="0.1" value={config.camera_startup?.recorder_settle_seconds ?? 0.5} onChange={(event) => updateConfig(["camera_startup", "recorder_settle_seconds"], Number(event.target.value))} /></label>
             </div>
-            <p>Limits camera connection bursts after a SurvNG restart. Cameras that do not deliver a frame in time keep reconnecting without delaying the rest. Changes take effect on the next server start.</p>
+            <p>Limits camera connection bursts after a SurvNG restart. Minimum camera spacing keeps each admitted camera slot occupied briefly after its recorders start. Cameras that do not deliver a frame in time keep reconnecting without delaying the rest. Changes take effect on the next server start.</p>
           </div>
           <div className="preference-action">
             <strong>Live Camera Order</strong>

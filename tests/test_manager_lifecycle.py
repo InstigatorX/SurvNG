@@ -351,6 +351,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager = AppManager(AppConfig(
                 storage_dir=storage,
                 database_dir=database,
+                camera_startup={"max_concurrent_cameras": 4},
                 cameras=[camera],
             ))
 
@@ -358,8 +359,20 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(manager.faces.db_path, Path(database) / "survng.sqlite3")
             self.assertEqual(manager.database_dir, Path(database))
             self.assertEqual(manager.workers["gate"].onvif._cache_dir, Path(database) / "onvif")
+            self.assertEqual(manager._capture_open_limiter.capacity, 4)
 
             manager.stop_all()
+
+    def test_shutdown_state_prevents_late_startup_recorder_launch(self) -> None:
+        manager = manager_with_mocks()
+        camera = manager.config.cameras[0]
+        camera.record_sub = True
+        camera.live_stream_url = "rtsp://camera/live"
+        manager._stopping = True
+
+        manager._start_configured_recorders(camera)
+
+        manager.recorder.start.assert_not_called()
 
     def test_camera_startup_failure_is_isolated_and_reported(self) -> None:
         manager = manager_with_mocks()

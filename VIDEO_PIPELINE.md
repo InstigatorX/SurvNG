@@ -132,6 +132,14 @@ through core service construction and persistence, then expose the same
 progressive camera admission rather than blocking the configuration request on
 unavailable feeds.
 
+The configured camera concurrency is also the shared native OpenCV-open limit,
+so a simultaneous reconnect after a network interruption cannot bypass startup
+admission and create a second connection storm. Before admission begins,
+orphaned recorder processes are terminated concurrently within one cleanup
+window. Recording-index mount migrations run in bounded database batches; a
+normal restart trusts the persisted root marker and does not enumerate indexed
+paths.
+
 ### Source responsibilities
 
 | Work | Preferred source | Reason |

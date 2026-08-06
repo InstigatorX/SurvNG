@@ -145,7 +145,12 @@ class AppManager:
             protected_recording_paths=self.events.protected_recording_paths,
         )
         self.go2rtc = Go2RtcAdapter()
-        self._capture_open_limiter = CaptureOpenLimiter()
+        # Keep native OpenCV admission aligned with the camera-level startup
+        # policy.  Otherwise increasing the configured coordinator capacity
+        # leaves an undocumented second ceiling at the old hard-coded value.
+        self._capture_open_limiter = CaptureOpenLimiter(
+            config.camera_startup.max_concurrent_cameras
+        )
         self.capture_backend = OpenCvFfmpegCaptureBackend(
             self._capture_open_limiter
         )
@@ -380,12 +385,24 @@ class AppManager:
         return self._detection_enabled.get(camera_id, True)
 
     def _recorder_should_run(self, camera_id: str) -> bool:
-        return self._camera_enabled.get(camera_id, True) and self.recording_enabled(camera_id)
+        return (
+            not self._stopping
+            and not self._closed
+            and self._camera_enabled.get(camera_id, True)
+            and self.recording_enabled(camera_id)
+        )
 
     def _start_configured_recorders(self, camera) -> None:
+        if self._stopping or self._closed:
+            return
         if camera.record:
             self.recorder.start(camera, "main")
-        if camera.record_sub and camera.live_stream_url:
+        if (
+            not self._stopping
+            and not self._closed
+            and camera.record_sub
+            and camera.live_stream_url
+        ):
             self.recorder.start(camera, "live")
 
     def set_recording(self, camera_id: str, enabled: bool) -> bool:

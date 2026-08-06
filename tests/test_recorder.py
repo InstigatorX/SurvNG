@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import unittest
 from collections import deque
@@ -715,6 +716,52 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual([row["path"] for row in rows], [str(new_clip.resolve())])
         self.assertEqual(recorded_root, str(new_recorder.recordings_dir.resolve()))
 
+    def test_recording_index_rebase_is_batched_and_handles_recordings_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "recordings-archive"
+            old_storage = root / "recordings" / "systemd-media"
+            new_storage = root / "docker-media"
+            index_dir = root / "index"
+            old_recorder = Recorder(
+                "ffmpeg",
+                old_storage,
+                segment_seconds=10,
+                index_dir=index_dir,
+            )
+            relatives = [
+                Path("gate") / "main" / "2026-08-06" / "17" / f"clip-{index}.mp4"
+                for index in range(3)
+            ]
+            old_paths = [old_recorder.recordings_dir / relative for relative in relatives]
+            for path in old_paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"recording")
+            old_recorder._store_recording_rows(
+                "gate",
+                "main",
+                [self._row(path) for path in old_paths],
+            )
+            new_recorder = Recorder(
+                "ffmpeg",
+                new_storage,
+                segment_seconds=10,
+                index_dir=index_dir,
+            )
+
+            with patch("survng.app.recorder.RECORDING_PATH_REBASE_BATCH_SIZE", 1):
+                new_recorder._rebase_recording_index_paths()
+
+            with new_recorder._index_connection() as connection:
+                stored = {
+                    str(row["path"])
+                    for row in connection.execute("SELECT path FROM recordings")
+                }
+
+        self.assertEqual(
+            stored,
+            {str(new_recorder.recordings_dir / relative) for relative in relatives},
+        )
+
     def test_legacy_index_at_current_root_gets_fast_rebase_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -742,6 +789,58 @@ class RecorderTest(unittest.TestCase):
 
         self.assertEqual(marker, str(recorder.recordings_dir.resolve()))
         self.assertEqual(stored_path, str(clip))
+
+    def test_stale_recorder_cleanup_terminates_processes_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            active = 0
+            maximum = 0
+            lock = threading.Lock()
+
+            def kill(_pid: int) -> None:
+                nonlocal active, maximum
+                with lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.02)
+                with lock:
+                    active -= 1
+
+            with (
+                patch.object(
+                    recorder,
+                    "_owned_ffmpeg_recorders",
+                    return_value={
+                        ("gate", "main"): [101],
+                        ("gate", "live"): [102],
+                    },
+                ),
+                patch.object(recorder, "_kill_pid", side_effect=kill),
+            ):
+                recorder.cleanup_stale_recorders({("gate", "main"), ("gate", "live")})
+
+        self.assertEqual(maximum, 2)
+
+    def test_stale_recorder_cleanup_propagates_termination_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            with (
+                patch.object(
+                    recorder,
+                    "_owned_ffmpeg_recorders",
+                    return_value={("gate", "main"): [101]},
+                ),
+                patch.object(
+                    recorder,
+                    "_kill_pid",
+                    side_effect=PermissionError("not owner"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "failed to terminate recorder processes: 101",
+                ):
+                    recorder.cleanup_stale_recorders({("gate", "main")})
 
     def test_active_recorder_does_not_hide_last_historical_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
