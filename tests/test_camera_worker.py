@@ -2465,8 +2465,8 @@ class CameraWorkerTest(unittest.TestCase):
                     side_effect=lambda: order.append("tracking"),
                 ),
                 patch.object(
-                    worker,
-                    "_clear_motion_queue",
+                    worker.motion_events,
+                    "clear",
                     side_effect=lambda: order.append("clear"),
                 ),
                 patch.object(
@@ -2514,7 +2514,7 @@ class CameraWorkerTest(unittest.TestCase):
                     side_effect=RuntimeError("startup failed"),
                 ),
                 patch.object(
-                    worker,
+                    worker.lifecycle,
                     "stop",
                     side_effect=KeyboardInterrupt("rollback interrupted"),
                 ),
@@ -2659,6 +2659,11 @@ class CameraWorkerTest(unittest.TestCase):
             worker.motion_pipeline = Mock()
             worker.motion_observation_pipeline = Mock()
             worker.motion_fusion_pipeline = Mock()
+            worker.lifecycle.motion_pipelines = (
+                ("qualification", worker.motion_pipeline),
+                ("observation", worker.motion_observation_pipeline),
+                ("fusion", worker.motion_fusion_pipeline),
+            )
             worker.motion_pipeline.close.side_effect = RuntimeError("close failed")
 
             with self.assertRaisesRegex(RuntimeError, "failed to close"):
