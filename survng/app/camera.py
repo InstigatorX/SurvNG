@@ -36,6 +36,7 @@ from .motion_coordinator import (
     VisualBackupPolicy,
 )
 from .motion_events import MotionEventCoordinator
+from .motion_incidents import MotionIncidentService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
 from .security import redact_secret_text
@@ -116,6 +117,13 @@ class CameraWorker:
             detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
             snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=self._publish_event_safely if event_callback is not None else None,
+        )
+        self.motion_incidents = MotionIncidentService(
+            camera_id=camera.id,
+            decision_processor=self.motion_decision_handler,
+            tracking=self.object_tracking,
+            prewarm_tracking=lambda: self._get_latest_tracking_frame("main"),
+            image_reader=lambda path: cv2.imread(path),
         )
         self.snapshots_dir = storage_dir / "snapshots" / camera.id
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -2234,11 +2242,7 @@ class CameraWorker:
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
     ) -> dict[str, Any]:
-        if self.object_tracking.config.enabled:
-            # Main-stream capture opens concurrently with recorded validation,
-            # so the tracking handoff does not pay another RTSP startup delay.
-            self._get_latest_tracking_frame("main")
-        outcome = self.motion_decision_handler.handle(
+        outcome = self.motion_incidents.process(
             topic,
             message,
             event_at,
@@ -2246,16 +2250,6 @@ class CameraWorker:
             require_eligible_object=require_eligible_object,
             require_motion_correlation=require_motion_correlation,
         )
-        if outcome.event_id is not None and outcome.object_detected:
-            initial_tracking_frame = None
-            if self.object_tracking.config.enabled and outcome.snapshot_path:
-                initial_tracking_frame = cv2.imread(outcome.snapshot_path)
-            self.object_tracking.start(
-                outcome.event_id,
-                event_at,
-                list(outcome.detected_objects),
-                initial_tracking_frame,
-            )
         return outcome.as_dict()
 
     def _related_incident_event_id(self, result: MotionQualificationResult) -> int | None:
