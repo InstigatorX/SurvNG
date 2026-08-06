@@ -181,7 +181,6 @@ class CameraWorker:
         self._visual_backup_last_candidate_at = 0.0
         self._visual_backup_consecutive = 0
         self._visual_backup_trigger_times: deque[float] = deque(maxlen=64)
-        self._visual_backup_last_nonpromotion_audit_at = 0.0
         self._motion_stats_lock = threading.Lock()
         self._motion_stats: dict[str, Any] = {
             "triggers": 0,
@@ -388,7 +387,6 @@ class CameraWorker:
             self._visual_backup_last_candidate_at = 0.0
             self._visual_backup_consecutive = 0
             self._visual_backup_trigger_times.clear()
-            self._visual_backup_last_nonpromotion_audit_at = 0.0
             self._thread = self._source_threads.get("live")
             shutdown_failures: list[str] = []
             if alive:
@@ -1104,12 +1102,7 @@ class CameraWorker:
         )
         if not strong_candidate:
             if result.accepted and scene_ready:
-                self._record_visual_backup_nonpromotion_audit(
-                    result,
-                    captured_at,
-                    "below_rescue_threshold" if result.score < required_score else "filtered_motion",
-                    required_score=required_score,
-                )
+                self._note_visual_backup_nonpromotion()
             self._reset_visual_backup_candidate()
             return
         if not scene_ready:
@@ -1164,12 +1157,7 @@ class CameraWorker:
             self._reset_visual_backup_candidate()
             return
         if not self._reserve_visual_backup_trigger(captured_at):
-            self._record_visual_backup_nonpromotion_audit(
-                result,
-                captured_at,
-                "rate_limited",
-                required_score=required_score,
-            )
+            self._note_visual_backup_nonpromotion()
             self._reset_visual_backup_candidate()
             return
 
@@ -1260,52 +1248,10 @@ class CameraWorker:
                 self.camera.id,
             )
 
-    def _record_visual_backup_nonpromotion_audit(
-        self,
-        result: MotionQualificationResult,
-        captured_at: float,
-        outcome: str,
-        *,
-        required_score: float,
-    ) -> None:
-        """Persist a rate-bounded explanation for strong visual work that stops.
-
-        This is intentionally not an audit for every quiet frame.  It records
-        only accepted EMA candidates that were withheld by rescue policy, so a
-        future missed incident can be reconstructed without creating a noisy
-        audit stream.
-        """
-        interval = max(10.0, float(self._visual_backup_settings()["cooldown_seconds"]))
-        if captured_at - self._visual_backup_last_nonpromotion_audit_at < interval:
-            return
-        self._visual_backup_last_nonpromotion_audit_at = captured_at
-        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+    def _note_visual_backup_nonpromotion(self) -> None:
+        """Expose withheld visual candidates as telemetry, never audit spam."""
         with self._motion_stats_lock:
             self._motion_stats["visual_backup_not_promoted"] += 1
-        try:
-            self.motion_decision_handler.record_audit(
-                snapshot_path=self._sample_rejected_motion(event_at, result),
-                event_at=event_at,
-                mode="camera_rescue",
-                sensitivity=self._motion_settings()[1],
-                score=result.score,
-                threshold=result.threshold,
-                reason=f"visual_backup_{outcome}",
-                object_detected=None,
-                trigger_count=0,
-                features={
-                    **self._audit_features(result),
-                    "visual_backup_scene_ready": True,
-                    "visual_backup_required_score": round(required_score, 4),
-                    "visual_backup_outcome": outcome,
-                },
-                category="visual_backup",
-            )
-        except Exception:
-            LOGGER.exception(
-                "failed to record visual backup non-promotion audit for %s",
-                self.camera.id,
-            )
 
     def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
         cutoff = captured_at - 300.0
