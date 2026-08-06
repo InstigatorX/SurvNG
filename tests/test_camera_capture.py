@@ -133,8 +133,10 @@ def test_latest_frame_is_copied_and_rejected_when_stale() -> None:
     assert second is not None
     assert int(second.image[0, 0, 0]) == 1
     assert second.captured_at_epoch == 1_700_000_000.0
+    assert service.frame_ready("live") is True
     now[0] = 111.0
     assert service.latest("live") is None
+    assert service.frame_ready("live") is False
 
 
 def test_main_source_is_lazy_and_expires_after_demand_lease() -> None:

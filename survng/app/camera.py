@@ -622,6 +622,10 @@ class CameraWorker:
     def status(self) -> dict[str, Any]:
         return self.status_reporter.snapshot()
 
+    def live_capture_ready(self) -> bool:
+        """Expose capture readiness to lifecycle orchestration without a frame copy."""
+        return self.capture.frame_ready("live")
+
     def update_zones(self, zones: list[DetectionZone]) -> None:
         next_zones = [zone.model_copy(deep=True) for zone in zones]
         with self._lifecycle_lock:

@@ -707,8 +707,41 @@ class RecorderTest(unittest.TestCase):
                 1_784_000_011.0,
                 discover_missing=False,
             )
+            with new_recorder._index_connection() as connection:
+                recorded_root = connection.execute(
+                    "SELECT value FROM recording_index_metadata WHERE key = 'recordings_root'"
+                ).fetchone()["value"]
 
         self.assertEqual([row["path"] for row in rows], [str(new_clip.resolve())])
+        self.assertEqual(recorded_root, str(new_recorder.recordings_dir.resolve()))
+
+    def test_legacy_index_at_current_root_gets_fast_rebase_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = (
+                recorder.recordings_dir
+                / "gate"
+                / "main"
+                / "2026-08-06"
+                / "17"
+                / "clip.mp4"
+            )
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            recorder._store_recording_rows("gate", "main", [self._row(clip)])
+
+            recorder._rebase_recording_index_paths()
+
+            with recorder._index_connection() as connection:
+                marker = connection.execute(
+                    "SELECT value FROM recording_index_metadata WHERE key = 'recordings_root'"
+                ).fetchone()["value"]
+                stored_path = connection.execute(
+                    "SELECT path FROM recordings"
+                ).fetchone()["path"]
+
+        self.assertEqual(marker, str(recorder.recordings_dir.resolve()))
+        self.assertEqual(stored_path, str(clip))
 
     def test_active_recorder_does_not_hide_last_historical_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

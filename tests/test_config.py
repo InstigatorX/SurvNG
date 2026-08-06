@@ -114,6 +114,9 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(AppConfig().base_path, "/survng")
         self.assertEqual(AppConfig().database_dir, "")
         self.assertEqual(AppConfig().recording_index_dir, "")
+        self.assertEqual(AppConfig().camera_startup.max_concurrent_cameras, 2)
+        self.assertEqual(AppConfig().camera_startup.first_frame_timeout_seconds, 5.0)
+        self.assertEqual(AppConfig().camera_startup.recorder_settle_seconds, 0.5)
 
     def test_base_path_is_normalized(self) -> None:
         self.assertEqual(AppConfig(base_path=" cameras/ ").base_path, "/cameras")

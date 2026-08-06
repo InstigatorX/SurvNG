@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import threading
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig
+from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
 
 
@@ -19,6 +21,13 @@ def manager_with_mocks() -> AppManager:
     manager._stopping = False
     manager._started = False
     manager._closed = False
+    manager._startup_services_ready = False
+    manager._startup_timings = {}
+    manager.camera_startup = CameraStartupCoordinator(
+        readiness_timeout_seconds=0.01,
+        recorder_settle_seconds=0.0,
+        poll_interval_seconds=0.01,
+    )
     manager._camera_enabled = {"gate": True}
     manager._recording_enabled = {}
     manager._detection_enabled = {}
@@ -28,6 +37,7 @@ def manager_with_mocks() -> AppManager:
     manager.mqtt = Mock()
     manager.state_events = Mock()
     manager.workers = {"gate": Mock()}
+    manager.workers["gate"].live_capture_ready.return_value = True
     manager._start_state_monitor = Mock()
     manager._stop_state_monitor = Mock()
     manager._save_runtime_state = Mock()
@@ -351,23 +361,55 @@ class ManagerLifecycleTest(unittest.TestCase):
 
             manager.stop_all()
 
-    def test_startup_failure_rolls_back_every_started_subsystem(self) -> None:
+    def test_camera_startup_failure_is_isolated_and_reported(self) -> None:
         manager = manager_with_mocks()
         manager.workers["gate"].start.side_effect = RuntimeError("capture failed")
 
-        with self.assertRaisesRegex(RuntimeError, "capture failed"):
-            manager.start_all()
+        manager.start_all()
+        self.assertTrue(manager.wait_for_camera_startup(timeout=1))
 
-        manager.mqtt.stop.assert_called_once_with()
-        manager.workers["gate"].stop.assert_called_once_with()
-        manager.workers["gate"].close.assert_called_once_with()
-        manager.faces.close.assert_called_once_with()
-        manager.detector.stop.assert_called_once_with()
-        manager.recorder.stop_all.assert_called_once_with()
-        manager.state_events.close.assert_called_once_with()
-        self.assertTrue(manager._closed)
-        with self.assertRaisesRegex(RuntimeError, "closed"):
-            manager.start_all()
+        startup = manager.camera_startup_status()
+        self.assertEqual(startup["counts"], {"failed": 1})
+        self.assertEqual(startup["cameras"]["gate"]["error"], "capture failed")
+        self.assertTrue(manager._started)
+        manager.recorder.start.assert_not_called()
+
+        manager.stop_all()
+
+    def test_manager_returns_while_admitted_camera_warms_with_recorder(self) -> None:
+        manager = manager_with_mocks()
+        frame_ready = threading.Event()
+        manager.camera_startup = CameraStartupCoordinator(
+            readiness_timeout_seconds=1.0,
+            recorder_settle_seconds=0.0,
+            poll_interval_seconds=0.01,
+        )
+        camera_started = threading.Event()
+        manager.workers["gate"].start.side_effect = camera_started.set
+        manager.workers["gate"].live_capture_ready.side_effect = frame_ready.is_set
+
+        manager.start_all()
+
+        self.assertTrue(manager._started)
+        self.assertTrue(camera_started.wait(timeout=1))
+        manager.workers["gate"].start.assert_called_once_with()
+        deadline = time.monotonic() + 1
+        while not manager.recorder.start.called and time.monotonic() < deadline:
+            threading.Event().wait(0.005)
+        manager.recorder.start.assert_called_once_with(manager.config.cameras[0], "main")
+        self.assertEqual(
+            manager.camera_startup_status()["cameras"]["gate"]["phase"],
+            "waiting_for_frame",
+        )
+
+        frame_ready.set()
+        self.assertTrue(manager.wait_for_camera_startup(timeout=1))
+        self.assertEqual(
+            [call.args[0] for call in manager.mqtt.set_server_lifecycle.call_args_list],
+            ["starting", "running"],
+        )
+
+        manager.stop_all()
 
     def test_shutdown_continues_after_one_cleanup_failure(self) -> None:
         manager = manager_with_mocks()
@@ -458,6 +500,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.start_all()
         manager.start_all()
+        self.assertTrue(manager.wait_for_camera_startup(timeout=1))
         manager.stop_all()
         manager.stop_all()
 
@@ -565,6 +608,7 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager._camera_enabled["gate"] = False
 
         manager.start_all()
+        self.assertTrue(manager.wait_for_camera_startup(timeout=1))
 
         manager._save_runtime_state.assert_called_once_with()
         manager.workers["gate"].start.assert_not_called()

@@ -75,6 +75,11 @@
     "backfill_pause_seconds": 0.25,
     "worker_queue_size": 256
   },
+  "camera_startup": {
+    "max_concurrent_cameras": 2,
+    "first_frame_timeout_seconds": 5.0,
+    "recorder_settle_seconds": 0.5
+  },
   "detector": {
     "enabled": false,
     "model_path": "best.onnx",

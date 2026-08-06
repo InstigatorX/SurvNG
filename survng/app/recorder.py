@@ -138,6 +138,14 @@ class Recorder:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS recordings_range ON recordings(camera_id, source, start_epoch, end_epoch)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recording_index_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(recordings)")}
             if "playable" not in columns:
                 connection.execute("ALTER TABLE recordings ADD COLUMN playable INTEGER NOT NULL DEFAULT 1")
@@ -167,7 +175,36 @@ class Recorder:
     def _rebase_recording_index_paths(self) -> None:
         """Rebase absolute media paths when the same index is used under a new mount."""
         recordings_root = self.recordings_dir.resolve()
+        root_value = str(recordings_root)
+        root_prefix = f"{root_value}{os.sep}"
+        root_upper_bound = f"{root_prefix}\U0010ffff"
         with self._index_connection() as connection:
+            metadata = connection.execute(
+                "SELECT value FROM recording_index_metadata WHERE key = 'recordings_root'"
+            ).fetchone()
+            if metadata is not None and str(metadata["value"]) == root_value:
+                return
+            # Older indexes predate the metadata marker. Check the primary-key
+            # range in SQLite rather than materializing millions of paths in
+            # Python on every service start.
+            mismatch = connection.execute(
+                """
+                SELECT path FROM recordings
+                WHERE path < ? OR path >= ?
+                LIMIT 1
+                """,
+                (root_prefix, root_upper_bound),
+            ).fetchone()
+            if mismatch is None:
+                connection.execute(
+                    """
+                    INSERT INTO recording_index_metadata(key, value)
+                    VALUES ('recordings_root', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (root_value,),
+                )
+                return
             indexed_paths = {
                 str(row["path"])
                 for row in connection.execute("SELECT path FROM recordings")
@@ -202,6 +239,14 @@ class Recorder:
                     "UPDATE recordings SET path = ? WHERE path = ?",
                     updates,
                 )
+            connection.execute(
+                """
+                INSERT INTO recording_index_metadata(key, value)
+                VALUES ('recordings_root', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (root_value,),
+            )
         changed = len(updates) + len(duplicates)
         if changed:
             LOGGER.info(

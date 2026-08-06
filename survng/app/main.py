@@ -728,6 +728,7 @@ def reload_manager(
 
 HOT_CONFIG_FIELDS = frozenset({
     "base_path",
+    "camera_startup",
     "event_clip_before_seconds",
     "event_clip_after_seconds",
     "incident_thumbnail_annotations",
@@ -2096,6 +2097,7 @@ def system_status() -> dict:
         },
         "mqtt": manager.mqtt_status(),
         "go2rtc": manager.go2rtc_status(),
+        "camera_startup": manager.camera_startup_status(),
     }
 
 

@@ -116,6 +116,22 @@ Reolink `reolink://` source can use the native Baichuan integration. URL and
 Baichuan behavior is normalized by the camera configuration before workers are
 started.
 
+Process startup uses a camera-level admission coordinator instead of launching
+every OpenCV capture, ONVIF listener, and recorder at once. By default, two
+cameras enter startup concurrently. Each camera gets a bounded first-frame
+window; a camera that misses it is marked degraded and keeps reconnecting in
+its capture worker while the coordinator advances to the next camera. Capture,
+ONVIF, and configured recorders start within the admitted camera group; that
+group retains its slot until a first frame arrives (or the bounded window ends),
+with a short minimum spacing between groups. Starting the recorders inside the
+group also lets their go2rtc attachment warm the upstream stream. This limits
+connection and decoder bursts without turning one unavailable camera into a
+fleet-wide startup blocker. The HTTP application and MQTT lifecycle expose the
+progressive startup state. Configuration-manager cutovers remain transactional
+through core service construction and persistence, then expose the same
+progressive camera admission rather than blocking the configuration request on
+unavailable feeds.
+
 ### Source responsibilities
 
 | Work | Preferred source | Reason |

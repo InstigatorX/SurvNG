@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .camera import CameraWorker
 from .camera_capture import CaptureOpenLimiter, OpenCvFfmpegCaptureBackend
+from .camera_startup import CameraStartupCoordinator, CameraStartupTask
 from .appearance_index import AppearanceIndex
 from .appearance_backfill import DeferredAppearanceBackfill
 from .config import (
@@ -201,6 +202,13 @@ class AppManager:
         self._stopping = False
         self._started = False
         self._closed = False
+        self._startup_services_ready = False
+        self._startup_timings: dict[str, float] = {}
+        self.camera_startup = CameraStartupCoordinator(
+            max_concurrency=config.camera_startup.max_concurrent_cameras,
+            readiness_timeout_seconds=config.camera_startup.first_frame_timeout_seconds,
+            recorder_settle_seconds=config.camera_startup.recorder_settle_seconds,
+        )
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None
         self._allocator_memory_trimmer = AllocatorMemoryTrimmer()
@@ -482,6 +490,9 @@ class AppManager:
             if self._started:
                 return
             self._stopping = False
+            self._startup_services_ready = False
+            startup_started = time.monotonic()
+            phase_started = startup_started
             try:
                 # Replace any state left by the previous process with the
                 # preferences this manager will actually apply. On a full
@@ -489,10 +500,10 @@ class AppManager:
                 # receive the active manager's preferences before this point.
                 self._save_runtime_state()
                 self.detector.start()
-                appearance_backfill = getattr(self, "appearance_backfill", None)
-                if appearance_backfill is not None:
-                    appearance_backfill.start()
                 self.faces.start()
+                self._startup_timings = {
+                    "inference_seconds": round(time.monotonic() - phase_started, 3),
+                }
                 cameras = list(self._unique_cameras())
                 recorder_keys = set()
                 for camera in cameras:
@@ -500,7 +511,13 @@ class AppManager:
                         recorder_keys.add((camera.id, "main"))
                     if camera.record_sub and camera.live_stream_url:
                         recorder_keys.add((camera.id, "live"))
+                phase_started = time.monotonic()
                 self.recorder.cleanup_stale_recorders(recorder_keys)
+                self._startup_timings["recorder_cleanup_seconds"] = round(
+                    time.monotonic() - phase_started,
+                    3,
+                )
+                startup_tasks: list[CameraStartupTask] = []
                 for camera in cameras:
                     camera_enabled = self._camera_enabled.get(camera.id, True)
                     self.recorder.set_camera_enabled(
@@ -508,22 +525,67 @@ class AppManager:
                         camera_enabled and self.recording_enabled(camera.id),
                     )
                     self.workers[camera.id].set_detection_enabled(self.detection_enabled(camera.id))
-                    if camera_enabled:
-                        self.workers[camera.id].start()
-                        if self.recording_enabled(camera.id):
-                            self._start_configured_recorders(camera)
-                    self.mqtt.publish_camera_state(camera.id, camera_enabled)
+                    worker = self.workers[camera.id]
+                    startup_tasks.append(CameraStartupTask(
+                        camera_id=camera.id,
+                        is_enabled=lambda camera_id=camera.id: self._camera_enabled.get(
+                            camera_id,
+                            True,
+                        ),
+                        start_camera=worker.start,
+                        capture_ready=worker.live_capture_ready,
+                        start_recorders=lambda camera=camera: self._start_camera_recorders_if_enabled(
+                            camera
+                        ),
+                        publish_state=lambda camera_id=camera.id: self.mqtt.publish_camera_state(
+                            camera_id,
+                            self._camera_enabled.get(camera_id, True),
+                        ),
+                    ))
+                phase_started = time.monotonic()
                 self.recorder.start_indexer(cameras)
                 self.recorder.start_watchdog(cameras)
+                self._startup_timings["recorder_services_seconds"] = round(
+                    time.monotonic() - phase_started,
+                    3,
+                )
                 # Publish discovery only after persisted recording/detection preferences
                 # have been applied to every worker.
+                phase_started = time.monotonic()
                 self.mqtt.start()
+                self.mqtt.set_server_lifecycle("starting")
                 self._start_state_monitor()
+                self._startup_timings["mqtt_seconds"] = round(
+                    time.monotonic() - phase_started,
+                    3,
+                )
+                self._started = True
+                self.camera_startup.start(
+                    startup_tasks,
+                    on_complete=self._camera_startup_completed,
+                )
+                phase_started = time.monotonic()
+                appearance_backfill = getattr(self, "appearance_backfill", None)
+                if appearance_backfill is not None:
+                    appearance_backfill.start()
                 semantic_search = getattr(self, "semantic_search", None)
                 if semantic_search is not None:
                     semantic_search.start(self.events, self.storage_dir)
-                self._started = True
-                self.mqtt.set_server_lifecycle("running")
+                self._startup_timings["auxiliary_services_seconds"] = round(
+                    time.monotonic() - phase_started,
+                    3,
+                )
+                self._startup_timings["application_ready_seconds"] = round(
+                    time.monotonic() - startup_started,
+                    3,
+                )
+                self._startup_services_ready = True
+                self._mark_running_if_startup_complete()
+                LOGGER.info(
+                    "SurvNG application ready in %.2fs; camera admission continues in background (%s)",
+                    self._startup_timings["application_ready_seconds"],
+                    self._startup_timings,
+                )
             except BaseException:
                 self._stopping = True
                 try:
@@ -532,6 +594,37 @@ class AppManager:
                     LOGGER.exception("application startup rollback was incomplete")
                 self._closed = True
                 raise
+
+    def _start_camera_recorders_if_enabled(self, camera: CameraConfig) -> None:
+        if self._recorder_should_run(camera.id):
+            self._start_configured_recorders(camera)
+
+    def _camera_startup_completed(self) -> None:
+        self._mark_running_if_startup_complete()
+
+    def _mark_running_if_startup_complete(self) -> None:
+        if (
+            self._stopping
+            or self._closed
+            or not self._started
+            or not self._startup_services_ready
+            or not self.camera_startup.status().get("complete")
+        ):
+            return
+        self.mqtt.set_server_lifecycle("running")
+
+    def wait_for_camera_startup(self, timeout: float | None = None) -> bool:
+        return self.camera_startup.wait(timeout)
+
+    def camera_startup_status(self) -> dict[str, object]:
+        return {
+            **self.camera_startup.status(),
+            "application_startup": dict(self._startup_timings),
+        }
+
+    def _cancel_camera_startup(self) -> None:
+        if not self.camera_startup.cancel():
+            raise RuntimeError("camera startup coordinator did not stop")
 
     def stop_all(self) -> None:
         self.stop_all_with_runtime_preferences()
@@ -608,6 +701,8 @@ class AppManager:
 
         started = time.monotonic()
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
+        LOGGER.info("SurvNG shutdown: cancelling camera startup admission")
+        attempt("camera startup", self._cancel_camera_startup)
         LOGGER.info("SurvNG shutdown: releasing ONVIF subscriptions")
         attempt("ONVIF subscriptions", self.release_onvif_subscriptions)
         attempt("state monitor", self._stop_state_monitor)
@@ -829,6 +924,9 @@ class AppManager:
     def _mqtt_server_status(self) -> dict[str, dict[str, object]]:
         """Build a bounded MQTT snapshot without scanning recording storage."""
         statuses = self.statuses()
+        startup = self.camera_startup.status()
+        startup_counts = dict(startup.get("counts") or {})
+        startup_active = bool(startup.get("active"))
         enabled_ids = {
             camera.id
             for camera in self._unique_cameras()
@@ -876,6 +974,8 @@ class AppManager:
             activity = "cleaning"
         else:
             activity = "idle"
+        if startup_active and activity == "idle":
+            activity = "starting_cameras"
         plan = dict(retention.get("plan") or {})
         storage = dict(plan.get("storage") or {})
 
@@ -883,6 +983,8 @@ class AppManager:
         if self._started and not self._stopping:
             if self.config.detector.enabled and not detector_ready:
                 health = "fault"
+            elif startup_active:
+                health = "degraded"
             elif enabled_ids and running_cameras == 0:
                 health = "fault"
             elif running_cameras < len(enabled_ids) or recorders_running < recorder_total:
@@ -924,6 +1026,11 @@ class AppManager:
                 "detector_device": detector_device,
                 "object_queue_depth": object_queue_depth,
                 "retention_state": retention_state,
+                "camera_startup_active": startup_active,
+                "camera_startup_ready": int(startup_counts.get("ready") or 0),
+                "camera_startup_degraded": int(startup_counts.get("degraded") or 0),
+                "camera_startup_failed": int(startup_counts.get("failed") or 0),
+                "camera_startup_queued": int(startup_counts.get("queued") or 0),
             },
         }
 
@@ -1365,9 +1472,11 @@ class AppManager:
                 recording_keys.add((camera.id, "live"))
         recordings = self.recorder.status(recording_keys)
         timestamp_health = self.recorder.timestamp_health()
+        startup_cameras = dict(self.camera_startup.status().get("cameras") or {})
         return [
             {
                 **worker.status(),
+                "startup": dict(startup_cameras.get(camera_id) or {}),
                 "recording": recordings.get((camera_id, "main"), False),
                 "sub_recording": recordings.get((camera_id, "live"), False),
                 "recording_enabled": self.recording_enabled(camera_id),

@@ -115,6 +115,14 @@ class SemanticSearchConfig(BaseModel):
         return str(value or "GPU").strip().upper() or "GPU"
 
 
+class CameraStartupConfig(BaseModel):
+    """Bounded admission policy for camera connections after process start."""
+
+    max_concurrent_cameras: int = Field(default=2, ge=1, le=8)
+    first_frame_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
+    recorder_settle_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
+
+
 class MotionStageSelection(BaseModel):
     stage_id: str
     implementation: str
@@ -540,6 +548,7 @@ class AppConfig(BaseModel):
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
     semantic_search: SemanticSearchConfig = Field(default_factory=SemanticSearchConfig)
+    camera_startup: CameraStartupConfig = Field(default_factory=CameraStartupConfig)
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)

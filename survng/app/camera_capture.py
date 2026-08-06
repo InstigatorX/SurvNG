@@ -410,6 +410,17 @@ class CameraCaptureService:
                 "capture_stats": capture_stats,
             }
 
+    def frame_ready(self, source: str = "live") -> bool:
+        """Return freshness without copying the captured image."""
+        source = self._normalize_source(source)
+        now = self._monotonic_clock()
+        with self._lock:
+            frame = self._frames.get(source)
+            return bool(
+                frame is not None
+                and now - frame.captured_at_monotonic <= self.stale_seconds
+            )
+
     def source_is_idle(self, source: str) -> bool:
         source = self._normalize_source(source)
         if source == "live":
