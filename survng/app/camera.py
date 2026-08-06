@@ -52,6 +52,7 @@ from .motion_decisions import (
 )
 from .motion_incidents import MotionIncidentService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
+from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .tracking_frames import TrackingFrameService
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
@@ -107,6 +108,11 @@ class CameraWorker:
         self.image_writer = image_writer
         self._stop = threading.Event()
         self._stop.set()
+        self._enabled = False
+        self._detection_enabled = True
+        self._accepting_motion_events = True
+        self._lifecycle_lock = threading.RLock()
+        self._frame_lock = threading.Lock()
         effective_capture_backend = capture_backend or OpenCvFfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
@@ -124,10 +130,15 @@ class CameraWorker:
             rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
             stop_requested=self._stop.is_set,
         )
-        self.object_tracking = object_tracking_session_factory.create(
+        self.tracking_lifecycle = ObjectTrackingLifecycle(
             camera=camera,
+            factory=object_tracking_session_factory,
             frame_provider=self._get_latest_tracking_frame_with_fallback,
             catchup_frame_provider=self._recorded_tracking_frames,
+            prewarm_frame_provider=lambda: self._get_latest_tracking_frame("main"),
+            history=lambda: self.tracking_frames,
+            accepting=lambda: self._detection_enabled and not self._stop.is_set(),
+            lifecycle_lock=self._lifecycle_lock,
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
@@ -138,14 +149,10 @@ class CameraWorker:
         self.motion_incidents = MotionIncidentService(
             camera_id=camera.id,
             decision_processor=self.motion_decision_handler,
-            tracking_provider=lambda: self.object_tracking,
-            prewarm_tracking=lambda: self._get_latest_tracking_frame("main"),
+            tracking_provider=self.tracking_lifecycle.current,
+            prewarm_tracking=self.tracking_lifecycle.prewarm,
             image_reader=self.media.read_image,
         )
-        self._enabled = False
-        self._accepting_motion_events = True
-        self._lifecycle_lock = threading.RLock()
-        self._frame_lock = threading.Lock()
         ring_size = max(
             12,
             round(
@@ -348,7 +355,6 @@ class CameraWorker:
             ),
         )
         self.last_motion_at = ""
-        self._detection_enabled = True
         self.capture = CameraCaptureService(
             camera_id=camera.id,
             source_url=camera.source_url,
@@ -362,7 +368,7 @@ class CameraWorker:
             capture=self.capture,
             recorder=self.motion_object_detector.recorder,
             stop_event=self._stop,
-            sample_fps=lambda: self.object_tracking.config.sample_fps,
+            sample_fps=self.tracking_lifecycle.sample_fps,
         )
         self.onvif = OnvifEventListener(
             camera,
@@ -390,7 +396,7 @@ class CameraWorker:
                 illumination_filter_enabled=self._illumination_filter_enabled,
                 suppression_verification_rate=self._suppression_verification_rate,
                 motion_stats=self._motion_stats_snapshot,
-                object_tracking_status=lambda: self.object_tracking.status(),
+                object_tracking_status=self.tracking_lifecycle.status,
                 incident_status=self.motion_incidents.status,
                 event_worker_running=lambda: bool(
                     self._motion_thread is not None
@@ -459,6 +465,15 @@ class CameraWorker:
     @property
     def _tracking_frames(self) -> deque[tuple[float, np.ndarray]]:
         return self.tracking_frames.frames
+
+    @property
+    def object_tracking(self) -> ObjectTrackingSession:
+        """Compatibility view of the session owned by the lifecycle coordinator."""
+        return self.tracking_lifecycle.current()
+
+    @object_tracking.setter
+    def object_tracking(self, value: ObjectTrackingSession) -> None:
+        self.tracking_lifecycle.bind_for_compatibility(value)
 
     @property
     def _motion_frames(self) -> deque[tuple[float, np.ndarray]]:
@@ -545,7 +560,7 @@ class CameraWorker:
                         any(thread.is_alive() for thread in self.capture.threads().values()),
                     ),
                     ("ONVIF", self.onvif.running),
-                    ("object tracking", self.object_tracking.running()),
+                    ("object tracking", self.tracking_lifecycle.running()),
                 )
                 if running
             ]
@@ -557,7 +572,7 @@ class CameraWorker:
             self._enabled = True
             self._accepting_motion_events = True
             self._stop.clear()
-            self.object_tracking.set_accepting(self._detection_enabled)
+            self.tracking_lifecycle.sync_accepting()
             try:
                 self.motion_analysis.start(self._stop)
                 if not self.capture.start():
@@ -596,7 +611,7 @@ class CameraWorker:
             # subscription before waiting for tracking inference to finish.
             self.capture.request_stop()
             self.onvif.stop()
-            self.object_tracking.stop()
+            self.tracking_lifecycle.stop()
             self.motion_analysis.request_stop()
             self.motion_events.signal_stop()
             motion_thread = self._motion_thread
@@ -656,7 +671,7 @@ class CameraWorker:
                 shutdown_failures.append("motion workers")
             if self.onvif.running:
                 shutdown_failures.append("ONVIF worker")
-            if self.object_tracking.running():
+            if self.tracking_lifecycle.running():
                 shutdown_failures.append("object tracking worker")
             if shutdown_failures:
                 raise RuntimeError(
@@ -728,77 +743,31 @@ class CameraWorker:
             self.camera.zones = next_zones
 
     def set_detection_enabled(self, enabled: bool) -> None:
-        self._detection_enabled = bool(enabled)
-        self.object_tracking.set_accepting(
-            self._detection_enabled and not self._stop.is_set()
-        )
+        with self._lifecycle_lock:
+            self._detection_enabled = bool(enabled)
+            self.tracking_lifecycle.sync_accepting()
 
     def create_object_tracking_session(
         self,
         factory: ObjectTrackingSessionFactory,
     ) -> ObjectTrackingSession:
         """Build a replacement tracking session without changing camera I/O."""
-        return factory.create(
-            camera=self.camera,
-            frame_provider=self._get_latest_tracking_frame_with_fallback,
-            catchup_frame_provider=self._recorded_tracking_frames,
-        )
+        return self.tracking_lifecycle.create(factory)
 
     def pause_object_tracking_session(self) -> None:
         """Quiesce tracking before an inference engine transition."""
-        with self._lifecycle_lock:
-            if not self.object_tracking.stop():
-                raise RuntimeError(
-                    f"object tracking session did not stop for {self.camera.id}"
-                )
+        self.tracking_lifecycle.pause()
 
     def resume_object_tracking_session(self) -> None:
         """Restore tracking eligibility after a cancelled transition."""
-        with self._lifecycle_lock:
-            self.object_tracking.set_accepting(
-                self._detection_enabled and not self._stop.is_set()
-            )
+        self.tracking_lifecycle.sync_accepting()
 
     def replace_object_tracking_session(
         self,
         replacement: ObjectTrackingSession,
     ) -> ObjectTrackingSession:
         """Atomically replace tracking while preserving capture and ONVIF state."""
-        with self._lifecycle_lock:
-            previous = self.object_tracking
-            if replacement is previous:
-                return previous
-            if not previous.stop():
-                raise RuntimeError(
-                    f"object tracking session did not stop for {self.camera.id}"
-                )
-            try:
-                self.object_tracking = replacement
-                self.tracking_frames.resize(replacement.config.sample_fps)
-                replacement.set_accepting(
-                    self._detection_enabled and not self._stop.is_set()
-                )
-            except BaseException:
-                try:
-                    replacement.stop()
-                except Exception:
-                    LOGGER.exception(
-                        "replacement object tracking cleanup failed for %s",
-                        self.camera.id,
-                    )
-                finally:
-                    self.object_tracking = previous
-                try:
-                    previous.set_accepting(
-                        self._detection_enabled and not self._stop.is_set()
-                    )
-                except Exception:
-                    LOGGER.exception(
-                        "previous object tracking session restore failed for %s",
-                        self.camera.id,
-                    )
-                raise
-            return previous
+        return self.tracking_lifecycle.replace(replacement)
 
     def snapshot(self, source: str = "live") -> bytes | None:
         return self.media.snapshot(source)
