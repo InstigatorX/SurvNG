@@ -1525,6 +1525,49 @@ p {
   padding: 14px;
 }
 
+@media (min-width: 1051px) {
+  .live-grid {
+    height: calc(100dvh - 80px);
+    min-height: 520px;
+    overflow: hidden;
+  }
+
+  .live-camera-zone {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .live-camera-grid {
+    width: 100%;
+    height: 100%;
+  }
+
+  .live-camera-grid.viewport-layout {
+    position: relative;
+    column-width: auto;
+    column-gap: 0;
+    padding: 0;
+  }
+
+  .live-camera-grid.viewport-layout .camera-tile.viewport-layout {
+    position: absolute;
+    display: block;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    transition: left 180ms ease, top 180ms ease, width 180ms ease, height 180ms ease,
+      border-color 140ms ease, opacity 140ms ease, transform 140ms ease;
+  }
+
+  .live-camera-grid.viewport-layout .camera-tile.viewport-layout .video-frame {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: auto;
+    border-radius: 7px;
+  }
+}
+
 .camera-tile {
   display: inline-block;
   width: 100%;
@@ -8345,6 +8388,13 @@ section.detection-settings-card {
 
 
 @media (max-width: 1050px) {
+  .live-camera-grid .camera-tile.viewport-layout {
+    position: static;
+    width: 100% !important;
+    height: auto !important;
+    inset: auto !important;
+  }
+
   .live-grid,
   .recordings-grid,
   .config-grid,

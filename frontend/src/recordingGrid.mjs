@@ -40,45 +40,73 @@ function partitionRows(items, rowCount) {
   return rows;
 }
 
-export function recordingGridLayout(cameras, source, width, height, gap = 6, aspectOverrides = {}) {
+function portraitLayoutScale(aspect, portraitPriority) {
+  if (!portraitPriority || aspect >= 1) return 1;
+  // Portrait cameras otherwise inherit the common row height and become tiny,
+  // narrow tiles. Give increasingly tall sources more visual area while
+  // preserving their native aspect ratio and keeping the boost bounded.
+  return 1 + Math.min(0.5, ((1 / Math.max(0.25, aspect)) - 1) * 0.6);
+}
+
+export function recordingGridLayout(
+  cameras,
+  source,
+  width,
+  height,
+  gap = 6,
+  aspectOverrides = {},
+  { portraitPriority = false } = {},
+) {
   if (!cameras.length || width <= 0 || height <= 0) return [];
-  const items = cameras.map((camera) => ({
-    camera,
-    aspect: Number(aspectOverrides[camera.id]) > 0
+  const items = cameras.map((camera) => {
+    const nativeAspect = Number(aspectOverrides[camera.id]) > 0
       ? Number(aspectOverrides[camera.id])
-      : recordingCameraAspect(camera, source),
-  }));
+      : recordingCameraAspect(camera, source);
+    const scale = portraitLayoutScale(nativeAspect, portraitPriority);
+    return {
+      camera,
+      nativeAspect,
+      scale,
+      // partitionRows balances rendered width, including the portrait boost.
+      aspect: nativeAspect * scale,
+    };
+  });
   let best = null;
   const maximumRows = Math.min(items.length, 12);
   for (let rowCount = 1; rowCount <= maximumRows; rowCount += 1) {
     const rows = partitionRows(items, rowCount);
-    const heightLimit = (height - gap * (rows.length - 1)) / rows.length;
+    const rowScales = rows.map((row) => Math.max(...row.items.map((item) => item.scale)));
+    const heightLimit = (height - gap * (rows.length - 1))
+      / rowScales.reduce((sum, scale) => sum + scale, 0);
     const widthLimit = Math.min(...rows.map((row) => (
       (width - gap * (row.items.length - 1)) / row.aspect
     )));
     const rowHeight = Math.max(1, Math.min(heightLimit, widthLimit));
-    if (!best || rowHeight > best.rowHeight) best = { rows, rowHeight };
+    if (!best || rowHeight > best.rowHeight) best = { rows, rowHeight, rowScales };
   }
 
-  const totalHeight = best.rows.length * best.rowHeight + gap * (best.rows.length - 1);
+  const totalHeight = best.rowScales.reduce((sum, scale) => sum + scale * best.rowHeight, 0)
+    + gap * (best.rows.length - 1);
   let y = Math.max(0, (height - totalHeight) / 2);
   const layout = [];
-  for (const row of best.rows) {
+  best.rows.forEach((row, rowIndex) => {
+    const renderedRowHeight = best.rowScales[rowIndex] * best.rowHeight;
     const rowWidth = row.aspect * best.rowHeight + gap * (row.items.length - 1);
     let x = Math.max(0, (width - rowWidth) / 2);
     for (const item of row.items) {
       const itemWidth = item.aspect * best.rowHeight;
+      const itemHeight = item.scale * best.rowHeight;
       layout.push({
         camera: item.camera,
         x,
-        y,
+        y: y + (renderedRowHeight - itemHeight) / 2,
         width: itemWidth,
-        height: best.rowHeight,
+        height: itemHeight,
       });
       x += itemWidth + gap;
     }
-    y += best.rowHeight + gap;
-  }
+    y += renderedRowHeight + gap;
+  });
   return layout;
 }
 

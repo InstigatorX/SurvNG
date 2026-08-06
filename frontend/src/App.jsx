@@ -1671,7 +1671,7 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -1693,6 +1693,10 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
   const shouldUseWebRtc = camera.running && streamReady && activeTransport === "webrtc";
   const shouldUseMjpegStream = camera.running && streamReady && activeTransport === "mjpeg";
   const cameraConnected = camera.connected ?? camera.running;
+
+  useEffect(() => {
+    onAspectChange?.(camera.id, mediaAspectRatio(aspect));
+  }, [aspect, camera.id, onAspectChange]);
 
   useEffect(() => {
     if (!STREAM_MODES.includes(streamMode)) setStreamMode("motion");
@@ -1825,8 +1829,14 @@ function CameraTile({ camera, timeZone, refresh, onOpen, startDelayMs = 0, dropP
 
   return (
     <article
-      className={`bento-card camera-tile ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`}
+      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
+      style={layout ? {
+        left: `${layout.x}px`,
+        top: `${layout.y}px`,
+        width: `${layout.width}px`,
+        height: `${layout.height}px`,
+      } : undefined}
       {...dropProps}
     >
       <div
@@ -4512,6 +4522,9 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [cameraOrder, setCameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [dragCameraId, setDragCameraId] = useState("");
   const [dragOverCameraId, setDragOverCameraId] = useState("");
+  const liveCameraGridRef = useRef(null);
+  const [liveCameraGridSize, setLiveCameraGridSize] = useState({ width: 0, height: 0 });
+  const [liveCameraAspects, setLiveCameraAspects] = useState({});
   const {
     incidentDetailCacheRef,
     incidentDetails,
@@ -4563,6 +4576,54 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     const seen = new Set(sorted.map((camera) => camera.id));
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
+  const liveCameraLayout = useMemo(
+    () => recordingGridLayout(
+      orderedCameras,
+      "live",
+      liveCameraGridSize.width,
+      liveCameraGridSize.height,
+      8,
+      liveCameraAspects,
+      { portraitPriority: true },
+    ),
+    [liveCameraAspects, liveCameraGridSize.height, liveCameraGridSize.width, orderedCameras],
+  );
+  const liveCameraLayoutById = useMemo(
+    () => new Map(liveCameraLayout.map((item) => [item.camera.id, item])),
+    [liveCameraLayout],
+  );
+  const liveCameraLayoutReady = liveCameraLayout.length === orderedCameras.length && orderedCameras.length > 0;
+  const updateLiveCameraAspect = React.useCallback((cameraId, aspect) => {
+    const normalized = Number(aspect);
+    if (!(normalized > 0)) return;
+    setLiveCameraAspects((current) => (
+      Math.abs(Number(current[cameraId]) - normalized) < 0.0001
+        ? current
+        : { ...current, [cameraId]: normalized }
+    ));
+  }, []);
+
+  useLayoutEffect(() => {
+    const grid = liveCameraGridRef.current;
+    if (!grid) return undefined;
+    const update = () => {
+      const next = {
+        width: Math.max(0, grid.clientWidth),
+        height: Math.max(0, grid.clientHeight),
+      };
+      setLiveCameraGridSize((current) => (
+        current.width === next.width && current.height === next.height ? current : next
+      ));
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     let cancelled = false;
     async function syncLiveDefaults() {
@@ -4829,8 +4890,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
 
   return (
     <main className="bento-grid live-grid">
-      <section className="bento-card camera-zone">
-        <div className="camera-grid">
+      <section className="bento-card camera-zone live-camera-zone">
+        <div ref={liveCameraGridRef} className={`camera-grid live-camera-grid${liveCameraLayoutReady ? " viewport-layout" : ""}`}>
           {liveDefaultsReady ? orderedCameras.map((camera, index) => (
             <CameraTile
               key={`${camera.id}:${liveDefaultsInstance}`}
@@ -4838,6 +4899,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               timeZone={timeZone}
               refresh={refreshBase}
               onOpen={setExpandedCamera}
+              onAspectChange={updateLiveCameraAspect}
+              layout={liveCameraLayoutById.get(camera.id)}
               startDelayMs={index * 450}
               dragging={dragCameraId === camera.id}
               dragOver={dragOverCameraId === camera.id && dragCameraId !== camera.id}
