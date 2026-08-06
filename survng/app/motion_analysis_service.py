@@ -59,6 +59,15 @@ class MotionAnalysisHooks:
     record_analysis_wait: Callable[[float], None]
 
 
+@dataclass(frozen=True, slots=True)
+class MotionFrameSubmission:
+    """A stable captured frame handed to the latest-only analysis mailbox."""
+
+    image: np.ndarray
+    captured_at_epoch: float
+    captured_at_monotonic: float
+
+
 class MotionAnalysisService:
     """Own continuous frame-driven motion analysis for one camera."""
 
@@ -90,7 +99,9 @@ class MotionAnalysisService:
         self.hooks = hooks
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
-        self.queue: queue.Queue[float | None] = queue.Queue(maxsize=queue_size)
+        self.queue: queue.Queue[float | MotionFrameSubmission | None] = queue.Queue(
+            maxsize=queue_size
+        )
         self.thread: threading.Thread | None = None
         self.last_sample_clock = 0.0
         self.last_processed_at = 0.0
@@ -100,11 +111,13 @@ class MotionAnalysisService:
         self._visual_lock = threading.Lock()
         self._stop_event: threading.Event | None = None
         self._stop_requested = threading.Event()
+        self._admission_lock = threading.Lock()
         self._accepting_frames = True
         self._telemetry_lock = threading.Lock()
         self._telemetry: dict[str, Any] = {
             "mailbox_high_water": 0,
             "mailbox_replacements": 0,
+            "raw_frames_submitted": 0,
             "frames_sampled": 0,
             "preprocess_count": 0,
             "preprocess_total_ms": 0.0,
@@ -136,7 +149,8 @@ class MotionAnalysisService:
         self.clear_queue()
         self._stop_event = stop_event
         self._stop_requested.clear()
-        self._accepting_frames = True
+        with self._admission_lock:
+            self._accepting_frames = True
         thread = threading.Thread(
             target=self.run,
             args=(stop_event,),
@@ -148,19 +162,21 @@ class MotionAnalysisService:
             thread.start()
         except BaseException:
             self.thread = None
-            self._accepting_frames = False
+            with self._admission_lock:
+                self._accepting_frames = False
             self._stop_requested.set()
             self._stop_event = None
             raise
 
     def request_stop(self) -> None:
-        self._accepting_frames = False
-        self._stop_requested.set()
-        self.clear_queue()
-        try:
-            self.queue.put_nowait(None)
-        except queue.Full:
-            pass
+        with self._admission_lock:
+            self._accepting_frames = False
+            self._stop_requested.set()
+            self.clear_queue()
+            try:
+                self.queue.put_nowait(None)
+            except queue.Full:
+                pass
 
     def wait_stopped(self, timeout: float) -> bool:
         thread = self.thread
@@ -192,28 +208,62 @@ class MotionAnalysisService:
             self.visual_backup.reset()
 
     def schedule(self, captured_at: float, stop_event: threading.Event) -> None:
-        if stop_event.is_set() or not self._accepting_frames:
+        self._enqueue_latest(captured_at, stop_event)
+
+    def submit_frame(
+        self,
+        frame: np.ndarray,
+        frame_clock: float,
+        stop_event: threading.Event,
+        captured_at: float | None = None,
+    ) -> None:
+        """Hand a stable raw frame to the analysis worker without preprocessing."""
+        if not self._admit_frame(frame_clock, stop_event):
             return
-        try:
-            self.queue.put_nowait(captured_at)
-            self._record_mailbox_depth()
-            return
-        except queue.Full:
-            dropped = 0
+        frame_epoch = captured_at if captured_at is not None else time.time()
+        queued = self._enqueue_latest(
+            MotionFrameSubmission(
+                image=frame,
+                captured_at_epoch=frame_epoch,
+                captured_at_monotonic=frame_clock,
+            ),
+            stop_event,
+        )
+        if queued:
+            with self._telemetry_lock:
+                self._telemetry["raw_frames_submitted"] += 1
+
+    def _enqueue_latest(
+        self,
+        work: float | MotionFrameSubmission,
+        stop_event: threading.Event,
+    ) -> bool:
+        with self._admission_lock:
+            if stop_event.is_set() or not self._accepting_frames:
+                return False
             try:
-                self.queue.get_nowait()
+                self.queue.put_nowait(work)
+                self._record_mailbox_depth()
+                return True
+            except queue.Full:
+                dropped = 0
+                try:
+                    self.queue.get_nowait()
+                    dropped += 1
+                except queue.Empty:
+                    pass
+            try:
+                self.queue.put_nowait(work)
+                self._record_mailbox_depth()
+                queued = True
+            except queue.Full:
                 dropped += 1
-            except queue.Empty:
-                pass
-        try:
-            self.queue.put_nowait(captured_at)
-            self._record_mailbox_depth()
-        except queue.Full:
-            dropped += 1
+                queued = False
         if dropped:
             self.hooks.increment_stat("analysis_frames_dropped", dropped)
             with self._telemetry_lock:
                 self._telemetry["mailbox_replacements"] += dropped
+        return queued
 
     def remember_frame(
         self,
@@ -222,13 +272,37 @@ class MotionAnalysisService:
         stop_event: threading.Event,
         captured_at: float | None = None,
     ) -> None:
-        if not self._accepting_frames or not self.hooks.frame_analysis_required():
+        if not self._admit_frame(frame_clock, stop_event):
             return
+        frame_epoch = captured_at if captured_at is not None else time.time()
+        prepared = self._preprocess_frame(frame, frame_epoch)
+        if prepared is None:
+            return
+        self.schedule(frame_epoch, stop_event)
+
+    def _admit_frame(
+        self,
+        frame_clock: float,
+        stop_event: threading.Event,
+    ) -> bool:
+        if (
+            stop_event.is_set()
+            or not self._accepting_frames
+            or not self.hooks.frame_analysis_required()
+        ):
+            return False
         interval = 1.0 / max(1.0, self.hooks.sample_fps())
         with self.frame_lock:
             if frame_clock - self.last_sample_clock < interval * 0.85:
-                return
+                return False
             self.last_sample_clock = frame_clock
+        return True
+
+    def _preprocess_frame(
+        self,
+        frame: np.ndarray,
+        frame_epoch: float,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
         preprocess_started = time.monotonic()
         try:
             height, width = frame.shape[:2]
@@ -241,7 +315,7 @@ class MotionAnalysisService:
             )
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         except (cv2.error, ValueError):
-            return
+            return None
         preprocess_ms = max(0.0, (time.monotonic() - preprocess_started) * 1000.0)
         with self._telemetry_lock:
             self._record_timing_locked("preprocess", preprocess_ms)
@@ -250,11 +324,10 @@ class MotionAnalysisService:
             self._telemetry["derived_frame_bytes"] += int(
                 resized.nbytes + gray.nbytes
             )
-        frame_epoch = captured_at if captured_at is not None else time.time()
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
             self.color_frames.append((frame_epoch, resized))
-        self.schedule(frame_epoch, stop_event)
+        return gray, resized
 
     def samples(self) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
@@ -414,10 +487,10 @@ class MotionAnalysisService:
         self._stop_event = stop_event
         while not self._stopping():
             try:
-                scheduled_at = self.queue.get(timeout=0.5)
+                work = self.queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if scheduled_at is None or stop_event.is_set():
+            if work is None or stop_event.is_set():
                 return
             cycle_started = time.monotonic()
             try:
@@ -427,18 +500,39 @@ class MotionAnalysisService:
                 ) as wait_seconds:
                     if wait_seconds is None or self._stopping():
                         return
+                    work = self._take_latest_pending(work)
+                    if work is None or self._stopping():
+                        return
+                    handoff_ms = (
+                        (time.monotonic() - work.captured_at_monotonic) * 1000.0
+                        if isinstance(work, MotionFrameSubmission)
+                        else (time.time() - work) * 1000.0
+                    )
                     self.hooks.record_analysis_wait(
                         max(0.0, wait_seconds * 1000.0)
                     )
                     self._record_timing(
                         "capture_to_analysis",
-                        max(0.0, (time.time() - scheduled_at) * 1000.0),
+                        max(0.0, handoff_ms),
                     )
-                    with self.frame_lock:
-                        if not self.frames:
+                    if isinstance(work, MotionFrameSubmission):
+                        prepared = self._preprocess_frame(
+                            work.image,
+                            work.captured_at_epoch,
+                        )
+                        if prepared is None:
                             continue
-                        captured_at, frame = self.frames[-1]
-                        frame = self._copy_frame(frame, "analysis_latest")
+                        captured_at = work.captured_at_epoch
+                        frame = self._copy_frame(
+                            prepared[0],
+                            "analysis_latest",
+                        )
+                    else:
+                        with self.frame_lock:
+                            if not self.frames:
+                                continue
+                            captured_at, frame = self.frames[-1]
+                            frame = self._copy_frame(frame, "analysis_latest")
                     if captured_at <= self.last_processed_at:
                         continue
                     self.last_processed_at = captured_at
@@ -472,6 +566,27 @@ class MotionAnalysisService:
                     "analysis_cycle",
                     max(0.0, (time.monotonic() - cycle_started) * 1000.0),
                 )
+
+    def _take_latest_pending(
+        self,
+        work: float | MotionFrameSubmission,
+    ) -> float | MotionFrameSubmission | None:
+        """Replace work held during limiter wait with the newest pending frame."""
+        superseded = 0
+        while True:
+            try:
+                candidate = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            if candidate is None:
+                return None
+            work = candidate
+            superseded += 1
+        if superseded:
+            self.hooks.increment_stat("analysis_frames_dropped", superseded)
+            with self._telemetry_lock:
+                self._telemetry["mailbox_replacements"] += superseded
+        return work
 
     def analyze_continuous(self, captured_at: float) -> None:
         _mode, sensitivity, _frame_width = self.hooks.motion_settings()

@@ -628,7 +628,10 @@ class CameraCaptureService:
             try:
                 self._frame_observer(CapturedFrame(
                     source=frame.source,
-                    image=image,
+                    # Share the capture service's stable stored-frame ownership.
+                    # The observer may retain this array after the callback;
+                    # subsequent frames replace the container, not its image.
+                    image=frame.image,
                     captured_at_epoch=frame.captured_at_epoch,
                     captured_at_monotonic=frame.captured_at_monotonic,
                     captured_at_iso=frame.captured_at_iso,

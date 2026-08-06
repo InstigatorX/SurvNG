@@ -295,6 +295,22 @@ def test_frame_observer_runs_without_capture_lock_held() -> None:
     assert observed_status
 
 
+def test_frame_observer_receives_stable_stored_frame_ownership() -> None:
+    observed: list[CapturedFrame] = []
+    service = _service(frame_observer=observed.append)
+    with service._lock:
+        service._stop.clear()
+    source = np.ones((10, 20, 3), dtype=np.uint8)
+
+    assert service._publish_frame("live", source)
+    source.fill(9)
+
+    assert len(observed) == 1
+    assert int(observed[0].image[0, 0, 0]) == 1
+    with service._lock:
+        assert observed[0].image is service._frames["live"].image
+
+
 def test_repeated_start_stop_leaves_no_capture_generations() -> None:
     service = _service(FakeBackend([
         [np.ones((10, 20, 3), dtype=np.uint8)],

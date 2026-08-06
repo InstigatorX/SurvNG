@@ -224,13 +224,18 @@ triggers before the high-resolution OpenVINO cycle.
 
 ### Frame ring
 
-The existing live/substream capture is downscaled to the configured
-`motion_qualification.frame_width`, converted to grayscale, and sampled at
-`motion_qualification.sample_fps`. The global default is 320 pixels; cameras
-with small or distant objects can override it independently. This does not open
-another camera connection. The ring is sized from the configured sample rate,
-analysis window, and post-trigger horizon with additional history for timestamp
-jitter.
+The existing live/substream capture publishes its stable stored-frame reference
+to a one-slot, latest-only motion mailbox at
+`motion_qualification.sample_fps`. The capture callback performs no resize or
+color conversion. The camera's motion-analysis worker acquires the shared CPU
+analysis slot, downscales the newest frame to
+`motion_qualification.frame_width`, converts it to grayscale, and appends both
+compact derivatives to their bounded rings. If analysis falls behind, a pending
+raw frame is replaced rather than building stale work. The global width default
+is 320 pixels; cameras with small or distant objects can override it
+independently. This does not open another camera connection. The ring is sized
+from the configured sample rate, analysis window, and post-trigger horizon with
+additional history for timestamp jitter.
 
 ### Optional MOG2 validation and blob tracking
 
@@ -609,7 +614,8 @@ than treating model time as the whole pipeline. Per-source capture status
 reports stored-frame copy volume and synchronous observer latency. Motion
 analysis reports capture-to-analysis handoff latency, preprocessing latency,
 analysis-cycle latency, derived-frame allocation, and explicit frame-copy
-volume by reason. The semantic motion-event coordinator reports queue and retry
+volume by reason. It also reports accepted raw-frame handoffs and latest-frame
+mailbox replacements. The semantic motion-event coordinator reports queue and retry
 high-water marks, evictions, rejections, and exhausted retries. Lifecycle status
 lists the workers that remain active for each camera. Bounded latency samples
 are exposed live; selected p95/p99 latency and counter deltas are persisted for

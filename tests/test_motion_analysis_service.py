@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -12,6 +13,7 @@ from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_analysis_service import (
     MotionAnalysisHooks,
     MotionAnalysisService,
+    MotionFrameSubmission,
 )
 from survng.app.motion_coordinator import (
     VisualBackupAction,
@@ -112,6 +114,88 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert telemetry["derived_frame_count"] == 2
     assert telemetry["derived_frame_bytes"] == 90 * 320 * 4
     assert telemetry["preprocess_count"] == 1
+
+
+def test_raw_submission_defers_preprocessing_to_analysis_worker() -> None:
+    stop_event = threading.Event()
+    execute_continuous = Mock(side_effect=lambda _at: stop_event.set())
+    service = _service(_hooks(execute_continuous=execute_continuous))
+    captured_at = time.time()
+
+    service.submit_frame(
+        np.zeros((180, 640, 3), dtype=np.uint8),
+        10.0,
+        stop_event,
+        captured_at,
+    )
+
+    assert not service.frames
+    assert service.telemetry_snapshot()["preprocess_count"] == 0
+    queued = service.queue.queue[0]
+    assert isinstance(queued, MotionFrameSubmission)
+    assert queued.captured_at_epoch == captured_at
+
+    service.run(stop_event)
+
+    assert service.frames[-1][0] == captured_at
+    assert service.frames[-1][1].shape == (90, 320)
+    assert service.color_frames[-1][1].shape == (90, 320, 3)
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["raw_frames_submitted"] == 1
+    assert telemetry["preprocess_count"] == 1
+    execute_continuous.assert_called_once_with(captured_at)
+
+
+def test_raw_submission_mailbox_replaces_stale_frame_before_preprocessing() -> None:
+    increment_stat = Mock()
+    service = _service(_hooks(increment_stat=increment_stat))
+    stop_event = threading.Event()
+    stale = np.zeros((180, 320, 3), dtype=np.uint8)
+    latest = np.ones((180, 320, 3), dtype=np.uint8)
+
+    service.submit_frame(stale, 10.0, stop_event, 100.0)
+    service.submit_frame(latest, 11.0, stop_event, 101.0)
+
+    queued = service.queue.get_nowait()
+    assert isinstance(queued, MotionFrameSubmission)
+    assert queued.captured_at_epoch == 101.0
+    assert queued.image is latest
+    assert not service.frames
+    increment_stat.assert_called_once_with("analysis_frames_dropped", 1)
+    assert service.telemetry_snapshot()["mailbox_replacements"] == 1
+
+
+def test_worker_uses_latest_raw_frame_after_waiting_for_analysis_slot() -> None:
+    increment_stat = Mock()
+    stop_event = threading.Event()
+    execute_continuous = Mock(side_effect=lambda _at: stop_event.set())
+    limiter = FairMotionAnalysisLimiter(1)
+    service = _service(_hooks(
+        increment_stat=increment_stat,
+        execute_continuous=execute_continuous,
+    ))
+    service.limiter = limiter
+    first = np.zeros((180, 320, 3), dtype=np.uint8)
+    latest = np.ones((180, 320, 3), dtype=np.uint8)
+
+    with limiter.acquire("blocker"):
+        service.submit_frame(first, 10.0, stop_event, time.time())
+        worker = threading.Thread(target=service.run, args=(stop_event,))
+        worker.start()
+        deadline = time.monotonic() + 1.0
+        while limiter.status()["pending"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert limiter.status()["pending"] == 1
+        latest_at = time.time()
+        service.submit_frame(latest, 11.0, stop_event, latest_at)
+
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert [captured_at for captured_at, _frame in service.frames] == [latest_at]
+    assert int(service.color_frames[-1][1][0, 0, 0]) == 1
+    increment_stat.assert_called_once_with("analysis_frames_dropped", 1)
+    assert service.telemetry_snapshot()["mailbox_replacements"] == 1
 
 
 def test_latest_only_schedule_replaces_stale_pending_work() -> None:
@@ -256,6 +340,39 @@ def test_stopped_service_rejects_late_capture_callbacks() -> None:
     assert not service.frames
     assert service.queue.get_nowait() is None
     assert service.queue.empty()
+
+
+def test_stop_wins_over_frame_admitted_before_mailbox_enqueue() -> None:
+    service = _service(_hooks())
+    stop_event = threading.Event()
+    admitted = threading.Event()
+    release_submitter = threading.Event()
+    original_admit = service._admit_frame
+
+    def pause_after_admission(
+        frame_clock: float,
+        submitted_stop: threading.Event,
+    ) -> bool:
+        result = original_admit(frame_clock, submitted_stop)
+        admitted.set()
+        assert release_submitter.wait(1.0)
+        return result
+
+    service._admit_frame = pause_after_admission
+    submitter = threading.Thread(
+        target=service.submit_frame,
+        args=(np.zeros((180, 320, 3), dtype=np.uint8), 10.0, stop_event, 100.0),
+    )
+    submitter.start()
+    assert admitted.wait(1.0)
+
+    service.request_stop()
+    release_submitter.set()
+    submitter.join(timeout=1.0)
+
+    assert not submitter.is_alive()
+    assert list(service.queue.queue) == [None]
+    assert service.telemetry_snapshot()["raw_frames_submitted"] == 0
 
 
 def test_adaptive_enqueue_failure_releases_reservation() -> None:

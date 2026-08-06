@@ -7956,6 +7956,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Motion analysis frames dropped</dt><dd>{camera.motion.analysis_frames_dropped || 0}</dd></div>
                 <div><dt>Motion preprocessing · avg / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.preprocess_average_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.preprocess_p99_ms)}</dd></div>
                 <div><dt>Capture to analysis · p95 / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p95_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p99_ms)}</dd></div>
+                <div><dt>Raw motion handoffs / replaced</dt><dd>{Number(camera.motion.analysis_runtime?.raw_frames_submitted || 0).toLocaleString()} / {Number(camera.motion.analysis_runtime?.mailbox_replacements || 0).toLocaleString()}</dd></div>
                 <div><dt>Motion frame copies</dt><dd>{Number(camera.motion.analysis_runtime?.copy_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.copy_bytes || 0)}</dd></div>
                 <div><dt>Event queue · peak / evicted / rejected</dt><dd>{camera.motion.event_runtime?.queue_high_water || 0} / {camera.motion.event_runtime?.evicted || 0} / {camera.motion.event_runtime?.rejected || 0}</dd></div>
                 <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>

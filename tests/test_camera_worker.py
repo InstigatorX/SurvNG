@@ -406,6 +406,11 @@ class CameraWorkerTest(unittest.TestCase):
         config = MotionQualificationConfig(mode="adaptive", sample_fps=2.0)
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            analysis_thread = worker._motion_analysis_thread = threading.Thread(
+                target=worker._run_motion_analysis
+            )
+            analysis_thread.start()
             live = CapturedFrame(
                 source="live",
                 image=np.zeros((90, 160, 3), dtype=np.uint8),
@@ -429,6 +434,13 @@ class CameraWorkerTest(unittest.TestCase):
 
             worker._capture_frame(live)
             worker._capture_frame(main)
+
+            deadline = time.monotonic() + 1
+            while not worker._motion_frames and time.monotonic() < deadline:
+                time.sleep(0.01)
+            worker._stop.set()
+            worker._signal_motion_analysis_stop()
+            analysis_thread.join(timeout=1)
 
         self.assertEqual(worker._motion_frames[-1][0], 100.25)
         self.assertEqual(worker._tracking_frames[-1][0], 100.5)

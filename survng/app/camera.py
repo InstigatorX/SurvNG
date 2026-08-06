@@ -30,7 +30,11 @@ from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
 from .motion_analysis import FairMotionAnalysisLimiter
-from .motion_analysis_service import MotionAnalysisHooks, MotionAnalysisService
+from .motion_analysis_service import (
+    MotionAnalysisHooks,
+    MotionAnalysisService,
+    MotionFrameSubmission,
+)
 from .motion_qualification_service import (
     MotionQualificationHooks,
     MotionQualificationService,
@@ -554,7 +558,9 @@ class CameraWorker:
         return self.motion_analysis.color_frames
 
     @property
-    def _motion_analysis_queue(self) -> queue.Queue[float | None]:
+    def _motion_analysis_queue(
+        self,
+    ) -> queue.Queue[float | MotionFrameSubmission | None]:
         return self.motion_analysis.queue
 
     @property
@@ -778,6 +784,19 @@ class CameraWorker:
         captured_at: float | None = None,
     ) -> None:
         self.motion_analysis.remember_frame(
+            frame,
+            frame_clock,
+            self._stop,
+            captured_at,
+        )
+
+    def _submit_motion_frame(
+        self,
+        frame: np.ndarray,
+        frame_clock: float,
+        captured_at: float | None = None,
+    ) -> None:
+        self.motion_analysis.submit_frame(
             frame,
             frame_clock,
             self._stop,
@@ -1053,7 +1072,7 @@ class CameraWorker:
 
     def _capture_frame(self, frame: CapturedFrame) -> None:
         if frame.source == "live":
-            self._remember_motion_frame(
+            self._submit_motion_frame(
                 frame.image,
                 frame.captured_at_monotonic,
                 frame.captured_at_epoch,
