@@ -22,6 +22,11 @@ from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
 from .motion_analysis import FairMotionAnalysisLimiter
+from .motion_coordinator import (
+    VisualBackupAction,
+    VisualBackupCoordinator,
+    VisualBackupPolicy,
+)
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
 from .security import redact_secret_text
@@ -171,16 +176,7 @@ class CameraWorker:
         self._adaptive_last_completed_at = 0.0
         self._priority_motion_times: deque[float] = deque(maxlen=16)
         self._camera_motion_times: deque[float] = deque(maxlen=32)
-        self._visual_backup_last_matched_camera_at = 0.0
-        self._visual_backup_analysis_started_at = 0.0
-        self._visual_backup_scene_ready = False
-        self._visual_backup_stable_since = 0.0
-        self._visual_backup_stable_samples = 0
-        self._visual_backup_readiness_audited = False
-        self._visual_backup_candidate_since = 0.0
-        self._visual_backup_last_candidate_at = 0.0
-        self._visual_backup_consecutive = 0
-        self._visual_backup_trigger_times: deque[float] = deque(maxlen=64)
+        self.visual_backup = VisualBackupCoordinator()
         self._motion_stats_lock = threading.Lock()
         self._motion_stats: dict[str, Any] = {
             "triggers": 0,
@@ -377,16 +373,8 @@ class CameraWorker:
             self._adaptive_last_completed_at = 0.0
             self._priority_motion_times.clear()
             self._camera_motion_times.clear()
-            self._visual_backup_last_matched_camera_at = 0.0
-            self._visual_backup_analysis_started_at = 0.0
-            self._visual_backup_scene_ready = False
-            self._visual_backup_stable_since = 0.0
-            self._visual_backup_stable_samples = 0
-            self._visual_backup_readiness_audited = False
-            self._visual_backup_candidate_since = 0.0
-            self._visual_backup_last_candidate_at = 0.0
-            self._visual_backup_consecutive = 0
-            self._visual_backup_trigger_times.clear()
+            with self._motion_stats_lock:
+                self.visual_backup.reset()
             self._thread = self._source_threads.get("live")
             shutdown_failures: list[str] = []
             if alive:
@@ -499,6 +487,7 @@ class CameraWorker:
         visual_backup = self._visual_backup_settings()
         with self._motion_stats_lock:
             motion_stats = dict(self._motion_stats)
+            visual_backup_status = self.visual_backup.snapshot()
         return {
             "id": self.camera.id,
             "name": self.camera.name,
@@ -562,8 +551,7 @@ class CameraWorker:
                     "minimum_consecutive": visual_backup["minimum_consecutive"],
                     "cooldown_seconds": visual_backup["cooldown_seconds"],
                     "maximum_triggers_5m": visual_backup["maximum_triggers_5m"],
-                    "scene_ready": self._visual_backup_scene_ready,
-                    "stable_samples": self._visual_backup_stable_samples,
+                    **visual_backup_status,
                 },
                 "suppression_verification_rate": self._suppression_verification_rate(),
                 "borderline_rescue_enabled": rescue_enabled,
@@ -994,60 +982,31 @@ class CameraWorker:
         })
 
     def _reset_visual_backup_candidate(self) -> None:
-        self._visual_backup_candidate_since = 0.0
-        self._visual_backup_last_candidate_at = 0.0
-        self._visual_backup_consecutive = 0
+        with self._motion_stats_lock:
+            self.visual_backup.reset_candidate()
 
     def _visual_backup_readiness(
         self,
         result: MotionQualificationResult,
         captured_at: float,
     ) -> bool:
-        """Require a quiet post-warmup baseline before EMA may rescue events."""
-        if (
-            self._visual_backup_analysis_started_at <= 0.0
-            or captured_at < self._visual_backup_analysis_started_at
-        ):
-            self._visual_backup_analysis_started_at = captured_at
-            self._visual_backup_scene_ready = False
-            self._visual_backup_stable_since = 0.0
-            self._visual_backup_stable_samples = 0
-        if self._visual_backup_scene_ready:
-            return True
-        if (
-            captured_at - self._visual_backup_analysis_started_at
-            < self.motion_config.visual_backup_warmup_seconds
-        ):
-            self._visual_backup_stable_since = 0.0
-            self._visual_backup_stable_samples = 0
-            return False
+        """Compatibility facade for tests and existing runtime callers."""
+        with self._motion_stats_lock:
+            return self.visual_backup.readiness(
+                result,
+                captured_at,
+                self._visual_backup_policy(),
+            )
 
-        stable_result = bool(
-            not result.accepted
-            and result.reason not in {
-                "global_illumination_change",
-                "illumination_change",
-                "insufficient_frames",
-                "validation_unavailable_fail_open",
-            }
-        )
-        if not stable_result:
-            self._visual_backup_stable_since = 0.0
-            self._visual_backup_stable_samples = 0
-            return False
-        if self._visual_backup_stable_since <= 0.0:
-            self._visual_backup_stable_since = captured_at
-        self._visual_backup_stable_samples += 1
-        visual_backup = self._visual_backup_settings()
-        required_samples = max(3, int(visual_backup["minimum_consecutive"]))
-        required_seconds = max(1.5, float(visual_backup["grace_seconds"]))
-        if (
-            self._visual_backup_stable_samples >= required_samples
-            and captured_at - self._visual_backup_stable_since >= required_seconds
-        ):
-            self._visual_backup_scene_ready = True
-            self._reset_visual_backup_candidate()
-        return self._visual_backup_scene_ready
+    @property
+    def _visual_backup_scene_ready(self) -> bool:
+        with self._motion_stats_lock:
+            return self.visual_backup.scene_ready
+
+    @property
+    def _visual_backup_stable_samples(self) -> int:
+        with self._motion_stats_lock:
+            return self.visual_backup.stable_samples
 
     def _consider_visual_backup(
         self,
@@ -1055,13 +1014,10 @@ class CameraWorker:
         samples: list[tuple[float, np.ndarray]],
         captured_at: float,
     ) -> None:
-        if not self._detection_enabled:
-            self._reset_visual_backup_candidate()
-            return
-        scene_ready = self._visual_backup_readiness(result, captured_at)
         visual_backup = self._visual_backup_settings()
-        illumination_probe = bool(
-            result.reason == "illumination_change"
+        illumination_probe_allowed = bool(
+            self._detection_enabled
+            and result.reason == "illumination_change"
             and result.features.get("illumination_would_reject")
             and self._should_verify_suppression(
                 (
@@ -1071,90 +1027,41 @@ class CameraWorker:
                 self._suppression_verification_rate(),
             )
         )
-        if illumination_probe:
-            result = MotionQualificationResult(
-                accepted=True,
-                score=result.score,
-                threshold=result.threshold,
-                reason="illumination_verification_probe",
-                frame_count=result.frame_count,
-                features={
-                    **result.features,
-                    "illumination_verification_probe": True,
-                },
-                telemetry=dict(result.telemetry),
+        with self._motion_stats_lock:
+            decision = self.visual_backup.evaluate(
+                result,
+                captured_at,
+                self._visual_backup_policy(),
+                detection_enabled=self._detection_enabled,
+                camera_motion_times=tuple(self._camera_motion_times),
+                illumination_probe_allowed=illumination_probe_allowed,
             )
-        required_score = max(
-            float(visual_backup["minimum_score"]),
-            float(result.threshold) + float(self.motion_config.visual_backup_score_margin),
-        )
-        strong_candidate = bool(
-            result.accepted
-            and result.score >= required_score
-            and result.reason not in {
-                "global_illumination_change",
-                "illumination_change",
-                "insect_like_motion",
-                "persistent_scene_motion",
-                "stationary_foreground",
-                "stationary_region",
-            }
-        )
-        if not strong_candidate:
-            if result.accepted and scene_ready:
+        result = decision.result
+        if decision.action in {VisualBackupAction.DISABLED, VisualBackupAction.IGNORED}:
+            if decision.count_nonpromotion:
                 self._note_visual_backup_nonpromotion()
-            self._reset_visual_backup_candidate()
             return
-        if not scene_ready:
+        if decision.action == VisualBackupAction.NOT_READY:
             with self._motion_stats_lock:
                 self._motion_stats["visual_backup_not_ready"] += 1
-            self._record_visual_backup_readiness_audit(result, captured_at)
-            self._reset_visual_backup_candidate()
+            if decision.readiness_audit_needed:
+                self._record_visual_backup_readiness_audit(result, captured_at)
             return
-
-        expected_interval = 1.0 / max(
-            0.5,
-            min(
-                self.motion_config.sample_fps,
-                self.motion_config.camera_mode_background_fps,
-            ),
-        )
-        if (
-            self._visual_backup_last_candidate_at > 0.0
-            and captured_at - self._visual_backup_last_candidate_at
-            > expected_interval * 2.5
-        ):
-            self._reset_visual_backup_candidate()
-        if self._visual_backup_candidate_since <= 0.0:
-            self._visual_backup_candidate_since = captured_at
-        self._visual_backup_last_candidate_at = captured_at
-        self._visual_backup_consecutive += 1
-        with self._motion_stats_lock:
-            self._motion_stats["visual_backup_candidates"] += 1
-
-        if (
-            self._visual_backup_consecutive
-            < int(visual_backup["minimum_consecutive"])
-            or captured_at - self._visual_backup_candidate_since
-            < float(visual_backup["grace_seconds"])
-        ):
+        if decision.action in {
+            VisualBackupAction.ACCUMULATING,
+            VisualBackupAction.CAMERA_NOTICE,
+            VisualBackupAction.READY,
+        }:
+            with self._motion_stats_lock:
+                self._motion_stats["visual_backup_candidates"] += 1
+        if decision.action == VisualBackupAction.ACCUMULATING:
             return
-        with self._motion_stats_lock:
-            matched_camera_at = max(
-                (
-                    observed_at
-                    for observed_at in self._camera_motion_times
-                    if 0.0 <= captured_at - observed_at
-                    <= float(visual_backup["cooldown_seconds"])
-                ),
-                default=0.0,
-            )
-            camera_notice_recent = matched_camera_at > 0.0
-            if matched_camera_at > self._visual_backup_last_matched_camera_at:
-                self._motion_stats["visual_backup_onvif_matches"] += 1
-                self._visual_backup_last_matched_camera_at = matched_camera_at
-        if camera_notice_recent:
-            self._reset_visual_backup_candidate()
+        if decision.action == VisualBackupAction.CAMERA_NOTICE:
+            if decision.new_camera_match:
+                with self._motion_stats_lock:
+                    self._motion_stats["visual_backup_onvif_matches"] += 1
+            return
+        if decision.action != VisualBackupAction.READY:
             return
         if not self._reserve_visual_backup_trigger(captured_at):
             self._note_visual_backup_nonpromotion()
@@ -1176,8 +1083,8 @@ class CameraWorker:
         features = {
             **fused.features,
             "visual_backup": True,
-            "visual_backup_required_score": round(required_score, 4),
-            "visual_backup_consecutive": self._visual_backup_consecutive,
+            "visual_backup_required_score": round(decision.required_score, 4),
+            "visual_backup_consecutive": decision.consecutive,
             "visual_backup_grace_seconds": visual_backup["grace_seconds"],
         }
         fused = MotionQualificationResult(
@@ -1204,9 +1111,9 @@ class CameraWorker:
         with self._motion_stats_lock:
             self._motion_stats["visual_backup_triggers"] += 1
             self._motion_stats["illumination_verification_probes"] += int(
-                illumination_probe
+                decision.illumination_probe
             )
-            self._visual_backup_trigger_times.append(captured_at)
+            self.visual_backup.record_trigger(captured_at)
         self.last_motion_at = event_at.isoformat()
         self._publish_event_safely("motion", {
             "camera_id": self.camera.id,
@@ -1220,9 +1127,6 @@ class CameraWorker:
         result: MotionQualificationResult,
         captured_at: float,
     ) -> None:
-        if self._visual_backup_readiness_audited:
-            return
-        self._visual_backup_readiness_audited = True
         event_at = datetime.fromtimestamp(captured_at, timezone.utc)
         try:
             self.motion_decision_handler.record_audit(
@@ -1254,25 +1158,14 @@ class CameraWorker:
             self._motion_stats["visual_backup_not_promoted"] += 1
 
     def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
-        cutoff = captured_at - 300.0
-        visual_backup = self._visual_backup_settings()
         with self._motion_stats_lock:
-            while (
-                self._visual_backup_trigger_times
-                and self._visual_backup_trigger_times[0] < cutoff
-            ):
-                self._visual_backup_trigger_times.popleft()
-            limited = bool(
-                self._adaptive_trigger_pending
-                or (
-                    self._adaptive_last_completed_at > 0.0
-                    and captured_at - self._adaptive_last_completed_at
-                    < float(visual_backup["cooldown_seconds"])
-                )
-                or len(self._visual_backup_trigger_times)
-                >= int(visual_backup["maximum_triggers_5m"])
+            allowed = self.visual_backup.reserve_trigger(
+                captured_at,
+                self._visual_backup_policy(),
+                trigger_pending=self._adaptive_trigger_pending,
+                last_completed_at=self._adaptive_last_completed_at,
             )
-            if limited:
+            if not allowed:
                 self._motion_stats["visual_backup_rate_limited"] += 1
                 return False
             self._adaptive_trigger_pending = True
@@ -1422,6 +1315,20 @@ class CameraWorker:
                 else override.visual_backup_max_triggers_5m
             ),
         }
+
+    def _visual_backup_policy(self) -> VisualBackupPolicy:
+        settings = self._visual_backup_settings()
+        return VisualBackupPolicy(
+            warmup_seconds=self.motion_config.visual_backup_warmup_seconds,
+            grace_seconds=float(settings["grace_seconds"]),
+            minimum_score=float(settings["minimum_score"]),
+            score_margin=self.motion_config.visual_backup_score_margin,
+            minimum_consecutive=int(settings["minimum_consecutive"]),
+            cooldown_seconds=float(settings["cooldown_seconds"]),
+            maximum_triggers_5m=int(settings["maximum_triggers_5m"]),
+            sample_fps=self.motion_config.sample_fps,
+            background_fps=self.motion_config.camera_mode_background_fps,
+        )
 
     def _trigger_mode(self) -> str:
         return resolved_trigger_mode(self._motion_settings()[0])
@@ -2067,9 +1974,8 @@ class CameraWorker:
             if visual_backup_queued and not visual_backup:
                 with self._motion_stats_lock:
                     matched_camera_at = max(self._camera_motion_times, default=0.0)
-                    if matched_camera_at > self._visual_backup_last_matched_camera_at:
+                    if self.visual_backup.record_camera_match(matched_camera_at):
                         self._motion_stats["visual_backup_onvif_matches"] += 1
-                        self._visual_backup_last_matched_camera_at = matched_camera_at
             prequalified = [
                 item["prequalified"]
                 for item in triggers

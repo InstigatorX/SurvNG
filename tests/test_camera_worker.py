@@ -802,6 +802,7 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertTrue(worker._motion_queue.empty())
         self.assertEqual(worker._motion_stats["visual_backup_onvif_matches"], 1)
+        self.assertEqual(worker._motion_stats["visual_backup_candidates"], 6)
 
     def test_visual_backup_waits_for_background_learning_after_startup(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
