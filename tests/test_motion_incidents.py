@@ -23,7 +23,7 @@ def _service(
     service = MotionIncidentService(
         camera_id="gate",
         decision_processor=decision,
-        tracking=tracking,
+        tracking_provider=lambda: tracking,
         prewarm_tracking=prewarm,
         image_reader=image_reader,
     )
@@ -87,8 +87,8 @@ def test_disabled_tracking_avoids_prewarm_and_snapshot_read() -> None:
 
     prewarm.assert_not_called()
     image_reader.assert_not_called()
-    tracking.start.assert_called_once()
-    assert tracking.start.call_args.args[3] is None
+    tracking.start.assert_not_called()
+    assert service.status()["handoff_failures"] == 0
 
 
 def test_tracking_failure_after_persistence_does_not_escape_or_replay() -> None:
@@ -105,3 +105,74 @@ def test_tracking_failure_after_persistence_does_not_escape_or_replay() -> None:
 
     assert result is outcome
     decision.handle.assert_called_once()
+    status = service.status()
+    assert status["handoff_failures"] == 1
+    assert status["last_handoff_failure"]["event_id"] == 42
+    assert status["last_handoff_failure"]["error_type"] == "RuntimeError"
+    assert status["last_handoff_failure"]["error"] == "capacity transition failed"
+
+
+def test_process_resolves_current_tracking_session_for_hot_reload() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="",
+        object_detected=True,
+        detected_objects=({"label": "person"},),
+    )
+    decision = Mock()
+    decision.handle.return_value = outcome
+    first = Mock()
+    first.config.enabled = False
+    second = Mock()
+    second.config.enabled = True
+    second.start.return_value = True
+    current = [first]
+    service = MotionIncidentService(
+        camera_id="gate",
+        decision_processor=decision,
+        tracking_provider=lambda: current[0],
+        prewarm_tracking=Mock(),
+        image_reader=Mock(),
+    )
+
+    current[0] = second
+    service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    first.start.assert_not_called()
+    second.start.assert_called_once()
+
+
+def test_enabled_tracking_decline_is_visible_in_telemetry() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="",
+        object_detected=True,
+        detected_objects=({"label": "person"},),
+    )
+    service, _decision, tracking, _prewarm, _image_reader = _service(outcome)
+    tracking.start.return_value = False
+
+    service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    failure = service.status()["last_handoff_failure"]
+    assert failure["error_type"] == "TrackingDeclined"
+    assert failure["event_id"] == 42
+
+
+def test_handoff_failure_telemetry_redacts_stream_credentials() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="",
+        object_detected=True,
+        detected_objects=({"label": "person"},),
+    )
+    service, _decision, tracking, _prewarm, _image_reader = _service(outcome)
+    tracking.start.side_effect = RuntimeError(
+        "failed rtsp://camera-admin:secret@example.invalid/live"
+    )
+
+    service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    failure = service.status()["last_handoff_failure"]
+    assert "secret" not in failure["error"]
+    assert "camera-admin:***@" in failure["error"]

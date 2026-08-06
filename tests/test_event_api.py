@@ -355,6 +355,12 @@ class EventApiSerializationTest(unittest.TestCase):
                         "reid_recoveries_by_label": {"car": 2},
                         "reid_avoided_geometry_matches": 19,
                         "reid_avoided_by_label": {"car": 19},
+                        "handoff_failures": 2,
+                        "last_handoff_failure": {
+                            "event_id": 41,
+                            "timestamp": "2026-08-06T12:00:00+00:00",
+                            "error": "decoder unavailable",
+                        },
                     },
                 }]),
             )
@@ -385,6 +391,11 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(
                 payload["cameras"][0]["tracking"]["reid_attempts_by_reason"]["geometry_recovery"],
                 5,
+            )
+            self.assertEqual(payload["cameras"][0]["tracking"]["handoff_failures"], 2)
+            self.assertEqual(
+                payload["cameras"][0]["tracking"]["last_handoff_failure"]["event_id"],
+                41,
             )
             fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
             self.assertEqual(fake_manager.events.runtime_telemetry_history.call_count, 2)

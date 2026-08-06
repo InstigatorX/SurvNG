@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
+import threading
 from typing import Any, Callable, Protocol
 
 import numpy as np
 
 from .motion_pipeline.decision_handler import MotionDecisionOutcome
+from .security import redact_secret_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class IncidentTrackingSession(Protocol):
 
 TrackingPrewarmer = Callable[[], object | None]
 ImageReader = Callable[[str], np.ndarray | None]
+TrackingProvider = Callable[[], IncidentTrackingSession]
 
 
 class MotionIncidentService:
@@ -58,15 +61,45 @@ class MotionIncidentService:
         *,
         camera_id: str,
         decision_processor: MotionDecisionProcessor,
-        tracking: IncidentTrackingSession,
+        tracking_provider: TrackingProvider,
         prewarm_tracking: TrackingPrewarmer,
         image_reader: ImageReader,
     ) -> None:
         self.camera_id = camera_id
         self.decision_processor = decision_processor
-        self.tracking = tracking
+        self.tracking_provider = tracking_provider
         self.prewarm_tracking = prewarm_tracking
         self.image_reader = image_reader
+        self._status_lock = threading.Lock()
+        self._handoff_failures = 0
+        self._last_handoff_failure: dict[str, Any] | None = None
+
+    def status(self) -> dict[str, Any]:
+        with self._status_lock:
+            return {
+                "handoff_failures": self._handoff_failures,
+                "last_handoff_failure": (
+                    dict(self._last_handoff_failure)
+                    if self._last_handoff_failure is not None
+                    else None
+                ),
+            }
+
+    def _record_handoff_failure(
+        self,
+        event_id: int,
+        error_type: str,
+        error: object,
+    ) -> None:
+        error_text = redact_secret_text(error)[:500]
+        with self._status_lock:
+            self._handoff_failures += 1
+            self._last_handoff_failure = {
+                "event_id": event_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error": error_text,
+                "error_type": error_type,
+            }
 
     def process(
         self,
@@ -78,7 +111,7 @@ class MotionIncidentService:
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome:
-        if self.tracking.config.enabled:
+        if self.tracking_provider().config.enabled:
             # Start opening main concurrently with recorded validation so the
             # tracking handoff does not pay another RTSP startup delay.
             self.prewarm_tracking()
@@ -93,20 +126,41 @@ class MotionIncidentService:
         if outcome.event_id is None or not outcome.object_detected:
             return outcome
 
+        tracking = self.tracking_provider()
+        if not tracking.config.enabled:
+            return outcome
         try:
             initial_frame = None
-            if self.tracking.config.enabled and outcome.snapshot_path:
+            if outcome.snapshot_path:
                 initial_frame = self.image_reader(outcome.snapshot_path)
-            self.tracking.start(
+            started = tracking.start(
                 outcome.event_id,
                 event_at,
                 list(outcome.detected_objects),
                 initial_frame,
             )
-        except Exception:
-            LOGGER.exception(
-                "post-persistence tracking handoff failed for %s event %d",
+            if not started:
+                self._record_handoff_failure(
+                    outcome.event_id,
+                    "TrackingDeclined",
+                    "tracking session declined the incident",
+                )
+                LOGGER.warning(
+                    "post-persistence tracking handoff was declined for %s event %d",
+                    self.camera_id,
+                    outcome.event_id,
+                )
+        except Exception as error:
+            self._record_handoff_failure(
+                outcome.event_id,
+                type(error).__name__,
+                error,
+            )
+            LOGGER.error(
+                "post-persistence tracking handoff failed for %s event %d: %s: %s",
                 self.camera_id,
                 outcome.event_id,
+                type(error).__name__,
+                redact_secret_text(error)[:500],
             )
         return outcome

@@ -2458,6 +2458,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
                     tracking.get("reid_avoided_geometry_matches") or 0
                 ),
                 "reid_avoided_by_label": dict(tracking.get("reid_avoided_by_label") or {}),
+                "handoff_failures": int(tracking.get("handoff_failures") or 0),
+                "last_handoff_failure": tracking.get("last_handoff_failure"),
             },
             "capture": dict(status.get("capture_stats") or {}),
             "activity": per_camera_activity.get(

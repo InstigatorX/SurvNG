@@ -121,7 +121,7 @@ class CameraWorker:
         self.motion_incidents = MotionIncidentService(
             camera_id=camera.id,
             decision_processor=self.motion_decision_handler,
-            tracking=self.object_tracking,
+            tracking_provider=lambda: self.object_tracking,
             prewarm_tracking=lambda: self._get_latest_tracking_frame("main"),
             image_reader=lambda path: cv2.imread(path),
         )
@@ -512,7 +512,10 @@ class CameraWorker:
             "onvif_last_motion_event_at": self.onvif.last_motion_event_at,
             "last_motion_at": self.last_motion_at,
             "detection_enabled": self._detection_enabled,
-            "object_tracking": self.object_tracking.status(),
+            "object_tracking": {
+                **self.object_tracking.status(),
+                **self.motion_incidents.status(),
+            },
             "onvif_last_error": self.onvif.last_error,
             "onvif_last_connected_at": self.onvif.last_connected_at,
             "onvif_last_poll_success_at": self.onvif.last_poll_success_at,
