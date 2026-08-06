@@ -41,6 +41,54 @@ class _Encoder:
 
 
 class DeferredAppearanceBackfillTest(unittest.TestCase):
+    def test_jobs_are_removed_when_their_event_is_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "events.db"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "create table events (id integer primary key, created_at text not null)"
+                )
+                connection.execute(
+                    "insert into events values (7, '2026-08-05T21:52:05+00:00')"
+                )
+            service = DeferredAppearanceBackfill(
+                database,
+                Path(tmp),
+                ObjectTrackingConfig(
+                    vehicle_reid_enabled=True,
+                    vehicle_reid_model_path="vehicle.xml",
+                ),
+                _Events({"id": 7}),
+                AppearanceIndex(database),
+                _Encoder(),
+            )
+            self.assertTrue(service.enqueue(7, "gate", delay_seconds=0))
+
+            with service._connect() as connection:
+                connection.execute("delete from events where id = 7")
+                remaining = connection.execute(
+                    "select count(*) from appearance_backfill_jobs where event_id = 7"
+                ).fetchone()[0]
+
+            self.assertEqual(remaining, 0)
+
+            # Upgrade cleanup also removes jobs orphaned by older builds that
+            # declared the foreign key without enabling SQLite enforcement.
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    insert into appearance_backfill_jobs (
+                        event_id, camera_id, state, available_at, created_at, updated_at
+                    ) values (99, 'gate', 'queued', 0, 'now', 'now')
+                    """
+                )
+            service._init_db()
+            with sqlite3.connect(database) as connection:
+                remaining = connection.execute(
+                    "select count(*) from appearance_backfill_jobs where event_id = 99"
+                ).fetchone()[0]
+            self.assertEqual(remaining, 0)
+
     def test_snapshot_fallback_indexes_missing_event_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

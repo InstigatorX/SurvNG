@@ -96,7 +96,7 @@ import { describePlaybackError, isUnsupportedPlaybackError, mergeRecordingAvaila
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
-import { rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
+import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 
@@ -2893,16 +2893,19 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
       setMatches([]);
       return undefined;
     }
+    const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
     setError("");
-    fetch(`/api/events/${Number(anchorEventId)}/related-incidents?hours=24&limit=16`)
+    fetch(`/api/events/${Number(anchorEventId)}/related-incidents?hours=24&limit=16`, {
+      signal: controller.signal,
+    })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("Related incidents unavailable")))
       .then((payload) => {
         if (!cancelled) setMatches(visibleRelatedAppearances(payload, anchorEventId, 8));
       })
       .catch((requestError) => {
-        if (!cancelled) {
+        if (!cancelled && requestError?.name !== "AbortError") {
           setMatches([]);
           setError(requestError.message || "Related incidents unavailable");
         }
@@ -2910,7 +2913,10 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [anchorEventId]);
 
   return (
@@ -4084,14 +4090,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Semantic incident search failed");
       const hits = Array.isArray(payload.results) ? payload.results : [];
-      const hydrated = await Promise.all(hits.map(async (hit) => {
+      const hydrated = await mapWithConcurrency(hits, 6, async (hit) => {
         const eventId = Number(hit?.event?.id);
         if (!Number.isInteger(eventId) || eventId <= 0) return null;
         const detailResponse = await fetch(`/api/incidents/by-event/${eventId}`, { signal: controller.signal });
         if (!detailResponse.ok) return null;
         const detail = await detailResponse.json();
         return { ...detail, semantic_search: { query: queryText, score: Number(hit.score), evidence: hit.evidence || null, event_id: eventId } };
-      }));
+      });
       if (semanticIncidentRequestRef.current !== controller) return;
       setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter));
     } catch (error) {

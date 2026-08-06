@@ -437,22 +437,20 @@ box in amber so an operator can verify the handoff against the recording.
 Offline comparisons remain eager so both engines receive identical appearance
 inputs and comparison runs are reproducible.
 
-The object-tracking implementation is pluggable. `survng_hybrid` is the
-lightweight default and is the corrected name for the historical `bytetrack`
-setting. `ultralytics_botsort` is an optional adapter around the official
-Ultralytics BoT-SORT implementation. It retains one tracker instance per camera
-event, prevents association across object classes, disables global camera-motion
-compensation for fixed cameras, and consumes the same isolated OpenVINO person
-embeddings used by the default engine. Install
-`requirements-ultralytics-tracking.txt` before selecting it. This optional
-runtime adds a large PyTorch dependency and should be enabled only after its
-accuracy and resource use are compared with the default on representative
-recordings. The optional requirements pin the reviewed Ultralytics version for
-reproducible installs. At runtime SurvNG accepts compatible patches on the
-reviewed 8.4.x tracker API line instead of disabling comparison solely because
-the installed patch is newer. Adapter regression tests exercise the private APIs
-SurvNG uses. Ultralytics is distributed under AGPL-3.0; deployments that redistribute
-SurvNG with this optional dependency should review the applicable license terms.
+The object-tracking implementation is internally pluggable, but production
+sessions intentionally use `survng_hybrid`; historical `bytetrack`, BoT-SORT,
+and Deep OC-SORT configuration values normalize to Hybrid. Deep OC-SORT is an
+optional, offline comparison adapter rather than a production tracker. It
+retains one tracker instance per comparison, prevents association across object
+classes, disables global camera-motion compensation for fixed cameras, and can
+consume the same isolated OpenVINO appearance embeddings used by Hybrid.
+Install `requirements-ultralytics-tracking.txt` to enable Compare. This optional
+runtime adds a large PyTorch dependency. The requirements pin the reviewed
+Ultralytics version for reproducible installs; SurvNG also accepts compatible
+patches on the reviewed 8.4.x API line. Adapter regression tests exercise the
+private APIs SurvNG uses. Ultralytics is distributed under AGPL-3.0;
+deployments that redistribute SurvNG with this optional dependency should
+review the applicable license terms.
 
 Tracking runs only after an eligible object is found. It samples the main
 camera source at `sample_fps`, and `max_active_cameras` bounds simultaneous
@@ -476,15 +474,15 @@ stored position and can therefore be later than the representative snapshot.
 
 The incident viewer’s **Compare** action is an explicit, offline diagnostic.
 It decodes a bounded 30-second recording window, runs OpenVINO detection and optional
-person appearance extraction once per sampled frame, then gives that identical
-detection sequence to SurvNG Hybrid and Ultralytics BoT-SORT. The result shows
+person/vehicle appearance extraction once per sampled frame, then gives that identical
+detection sequence to SurvNG Hybrid and Deep OC-SORT. The result shows
 side-by-side paths, track and observation counts, extra-track-ID and processing
 time signals, and lets either result replay over the same recording. Detection
 and appearance costs are reported separately because they are shared inputs,
 not tracker costs. Extra track IDs are only a fragmentation proxy: without
 labeled ground truth, the comparison cannot claim a true ID-switch count or
 choose a winner automatically. After watching the replays, an operator can
-mark Hybrid, BoT-SORT, or no clear winner. SurvNG retains only compact evidence
+mark Hybrid, Deep OC-SORT, or no clear winner. SurvNG retains only compact evidence
 for the latest 100 compared incidents per camera (not the replay trajectories),
 shows the reviewed totals in the incident viewer, and resets an incident's
 verdict when that incident is compared again. This evidence never changes the

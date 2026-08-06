@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rankSemanticIncidentDetails, semanticIncidentRequest } from "../src/incidentSemanticSearch.mjs";
+import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "../src/incidentSemanticSearch.mjs";
 
 assert.deepEqual(semanticIncidentRequest({
   query: " white delivery truck ",
@@ -23,5 +23,17 @@ const ranked = rankSemanticIncidentDetails([
   { id: "c", zones: ["Porch"], semantic_search: { score: 0.9 } },
 ], "Road");
 assert.deepEqual(ranked.map((item) => [item.id, item.semantic_search.score]), [["b", 0.8], ["a", 0.6]]);
+
+let active = 0;
+let maximumActive = 0;
+const mapped = await mapWithConcurrency([1, 2, 3, 4, 5], 2, async (value) => {
+  active += 1;
+  maximumActive = Math.max(maximumActive, active);
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  active -= 1;
+  return value * 2;
+});
+assert.deepEqual(mapped, [2, 4, 6, 8, 10]);
+assert.equal(maximumActive, 2);
 
 console.log("incident semantic search tests passed");

@@ -53,6 +53,7 @@ class DeferredAppearanceBackfill:
         connection = sqlite3.connect(self.database_path, timeout=10.0)
         connection.row_factory = sqlite3.Row
         connection.execute("pragma busy_timeout = 10000")
+        connection.execute("pragma foreign_keys = on")
         return connection
 
     def _init_db(self) -> None:
@@ -75,6 +76,14 @@ class DeferredAppearanceBackfill:
             )
             connection.execute(
                 "create index if not exists idx_appearance_backfill_ready on appearance_backfill_jobs(state, available_at)"
+            )
+            connection.execute(
+                """
+                delete from appearance_backfill_jobs
+                where not exists (
+                    select 1 from events where events.id = appearance_backfill_jobs.event_id
+                )
+                """
             )
             connection.execute(
                 "update appearance_backfill_jobs set state = 'queued', reason = 'resumed after restart' where state = 'running'"

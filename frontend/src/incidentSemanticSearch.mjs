@@ -24,3 +24,20 @@ export function rankSemanticIncidentDetails(details, zoneFilter = "all") {
     (left, right) => Number(right.semantic_search?.score || -1) - Number(left.semantic_search?.score || -1),
   );
 }
+
+export async function mapWithConcurrency(items, concurrency, mapper) {
+  const values = Array.from(items || []);
+  if (!values.length) return [];
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(values.length, Math.floor(Number(concurrency) || 1)));
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(values[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}

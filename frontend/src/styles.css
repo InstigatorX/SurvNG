@@ -2969,7 +2969,7 @@ button.status-pill.hud-toggle:disabled {
   grid-template-rows: max-content max-content max-content;
   align-content: start;
   gap: 12px;
-  width: min(1120px, calc(100vw - 36px), var(--event-panel-fit-width, 1120px));
+  width: min(1490px, calc(100vw - 36px), var(--event-panel-fit-width, 1490px));
   max-height: calc(100vh - 36px);
   overflow: auto;
   border: 1px solid var(--line-strong);
