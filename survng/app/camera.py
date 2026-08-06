@@ -50,10 +50,10 @@ from .motion_decisions import (
     MotionDecisionOrchestrator,
     audit_features,
     is_borderline_candidate,
-    priority_motion_topic,
     should_verify_suppression,
 )
 from .motion_incidents import MotionIncidentService
+from .motion_ingress import MotionEventIngressService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .tracking_frames import TrackingFrameService
@@ -352,6 +352,17 @@ class CameraWorker:
                     lambda wait_ms: self._record_analysis_wait(wait_ms)
                 ),
             ),
+        )
+        self.motion_ingress = MotionEventIngressService(
+            camera_id=camera.id,
+            events=self.motion_events,
+            accepting=lambda: self._accepting_motion_events,
+            detection_enabled=lambda: self._detection_enabled,
+            configured_mode=lambda: self._motion_settings()[0],
+            observe_event=self.motion_qualification.observe_event,
+            publish_event=self._publish_event_safely,
+            set_last_motion_at=self._set_last_motion_at,
+            increment_stat=self._increment_motion_stat,
         )
         self.last_motion_at = ""
         self.capture = CameraCaptureService(
@@ -720,40 +731,7 @@ class CameraWorker:
         message: str = "",
         event_at: datetime | None = None,
     ) -> None:
-        if not self._accepting_motion_events or not self._detection_enabled:
-            return
-        received_at = time.time()
-        self.last_motion_at = datetime.now(timezone.utc).isoformat()
-        if event_at is None:
-            event_at = datetime.now(timezone.utc)
-        elif event_at.tzinfo is None:
-            event_at = event_at.replace(tzinfo=timezone.utc)
-        else:
-            event_at = event_at.astimezone(timezone.utc)
-
-        self._observe_motion_event(topic, message, event_at, received_at)
-        configured_mode = self._motion_settings()[0]
-        if configured_mode == "adaptive" and not topic.startswith("manual"):
-            # ONVIF remains useful diagnostic evidence in visual-triggered mode,
-            # but it is never allowed to create an object-detection job.
-            return
-        if self._priority_motion_topic(topic):
-            self._remember_priority_motion(received_at)
-        if not topic.startswith("manual"):
-            self.motion_events.remember_camera_motion(received_at)
-
-        self._publish_event_safely("motion", {
-            "camera_id": self.camera.id,
-            "timestamp": event_at.isoformat(),
-            "source": "manual" if topic.startswith("manual") else "onvif",
-        })
-
-        self._enqueue_motion_trigger(MotionTrigger(
-            topic=topic,
-            message=message,
-            event_at=event_at,
-            received_at=received_at,
-        ))
+        self.motion_ingress.handle(topic, message, event_at)
 
     def _enqueue_motion_trigger(
         self,
@@ -761,12 +739,7 @@ class CameraWorker:
         *,
         evict_oldest: bool = True,
     ) -> bool:
-        return self.motion_events.enqueue(
-            trigger,
-            evict_oldest=evict_oldest,
-            on_trigger=self._increment_motion_stat,
-            on_drop=self._increment_motion_stat,
-        )
+        return self.motion_ingress.enqueue(trigger, evict_oldest=evict_oldest)
 
     def _clear_motion_queue(self) -> None:
         self.motion_events.clear()
@@ -854,9 +827,6 @@ class CameraWorker:
             + self.motion_config.burst_quiet_seconds,
         )
 
-    def _remember_priority_motion(self, observed_at: float) -> None:
-        self.motion_events.remember_priority(observed_at)
-
     def _matches_recent_priority_motion(self, event_at: float) -> bool:
         return self.motion_events.matches_recent_priority(
             event_at,
@@ -871,15 +841,6 @@ class CameraWorker:
 
     def _capture_motion_debug(self, captured_at: float) -> None:
         self.motion_analysis.capture_debug(captured_at)
-
-    def _observe_motion_event(
-        self,
-        topic: str,
-        message: str,
-        event_at: datetime,
-        received_at: float,
-    ) -> None:
-        self.motion_qualification.observe_event(topic, message, event_at, received_at)
 
     def _motion_settings(self) -> tuple[str, str, int]:
         return self.motion_qualification.settings()
@@ -991,10 +952,6 @@ class CameraWorker:
         result: MotionQualificationResult,
     ) -> MotionQualificationResult:
         return self.motion_qualification.with_pipeline_telemetry(result)
-
-    @staticmethod
-    def _priority_motion_topic(topic: str) -> bool:
-        return priority_motion_topic(topic)
 
     def _qualify_motion_burst(
         self,
