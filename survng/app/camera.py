@@ -17,6 +17,16 @@ from typing import Any, Callable, Iterator
 import cv2
 import numpy as np
 
+from .camera_capture import (
+    CAPTURE_DECODER_THREADS,
+    CAPTURE_OPEN_CONCURRENCY,
+    CAPTURE_OPEN_TIMEOUT_MS,
+    CAPTURE_READ_TIMEOUT_MS,
+    CaptureBackend,
+    CaptureHandle,
+    CaptureOpenLimiter,
+    OpenCvFfmpegCaptureBackend,
+)
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
@@ -46,15 +56,9 @@ MOTION_THREAD_STOP_TIMEOUT_SECONDS = 22.0
 # OpenCV's FFmpeg calls cannot be interrupted safely from another thread.
 # Keep their own deadlines below CameraWorker.stop()'s join budget so a stop
 # request can always regain control after a blocked open/read operation.
-CAPTURE_OPEN_TIMEOUT_MS = 3000
-CAPTURE_READ_TIMEOUT_MS = 5000
-CAPTURE_DECODER_THREADS = 1
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
 CAPTURE_RETRY_INITIAL_SECONDS = 1.0
 CAPTURE_RETRY_MAX_SECONDS = 30.0
-CAPTURE_OPEN_LOCK_POLL_SECONDS = 0.1
-CAPTURE_OPEN_CONCURRENCY = 2
-CAPTURE_OPEN_SLOTS = threading.BoundedSemaphore(CAPTURE_OPEN_CONCURRENCY)
 FRAME_STALE_SECONDS = 10.0
 MAIN_SOURCE_IDLE_SECONDS = 20.0
 TRACKING_CATCHUP_SECONDS = 10.0
@@ -85,6 +89,7 @@ class CameraWorker:
         motion_analysis_limiter: FairMotionAnalysisLimiter,
         image_writer: DurableImageWriter,
         onvif_cache_dir: Path | None = None,
+        capture_backend: CaptureBackend | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -97,6 +102,9 @@ class CameraWorker:
         self.motion_pipeline_origins = dict(motion_pipeline_origins)
         self.motion_analysis_limiter = motion_analysis_limiter
         self.image_writer = image_writer
+        self.capture_backend = capture_backend or OpenCvFfmpegCaptureBackend(
+            CaptureOpenLimiter()
+        )
         self.motion_debug = MotionDebugSnapshotStore()
         self._motion_debug_last_run = 0.0
         self.motion_object_detector = motion_object_detector_factory.create(
@@ -2412,14 +2420,14 @@ class CameraWorker:
             while not self._stop.is_set() and not stop_event.is_set():
                 if self._source_is_idle(source):
                     return
-                capture = cv2.VideoCapture()
+                capture = self.capture_backend.create_handle()
                 failure_reason = ""
                 try:
                     opened = self._open_capture(capture, source, stop_event)
                     if self._stop.is_set() or stop_event.is_set():
                         return
-                    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    if not opened or not capture.isOpened():
+                    capture.set_buffer_size(1)
+                    if not opened or not capture.is_opened():
                         failure_reason = "failed to open stream"
                         with self._frame_lock:
                             self._source_capture_stats[source]["open_failures"] += 1
@@ -2476,7 +2484,7 @@ class CameraWorker:
                         failure_reason,
                     )
                 finally:
-                    capture.release()
+                    capture.close()
                 if self._stop.is_set() or stop_event.is_set() or self._source_is_idle(source):
                     break
                 LOGGER.info(
@@ -2504,35 +2512,15 @@ class CameraWorker:
 
     def _open_capture(
         self,
-        capture: Any,
+        capture: CaptureHandle,
         source: str,
         stop_event: threading.Event,
     ) -> bool:
-        # OpenCV/FFmpeg opens can wait in native code where Python cannot
-        # interrupt them. Bound admission at the Python boundary so queued
-        # cameras can observe shutdown and the admitted worst case still fits
-        # inside the capture-thread join budget.
-        while not self._stop.is_set() and not stop_event.is_set():
-            if not CAPTURE_OPEN_SLOTS.acquire(timeout=CAPTURE_OPEN_LOCK_POLL_SECONDS):
-                continue
-            try:
-                if self._stop.is_set() or stop_event.is_set():
-                    return False
-                return bool(capture.open(
-                    self.camera.source_url(source),
-                    cv2.CAP_FFMPEG,
-                    [
-                        cv2.CAP_PROP_N_THREADS,
-                        CAPTURE_DECODER_THREADS,
-                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
-                        CAPTURE_OPEN_TIMEOUT_MS,
-                        cv2.CAP_PROP_READ_TIMEOUT_MSEC,
-                        CAPTURE_READ_TIMEOUT_MS,
-                    ],
-                ))
-            finally:
-                CAPTURE_OPEN_SLOTS.release()
-        return False
+        return self.capture_backend.open(
+            capture,
+            self.camera.source_url(source),
+            lambda: self._stop.is_set() or stop_event.is_set(),
+        )
 
     def _set_source_error(self, source: str, message: str) -> None:
         message = redact_secret_text(message)

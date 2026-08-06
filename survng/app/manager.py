@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import CameraWorker
+from .camera_capture import CaptureOpenLimiter, OpenCvFfmpegCaptureBackend
 from .appearance_index import AppearanceIndex
 from .appearance_backfill import DeferredAppearanceBackfill
 from .config import (
@@ -143,6 +144,10 @@ class AppManager:
             protected_recording_paths=self.events.protected_recording_paths,
         )
         self.go2rtc = Go2RtcAdapter()
+        self._capture_open_limiter = CaptureOpenLimiter()
+        self.capture_backend = OpenCvFfmpegCaptureBackend(
+            self._capture_open_limiter
+        )
         self.state_events = StateEventBroker()
         self._object_tracking_limiter = AdaptiveTrackingLimiter(
             config.detector.tracking.max_active_cameras,
@@ -306,6 +311,7 @@ class AppManager:
                 motion_analysis_limiter=self._motion_analysis_limiter,
                 image_writer=self.image_writer,
                 onvif_cache_dir=self.database_dir / "onvif",
+                capture_backend=self.capture_backend,
             )
         except BaseException:
             for pipeline in reversed(pipelines):

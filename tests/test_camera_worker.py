@@ -16,7 +16,6 @@ import cv2
 from survng.app.camera import (
     CAPTURE_OPEN_TIMEOUT_MS,
     CAPTURE_OPEN_CONCURRENCY,
-    CAPTURE_OPEN_SLOTS,
     CAPTURE_READ_TIMEOUT_MS,
     CAPTURE_STOP_TIMEOUT_SECONDS,
     CameraWorker,
@@ -500,7 +499,7 @@ class CameraWorkerTest(unittest.TestCase):
                 return False
 
             capture.open.side_effect = stop_after_open
-            with patch("survng.app.camera.cv2.VideoCapture", return_value=capture):
+            with patch("survng.app.camera_capture.cv2.VideoCapture", return_value=capture):
                 worker._run_source("live", threading.Event())
 
         _, backend, options = capture.open.call_args.args
@@ -534,12 +533,14 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
+            limiter = worker.capture_backend.limiter
             for _ in range(CAPTURE_OPEN_CONCURRENCY):
-                CAPTURE_OPEN_SLOTS.acquire()
+                limiter.acquire(timeout=0.1)
             try:
+                handle = worker.capture_backend.create_handle()
                 thread = threading.Thread(
                     target=lambda: result.append(
-                        worker._open_capture(capture, "live", stop_event)
+                        worker._open_capture(handle, "live", stop_event)
                     )
                 )
                 thread.start()
@@ -548,7 +549,7 @@ class CameraWorkerTest(unittest.TestCase):
                 thread.join(timeout=1)
             finally:
                 for _ in range(CAPTURE_OPEN_CONCURRENCY):
-                    CAPTURE_OPEN_SLOTS.release()
+                    limiter.release()
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, [False])
@@ -2239,7 +2240,7 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            with patch("survng.app.camera.cv2.VideoCapture", return_value=capture):
+            with patch("survng.app.camera_capture.cv2.VideoCapture", return_value=capture):
                 worker._run_source("live", stop_event)
 
         self.assertNotIn("live", worker._source_frames)
