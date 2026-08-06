@@ -56,6 +56,11 @@ class FakeBackend:
         return True
 
 
+class FailingOpenBackend(FakeBackend):
+    def open(self, handle, source_url, cancelled) -> bool:
+        raise RuntimeError(f"unable to open {source_url}")
+
+
 def _service(
     backend: FakeBackend | None = None,
     **kwargs,
@@ -249,3 +254,91 @@ def test_frame_is_not_published_when_stop_wins_after_native_read() -> None:
 
     assert stored is False
     assert service.latest("live") is None
+
+
+def test_frame_observer_runs_without_capture_lock_held() -> None:
+    observed_status: list[dict[str, object]] = []
+    service: CameraCaptureService
+
+    def observe(_frame: CapturedFrame) -> None:
+        observed_status.append(service.status())
+
+    service = _service(frame_observer=observe)
+    with service._lock:
+        service._stop.clear()
+
+    assert service._publish_frame(
+        "live", np.ones((10, 20, 3), dtype=np.uint8)
+    )
+    assert observed_status
+
+
+def test_repeated_start_stop_leaves_no_capture_generations() -> None:
+    service = _service(FakeBackend([
+        [np.ones((10, 20, 3), dtype=np.uint8)],
+        [np.ones((10, 20, 3), dtype=np.uint8)],
+    ]))
+
+    for cycle in range(2):
+        assert service.start()
+        _wait_until(
+            lambda: service.status()["capture_stats"]["live"]["starts"]
+            >= cycle + 1
+        )
+        service.request_stop()
+        assert service.wait_stopped(1.0) == {}
+        with service._lock:
+            assert not service._all_threads
+
+
+def test_backend_error_redacts_credentials_in_status() -> None:
+    service = CameraCaptureService(
+        camera_id="gate",
+        source_url=lambda _source: "rtsp://admin:secret@camera/live",
+        backend=FailingOpenBackend(),
+        retry_initial_seconds=0.01,
+        retry_max_seconds=0.02,
+    )
+
+    assert service.start()
+    _wait_until(lambda: bool(service.status()["last_error"]))
+    error = str(service.status()["last_error"])
+    service.request_stop()
+    service.wait_stopped(1.0)
+
+    assert "secret" not in error
+    assert "rtsp://admin:***@camera/live" in error
+
+
+def test_close_rejects_active_capture_thread() -> None:
+    service = _service()
+    assert service.start()
+
+    try:
+        try:
+            service.close()
+        except RuntimeError as error:
+            assert "capture sources still running" in str(error)
+        else:
+            raise AssertionError("active capture close should fail")
+    finally:
+        service.request_stop()
+        service.wait_stopped(1.0)
+
+
+def test_latest_frame_store_is_bounded_to_one_frame_per_source() -> None:
+    service = _service()
+    with service._lock:
+        service._stop.clear()
+
+    for value in range(20):
+        service._publish_frame(
+            "live",
+            np.full((10, 20, 3), value, dtype=np.uint8),
+        )
+
+    with service._lock:
+        assert list(service._frames) == ["live"]
+    latest = service.latest("live")
+    assert latest is not None
+    assert int(latest.image[0, 0, 0]) == 19
