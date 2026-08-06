@@ -63,7 +63,10 @@ class FairMotionAnalysisLimiter:
             # A worker only has one queued unit at a time. Replacing a stale
             # request keeps the latest-frame queue bounded per camera.
             self._pending[camera_id] = waiter
+            self._condition.notify_all()
             while self._active >= self.capacity or self._next_waiter() is not waiter:
+                if self._pending.get(camera_id) is not waiter:
+                    break
                 if cancel_event is not None and cancel_event.is_set():
                     if self._pending.get(camera_id) is waiter:
                         self._pending.pop(camera_id, None)

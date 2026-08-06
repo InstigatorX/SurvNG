@@ -21,10 +21,36 @@ def _service(
     tracking.config.tracks_label.side_effect = lambda label: label != "face"
     prewarm = Mock()
     image_reader = Mock()
+
+    def has_trackable(objects: list[dict]) -> bool:
+        return bool(
+            tracking.config.enabled
+            and any(
+                item.get("label")
+                and item.get("incident_eligible") is not False
+                and tracking.config.tracks_label(item.get("label"))
+                for item in objects
+            )
+        )
+
+    def start_tracking(event_id, event_at, objects, initial_frame):
+        trackable = [
+            item
+            for item in objects
+            if (
+                item.get("label")
+                and item.get("incident_eligible") is not False
+                and tracking.config.tracks_label(item.get("label"))
+            )
+        ]
+        return tracking.start(event_id, event_at, trackable, initial_frame)
+
     service = MotionIncidentService(
         camera_id="gate",
         decision_processor=decision,
-        tracking_provider=lambda: tracking,
+        tracking_enabled=lambda: bool(tracking.config.enabled),
+        has_trackable_objects=has_trackable,
+        start_tracking=start_tracking,
         prewarm_tracking=prewarm,
         image_reader=image_reader,
     )
@@ -146,10 +172,29 @@ def test_process_resolves_current_tracking_session_for_hot_reload() -> None:
     second.config.tracks_label.return_value = True
     second.start.return_value = True
     current = [first]
+
+    def has_trackable(objects: list[dict]) -> bool:
+        tracking = current[0]
+        return bool(
+            tracking.config.enabled
+            and any(tracking.config.tracks_label(item.get("label")) for item in objects)
+        )
+
+    def start_tracking(event_id, event_at, objects, initial_frame):
+        tracking = current[0]
+        trackable = [
+            item
+            for item in objects
+            if tracking.config.tracks_label(item.get("label"))
+        ]
+        return tracking.start(event_id, event_at, trackable, initial_frame)
+
     service = MotionIncidentService(
         camera_id="gate",
         decision_processor=decision,
-        tracking_provider=lambda: current[0],
+        tracking_enabled=lambda: bool(current[0].config.enabled),
+        has_trackable_objects=has_trackable,
+        start_tracking=start_tracking,
         prewarm_tracking=Mock(),
         image_reader=Mock(),
     )

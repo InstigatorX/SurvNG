@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 
 from survng.app.config import CameraConfig
@@ -114,3 +115,87 @@ def test_stopped_service_does_not_request_new_capture_frames() -> None:
 
     assert service.latest("main") is None
     capture.request_frame.assert_not_called()
+
+
+def test_clear_during_resize_does_not_reintroduce_a_stale_frame() -> None:
+    service = _service(sample_fps=2.0)
+    frame = np.zeros((900, 1600, 3), dtype=np.uint8)
+    resizing = threading.Event()
+    release = threading.Event()
+    original_resize = cv2.resize
+
+    def delayed_resize(*args, **kwargs):
+        resizing.set()
+        release.wait(timeout=1)
+        return original_resize(*args, **kwargs)
+
+    with patch("survng.app.tracking_frames.cv2.resize", side_effect=delayed_resize):
+        writer = threading.Thread(target=service.remember, args=(frame, 100.0))
+        writer.start()
+        assert resizing.wait(timeout=1)
+        service.clear()
+        release.set()
+        writer.join(timeout=1)
+
+    assert not writer.is_alive()
+    assert not service.frames
+
+
+def test_recording_rows_are_sorted_before_cross_segment_deduplication() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first = Path(tmpdir) / "first.mp4"
+        second = Path(tmpdir) / "second.mp4"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        recorder.recording_rows_between.return_value = [
+            {"path": str(second), "start_epoch": 101.0, "end_epoch": 102.0},
+            {"path": str(first), "start_epoch": 100.0, "end_epoch": 101.0},
+        ]
+        service = _service(recorder=recorder)
+
+        def decoded(path, **_kwargs):
+            captured_at = 100.0 if path == first else 101.0
+            return iter([(captured_at, np.zeros((4, 4, 3), dtype=np.uint8))])
+
+        with patch(
+            "survng.app.tracking_frames.sampled_video_frames",
+            side_effect=decoded,
+        ):
+            samples = list(service.recorded_frames(100.0, 102.0, 1.0, 640))
+
+    assert [captured_at for captured_at, _frame in samples] == [100.0, 101.0]
+
+
+def test_recorded_catchup_streams_and_stops_before_decoding_later_segments() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    opened: list[str] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first = Path(tmpdir) / "first.mp4"
+        second = Path(tmpdir) / "second.mp4"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        recorder.recording_rows_between.return_value = [
+            {"path": str(first), "start_epoch": 100.0, "end_epoch": 101.0},
+            {"path": str(second), "start_epoch": 101.0, "end_epoch": 102.0},
+        ]
+        service = _service(recorder=recorder)
+
+        def decoded(path, **_kwargs):
+            opened.append(path.name)
+            captured_at = 100.0 if path == first else 101.0
+            yield captured_at, np.zeros((4, 4, 3), dtype=np.uint8)
+
+        with patch(
+            "survng.app.tracking_frames.sampled_video_frames",
+            side_effect=decoded,
+        ):
+            samples = service.recorded_frames(100.0, 102.0, 1.0, 640)
+            assert next(samples)[0] == 100.0
+            assert opened == ["first.mp4"]
+            service.stop_event.set()
+            assert list(samples) == []
+
+    assert opened == ["first.mp4"]

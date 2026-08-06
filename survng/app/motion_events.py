@@ -293,6 +293,10 @@ class MotionEventCoordinator:
         item = self.queue.get(timeout=timeout)
         return None if item is None else coerce_motion_trigger(item)
 
+    def retry_queue_depth(self) -> int:
+        with self._lock:
+            return len(self.retry_batches)
+
     def coalesce(
         self,
         first: MotionTrigger | Mapping[str, Any],

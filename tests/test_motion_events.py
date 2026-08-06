@@ -136,6 +136,17 @@ def test_clear_removes_primary_and_retry_queues() -> None:
         coordinator.next_trigger(timeout=0.001)
 
 
+def test_retry_queue_depth_reports_coordinator_owned_state() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    retry = _trigger(2)
+    coordinator.retry_batches.append(retry)
+
+    assert coordinator.retry_queue_depth() == 1
+
+    assert coordinator.next_trigger(timeout=0.001) is retry
+    assert coordinator.retry_queue_depth() == 0
+
+
 def test_legacy_mapping_adapter_rejects_unknown_payload_fields() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     trigger = {

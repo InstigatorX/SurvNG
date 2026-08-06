@@ -149,7 +149,9 @@ class CameraWorker:
         self.motion_incidents = MotionIncidentService(
             camera_id=camera.id,
             decision_processor=self.motion_decision_handler,
-            tracking_provider=self.tracking_lifecycle.current,
+            tracking_enabled=self.tracking_lifecycle.enabled,
+            has_trackable_objects=self.tracking_lifecycle.has_trackable_objects,
+            start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
             image_reader=self.media.read_image,
         )
@@ -403,7 +405,7 @@ class CameraWorker:
                     and self._motion_thread.is_alive()
                 ),
                 event_queue_depth=self._motion_queue.qsize,
-                retry_queue_depth=lambda: len(self._motion_retry_batches),
+                retry_queue_depth=self.motion_events.retry_queue_depth,
             ),
         )
 
@@ -414,7 +416,7 @@ class CameraWorker:
         return self.motion_events.queue
 
     @property
-    def _motion_retry_batches(self) -> deque[dict[str, Any]]:
+    def _motion_retry_batches(self) -> deque[MotionTrigger]:
         return self.motion_events.retry_batches
 
     @property
@@ -572,13 +574,16 @@ class CameraWorker:
             self._enabled = True
             self._accepting_motion_events = True
             self._stop.clear()
-            self.tracking_lifecycle.sync_accepting()
             try:
+                self.tracking_lifecycle.sync_accepting()
+                # Clear state left by the previous run before producers start.
+                # Capture and motion analysis may enqueue a legitimate trigger
+                # as soon as they start, and that work must not be discarded.
+                self._clear_motion_queue()
                 self.motion_analysis.start(self._stop)
                 if not self.capture.start():
                     raise RuntimeError(f"camera source did not start for {self.camera.id}")
                 if self._motion_thread is None or not self._motion_thread.is_alive():
-                    self._clear_motion_queue()
                     motion_thread = threading.Thread(
                         target=self._run_motion_events,
                         name=f"motion-{self.camera.id}",
@@ -594,7 +599,7 @@ class CameraWorker:
             except BaseException:
                 try:
                     self.stop()
-                except Exception:
+                except BaseException:
                     LOGGER.exception(
                         "camera startup rollback was incomplete for %s",
                         self.camera.id,
@@ -603,29 +608,67 @@ class CameraWorker:
 
     def stop(self) -> None:
         with self._lifecycle_lock:
+            shutdown_errors: list[tuple[str, BaseException]] = []
+
+            def attempt(label: str, operation: Callable[[], Any]) -> Any:
+                try:
+                    return operation()
+                except BaseException as error:
+                    shutdown_errors.append((label, error))
+                    LOGGER.exception("%s stop failed for %s", label, self.camera.id)
+                    return None
+
             self._enabled = False
             self._accepting_motion_events = False
             self._stop.set()
             self._active_incident_event_id = None
             # Stop accepting camera I/O and release the scarce ONVIF
             # subscription before waiting for tracking inference to finish.
-            self.capture.request_stop()
-            self.onvif.stop()
-            self.tracking_lifecycle.stop()
-            self.motion_analysis.request_stop()
-            self.motion_events.signal_stop()
+            attempt("capture", self.capture.request_stop)
+            attempt("ONVIF", self.onvif.stop)
+            tracking_stopped = attempt(
+                "object tracking",
+                self.tracking_lifecycle.stop,
+            )
+            if tracking_stopped is False:
+                shutdown_errors.append((
+                    "object tracking",
+                    RuntimeError("object tracking session did not stop"),
+                ))
+            attempt("motion analysis", self.motion_analysis.request_stop)
+            attempt("motion events", self.motion_events.signal_stop)
             motion_thread = self._motion_thread
             if motion_thread is not None:
-                motion_thread.join(timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS)
-                if motion_thread.is_alive():
+                attempt(
+                    "motion event worker join",
+                    lambda: motion_thread.join(
+                        timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS
+                    ),
+                )
+                motion_thread_alive = attempt(
+                    "motion event worker status",
+                    motion_thread.is_alive,
+                )
+                if motion_thread_alive is not False:
                     LOGGER.error("motion worker did not stop for %s", self.camera.id)
-            self._motion_thread = motion_thread if motion_thread is not None and motion_thread.is_alive() else None
-            analysis_stopped = self.motion_analysis.wait_stopped(
-                CAPTURE_STOP_TIMEOUT_SECONDS
+            else:
+                motion_thread_alive = False
+            self._motion_thread = motion_thread if motion_thread_alive is not False else None
+            analysis_stopped = attempt(
+                "motion analysis wait",
+                lambda: self.motion_analysis.wait_stopped(
+                    CAPTURE_STOP_TIMEOUT_SECONDS
+                ),
             )
+            analysis_stopped = analysis_stopped is True
             if not analysis_stopped:
                 LOGGER.error("motion analysis worker did not stop for %s", self.camera.id)
-            alive_threads = self.capture.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS)
+            alive_threads = attempt(
+                "capture wait",
+                lambda: self.capture.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS),
+            )
+            if not isinstance(alive_threads, dict):
+                alive_threads = {}
             alive = sorted(alive_threads)
             if alive:
                 logging.getLogger("uvicorn.error").error(
@@ -645,20 +688,23 @@ class CameraWorker:
                             source,
                             "".join(traceback.format_stack(frame)),
                         )
-            self.tracking_frames.clear()
+            attempt("tracking frame history", self.tracking_frames.clear)
             event_worker_stopped = self._motion_thread is None
             motion_workers_stopped = event_worker_stopped and analysis_stopped
             if motion_workers_stopped:
-                self.motion_analysis.reset()
-                self.motion_evidence.clear()
-                self.motion_qualification.reset_runtime()
+                attempt("motion analysis reset", self.motion_analysis.reset)
+                attempt("motion evidence reset", self.motion_evidence.clear)
+                attempt(
+                    "motion qualification reset",
+                    self.motion_qualification.reset_runtime,
+                )
             else:
                 LOGGER.error(
                     "preserving motion runtime for %s because a motion worker is still active",
                     self.camera.id,
                 )
             if motion_workers_stopped:
-                self.motion_events.reset()
+                attempt("motion event state reset", self.motion_events.reset)
             else:
                 LOGGER.error(
                     "preserving motion event state for %s because a motion worker is still active",
@@ -669,14 +715,33 @@ class CameraWorker:
                 shutdown_failures.append(f"capture sources: {', '.join(alive)}")
             if not motion_workers_stopped:
                 shutdown_failures.append("motion workers")
-            if self.onvif.running:
+            onvif_running = attempt(
+                "ONVIF status",
+                lambda: self.onvif.running,
+            )
+            if onvif_running is not False:
                 shutdown_failures.append("ONVIF worker")
-            if self.tracking_lifecycle.running():
+            tracking_running = attempt(
+                "object tracking status",
+                self.tracking_lifecycle.running,
+            )
+            if tracking_running is not False:
                 shutdown_failures.append("object tracking worker")
+            shutdown_failures.extend(
+                f"{label} cleanup"
+                for label, _error in shutdown_errors
+                if f"{label} cleanup" not in shutdown_failures
+            )
             if shutdown_failures:
-                raise RuntimeError(
+                failure = RuntimeError(
                     f"camera {self.camera.id} did not stop cleanly ({'; '.join(shutdown_failures)})"
                 )
+                if shutdown_errors:
+                    first_error = shutdown_errors[0][1]
+                    if not isinstance(first_error, Exception):
+                        raise first_error
+                    raise failure from first_error
+                raise failure
 
     def stop_onvif_events(self) -> None:
         """Release the camera's ONVIF subscription without stopping video."""
@@ -744,8 +809,20 @@ class CameraWorker:
 
     def set_detection_enabled(self, enabled: bool) -> None:
         with self._lifecycle_lock:
+            previous = self._detection_enabled
             self._detection_enabled = bool(enabled)
-            self.tracking_lifecycle.sync_accepting()
+            try:
+                self.tracking_lifecycle.sync_accepting()
+            except BaseException:
+                self._detection_enabled = previous
+                try:
+                    self.tracking_lifecycle.sync_accepting()
+                except BaseException:
+                    LOGGER.exception(
+                        "object tracking eligibility rollback failed for %s",
+                        self.camera.id,
+                    )
+                raise
 
     def create_object_tracking_session(
         self,

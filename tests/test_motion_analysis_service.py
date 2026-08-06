@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import queue
 import threading
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
 
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
@@ -146,6 +147,21 @@ def test_schedule_rejects_work_after_stop_requested() -> None:
     service.schedule(100.0, threading.Event())
 
     assert list(service.queue.queue) == [None]
+
+
+def test_thread_start_failure_disables_frame_admission_until_restarted() -> None:
+    service = _service(_hooks())
+    stop_event = threading.Event()
+
+    with patch("survng.app.motion_analysis_service.threading.Thread.start", side_effect=RuntimeError("start failed")):
+        with pytest.raises(RuntimeError, match="start failed"):
+            service.start(stop_event)
+
+    service.schedule(100.0, stop_event)
+    assert service.thread is None
+    assert service.queue.empty()
+    assert service._stop_requested.is_set()
+    assert service._accepting_frames is False
 
 
 def test_worker_loop_uses_injected_execution_boundary_and_stops_cleanly() -> None:

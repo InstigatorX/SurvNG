@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
+from heapq import merge
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
@@ -52,6 +53,7 @@ class TrackingFrameService:
         self.stop_event = stop_event
         self.sample_fps = sample_fps
         self._lock = threading.Lock()
+        self._generation = 0
         self.frames: deque[tuple[float, np.ndarray]] = deque(
             maxlen=self.buffer_size(sample_fps())
         )
@@ -63,11 +65,13 @@ class TrackingFrameService:
 
     def clear(self) -> None:
         with self._lock:
+            self._generation += 1
             self.frames.clear()
             self._last_sample_epoch = 0.0
 
     def resize(self, sample_fps: float) -> None:
         with self._lock:
+            self._generation += 1
             self.frames = deque(
                 self.frames,
                 maxlen=self.buffer_size(sample_fps),
@@ -96,6 +100,7 @@ class TrackingFrameService:
             if captured_at - self._last_sample_epoch < interval * 0.9:
                 return
             self._last_sample_epoch = captured_at
+            generation = self._generation
         height, width = frame.shape[:2]
         if width > TRACKING_CATCHUP_FRAME_WIDTH:
             scale = TRACKING_CATCHUP_FRAME_WIDTH / width
@@ -107,6 +112,11 @@ class TrackingFrameService:
         else:
             stored = frame.copy()
         with self._lock:
+            if (
+                generation != self._generation
+                or captured_at != self._last_sample_epoch
+            ):
+                return
             self.frames.append((captured_at, stored))
 
     def recorded_frames(
@@ -118,59 +128,85 @@ class TrackingFrameService:
     ) -> Iterator[tuple[float, np.ndarray]]:
         if end_epoch <= start_epoch or frame_width <= 0:
             return
-        samples: list[tuple[float, np.ndarray]] = []
-        rows = self.recorder.recording_rows_between(
-            self.camera.id,
-            start_epoch,
-            end_epoch,
-            source="main",
+        rows = sorted(
+            self.recorder.recording_rows_between(
+                self.camera.id,
+                start_epoch,
+                end_epoch,
+                source="main",
+            ),
+            key=lambda row: (
+                float(row.get("start_epoch") or 0.0),
+                float(row.get("end_epoch") or 0.0),
+                str(row.get("path") or ""),
+            ),
         )
         interval = 1.0 / max(0.1, float(sample_fps))
-        last_epoch = start_epoch - interval
-        for row in rows:
-            row_start = float(row.get("start_epoch") or 0.0)
-            row_end = float(row.get("end_epoch") or row_start)
-            sample_start = max(start_epoch, row_start)
-            sample_end = min(end_epoch, row_end)
-            duration = sample_end - sample_start
-            if duration <= 0.0:
-                continue
-            path = Path(str(row.get("path") or ""))
-            if not path.is_file():
-                continue
-            try:
-                for captured_at, frame in sampled_video_frames(
-                    path,
-                    start_epoch=sample_start,
-                    sample_fps=sample_fps,
-                    duration_seconds=duration,
-                    ffmpeg_path=self.recorder.ffmpeg_path,
-                    maximum_width=frame_width,
-                    start_offset_seconds=max(0.0, sample_start - row_start),
-                    probe_path=path,
-                ):
-                    if captured_at <= last_epoch + interval * 0.5:
-                        continue
-                    if captured_at > end_epoch + 1e-6:
-                        break
-                    last_epoch = captured_at
-                    samples.append((captured_at, frame))
-            except RuntimeError as error:
-                LOGGER.warning(
-                    "recorded tracking catch-up skipped %s/%s: %s",
-                    self.camera.id,
-                    path.name,
-                    redact_secret_text(error),
-                )
         with self._lock:
-            samples.extend(
-                (captured_at, frame)
-                for captured_at, frame in self.frames
-                if start_epoch <= captured_at <= end_epoch
+            buffered = tuple(
+                sorted(
+                    (
+                        (captured_at, frame)
+                        for captured_at, frame in self.frames
+                        if start_epoch <= captured_at <= end_epoch
+                    ),
+                    key=lambda sample: sample[0],
+                )
             )
+
+        def recorded_samples() -> Iterator[tuple[float, np.ndarray]]:
+            last_recorded_epoch = start_epoch - interval
+            for row in rows:
+                if self.stop_event.is_set():
+                    return
+                row_start = float(row.get("start_epoch") or 0.0)
+                row_end = float(row.get("end_epoch") or row_start)
+                sample_start = max(start_epoch, row_start)
+                sample_end = min(end_epoch, row_end)
+                duration = sample_end - sample_start
+                if duration <= 0.0:
+                    continue
+                path = Path(str(row.get("path") or ""))
+                if not path.is_file():
+                    continue
+                try:
+                    for captured_at, frame in sampled_video_frames(
+                        path,
+                        start_epoch=sample_start,
+                        sample_fps=sample_fps,
+                        duration_seconds=duration,
+                        ffmpeg_path=self.recorder.ffmpeg_path,
+                        maximum_width=frame_width,
+                        start_offset_seconds=max(0.0, sample_start - row_start),
+                        probe_path=path,
+                    ):
+                        if self.stop_event.is_set():
+                            return
+                        if captured_at <= last_recorded_epoch + interval * 0.5:
+                            continue
+                        if captured_at > end_epoch + 1e-6:
+                            break
+                        last_recorded_epoch = captured_at
+                        yield captured_at, frame
+                except RuntimeError as error:
+                    LOGGER.warning(
+                        "recorded tracking catch-up skipped %s/%s: %s",
+                        self.camera.id,
+                        path.name,
+                        redact_secret_text(error),
+                    )
+
         last_epoch = start_epoch - interval
-        for captured_at, frame in sorted(samples, key=lambda sample: sample[0]):
+        for captured_at, frame in merge(
+            recorded_samples(),
+            buffered,
+            key=lambda sample: sample[0],
+        ):
+            if self.stop_event.is_set():
+                return
             if captured_at <= last_epoch + interval * 0.5:
                 continue
+            if captured_at > end_epoch + 1e-6:
+                break
             last_epoch = captured_at
             yield captured_at, frame

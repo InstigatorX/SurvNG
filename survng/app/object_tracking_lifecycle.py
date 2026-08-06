@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Protocol
+from datetime import datetime
+from typing import Any, Callable, Protocol
+
+import numpy as np
 
 from .config import CameraConfig
 from .object_tracking import (
@@ -47,12 +50,15 @@ class ObjectTrackingLifecycle:
         self._session = self.create(factory)
 
     def current(self) -> ObjectTrackingSession:
-        with self.lifecycle_lock:
-            return self._session
+        return self._session
 
     def bind_for_compatibility(self, session: ObjectTrackingSession) -> None:
         """Support legacy integrations that replace an inactive session directly."""
         with self.lifecycle_lock:
+            if self._session is not session and self._session.running():
+                raise RuntimeError(
+                    f"cannot replace active object tracking session for {self.camera.id}"
+                )
             self._session = session
 
     def create(
@@ -69,16 +75,35 @@ class ObjectTrackingLifecycle:
         return self.prewarm_frame_provider()
 
     def sample_fps(self) -> float:
-        with self.lifecycle_lock:
-            return float(self._session.config.sample_fps)
+        return float(self._session.config.sample_fps)
 
     def status(self) -> dict[str, object]:
-        with self.lifecycle_lock:
-            return self._session.status()
+        return self._session.status()
 
     def running(self) -> bool:
+        return self._session.running()
+
+    def enabled(self) -> bool:
+        return bool(self._session.config.enabled)
+
+    def has_trackable_objects(self, objects: list[dict[str, Any]]) -> bool:
         with self.lifecycle_lock:
-            return self._session.running()
+            return bool(self._trackable_objects(self._session, objects))
+
+    def start_incident(
+        self,
+        event_id: int,
+        event_at: datetime,
+        objects: list[dict[str, Any]],
+        initial_frame: np.ndarray | None = None,
+    ) -> bool | None:
+        """Atomically select and start the current session for one incident."""
+        with self.lifecycle_lock:
+            session = self._session
+            trackable = self._trackable_objects(session, objects)
+            if not trackable:
+                return None
+            return session.start(event_id, event_at, trackable, initial_frame)
 
     def sync_accepting(self) -> None:
         with self.lifecycle_lock:
@@ -114,7 +139,7 @@ class ObjectTrackingLifecycle:
             except BaseException:
                 try:
                     replacement.stop()
-                except Exception:
+                except BaseException:
                     LOGGER.exception(
                         "replacement object tracking cleanup failed for %s",
                         self.camera.id,
@@ -123,17 +148,34 @@ class ObjectTrackingLifecycle:
                     self._session = previous
                 try:
                     self.history().resize(previous.config.sample_fps)
-                except Exception:
+                except BaseException:
                     LOGGER.exception(
                         "previous object tracking history restore failed for %s",
                         self.camera.id,
                     )
                 try:
                     previous.set_accepting(self.accepting())
-                except Exception:
+                except BaseException:
                     LOGGER.exception(
                         "previous object tracking session restore failed for %s",
                         self.camera.id,
                     )
                 raise
             return previous
+
+    @staticmethod
+    def _trackable_objects(
+        session: ObjectTrackingSession,
+        objects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not session.config.enabled:
+            return []
+        return [
+            item
+            for item in objects
+            if (
+                item.get("label")
+                and item.get("incident_eligible") is not False
+                and session.config.tracks_label(item.get("label"))
+            )
+        ]

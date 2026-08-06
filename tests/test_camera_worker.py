@@ -259,6 +259,23 @@ class CameraWorkerTest(unittest.TestCase):
             tracking.set_accepting.assert_called_once_with(True)
             self.assertFalse(worker._stop.is_set())
 
+    def test_detection_toggle_restores_previous_state_when_tracking_sync_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+                Path(tmpdir),
+            )
+            with patch.object(
+                worker.tracking_lifecycle,
+                "sync_accepting",
+                side_effect=[RuntimeError("sync failed"), None],
+            ) as sync:
+                with self.assertRaisesRegex(RuntimeError, "sync failed"):
+                    worker.set_detection_enabled(False)
+
+            self.assertTrue(worker._detection_enabled)
+            self.assertEqual(sync.call_count, 2)
+
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(
@@ -352,6 +369,7 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
+            worker._stop.clear()
             worker.object_tracking.config = ObjectTrackingConfig(sample_fps=2.0)
             first = np.full((900, 1600, 3), 1, dtype=np.uint8)
             second = np.full((900, 1600, 3), 2, dtype=np.uint8)
@@ -2435,6 +2453,75 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertIsNone(worker._motion_analysis_thread)
             self.assertIsNone(worker._motion_thread)
 
+    def test_start_clears_stale_events_before_starting_producers(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        order: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(
+                    worker.tracking_lifecycle,
+                    "sync_accepting",
+                    side_effect=lambda: order.append("tracking"),
+                ),
+                patch.object(
+                    worker,
+                    "_clear_motion_queue",
+                    side_effect=lambda: order.append("clear"),
+                ),
+                patch.object(
+                    worker.motion_analysis,
+                    "start",
+                    side_effect=lambda _stop: order.append("analysis"),
+                ),
+                patch.object(
+                    worker.capture,
+                    "start",
+                    side_effect=lambda: order.append("capture") or False,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "camera source did not start"):
+                    worker.start()
+
+        self.assertEqual(order[:4], ["tracking", "clear", "analysis", "capture"])
+
+    def test_start_rolls_back_when_tracking_eligibility_sync_fails(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with patch.object(
+                worker.tracking_lifecycle,
+                "sync_accepting",
+                side_effect=RuntimeError("tracking unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "tracking unavailable"):
+                    worker.start()
+
+            self.assertFalse(worker.status()["running"])
+            self.assertTrue(worker._stop.is_set())
+            self.assertIsNone(worker._motion_analysis_thread)
+            self.assertIsNone(worker._motion_thread)
+
+    def test_start_preserves_original_error_when_rollback_raises_base_exception(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(worker.motion_analysis, "start"),
+                patch.object(
+                    worker.capture,
+                    "start",
+                    side_effect=RuntimeError("startup failed"),
+                ),
+                patch.object(
+                    worker,
+                    "stop",
+                    side_effect=KeyboardInterrupt("rollback interrupted"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                    worker.start()
+
     def test_stop_releases_camera_io_before_waiting_for_tracking(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         order: list[str] = []
@@ -2460,6 +2547,62 @@ class CameraWorkerTest(unittest.TestCase):
                 worker.stop()
 
         self.assertEqual(order[:3], ["capture", "onvif", "tracking"])
+
+    def test_tracking_stop_failure_does_not_skip_remaining_camera_cleanup(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        order: list[str] = []
+
+        def fail_tracking_stop() -> None:
+            order.append("tracking")
+            raise RuntimeError("tracking stop failed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(worker.capture, "request_stop", side_effect=lambda: order.append("capture")),
+                patch.object(worker.onvif, "stop", side_effect=lambda: order.append("onvif")),
+                patch.object(
+                    worker.tracking_lifecycle,
+                    "stop",
+                    side_effect=fail_tracking_stop,
+                ),
+                patch.object(
+                    worker.motion_analysis,
+                    "request_stop",
+                    side_effect=lambda: order.append("analysis"),
+                ),
+                patch.object(
+                    worker.motion_events,
+                    "signal_stop",
+                    side_effect=lambda: order.append("events"),
+                ),
+                patch.object(worker.tracking_lifecycle, "running", return_value=False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "object tracking cleanup"):
+                    worker.stop()
+
+        self.assertEqual(order, ["capture", "onvif", "tracking", "analysis", "events"])
+
+    def test_stop_continues_reset_after_capture_wait_raises(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir))
+            with (
+                patch.object(
+                    worker.capture,
+                    "wait_stopped",
+                    side_effect=RuntimeError("capture join failed"),
+                ),
+                patch.object(worker.tracking_frames, "clear") as clear_frames,
+                patch.object(worker.motion_analysis, "reset") as reset_analysis,
+                patch.object(worker.motion_events, "reset") as reset_events,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "capture wait cleanup"):
+                    worker.stop()
+
+        clear_frames.assert_called_once_with()
+        reset_analysis.assert_called_once_with()
+        reset_events.assert_called_once_with()
 
     def test_stop_preserves_motion_state_when_workers_do_not_exit(self) -> None:
         camera = CameraConfig(

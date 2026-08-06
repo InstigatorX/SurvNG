@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import numpy as np
@@ -117,6 +118,19 @@ def test_replacement_failure_cleans_up_and_restores_previous_session() -> None:
     initial.set_accepting.assert_called_once_with(True)
 
 
+def test_replacement_preserves_original_error_when_restore_is_interrupted() -> None:
+    initial = _session()
+    initial.set_accepting.side_effect = KeyboardInterrupt("restore interrupted")
+    replacement = _session(fps=3.0)
+    replacement.set_accepting.side_effect = RuntimeError("accept failed")
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)
+
+    with pytest.raises(RuntimeError, match="accept failed"):
+        lifecycle.replace(replacement)
+
+    assert lifecycle.current() is initial
+
+
 def test_status_running_and_sample_rate_follow_the_current_session() -> None:
     initial = _session(fps=2.5)
     initial.running.return_value = True
@@ -126,3 +140,51 @@ def test_status_running_and_sample_rate_follow_the_current_session() -> None:
     assert lifecycle.sample_fps() == 2.5
     assert lifecycle.running() is True
     assert lifecycle.status() == {"active": True, "frames_processed": 7}
+
+
+def test_incident_handoff_filters_objects_and_starts_current_session_atomically() -> None:
+    initial = _session()
+    initial.start.return_value = True
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)
+    event_at = datetime.now(timezone.utc)
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    objects = [
+        {"label": "face"},
+        {"label": "person", "incident_eligible": False},
+        {"label": "person", "incident_eligible": True},
+    ]
+
+    assert lifecycle.enabled()
+    assert lifecycle.has_trackable_objects(objects)
+    assert lifecycle.start_incident(42, event_at, objects, frame) is True
+    initial.start.assert_called_once_with(
+        42,
+        event_at,
+        [{"label": "person", "incident_eligible": True}],
+        frame,
+    )
+
+
+def test_read_only_sample_rate_does_not_wait_for_camera_lifecycle_lock() -> None:
+    initial = _session(fps=3.0)
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)
+    completed = threading.Event()
+
+    def read_sample_rate() -> None:
+        assert lifecycle.sample_fps() == 3.0
+        completed.set()
+
+    with lifecycle.lifecycle_lock:
+        reader = threading.Thread(target=read_sample_rate)
+        reader.start()
+        assert completed.wait(timeout=0.2)
+    reader.join(timeout=1)
+
+
+def test_compatibility_binding_rejects_replacement_of_active_session() -> None:
+    initial = _session()
+    initial.running.return_value = True
+    lifecycle, _factory, _frame_provider, _history = _lifecycle(initial)
+
+    with pytest.raises(RuntimeError, match="cannot replace active"):
+        lifecycle.bind_for_compatibility(_session())

@@ -119,6 +119,9 @@ class MotionAnalysisService:
             thread.start()
         except BaseException:
             self.thread = None
+            self._accepting_frames = False
+            self._stop_requested.set()
+            self._stop_event = None
             raise
 
     def request_stop(self) -> None:

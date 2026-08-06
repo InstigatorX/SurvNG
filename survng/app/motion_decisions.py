@@ -55,7 +55,7 @@ class MotionDecisionHooks:
 
 def priority_motion_topic(topic: str) -> bool:
     searchable = topic.lower()
-    return topic.startswith("manual") or any(
+    return searchable.startswith("manual") or any(
         word in searchable
         for word in ("person", "people", "human", "vehicle", "animal", "face")
     )

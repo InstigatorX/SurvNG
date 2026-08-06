@@ -74,6 +74,45 @@ class FairMotionAnalysisLimiterTest(unittest.TestCase):
         release.set()
         holding_thread.join(timeout=1)
 
+    def test_newer_request_supersedes_same_camera_waiter_without_stranding_it(self) -> None:
+        limiter = FairMotionAnalysisLimiter(1)
+        holder_active = threading.Event()
+        release_holder = threading.Event()
+        first_done = threading.Event()
+        results: list[tuple[str, float | None]] = []
+
+        def holder() -> None:
+            with limiter.acquire("boiler"):
+                holder_active.set()
+                release_holder.wait(timeout=1)
+
+        def waiter(name: str, done: threading.Event | None = None) -> None:
+            with limiter.acquire("gate") as waited:
+                results.append((name, waited))
+            if done is not None:
+                done.set()
+
+        holding = threading.Thread(target=holder)
+        first = threading.Thread(target=waiter, args=("first", first_done))
+        second = threading.Thread(target=waiter, args=("second",))
+        holding.start()
+        holder_active.wait(timeout=1)
+        first.start()
+        deadline = time.monotonic() + 1
+        while limiter.status()["pending"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        second.start()
+
+        self.assertTrue(first_done.wait(timeout=0.5))
+        release_holder.set()
+        holding.join(timeout=1)
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        self.assertFalse(second.is_alive())
+        self.assertIn(("first", None), results)
+        self.assertTrue(any(name == "second" and waited is not None for name, waited in results))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,27 +27,14 @@ class MotionDecisionProcessor(Protocol):
     ) -> MotionDecisionOutcome: ...
 
 
-class TrackingConfig(Protocol):
-    enabled: bool
-
-    def tracks_label(self, label: object) -> bool: ...
-
-
-class IncidentTrackingSession(Protocol):
-    config: TrackingConfig
-
-    def start(
-        self,
-        event_id: int,
-        event_at: datetime,
-        initial_objects: list[dict[str, Any]],
-        initial_frame: np.ndarray | None = None,
-    ) -> bool: ...
-
-
 TrackingPrewarmer = Callable[[], object | None]
 ImageReader = Callable[[str], np.ndarray | None]
-TrackingProvider = Callable[[], IncidentTrackingSession]
+TrackingEnabled = Callable[[], bool]
+TrackableObjects = Callable[[list[dict[str, Any]]], bool]
+TrackingStarter = Callable[
+    [int, datetime, list[dict[str, Any]], np.ndarray | None],
+    bool | None,
+]
 
 
 class MotionIncidentService:
@@ -63,13 +50,17 @@ class MotionIncidentService:
         *,
         camera_id: str,
         decision_processor: MotionDecisionProcessor,
-        tracking_provider: TrackingProvider,
+        tracking_enabled: TrackingEnabled,
+        has_trackable_objects: TrackableObjects,
+        start_tracking: TrackingStarter,
         prewarm_tracking: TrackingPrewarmer,
         image_reader: ImageReader,
     ) -> None:
         self.camera_id = camera_id
         self.decision_processor = decision_processor
-        self.tracking_provider = tracking_provider
+        self.tracking_enabled = tracking_enabled
+        self.has_trackable_objects = has_trackable_objects
+        self.start_tracking = start_tracking
         self.prewarm_tracking = prewarm_tracking
         self.image_reader = image_reader
         self._status_lock = threading.Lock()
@@ -132,7 +123,7 @@ class MotionIncidentService:
         require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome:
         try:
-            if self.tracking_provider().config.enabled:
+            if self.tracking_enabled():
                 # Start opening main concurrently with recorded validation so
                 # the tracking handoff does not pay another RTSP startup delay.
                 self.prewarm_tracking()
@@ -158,29 +149,20 @@ class MotionIncidentService:
             return outcome
 
         try:
-            tracking = self.tracking_provider()
-            if not tracking.config.enabled:
-                return outcome
-            trackable_objects = [
-                item
-                for item in outcome.detected_objects
-                if (
-                    item.get("label")
-                    and item.get("incident_eligible") is not False
-                    and tracking.config.tracks_label(item.get("label"))
-                )
-            ]
-            if not trackable_objects:
+            detected_objects = list(outcome.detected_objects)
+            if not self.has_trackable_objects(detected_objects):
                 return outcome
             initial_frame = None
             if outcome.snapshot_path:
                 initial_frame = self.image_reader(outcome.snapshot_path)
-            started = tracking.start(
+            started = self.start_tracking(
                 outcome.event_id,
                 event_at,
-                trackable_objects,
+                detected_objects,
                 initial_frame,
             )
+            if started is None:
+                return outcome
             if not started:
                 self._record_handoff_failure(
                     outcome.event_id,
