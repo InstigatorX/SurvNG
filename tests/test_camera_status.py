@@ -89,6 +89,8 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
         event_worker_running=lambda: True,
         event_queue_depth=lambda: 2,
         retry_queue_depth=lambda: 1,
+        event_runtime=lambda: {"queue_high_water": 3},
+        lifecycle_runtime=lambda: {"active_worker_count": 4},
         monotonic=lambda: 100.0,
     )
     service = CameraStatusService(
@@ -121,12 +123,14 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
         "active": True,
         "handoff_failures": 0,
     }
+    assert status["lifecycle"]["active_worker_count"] == 4
     assert status["onvif_poll_timeouts"] == 2
     assert status["onvif_subscription_lifetime_seconds"] == 3600.0
     motion = status["motion_qualification"]
     assert motion["triggers"] == 4
     assert motion["analysis_worker_running"] is True
     assert motion["event_worker_running"] is True
+    assert motion["event_runtime"]["queue_high_water"] == 3
     assert motion["visual_backup"]["scene_ready"] is True
     assert motion["mog2_audit_enabled"] is True
 

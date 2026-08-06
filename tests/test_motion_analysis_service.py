@@ -107,6 +107,11 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert service.frames[-1][1].shape == (90, 320)
     assert service.color_frames[-1][1].shape == (90, 320, 3)
     assert service.queue.get_nowait() == 100.0
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["frames_sampled"] == 1
+    assert telemetry["derived_frame_count"] == 2
+    assert telemetry["derived_frame_bytes"] == 90 * 320 * 4
+    assert telemetry["preprocess_count"] == 1
 
 
 def test_latest_only_schedule_replaces_stale_pending_work() -> None:
@@ -119,6 +124,9 @@ def test_latest_only_schedule_replaces_stale_pending_work() -> None:
 
     assert service.queue.get_nowait() == 101.0
     increment_stat.assert_called_once_with("analysis_frames_dropped", 1)
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["mailbox_high_water"] == 1
+    assert telemetry["mailbox_replacements"] == 1
 
 
 def test_schedule_does_not_report_drop_when_consumer_wins_full_queue_race() -> None:
@@ -176,6 +184,11 @@ def test_worker_loop_uses_injected_execution_boundary_and_stops_cleanly() -> Non
 
     execute_continuous.assert_called_once_with(100.0)
     assert service.last_processed_at == 100.0
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["capture_to_analysis_count"] == 1
+    assert telemetry["analysis_cycle_count"] == 1
+    assert telemetry["copy_count"] == 1
+    assert telemetry["copies_by_reason"]["analysis_latest"]["count"] == 1
 
 
 def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:

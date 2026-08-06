@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
 import time
@@ -100,6 +101,34 @@ class MotionAnalysisService:
         self._stop_event: threading.Event | None = None
         self._stop_requested = threading.Event()
         self._accepting_frames = True
+        self._telemetry_lock = threading.Lock()
+        self._telemetry: dict[str, Any] = {
+            "mailbox_high_water": 0,
+            "mailbox_replacements": 0,
+            "frames_sampled": 0,
+            "preprocess_count": 0,
+            "preprocess_total_ms": 0.0,
+            "preprocess_last_ms": 0.0,
+            "preprocess_max_ms": 0.0,
+            "derived_frame_count": 0,
+            "derived_frame_bytes": 0,
+            "capture_to_analysis_count": 0,
+            "capture_to_analysis_total_ms": 0.0,
+            "capture_to_analysis_last_ms": 0.0,
+            "capture_to_analysis_max_ms": 0.0,
+            "analysis_cycle_count": 0,
+            "analysis_cycle_total_ms": 0.0,
+            "analysis_cycle_last_ms": 0.0,
+            "analysis_cycle_max_ms": 0.0,
+            "copy_count": 0,
+            "copy_bytes": 0,
+            "copies_by_reason": {},
+        }
+        self._timing_samples_ms: dict[str, deque[float]] = {
+            "preprocess": deque(maxlen=600),
+            "capture_to_analysis": deque(maxlen=600),
+            "analysis_cycle": deque(maxlen=600),
+        }
 
     def start(self, stop_event: threading.Event) -> None:
         if self.thread is not None and self.thread.is_alive():
@@ -167,6 +196,7 @@ class MotionAnalysisService:
             return
         try:
             self.queue.put_nowait(captured_at)
+            self._record_mailbox_depth()
             return
         except queue.Full:
             dropped = 0
@@ -177,10 +207,13 @@ class MotionAnalysisService:
                 pass
         try:
             self.queue.put_nowait(captured_at)
+            self._record_mailbox_depth()
         except queue.Full:
             dropped += 1
         if dropped:
             self.hooks.increment_stat("analysis_frames_dropped", dropped)
+            with self._telemetry_lock:
+                self._telemetry["mailbox_replacements"] += dropped
 
     def remember_frame(
         self,
@@ -196,6 +229,7 @@ class MotionAnalysisService:
             if frame_clock - self.last_sample_clock < interval * 0.85:
                 return
             self.last_sample_clock = frame_clock
+        preprocess_started = time.monotonic()
         try:
             height, width = frame.shape[:2]
             frame_width = self.hooks.frame_width()
@@ -208,6 +242,14 @@ class MotionAnalysisService:
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         except (cv2.error, ValueError):
             return
+        preprocess_ms = max(0.0, (time.monotonic() - preprocess_started) * 1000.0)
+        with self._telemetry_lock:
+            self._record_timing_locked("preprocess", preprocess_ms)
+            self._telemetry["frames_sampled"] += 1
+            self._telemetry["derived_frame_count"] += 2
+            self._telemetry["derived_frame_bytes"] += int(
+                resized.nbytes + gray.nbytes
+            )
         frame_epoch = captured_at if captured_at is not None else time.time()
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
@@ -216,12 +258,15 @@ class MotionAnalysisService:
 
     def samples(self) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
-            return [(timestamp, frame.copy()) for timestamp, frame in self.frames]
+            return [
+                (timestamp, self._copy_frame(frame, "samples"))
+                for timestamp, frame in self.frames
+            ]
 
     def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
             return [
-                (timestamp, frame.copy())
+                (timestamp, self._copy_frame(frame, "samples_since"))
                 for timestamp, frame in self.frames
                 if timestamp >= captured_at
             ]
@@ -247,7 +292,89 @@ class MotionAnalysisService:
             "color_buffered_frames": color_buffered_frames,
             "color_frame_shape": color_frame_shape,
             "continuous_last_result": last_result,
+            "telemetry": self.telemetry_snapshot(),
         }
+
+    def telemetry_snapshot(self) -> dict[str, Any]:
+        with self._telemetry_lock:
+            result = {
+                key: (
+                    {
+                        nested_key: (
+                            dict(nested_value)
+                            if isinstance(nested_value, dict)
+                            else nested_value
+                        )
+                        for nested_key, nested_value in value.items()
+                    }
+                    if isinstance(value, dict)
+                    else value
+                )
+                for key, value in self._telemetry.items()
+            }
+            timing_samples = {
+                prefix: sorted(samples)
+                for prefix, samples in self._timing_samples_ms.items()
+            }
+        for prefix in ("preprocess", "capture_to_analysis", "analysis_cycle"):
+            count = int(result.get(f"{prefix}_count") or 0)
+            total = float(result.get(f"{prefix}_total_ms") or 0.0)
+            result[f"{prefix}_average_ms"] = round(total / count, 3) if count else 0.0
+            for suffix in ("total_ms", "last_ms", "max_ms"):
+                result[f"{prefix}_{suffix}"] = round(
+                    float(result.get(f"{prefix}_{suffix}") or 0.0),
+                    3,
+                )
+            samples = timing_samples[prefix]
+            result[f"{prefix}_p95_ms"] = self._percentile(samples, 0.95)
+            result[f"{prefix}_p99_ms"] = self._percentile(samples, 0.99)
+        return result
+
+    def _record_mailbox_depth(self) -> None:
+        depth = self.queue.qsize()
+        with self._telemetry_lock:
+            self._telemetry["mailbox_high_water"] = max(
+                int(self._telemetry["mailbox_high_water"]),
+                depth,
+            )
+
+    def _record_timing(self, prefix: str, duration_ms: float) -> None:
+        with self._telemetry_lock:
+            self._record_timing_locked(prefix, duration_ms)
+
+    def _record_timing_locked(self, prefix: str, duration_ms: float) -> None:
+        self._telemetry[f"{prefix}_count"] += 1
+        self._telemetry[f"{prefix}_total_ms"] += duration_ms
+        self._telemetry[f"{prefix}_last_ms"] = duration_ms
+        self._telemetry[f"{prefix}_max_ms"] = max(
+            float(self._telemetry[f"{prefix}_max_ms"]),
+            duration_ms,
+        )
+        self._timing_samples_ms[prefix].append(duration_ms)
+
+    def _copy_frame(self, frame: np.ndarray, reason: str) -> np.ndarray:
+        copied = frame.copy()
+        with self._telemetry_lock:
+            self._telemetry["copy_count"] += 1
+            self._telemetry["copy_bytes"] += int(copied.nbytes)
+            copies_by_reason = self._telemetry["copies_by_reason"]
+            reason_stats = copies_by_reason.setdefault(
+                reason,
+                {"count": 0, "bytes": 0},
+            )
+            reason_stats["count"] += 1
+            reason_stats["bytes"] += int(copied.nbytes)
+        return copied
+
+    @staticmethod
+    def _percentile(values: list[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        index = min(
+            len(values) - 1,
+            max(0, int(math.ceil(len(values) * percentile) - 1)),
+        )
+        return round(float(values[index]), 3)
 
     def visual_backup_snapshot(self) -> dict[str, Any]:
         with self._visual_lock:
@@ -292,6 +419,7 @@ class MotionAnalysisService:
                 continue
             if scheduled_at is None or stop_event.is_set():
                 return
+            cycle_started = time.monotonic()
             try:
                 with self.limiter.acquire(
                     self.camera_id,
@@ -302,11 +430,15 @@ class MotionAnalysisService:
                     self.hooks.record_analysis_wait(
                         max(0.0, wait_seconds * 1000.0)
                     )
+                    self._record_timing(
+                        "capture_to_analysis",
+                        max(0.0, (time.time() - scheduled_at) * 1000.0),
+                    )
                     with self.frame_lock:
                         if not self.frames:
                             continue
                         captured_at, frame = self.frames[-1]
-                        frame = frame.copy()
+                        frame = self._copy_frame(frame, "analysis_latest")
                     if captured_at <= self.last_processed_at:
                         continue
                     self.last_processed_at = captured_at
@@ -335,6 +467,11 @@ class MotionAnalysisService:
             except Exception:
                 self.hooks.increment_stat("analysis_worker_errors", 1)
                 LOGGER.exception("motion analysis cycle failed for %s", self.camera_id)
+            finally:
+                self._record_timing(
+                    "analysis_cycle",
+                    max(0.0, (time.monotonic() - cycle_started) * 1000.0),
+                )
 
     def analyze_continuous(self, captured_at: float) -> None:
         _mode, sensitivity, _frame_width = self.hooks.motion_settings()
@@ -345,7 +482,8 @@ class MotionAnalysisService:
                 else list(self.frames)[-3:]
             )
             samples = [
-                (timestamp, frame.copy()) for timestamp, frame in source_samples
+                (timestamp, self._copy_frame(frame, "continuous_samples"))
+                for timestamp, frame in source_samples
             ]
         if len(samples) < 2:
             return

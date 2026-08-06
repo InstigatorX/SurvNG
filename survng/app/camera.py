@@ -432,6 +432,8 @@ class CameraWorker:
                 ),
                 event_queue_depth=self._motion_queue.qsize,
                 retry_queue_depth=self.motion_events.retry_queue_depth,
+                event_runtime=self.motion_events.runtime_status,
+                lifecycle_runtime=self.lifecycle.runtime_status,
             ),
         )
 

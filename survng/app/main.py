@@ -2396,6 +2396,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     for status in camera_statuses:
         status_camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
+        analysis_runtime = dict(motion.get("analysis_runtime") or {})
+        event_runtime = dict(motion.get("event_runtime") or {})
         tracking = status.get("object_tracking") or {}
         cameras.append({
             "id": status_camera_id,
@@ -2430,6 +2432,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
                 "analysis_wait_ms_total": round(float(motion.get("analysis_wait_ms_total") or 0.0), 1),
                 "analysis_wait_ms_max": round(float(motion.get("analysis_wait_ms_max") or 0.0), 1),
                 "queue_depth": int(motion.get("queue_depth") or 0),
+                "analysis_runtime": analysis_runtime,
+                "event_runtime": event_runtime,
                 "visual_backup_candidates": int(motion.get("visual_backup_candidates") or 0),
                 "visual_backup_triggers": int(motion.get("visual_backup_triggers") or 0),
                 "visual_backup_onvif_matches": int(motion.get("visual_backup_onvif_matches") or 0),
@@ -2466,6 +2470,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
                 "last_handoff_failure": tracking.get("last_handoff_failure"),
             },
             "capture": dict(status.get("capture_stats") or {}),
+            "lifecycle": dict(status.get("lifecycle") or {}),
             "activity": per_camera_activity.get(
                 status_camera_id,
                 {

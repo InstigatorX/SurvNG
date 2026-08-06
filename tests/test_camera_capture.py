@@ -218,6 +218,10 @@ def test_frame_observer_failure_does_not_reconnect_healthy_source() -> None:
 
     assert status["capture_stats"]["live"]["frames_received"] >= 2
     assert status["capture_stats"]["live"]["starts"] == 1
+    assert status["capture_stats"]["live"]["frame_copy_count"] >= 2
+    assert status["capture_stats"]["live"]["frame_copy_bytes"] >= 1200
+    assert status["capture_stats"]["live"]["observer_calls"] >= 2
+    assert status["capture_stats"]["live"]["observer_p99_ms"] >= 0.0
 
 
 def test_source_started_notification_precedes_first_frame() -> None:

@@ -32,6 +32,8 @@ class CameraStatusHooks:
     event_worker_running: Callable[[], bool]
     event_queue_depth: Callable[[], int]
     retry_queue_depth: Callable[[], int]
+    event_runtime: Callable[[], dict[str, int]]
+    lifecycle_runtime: Callable[[], dict[str, Any]]
     monotonic: Callable[[], float] = time.monotonic
 
 
@@ -120,8 +122,10 @@ class CameraStatusService:
             "queue_depth": self.hooks.event_queue_depth(),
             "retry_queue_depth": self.hooks.retry_queue_depth(),
             "analysis_queue_depth": analysis["queue_depth"],
+            "analysis_runtime": dict(analysis.get("telemetry") or {}),
             "analysis_worker_running": analysis["worker_running"],
             "event_worker_running": self.hooks.event_worker_running(),
+            "event_runtime": self.hooks.event_runtime(),
             "continuous_last_result": analysis["continuous_last_result"],
             "buffered_frames": analysis["buffered_frames"],
             "frame_shape": analysis["frame_shape"],
@@ -164,6 +168,7 @@ class CameraStatusService:
             },
             **self._onvif_diagnostics(),
             "motion_qualification": motion,
+            "lifecycle": self.hooks.lifecycle_runtime(),
         }
 
     @staticmethod

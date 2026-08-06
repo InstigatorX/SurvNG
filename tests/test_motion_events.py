@@ -34,6 +34,11 @@ def test_full_queue_evicts_oldest_trigger_and_reports_drop() -> None:
     assert coordinator.queue.get_nowait()["message"] == "2"
     assert coordinator.queue.get_nowait()["message"] == "3"
     assert stats == ["triggers", "triggers", "triggers", "dropped_triggers"]
+    runtime = coordinator.runtime_status()
+    assert runtime["enqueued"] == 3
+    assert runtime["evicted"] == 1
+    assert runtime["rejected"] == 0
+    assert runtime["queue_high_water"] == 2
 
 
 def test_full_queue_race_does_not_report_an_eviction_that_never_happened() -> None:
@@ -88,6 +93,10 @@ def test_retry_batch_is_prioritized_and_bounded() -> None:
     ) == RetryDisposition.DROPPED
     assert retries == ["event_retries"]
     assert drops == ["event_retry_drops"]
+    runtime = coordinator.runtime_status()
+    assert runtime["retries_scheduled"] == 1
+    assert runtime["retries_dropped"] == 1
+    assert runtime["retry_high_water"] == 1
 
 
 def test_adaptive_reservation_deduplicates_priority_and_rearms() -> None:

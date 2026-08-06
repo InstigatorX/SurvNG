@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
-import math
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -232,6 +232,15 @@ class MotionEventCoordinator:
         self.camera_motion_times: deque[float] = deque(maxlen=32)
         self._retry_limit = retry_limit
         self._lock = threading.RLock()
+        self._runtime_metrics = {
+            "enqueued": 0,
+            "evicted": 0,
+            "rejected": 0,
+            "queue_high_water": 0,
+            "retries_scheduled": 0,
+            "retries_dropped": 0,
+            "retry_high_water": 0,
+        }
 
     def enqueue(
         self,
@@ -246,9 +255,11 @@ class MotionEventCoordinator:
             on_trigger("triggers")
         try:
             self.queue.put_nowait(trigger)
+            self._record_enqueue()
             return True
         except queue.Full:
             if not evict_oldest:
+                self._record_rejected()
                 if on_drop is not None:
                     on_drop("dropped_triggers")
                 return False
@@ -261,9 +272,11 @@ class MotionEventCoordinator:
             try:
                 self.queue.put_nowait(trigger)
                 queued = True
+                self._record_enqueue(evicted=dropped)
             except queue.Full:
                 dropped += 1
                 queued = False
+                self._record_rejected(evicted=max(0, dropped - 1))
             if on_drop is not None:
                 for _ in range(dropped):
                     on_drop("dropped_triggers")
@@ -338,6 +351,8 @@ class MotionEventCoordinator:
             default=0,
         ) + 1
         if retry_count > self._retry_limit:
+            with self._lock:
+                self._runtime_metrics["retries_dropped"] += 1
             if on_drop is not None:
                 on_drop("event_retry_drops")
             return RetryDisposition.DROPPED
@@ -356,9 +371,36 @@ class MotionEventCoordinator:
         )
         with self._lock:
             self.retry_batches.append(wrapper)
+            self._runtime_metrics["retries_scheduled"] += 1
+            self._runtime_metrics["retry_high_water"] = max(
+                self._runtime_metrics["retry_high_water"],
+                len(self.retry_batches),
+            )
         if on_retry is not None:
             on_retry("event_retries")
         return RetryDisposition.SCHEDULED
+
+    def runtime_status(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                **self._runtime_metrics,
+                "queue_depth": self.queue.qsize(),
+                "retry_queue_depth": len(self.retry_batches),
+            }
+
+    def _record_enqueue(self, *, evicted: int = 0) -> None:
+        with self._lock:
+            self._runtime_metrics["enqueued"] += 1
+            self._runtime_metrics["evicted"] += max(0, evicted)
+            self._runtime_metrics["queue_high_water"] = max(
+                self._runtime_metrics["queue_high_water"],
+                self.queue.qsize(),
+            )
+
+    def _record_rejected(self, *, evicted: int = 0) -> None:
+        with self._lock:
+            self._runtime_metrics["rejected"] += 1
+            self._runtime_metrics["evicted"] += max(0, evicted)
 
     def reserve_adaptive(
         self,

@@ -291,6 +291,21 @@ class CameraLifecycleService:
                     )
                 raise
 
+    def runtime_status(self) -> dict[str, Any]:
+        """Return a non-blocking lifecycle baseline for telemetry."""
+        with self.state.lock:
+            enabled = self.state.enabled
+            detection_enabled = self.state.detection_enabled
+            accepting_motion_events = self.state.accepting_motion_events
+        workers = self._residual_workers()
+        return {
+            "enabled": enabled,
+            "detection_enabled": detection_enabled,
+            "accepting_motion_events": accepting_motion_events,
+            "active_workers": workers,
+            "active_worker_count": len(workers),
+        }
+
     def _residual_workers(self) -> list[str]:
         return [
             label

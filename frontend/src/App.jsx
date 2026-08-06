@@ -7852,6 +7852,16 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         </div>
       </section>
 
+      <section className="telemetry-section">
+        <div className="telemetry-section-head"><div><h3>Camera dataflow{selected ? ` · ${selected.name}` : ""}</h3><p>Measures synchronous capture work, analysis handoff latency, preprocessing cost, and copied motion-frame volume.</p></div></div>
+        <div className="telemetry-trend-grid two-column">
+          <TelemetryTrend title="Frame handoff latency · 2 hours" description="Worst camera sample in each minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "capture_observer_p99_ms", label: "Capture observer p99", className: "warning" }, { key: "capture_to_analysis_p95_ms", label: "Capture to analysis p95", className: "secondary" }, { key: "preprocess_p99_ms", label: "Preprocess p99", className: "rate" }]} />
+          <TelemetryTrend title="Frame handoff latency · 7 days" description="Worst camera sample in each 15-minute bucket" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "capture_observer_p99_ms", label: "Capture observer p99", className: "warning" }, { key: "capture_to_analysis_p95_ms", label: "Capture to analysis p95", className: "secondary" }, { key: "preprocess_p99_ms", label: "Preprocess p99", className: "rate" }]} />
+          <TelemetryTrend title="Motion frame copies · 2 hours" description="Bytes copied by motion analysis per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "motion_copy_bytes", label: "Copied", className: "secondary" }]} />
+          <TelemetryTrend title="Motion frame copies · 7 days" description="Bytes copied per 15-minute bucket" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "motion_copy_bytes", label: "Copied", className: "secondary" }]} />
+        </div>
+      </section>
+
       {!selected ? <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>System trends</h3><p>Live rolling history sampled while Telemetry is active.</p></div></div>
         <div className="telemetry-trend-grid">
@@ -7930,10 +7940,13 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
               <dl>
                 <div><dt>Last frame</dt><dd>{formatAge(camera.last_frame_age_seconds)}</dd></div>
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
+                <div><dt>Camera workers</dt><dd>{camera.lifecycle?.active_worker_count || 0} active{camera.lifecycle?.active_workers?.length ? ` · ${camera.lifecycle.active_workers.join(", ")}` : ""}</dd></div>
                 <div><dt>Recorder clock recovery</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
                 <div><dt>Decoded FPS · live / main</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)} / {Number(camera.capture?.main?.fps || 0).toFixed(1)}</dd></div>
                 <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                 <div><dt>Capture read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
+                <div><dt>Live capture observer · avg / p99</dt><dd>{formatMilliseconds(camera.capture?.live?.observer_average_ms)} / {formatMilliseconds(camera.capture?.live?.observer_p99_ms)}</dd></div>
+                <div><dt>Stored frame copies</dt><dd>{Number(camera.capture?.live?.frame_copy_count || 0).toLocaleString()} · {formatBytes(camera.capture?.live?.frame_copy_bytes || 0)}</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
                 <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>
                 <div><dt>ONVIF notices / motion</dt><dd>{camera.onvif.notifications} / {camera.onvif.motion_events}</dd></div>
@@ -7941,6 +7954,10 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Motion passed / rejected</dt><dd>{camera.motion.passed} / {camera.motion.rejected}</dd></div>
                 <div><dt>Motion suppressed / dropped</dt><dd>{camera.motion.suppressed} / {camera.motion.dropped}</dd></div>
                 <div><dt>Motion analysis frames dropped</dt><dd>{camera.motion.analysis_frames_dropped || 0}</dd></div>
+                <div><dt>Motion preprocessing · avg / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.preprocess_average_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.preprocess_p99_ms)}</dd></div>
+                <div><dt>Capture to analysis · p95 / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p95_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p99_ms)}</dd></div>
+                <div><dt>Motion frame copies</dt><dd>{Number(camera.motion.analysis_runtime?.copy_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.copy_bytes || 0)}</dd></div>
+                <div><dt>Event queue · peak / evicted / rejected</dt><dd>{camera.motion.event_runtime?.queue_high_water || 0} / {camera.motion.event_runtime?.evicted || 0} / {camera.motion.event_runtime?.rejected || 0}</dd></div>
                 <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>
                 <div><dt>Tracking waits / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {camera.tracking?.capacity_timeouts || 0}</dd></div>
                 <div><dt>Tracking prewarm / handoff failures</dt><dd>{camera.tracking?.prewarm_failures || 0} / {camera.tracking?.handoff_failures || 0}{camera.tracking?.last_handoff_failure?.timestamp ? ` · last handoff ${formatDateTime(camera.tracking.last_handoff_failure.timestamp, timeZone)}` : ""}</dd></div>
@@ -10782,6 +10799,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
             <span>{motionModeInfo(status.motion_qualification.mode).status} · {status.motion_qualification.sensitivity} sensitivity · {status.motion_qualification.frame_width || 320}px</span>
             <span>{status.motion_qualification.passed || 0} accepted · {status.motion_qualification.audit_rejected || 0} legacy preview rejects · {status.motion_qualification.suppressed || 0} filtered</span>
             <span>{status.motion_qualification.continuous_frames || 0} visual frames analyzed · {status.motion_qualification.continuous_candidates || 0} accepted analysis frames · {status.motion_qualification.triggers || 0} triggers delivered · {status.motion_qualification.analysis_frames_dropped || 0} stale requests replaced</span>
+            <span>Capture-to-analysis p95 {formatMilliseconds(status.motion_qualification.analysis_runtime?.capture_to_analysis_p95_ms)} · preprocessing p99 {formatMilliseconds(status.motion_qualification.analysis_runtime?.preprocess_p99_ms)} · {formatBytes(status.motion_qualification.analysis_runtime?.copy_bytes || 0)} copied for motion analysis</span>
             <span>Light and shadow filtering {status.motion_qualification.illumination_filter_enabled ? "enabled" : "measuring only"} · {status.motion_qualification.illumination_evaluations || 0} evaluated · {status.motion_qualification.illumination_candidates || 0} likely illumination changes · {status.motion_qualification.illumination_filtered || 0} filtered</span>
             <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
             {missingCameraTrigger ? <span className="motion-runtime-warning">{visualBackupEnabled ? "ONVIF is disabled, so the conservative visual backup is the only automatic trigger. Restore ONVIF for primary coverage." : "ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection."}</span> : null}

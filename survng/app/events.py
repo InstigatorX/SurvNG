@@ -1040,6 +1040,8 @@ class EventStore:
                 "main_frame_age_seconds": status.get("main_last_frame_age_seconds"),
                 "capture": status.get("capture_stats") or {},
                 "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
+                "analysis_runtime": motion.get("analysis_runtime") or {},
+                "event_runtime": motion.get("event_runtime") or {},
                 "tracking_active": bool(tracking.get("active")),
             }
         payload = json.dumps(
@@ -1183,6 +1185,12 @@ class EventStore:
                 "capture_open_failures": 0,
                 "main_capture_starts": 0,
                 "analysis_frames_dropped": 0,
+                "capture_observer_p99_ms": 0.0,
+                "capture_to_analysis_p95_ms": 0.0,
+                "preprocess_p99_ms": 0.0,
+                "motion_copy_bytes": 0,
+                "event_evictions": 0,
+                "event_rejections": 0,
             })
             live_values: list[float] = []
             main_values: list[float] = []
@@ -1191,6 +1199,8 @@ class EventStore:
                 capture = item.get("capture") or {}
                 live = capture.get("live") or {}
                 main = capture.get("main") or {}
+                analysis_runtime = item.get("analysis_runtime") or {}
+                event_runtime = item.get("event_runtime") or {}
                 live_fps = float(live.get("fps") or 0.0)
                 main_fps = float(main.get("fps") or 0.0)
                 if camera_id or bool(item.get("connected")):
@@ -1198,11 +1208,27 @@ class EventStore:
                 if camera_id or main_fps > 0:
                     main_values.append(main_fps)
                 active += int(bool(item.get("tracking_active")))
+                bucket["capture_observer_p99_ms"] = max(
+                    float(bucket["capture_observer_p99_ms"]),
+                    float(live.get("observer_p99_ms") or 0.0),
+                    float(main.get("observer_p99_ms") or 0.0),
+                )
+                bucket["capture_to_analysis_p95_ms"] = max(
+                    float(bucket["capture_to_analysis_p95_ms"]),
+                    float(analysis_runtime.get("capture_to_analysis_p95_ms") or 0.0),
+                )
+                bucket["preprocess_p99_ms"] = max(
+                    float(bucket["preprocess_p99_ms"]),
+                    float(analysis_runtime.get("preprocess_p99_ms") or 0.0),
+                )
                 counters = {
                     "capture_read_failures": int(live.get("read_failures") or 0) + int(main.get("read_failures") or 0),
                     "capture_open_failures": int(live.get("open_failures") or 0) + int(main.get("open_failures") or 0),
                     "main_capture_starts": int(main.get("starts") or 0),
                     "analysis_frames_dropped": int(item.get("analysis_frames_dropped") or 0),
+                    "motion_copy_bytes": int(analysis_runtime.get("copy_bytes") or 0),
+                    "event_evictions": int(event_runtime.get("evicted") or 0),
+                    "event_rejections": int(event_runtime.get("rejected") or 0),
                 }
                 previous = previous_counters.get(selected_id)
                 if previous is not None:
@@ -1232,6 +1258,12 @@ class EventStore:
                 "capture_open_failures": int(bucket["capture_open_failures"]),
                 "main_capture_starts": int(bucket["main_capture_starts"]),
                 "analysis_frames_dropped": int(bucket["analysis_frames_dropped"]),
+                "capture_observer_p99_ms": round(float(bucket["capture_observer_p99_ms"]), 3),
+                "capture_to_analysis_p95_ms": round(float(bucket["capture_to_analysis_p95_ms"]), 3),
+                "preprocess_p99_ms": round(float(bucket["preprocess_p99_ms"]), 3),
+                "motion_copy_bytes": int(bucket["motion_copy_bytes"]),
+                "event_evictions": int(bucket["event_evictions"]),
+                "event_rejections": int(bucket["event_rejections"]),
             })
         return result
 

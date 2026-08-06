@@ -136,10 +136,21 @@ class EventStoreTest(unittest.TestCase):
                     "last_frame_age_seconds": 0.1,
                     "main_last_frame_age_seconds": 0.2,
                     "capture_stats": {
-                        "live": {"fps": fps, "read_failures": read_failures, "open_failures": 0},
+                        "live": {"fps": fps, "read_failures": read_failures, "open_failures": 0, "observer_p99_ms": float(read_failures)},
                         "main": {"fps": fps / 2, "read_failures": 0, "open_failures": 0, "starts": main_starts},
                     },
-                    "motion_qualification": {"analysis_frames_dropped": analysis_drops},
+                    "motion_qualification": {
+                        "analysis_frames_dropped": analysis_drops,
+                        "analysis_runtime": {
+                            "capture_to_analysis_p95_ms": float(analysis_drops),
+                            "preprocess_p99_ms": float(analysis_drops) / 2,
+                            "copy_bytes": analysis_drops * 100,
+                        },
+                        "event_runtime": {
+                            "evicted": analysis_drops,
+                            "rejected": analysis_drops // 2,
+                        },
+                    },
                     "object_tracking": {"active": False},
                 }]
 
@@ -161,6 +172,12 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(history[-1]["capture_read_failures"], 2)
             self.assertEqual(history[-1]["main_capture_starts"], 3)
             self.assertEqual(history[-1]["analysis_frames_dropped"], 5)
+            self.assertEqual(history[-1]["capture_observer_p99_ms"], 4.0)
+            self.assertEqual(history[-1]["capture_to_analysis_p95_ms"], 8.0)
+            self.assertEqual(history[-1]["preprocess_p99_ms"], 4.0)
+            self.assertEqual(history[-1]["motion_copy_bytes"], 500)
+            self.assertEqual(history[-1]["event_evictions"], 5)
+            self.assertEqual(history[-1]["event_rejections"], 3)
 
     def test_runtime_telemetry_persists_process_memory_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import threading
 import time
-import logging
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -208,7 +209,11 @@ class CameraCaptureService:
             "live": deque(maxlen=600),
             "main": deque(maxlen=600),
         }
-        self._stats: dict[str, dict[str, int]] = {
+        self._observer_durations_ms: dict[str, deque[float]] = {
+            "live": deque(maxlen=600),
+            "main": deque(maxlen=600),
+        }
+        self._stats: dict[str, dict[str, int | float]] = {
             source: {
                 "frames_received": 0,
                 "read_failures": 0,
@@ -217,6 +222,12 @@ class CameraCaptureService:
                 "starts": 0,
                 "observer_errors": 0,
                 "close_failures": 0,
+                "frame_copy_count": 0,
+                "frame_copy_bytes": 0,
+                "observer_calls": 0,
+                "observer_total_ms": 0.0,
+                "observer_last_ms": 0.0,
+                "observer_max_ms": 0.0,
             }
             for source in ("live", "main")
         }
@@ -388,6 +399,21 @@ class CameraCaptureService:
                     else 0.0
                 )
                 capture_stats[source] = {**self._stats[source], "fps": round(fps, 2)}
+                observer_calls = int(capture_stats[source]["observer_calls"])
+                capture_stats[source]["observer_average_ms"] = round(
+                    float(capture_stats[source]["observer_total_ms"])
+                    / max(1, observer_calls),
+                    3,
+                )
+                durations = sorted(self._observer_durations_ms[source])
+                capture_stats[source]["observer_p95_ms"] = self._percentile(
+                    durations,
+                    0.95,
+                )
+                capture_stats[source]["observer_p99_ms"] = self._percentile(
+                    durations,
+                    0.99,
+                )
             live = self._frames.get("live")
             main = self._frames.get("main")
             return {
@@ -577,9 +603,10 @@ class CameraCaptureService:
             ):
                 return False
             self._sequence += 1
+            stored_image = image.copy()
             frame = CapturedFrame(
                 source=source,
-                image=image.copy(),
+                image=stored_image,
                 captured_at_epoch=captured_at_epoch,
                 captured_at_monotonic=captured_at_monotonic,
                 captured_at_iso=captured_at_iso,
@@ -594,7 +621,10 @@ class CameraCaptureService:
             }
             self._frame_times[source].append(captured_at_monotonic)
             self._stats[source]["frames_received"] += 1
+            self._stats[source]["frame_copy_count"] += 1
+            self._stats[source]["frame_copy_bytes"] += int(stored_image.nbytes)
         if self._frame_observer is not None:
+            observer_started = self._monotonic_clock()
             try:
                 self._frame_observer(CapturedFrame(
                     source=frame.source,
@@ -616,7 +646,29 @@ class CameraCaptureService:
                     source,
                     failures,
                 )
+            finally:
+                observer_ms = max(
+                    0.0,
+                    (self._monotonic_clock() - observer_started) * 1000.0,
+                )
+                with self._lock:
+                    stats = self._stats[source]
+                    stats["observer_calls"] += 1
+                    stats["observer_total_ms"] += observer_ms
+                    stats["observer_last_ms"] = observer_ms
+                    stats["observer_max_ms"] = max(
+                        float(stats["observer_max_ms"]),
+                        observer_ms,
+                    )
+                    self._observer_durations_ms[source].append(observer_ms)
         return True
+
+    @staticmethod
+    def _percentile(values: list[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        index = min(len(values) - 1, max(0, int(math.ceil(len(values) * percentile) - 1)))
+        return round(float(values[index]), 3)
 
     def _source_finished(self, source: str, stop_event: threading.Event) -> None:
         current = threading.current_thread()
@@ -646,8 +698,8 @@ class CameraCaptureService:
 
     def _increment(self, source: str, key: str) -> int:
         with self._lock:
-            self._stats[source][key] += 1
-            return self._stats[source][key]
+            self._stats[source][key] = int(self._stats[source][key]) + 1
+            return int(self._stats[source][key])
 
     def _notify_source(
         self,

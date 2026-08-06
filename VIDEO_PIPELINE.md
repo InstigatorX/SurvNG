@@ -604,6 +604,18 @@ passes, suppressions, priority bypasses, insufficient-frame decisions,
 validator fail-opens, dropped triggers, queue depth, ring depth, and the last
 decision details.
 
+Camera dataflow telemetry also measures the costs surrounding inference rather
+than treating model time as the whole pipeline. Per-source capture status
+reports stored-frame copy volume and synchronous observer latency. Motion
+analysis reports capture-to-analysis handoff latency, preprocessing latency,
+analysis-cycle latency, derived-frame allocation, and explicit frame-copy
+volume by reason. The semantic motion-event coordinator reports queue and retry
+high-water marks, evictions, rejections, and exhausted retries. Lifecycle status
+lists the workers that remain active for each camera. Bounded latency samples
+are exposed live; selected p95/p99 latency and counter deltas are persisted for
+the two-hour and seven-day Telemetry charts. These measurements provide the
+baseline used to evaluate lifecycle, frame-ownership, and hot-path changes.
+
 Rejected decisions are also indexed in the `motion_audits` table inside
 `survng.sqlite3` and displayed under Config > Motion Audit. Rejected entries
 report that detection was skipped and use the configured rejected-frame

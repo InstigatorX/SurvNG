@@ -126,6 +126,20 @@ def test_detection_change_rolls_back_when_tracking_sync_fails() -> None:
     assert owned.tracking.sync_accepting.call_count == 2
 
 
+def test_runtime_status_reports_authoritative_state_and_active_workers() -> None:
+    service, owned = _service()
+    owned.state.enabled = True
+    owned.motion_analysis.thread = Mock()
+    owned.motion_analysis.thread.is_alive.return_value = True
+
+    status = service.runtime_status()
+
+    assert status["enabled"] is True
+    assert status["detection_enabled"] is True
+    assert status["active_workers"] == ["motion analysis"]
+    assert status["active_worker_count"] == 1
+
+
 def test_close_attempts_all_owned_resources() -> None:
     service, owned = _service()
     owned.pipelines[0][1].close.side_effect = RuntimeError("pipeline failed")
