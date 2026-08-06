@@ -262,6 +262,44 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
         self.assertEqual(outcome.motion_correlation["stationary_spatial_rejection_count"], 1)
 
+    def test_ema_rescue_accepts_spatial_object_with_substantial_reversal_path(self) -> None:
+        """A person can turn around during a short sample window."""
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.91,
+                    "incident_eligible": True,
+                    "box": {"x1": 35, "y1": 30, "x2": 60, "y2": 90},
+                    "temporal_track_observations": 3,
+                    "temporal_center_displacement_ratio": 0.002,
+                    "temporal_center_path_ratio": 0.08,
+                    "temporal_newly_appeared": False,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 5, 20, 44, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.30, 0.25, 0.65, 0.95]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "spatial_path")
+        self.assertEqual(outcome.motion_correlation["temporal_path_match_count"], 1)
+
     def test_ema_rescue_accepts_new_object_appearing_inside_motion_region(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)

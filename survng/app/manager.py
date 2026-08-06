@@ -53,6 +53,7 @@ from .motion_pipeline import (
     build_builtin_motion_registry,
     resolve_motion_pipeline_graphs,
 )
+from .motion_analysis import FairMotionAnalysisLimiter
 from .recorder import Recorder
 from .state_events import StateEventBroker
 
@@ -199,7 +200,9 @@ class AppManager:
         self._state_monitor_thread: threading.Thread | None = None
         self._allocator_memory_trimmer = AllocatorMemoryTrimmer()
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
-        self._motion_analysis_limiter = threading.BoundedSemaphore(2)
+        # Keep the established two-camera CPU ceiling, but dispatch those slots
+        # fairly so continuous EMA work from one camera cannot starve another.
+        self._motion_analysis_limiter = FairMotionAnalysisLimiter(2)
         workers: dict[str, CameraWorker] = {}
         try:
             for camera in self._unique_cameras():

@@ -94,6 +94,7 @@ def motion_correlated_objects(
     correlated: list[dict[str, Any]] = []
     spatial_matches = 0
     temporal_matches = 0
+    temporal_path_matches = 0
     new_appearance_matches = 0
     stationary_spatial_rejections = 0
     for detected in objects:
@@ -103,20 +104,35 @@ def motion_correlated_objects(
             displacement = float(detected.get("temporal_center_displacement_ratio") or 0.0)
         except (TypeError, ValueError):
             displacement = 0.0
+        try:
+            path = float(detected.get("temporal_center_path_ratio") or 0.0)
+        except (TypeError, ValueError):
+            path = 0.0
         movement_threshold = _temporal_movement_threshold(box)
         temporal_evidence_available = bool(
             int(detected.get("temporal_track_observations") or 0) >= 2
         )
         newly_appeared = bool(detected.get("temporal_newly_appeared"))
-        # Net displacement is deliberately authoritative. Detector-box jitter
-        # can accumulate a long path around an otherwise stationary object.
         temporal = displacement >= movement_threshold
         spatial_fallback = spatial and not temporal_evidence_available
         appearance_match = spatial and newly_appeared
-        motion_correlated = bool(temporal or spatial_fallback or appearance_match)
+        # A short recorded sequence can begin and end at nearly the same point
+        # while a real object walks through the EMA region.  Permit that only
+        # when spatial evidence also agrees and the travelled path is well
+        # beyond ordinary detector-box jitter.  A stationary object therefore
+        # still cannot explain unrelated motion beside or behind it.
+        spatial_path = bool(
+            spatial
+            and temporal_evidence_available
+            and path >= max(0.01, movement_threshold * 2.5)
+        )
+        motion_correlated = bool(
+            temporal or spatial_path or spatial_fallback or appearance_match
+        )
         detected["motion_correlated"] = motion_correlated
         detected["motion_correlation"] = (
             "temporal" if temporal else
+            "spatial_path" if spatial_path else
             "appearance" if appearance_match else
             "spatial" if spatial_fallback else
             "none"
@@ -127,6 +143,7 @@ def motion_correlated_objects(
             correlated.append(detected)
             spatial_matches += int(spatial)
             temporal_matches += int(temporal)
+            temporal_path_matches += int(spatial_path)
             new_appearance_matches += int(appearance_match)
         else:
             # Preserve the detection as diagnostic evidence without allowing
@@ -140,6 +157,7 @@ def motion_correlated_objects(
         "correlated_object_count": len(correlated),
         "spatial_match_count": spatial_matches,
         "temporal_match_count": temporal_matches,
+        "temporal_path_match_count": temporal_path_matches,
         "new_appearance_match_count": new_appearance_matches,
         "stationary_spatial_rejection_count": stationary_spatial_rejections,
         "minimum_temporal_movement_ratio": TEMPORAL_OBJECT_MOVEMENT_RATIO,

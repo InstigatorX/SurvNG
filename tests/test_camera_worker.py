@@ -26,6 +26,7 @@ from survng.app.config import CameraConfig, ImageStorageConfig, MotionQualificat
 from survng.app.detector import objects_to_json
 from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
+from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.object_tracking import ObjectTrackingSessionFactory
 from survng.app.motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
@@ -131,7 +132,7 @@ def make_worker(
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
         ),
-        motion_analysis_limiter=threading.BoundedSemaphore(2),
+        motion_analysis_limiter=FairMotionAnalysisLimiter(2),
         image_writer=DurableImageWriter(ImageStorageConfig()),
     )
 
@@ -758,6 +759,27 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual(trigger["topic"], "adaptive/visual_backup")
         self.assertTrue(trigger["prequalified"].features["visual_backup"])
+
+    def test_visual_backup_records_rate_limited_promotion_reason_once(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(
+            mode="camera_rescue",
+            visual_backup_warmup_seconds=0,
+            visual_backup_grace_seconds=0,
+            visual_backup_min_consecutive=2,
+            visual_backup_cooldown_seconds=20,
+        )
+        accepted = MotionQualificationResult(True, 0.9, 0.48, "qualified", 4, {})
+        samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
+        events = DummyEvents()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config, events=events)
+            prime_visual_backup_scene(worker, 90.0)
+            worker._adaptive_trigger_pending = True
+            with patch.object(worker, "_sample_rejected_motion", return_value="snapshot.webp"):
+                worker._consider_visual_backup(accepted, samples, 100.0)
+                worker._consider_visual_backup(accepted, samples, 100.5)
+        self.assertEqual(worker._motion_stats["visual_backup_not_promoted"], 1)
 
     def test_visual_backup_yields_to_recent_onvif_notice(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
