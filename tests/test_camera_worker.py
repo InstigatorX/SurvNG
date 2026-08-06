@@ -701,7 +701,7 @@ class CameraWorkerTest(unittest.TestCase):
                     return_value=(frame, objects, "recording.mp4"),
                 ),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
-                patch("survng.app.camera.cv2.imread", return_value=seed) as imread,
+                patch("survng.app.camera_media.cv2.imread", return_value=seed) as imread,
                 patch.object(worker, "_get_latest_tracking_frame", return_value=None) as prewarm,
                 patch.object(worker.object_tracking, "start", return_value=True) as start,
             ):

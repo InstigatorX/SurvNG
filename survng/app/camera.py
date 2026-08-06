@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import queue
-import random
 import sys
 import threading
 import time
@@ -12,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-import cv2
 import numpy as np
 
 from .camera_capture import (
@@ -23,6 +21,7 @@ from .camera_capture import (
     OpenCvFfmpegCaptureBackend,
 )
 from .camera_status import CameraStatusHooks, CameraStatusService
+from .camera_media import CameraMediaService
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
@@ -106,6 +105,8 @@ class CameraWorker:
         self.motion_pipeline_origins = dict(motion_pipeline_origins)
         self.motion_analysis_limiter = motion_analysis_limiter
         self.image_writer = image_writer
+        self._stop = threading.Event()
+        self._stop.set()
         effective_capture_backend = capture_backend or OpenCvFfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
@@ -113,6 +114,15 @@ class CameraWorker:
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
+        )
+        self.media = CameraMediaService(
+            camera=camera,
+            storage_dir=storage_dir,
+            image_writer=image_writer,
+            motion_detector=self.motion_object_detector,
+            frame_provider=lambda source: self._get_latest_frame(source),
+            rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
+            stop_requested=self._stop.is_set,
         )
         self.object_tracking = object_tracking_session_factory.create(
             camera=camera,
@@ -130,12 +140,8 @@ class CameraWorker:
             decision_processor=self.motion_decision_handler,
             tracking_provider=lambda: self.object_tracking,
             prewarm_tracking=lambda: self._get_latest_tracking_frame("main"),
-            image_reader=lambda path: cv2.imread(path),
+            image_reader=self.media.read_image,
         )
-        self.snapshots_dir = storage_dir / "snapshots" / camera.id
-        self.snapshots_dir.mkdir(parents=True, exist_ok=True)
-        self._stop = threading.Event()
-        self._stop.set()
         self._enabled = False
         self._accepting_motion_events = True
         self._lifecycle_lock = threading.RLock()
@@ -795,28 +801,10 @@ class CameraWorker:
             return previous
 
     def snapshot(self, source: str = "live") -> bytes | None:
-        frame = self._get_latest_frame(source)
-        if frame is None:
-            return None
-        ok, buffer = cv2.imencode(".jpg", frame)
-        return buffer.tobytes() if ok else None
+        return self.media.snapshot(source)
 
-    def mjpeg_frames(self, fps: float = 4.0, source: str = "live"):
-        source = self.camera.normalized_source(source)
-        delay = 1.0 / max(fps, 1.0)
-        while not self._stop.is_set():
-            image = self.snapshot(source)
-            if image is None:
-                time.sleep(delay)
-                continue
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Cache-Control: no-cache\r\n\r\n"
-                + image
-                + b"\r\n"
-            )
-            time.sleep(delay)
+    def mjpeg_frames(self, fps: float = 4.0, source: str = "live") -> Iterator[bytes]:
+        yield from self.media.mjpeg_frames(fps, source)
 
     def _publish_event_safely(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.event_callback is None:
@@ -1220,48 +1208,7 @@ class CameraWorker:
         self.motion_decisions.run_until_error(self._stop)
 
     def _sample_rejected_motion(self, event_at: datetime, result: MotionQualificationResult) -> str:
-        if self.motion_config.rejected_sample_rate <= 0 or random.random() > self.motion_config.rejected_sample_rate:
-            return ""
-        frame = self._get_latest_frame("live")
-        if frame is None:
-            return ""
-        directory = self.storage_dir / "motion_samples" / self.camera.id
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-            stamp = event_at.strftime("%Y%m%d-%H%M%S-%f")
-            path = self.image_writer.write(
-                directory,
-                f"{stamp}-{result.score:.3f}-{result.reason}",
-                frame,
-            )
-            if path is not None:
-                try:
-                    samples = []
-                    for item in self.image_writer.stored_images(directory):
-                        try:
-                            samples.append((item.stat().st_mtime_ns, item))
-                        except FileNotFoundError:
-                            continue
-                    for _modified, stale in sorted(samples)[:-100]:
-                        try:
-                            stale.unlink(missing_ok=True)
-                        except OSError as error:
-                            LOGGER.debug(
-                                "failed to prune rejected motion sample %s: %s",
-                                stale,
-                                error,
-                            )
-                except OSError as error:
-                    LOGGER.debug(
-                        "failed to enumerate rejected motion samples for %s: %s",
-                        self.camera.id,
-                        error,
-                    )
-                return str(path)
-            LOGGER.warning("failed to encode rejected motion sample for %s", self.camera.id)
-        except OSError as error:
-            LOGGER.debug("failed to save rejected motion sample for %s: %s", self.camera.id, error)
-        return ""
+        return self.media.sample_rejected_motion(event_at, result)
 
     def _process_motion_event(
         self,
@@ -1347,18 +1294,7 @@ class CameraWorker:
         self,
         event_at: datetime,
     ) -> tuple[Any | None, list[dict[str, Any]], str]:
-        return self.motion_object_detector.detect(event_at)
+        return self.media.detect_recorded_motion(event_at)
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:
-        captured_at = event_at or datetime.now(timezone.utc)
-        if captured_at.tzinfo is None:
-            captured_at = captured_at.replace(tzinfo=timezone.utc)
-        else:
-            captured_at = captured_at.astimezone(timezone.utc)
-        event_stamp = captured_at.strftime("%Y%m%d-%H%M%S-%f")
-        stamp = f"{event_stamp}-{time.time_ns() % 1_000_000_000:09d}"
-        path = self.image_writer.write(self.snapshots_dir, stamp, frame)
-        if path is None:
-            LOGGER.warning("failed to encode snapshot for %s", self.camera.id)
-            return ""
-        return str(path)
+        return self.media.write_snapshot(frame, event_at)
