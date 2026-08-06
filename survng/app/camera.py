@@ -18,12 +18,10 @@ import cv2
 import numpy as np
 
 from .camera_capture import (
-    CAPTURE_DECODER_THREADS,
-    CAPTURE_OPEN_CONCURRENCY,
-    CAPTURE_OPEN_TIMEOUT_MS,
-    CAPTURE_READ_TIMEOUT_MS,
+    FRAME_STALE_SECONDS,
     CaptureBackend,
-    CaptureHandle,
+    CameraCaptureService,
+    CapturedFrame,
     CaptureOpenLimiter,
     OpenCvFfmpegCaptureBackend,
 )
@@ -57,10 +55,6 @@ MOTION_THREAD_STOP_TIMEOUT_SECONDS = 22.0
 # Keep their own deadlines below CameraWorker.stop()'s join budget so a stop
 # request can always regain control after a blocked open/read operation.
 CAPTURE_STOP_TIMEOUT_SECONDS = 8.0
-CAPTURE_RETRY_INITIAL_SECONDS = 1.0
-CAPTURE_RETRY_MAX_SECONDS = 30.0
-FRAME_STALE_SECONDS = 10.0
-MAIN_SOURCE_IDLE_SECONDS = 20.0
 TRACKING_CATCHUP_SECONDS = 10.0
 TRACKING_CATCHUP_FRAME_WIDTH = 640
 MOTION_QUEUE_SIZE = 32
@@ -102,7 +96,7 @@ class CameraWorker:
         self.motion_pipeline_origins = dict(motion_pipeline_origins)
         self.motion_analysis_limiter = motion_analysis_limiter
         self.image_writer = image_writer
-        self.capture_backend = capture_backend or OpenCvFfmpegCaptureBackend(
+        effective_capture_backend = capture_backend or OpenCvFfmpegCaptureBackend(
             CaptureOpenLimiter()
         )
         self.motion_debug = MotionDebugSnapshotStore()
@@ -127,29 +121,11 @@ class CameraWorker:
         self._stop = threading.Event()
         self._stop.set()
         self._enabled = False
-        self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
         self._motion_analysis_lock = threading.Lock()
         self._motion_fusion_lock = threading.Lock()
         self._motion_fusion_last_at = 0.0
-        self._source_threads: dict[str, threading.Thread] = {}
-        self._source_stops: dict[str, threading.Event] = {}
-        self._source_frames: dict[str, Any] = {}
-        self._source_frame_at: dict[str, str] = {}
-        self._source_frame_epoch: dict[str, float] = {}
-        self._source_frame_monotonic: dict[str, float] = {}
-        self._source_frame_dimensions: dict[str, dict[str, int]] = {}
-        self._source_frame_times: dict[str, deque[float]] = {
-            "live": deque(maxlen=600),
-            "main": deque(maxlen=600),
-        }
-        self._source_capture_stats: dict[str, dict[str, int]] = {
-            "live": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0, "starts": 0},
-            "main": {"frames_received": 0, "read_failures": 0, "open_failures": 0, "reconnects": 0, "starts": 0},
-        }
-        self._source_last_access: dict[str, float] = {}
-        self._source_errors: dict[str, str] = {}
         tracking_buffer_size = max(
             4,
             round(self.object_tracking.config.sample_fps * TRACKING_CATCHUP_SECONDS) + 2,
@@ -227,10 +203,16 @@ class CameraWorker:
             "suppression_verification_rescues": 0,
             "last_result": None,
         }
-        self.last_error = ""
-        self.last_frame_at = ""
         self.last_motion_at = ""
         self._detection_enabled = True
+        self.capture = CameraCaptureService(
+            camera_id=camera.id,
+            source_url=camera.source_url,
+            backend=effective_capture_backend,
+            frame_observer=self._capture_frame,
+            source_started_observer=self._capture_source_started,
+            source_stopped_observer=self._capture_source_stopped,
+        )
         self.onvif = OnvifEventListener(
             camera,
             self.handle_motion_event,
@@ -256,7 +238,7 @@ class CameraWorker:
                     except BaseException:
                         self._motion_analysis_thread = None
                         raise
-                if not self._start_source("live"):
+                if not self.capture.start():
                     raise RuntimeError(f"camera source did not start for {self.camera.id}")
                 if self._motion_thread is None or not self._motion_thread.is_alive():
                     self._clear_motion_queue()
@@ -288,11 +270,7 @@ class CameraWorker:
             self._stop.set()
             self._active_incident_event_id = None
             self.object_tracking.stop()
-            with self._frame_lock:
-                stops = list(self._source_stops.values())
-                threads = list(self._source_threads.items())
-            for stop_event in stops:
-                stop_event.set()
+            self.capture.request_stop()
             self.onvif.stop()
             self._signal_motion_analysis_stop()
             try:
@@ -315,10 +293,8 @@ class CameraWorker:
                 if analysis_thread is not None and analysis_thread.is_alive()
                 else None
             )
-            deadline = time.monotonic() + CAPTURE_STOP_TIMEOUT_SECONDS
-            for _source, thread in threads:
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            alive = [source for source, thread in threads if thread.is_alive()]
+            alive_threads = self.capture.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS)
+            alive = sorted(alive_threads)
             if alive:
                 logging.getLogger("uvicorn.error").error(
                     "camera capture threads did not stop for %s: %s",
@@ -326,8 +302,8 @@ class CameraWorker:
                     ", ".join(alive),
                 )
                 current_frames = sys._current_frames()
-                for source, thread in threads:
-                    if not thread.is_alive() or thread.ident is None:
+                for source, thread in alive_threads.items():
+                    if thread.ident is None:
                         continue
                     frame = current_frames.get(thread.ident)
                     if frame is not None:
@@ -338,20 +314,6 @@ class CameraWorker:
                             "".join(traceback.format_stack(frame)),
                         )
             with self._frame_lock:
-                self._source_threads = {
-                    source: thread for source, thread in self._source_threads.items()
-                    if thread.is_alive()
-                }
-                self._source_stops = {
-                    source: stop for source, stop in self._source_stops.items()
-                    if source in self._source_threads
-                }
-                self._source_frames.clear()
-                self._source_frame_at.clear()
-                self._source_frame_epoch.clear()
-                self._source_frame_monotonic.clear()
-                self._source_last_access.clear()
-                self._source_errors.clear()
                 self._tracking_frames.clear()
                 self._tracking_last_sample_epoch = 0.0
                 self._motion_frames.clear()
@@ -359,7 +321,6 @@ class CameraWorker:
                 self._motion_last_sample = 0.0
                 self._motion_last_continuous_result = None
                 self._motion_analysis_last_processed_at = 0.0
-                self.last_frame_at = ""
             self.motion_evidence.clear()
             motion_workers_stopped = (
                 self._motion_thread is None
@@ -383,7 +344,6 @@ class CameraWorker:
             self._camera_motion_times.clear()
             with self._motion_stats_lock:
                 self.visual_backup.reset()
-            self._thread = self._source_threads.get("live")
             shutdown_failures: list[str] = []
             if alive:
                 shutdown_failures.append(f"capture sources: {', '.join(alive)}")
@@ -433,29 +393,24 @@ class CameraWorker:
                         label,
                         self.camera.id,
                     )
+            try:
+                self.capture.close()
+            except BaseException as exc:
+                failures.append(exc)
+                LOGGER.exception("capture cleanup failed for %s", self.camera.id)
             if failures:
                 first_error = failures[0]
                 if not isinstance(first_error, Exception):
                     raise first_error
                 raise RuntimeError(
-                    f"one or more motion pipelines failed to close for {self.camera.id}"
+                    f"one or more camera resources failed to close for {self.camera.id}"
                 ) from first_error
 
     def status(self) -> dict[str, Any]:
         with self._lifecycle_lock:
             enabled = self._enabled
+        capture_status = self.capture.status()
         with self._frame_lock:
-            live_thread = self._source_threads.get("live")
-            main_thread = self._source_threads.get("main")
-            live_frame_at = self._source_frame_at.get("live", "")
-            main_frame_at = self._source_frame_at.get("main", "")
-            live_frame_clock = self._source_frame_monotonic.get("live")
-            main_frame_clock = self._source_frame_monotonic.get("main")
-            main_error = self._source_errors.get("main", "")
-            stream_dimensions = {
-                source: dict(dimensions)
-                for source, dimensions in self._source_frame_dimensions.items()
-            }
             motion_buffered_frames = len(self._motion_frames)
             motion_frame_shape = (
                 list(self._motion_frames[-1][1].shape[:2])
@@ -468,21 +423,10 @@ class CameraWorker:
                 if self._motion_color_frames
                 else None
             )
-            capture_stats: dict[str, dict[str, int | float]] = {}
-            sample_now = time.monotonic()
-            for source in ("live", "main"):
-                times = self._source_frame_times[source]
-                while times and sample_now - times[0] > 10.0:
-                    times.popleft()
-                fps = (
-                    (len(times) - 1) / max(0.001, times[-1] - times[0])
-                    if len(times) >= 2 and sample_now - times[-1] <= FRAME_STALE_SECONDS
-                    else 0.0
-                )
-                capture_stats[source] = {
-                    **self._source_capture_stats[source],
-                    "fps": round(fps, 2),
-                }
+        live_frame_at = str(capture_status["live_frame_at"])
+        main_frame_at = str(capture_status["main_frame_at"])
+        live_frame_clock = capture_status["live_frame_monotonic"]
+        main_frame_clock = capture_status["main_frame_monotonic"]
         evidence_status = self.motion_evidence.status()
         mog2_status = evidence_status.get("mog2", {})
         now = time.monotonic()
@@ -501,18 +445,18 @@ class CameraWorker:
             "name": self.camera.name,
             "running": enabled,
             "connected": connected,
-            "capture_running": live_thread is not None and live_thread.is_alive(),
+            "capture_running": bool(capture_status["live_running"]),
             "frame_fresh": connected,
             "last_frame_age_seconds": round(live_age, 3) if live_age is not None else None,
-            "main_running": main_thread is not None and main_thread.is_alive(),
+            "main_running": bool(capture_status["main_running"]),
             "main_frame_fresh": bool(main_age is not None and main_age <= FRAME_STALE_SECONDS),
             "main_last_frame_age_seconds": round(main_age, 3) if main_age is not None else None,
             "last_frame_at": live_frame_at,
             "main_last_frame_at": main_frame_at,
-            "last_error": self.last_error,
-            "main_last_error": main_error,
-            "capture_stats": capture_stats,
-            "stream_dimensions": stream_dimensions,
+            "last_error": capture_status["last_error"],
+            "main_last_error": capture_status["main_error"],
+            "capture_stats": capture_status["capture_stats"],
+            "stream_dimensions": capture_status["stream_dimensions"],
             "onvif_enabled": self.camera.onvif.enabled,
             "onvif_connected": self.onvif.connected,
             "onvif_last_event_at": self.onvif.last_event_at,
@@ -833,7 +777,12 @@ class CameraWorker:
         except queue.Full:
             pass
 
-    def _remember_motion_frame(self, frame: np.ndarray, frame_clock: float) -> None:
+    def _remember_motion_frame(
+        self,
+        frame: np.ndarray,
+        frame_clock: float,
+        captured_at: float | None = None,
+    ) -> None:
         if not self._frame_motion_analysis_required():
             return
         interval = 1.0 / max(1.0, self.motion_config.sample_fps)
@@ -849,13 +798,13 @@ class CameraWorker:
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         except (cv2.error, ValueError):
             return
-        captured_at = time.time()
+        frame_epoch = captured_at if captured_at is not None else time.time()
         with self._frame_lock:
             # The full analysis window remains compact grayscale. Only the
             # three samples needed by the illumination stage retain color.
-            self._motion_frames.append((captured_at, gray))
-            self._motion_color_frames.append((captured_at, resized))
-        self._schedule_motion_analysis(captured_at)
+            self._motion_frames.append((frame_epoch, gray))
+            self._motion_color_frames.append((frame_epoch, resized))
+        self._schedule_motion_analysis(frame_epoch)
 
     def _run_motion_analysis(self) -> None:
         while not self._stop.is_set():
@@ -2346,207 +2295,34 @@ class CameraWorker:
             return None
         return self._active_incident_event_id
 
-    def _start_source(self, source: str) -> bool:
-        source = self.camera.normalized_source(source)
-        if self._stop.is_set():
-            return False
-        with self._frame_lock:
-            if self._stop.is_set():
-                return False
-            thread = self._source_threads.get(source)
-            existing_stop = self._source_stops.get(source)
-            if (
-                thread is not None
-                and thread.is_alive()
-                and existing_stop is not None
-                and not existing_stop.is_set()
-            ):
-                return True
-            stop_event = threading.Event()
-            if source == "main":
+    def _capture_frame(self, frame: CapturedFrame) -> None:
+        if frame.source == "live":
+            self._remember_motion_frame(
+                frame.image,
+                frame.captured_at_monotonic,
+                frame.captured_at_epoch,
+            )
+        elif frame.source == "main":
+            self._remember_tracking_frame(frame.image, frame.captured_at_epoch)
+
+    def _capture_source_started(self, source: str) -> None:
+        if source == "main":
+            with self._frame_lock:
                 self._tracking_frames.clear()
                 self._tracking_last_sample_epoch = 0.0
-            thread = threading.Thread(
-                target=self._run_source,
-                args=(source, stop_event),
-                name=f"camera-{self.camera.id}-{source}",
-                daemon=False,
-            )
-            self._source_stops[source] = stop_event
-            self._source_threads[source] = thread
-            if source == "live":
-                self._thread = thread
-            try:
-                thread.start()
-            except BaseException:
-                if self._source_threads.get(source) is thread:
-                    self._source_threads.pop(source, None)
-                    self._source_stops.pop(source, None)
-                    if source == "live":
-                        self._thread = None
-                raise
-        return True
 
-    def _source_is_idle(self, source: str) -> bool:
-        if source == "live":
-            return False
-        with self._frame_lock:
-            last_access = self._source_last_access.get(source)
-        return last_access is None or time.monotonic() - last_access >= MAIN_SOURCE_IDLE_SECONDS
-
-    def _source_finished(self, source: str) -> None:
-        current = threading.current_thread()
-        with self._frame_lock:
-            if self._source_threads.get(source) is not current:
-                return
-            self._source_threads.pop(source, None)
-            self._source_stops.pop(source, None)
-            self._source_last_access.pop(source, None)
-            if source != "live":
-                self._source_frames.pop(source, None)
-                self._source_frame_at.pop(source, None)
-                self._source_frame_epoch.pop(source, None)
-                self._source_frame_monotonic.pop(source, None)
-                self._source_errors.pop(source, None)
-                if source == "main":
-                    self._tracking_frames.clear()
-                    self._tracking_last_sample_epoch = 0.0
-            else:
-                self._thread = None
-
-    def _run_source(self, source: str, stop_event: threading.Event) -> None:
-        retry_delay = CAPTURE_RETRY_INITIAL_SECONDS
-        try:
-            while not self._stop.is_set() and not stop_event.is_set():
-                if self._source_is_idle(source):
-                    return
-                capture = self.capture_backend.create_handle()
-                failure_reason = ""
-                try:
-                    opened = self._open_capture(capture, source, stop_event)
-                    if self._stop.is_set() or stop_event.is_set():
-                        return
-                    capture.set_buffer_size(1)
-                    if not opened or not capture.is_opened():
-                        failure_reason = "failed to open stream"
-                        with self._frame_lock:
-                            self._source_capture_stats[source]["open_failures"] += 1
-                        self._set_source_error(source, failure_reason)
-                    else:
-                        with self._frame_lock:
-                            source_stats = self._source_capture_stats[source]
-                            if source_stats["frames_received"] > 0:
-                                source_stats["reconnects"] += 1
-                            source_stats["starts"] += 1
-                        self._set_source_error(source, "")
-                        while not self._stop.is_set() and not stop_event.is_set():
-                            if self._source_is_idle(source):
-                                return
-                            ok, frame = capture.read()
-                            if not ok:
-                                if self._stop.is_set() or stop_event.is_set():
-                                    break
-                                failure_reason = "stream read failed"
-                                with self._frame_lock:
-                                    self._source_capture_stats[source]["read_failures"] += 1
-                                self._set_source_error(source, failure_reason)
-                                break
-                            if self._stop.is_set() or stop_event.is_set():
-                                break
-                            retry_delay = CAPTURE_RETRY_INITIAL_SECONDS
-                            frame_epoch = time.time()
-                            stamp = datetime.fromtimestamp(frame_epoch, timezone.utc).isoformat()
-                            frame_clock = time.monotonic()
-                            with self._frame_lock:
-                                self._source_frames[source] = frame.copy()
-                                self._source_frame_at[source] = stamp
-                                self._source_frame_epoch[source] = frame_epoch
-                                self._source_frame_monotonic[source] = frame_clock
-                                self._source_frame_dimensions[source] = {
-                                    "width": int(frame.shape[1]),
-                                    "height": int(frame.shape[0]),
-                                }
-                                self._source_frame_times[source].append(frame_clock)
-                                self._source_capture_stats[source]["frames_received"] += 1
-                                if source == "live":
-                                    self.last_frame_at = stamp
-                            if source == "live":
-                                self._remember_motion_frame(frame, frame_clock)
-                            elif source == "main":
-                                self._remember_tracking_frame(frame, frame_epoch)
-                except Exception as exc:
-                    failure_reason = f"stream error: {redact_secret_text(exc)[:160]}"
-                    self._set_source_error(source, failure_reason)
-                    LOGGER.warning(
-                        "camera stream failed for %s/%s: %s",
-                        self.camera.id,
-                        source,
-                        failure_reason,
-                    )
-                finally:
-                    capture.close()
-                if self._stop.is_set() or stop_event.is_set() or self._source_is_idle(source):
-                    break
-                LOGGER.info(
-                    "camera=%s source=%s retry_delay=%s failure_reason=%s",
-                    self.camera.id,
-                    source,
-                    retry_delay,
-                    failure_reason,
-                )
-                wait_delay = retry_delay
-                if source != "live":
-                    with self._frame_lock:
-                        last_access = self._source_last_access.get(source)
-                    if last_access is not None:
-                        idle_in = max(
-                            0.0,
-                            MAIN_SOURCE_IDLE_SECONDS - (time.monotonic() - last_access),
-                        )
-                        wait_delay = min(wait_delay, idle_in)
-                if stop_event.wait(wait_delay):
-                    break
-                retry_delay = min(retry_delay * 2.0, CAPTURE_RETRY_MAX_SECONDS)
-        finally:
-            self._source_finished(source)
-
-    def _open_capture(
-        self,
-        capture: CaptureHandle,
-        source: str,
-        stop_event: threading.Event,
-    ) -> bool:
-        return self.capture_backend.open(
-            capture,
-            self.camera.source_url(source),
-            lambda: self._stop.is_set() or stop_event.is_set(),
-        )
-
-    def _set_source_error(self, source: str, message: str) -> None:
-        message = redact_secret_text(message)
-        with self._frame_lock:
-            self._source_errors[source] = message
-            if source == "live":
-                self.last_error = message
+    def _capture_source_stopped(self, source: str) -> None:
+        if source == "main":
+            with self._frame_lock:
+                self._tracking_frames.clear()
+                self._tracking_last_sample_epoch = 0.0
 
     def _get_latest_frame(self, source: str = "live") -> Any:
         source = self.camera.normalized_source(source)
         if self._stop.is_set():
             return None
-        with self._frame_lock:
-            self._source_last_access[source] = time.monotonic()
-        if not self._start_source(source):
-            return None
-        with self._frame_lock:
-            frame = self._source_frames.get(source)
-            frame_clock = self._source_frame_monotonic.get(source)
-            if (
-                frame is None
-                or frame_clock is None
-                or time.monotonic() - frame_clock > FRAME_STALE_SECONDS
-            ):
-                return None
-            return frame.copy()
+        frame = self.capture.request_frame(source)
+        return frame.image if frame is not None else None
 
     def _get_latest_tracking_frame(
         self,
@@ -2555,22 +2331,10 @@ class CameraWorker:
         source = self.camera.normalized_source(source)
         if self._stop.is_set():
             return None
-        with self._frame_lock:
-            self._source_last_access[source] = time.monotonic()
-        if not self._start_source(source):
+        frame = self.capture.request_frame(source)
+        if frame is None:
             return None
-        with self._frame_lock:
-            frame = self._source_frames.get(source)
-            captured_at = self._source_frame_epoch.get(source)
-            frame_clock = self._source_frame_monotonic.get(source)
-            if (
-                frame is None
-                or captured_at is None
-                or frame_clock is None
-                or time.monotonic() - frame_clock > FRAME_STALE_SECONDS
-            ):
-                return None
-            return frame.copy(), captured_at, frame_clock
+        return frame.image, frame.captured_at_epoch, frame.captured_at_monotonic
 
     def _get_latest_tracking_frame_with_fallback(
         self,

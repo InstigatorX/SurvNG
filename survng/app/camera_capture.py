@@ -195,6 +195,10 @@ class CameraCaptureService:
         self._stop.set()
         self._threads: dict[str, threading.Thread] = {}
         self._source_stops: dict[str, threading.Event] = {}
+        self._all_threads: dict[
+            threading.Thread,
+            tuple[str, threading.Event],
+        ] = {}
         self._frames: dict[str, CapturedFrame] = {}
         self._last_access: dict[str, float] = {}
         self._errors: dict[str, str] = {}
@@ -227,7 +231,7 @@ class CameraCaptureService:
             if self._stop.is_set():
                 lingering = [
                     source
-                    for source, thread in self._threads.items()
+                    for thread, (source, _stop_event) in self._all_threads.items()
                     if thread.is_alive()
                 ]
                 if lingering:
@@ -262,12 +266,14 @@ class CameraCaptureService:
             )
             self._source_stops[source] = stop_event
             self._threads[source] = thread
+            self._all_threads[thread] = (source, stop_event)
             try:
                 thread.start()
             except BaseException:
                 if self._threads.get(source) is thread:
                     self._threads.pop(source, None)
                     self._source_stops.pop(source, None)
+                self._all_threads.pop(thread, None)
                 raise
         try:
             self._notify_source(self._source_started_observer, source, "started")
@@ -306,17 +312,32 @@ class CameraCaptureService:
     def request_stop(self) -> None:
         self._stop.set()
         with self._lock:
-            stops = tuple(self._source_stops.values())
+            stops = tuple(
+                stop_event
+                for _source, stop_event in self._all_threads.values()
+            )
         for stop_event in stops:
             stop_event.set()
 
     def wait_stopped(self, timeout: float) -> dict[str, threading.Thread]:
         deadline = self._monotonic_clock() + max(0.0, timeout)
         with self._lock:
-            threads = tuple(self._threads.items())
+            threads = tuple(
+                (source, thread)
+                for thread, (source, _stop_event) in self._all_threads.items()
+            )
         for _source, thread in threads:
             thread.join(timeout=max(0.0, deadline - self._monotonic_clock()))
-        alive = {source: thread for source, thread in threads if thread.is_alive()}
+        alive: dict[str, threading.Thread] = {}
+        for source, thread in threads:
+            if not thread.is_alive():
+                continue
+            label = source
+            suffix = 2
+            while label in alive:
+                label = f"{source}#{suffix}"
+                suffix += 1
+            alive[label] = thread
         if not alive:
             with self._lock:
                 self._frames.clear()
@@ -328,7 +349,7 @@ class CameraCaptureService:
         with self._lock:
             alive = {
                 source: thread
-                for source, thread in self._threads.items()
+                for thread, (source, _stop_event) in self._all_threads.items()
                 if thread.is_alive()
             }
         if alive:
@@ -450,7 +471,7 @@ class CameraCaptureService:
                             if self._cancelled(stop_event):
                                 break
                             retry_delay = self.retry_initial_seconds
-                            self._publish_frame(source, image)
+                            self._publish_frame(source, image, stop_event)
                 except Exception as exc:
                     failure_reason = f"stream error: {redact_secret_text(exc)[:160]}"
                     self._set_error(source, failure_reason)
@@ -512,13 +533,22 @@ class CameraCaptureService:
     def _cancelled(self, stop_event: threading.Event) -> bool:
         return self._stop.is_set() or stop_event.is_set()
 
-    def _publish_frame(self, source: str, image: np.ndarray) -> None:
+    def _publish_frame(
+        self,
+        source: str,
+        image: np.ndarray,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
         captured_at_epoch = self._wall_clock()
         captured_at_monotonic = self._monotonic_clock()
         captured_at_iso = datetime.fromtimestamp(
             captured_at_epoch, timezone.utc
         ).isoformat()
         with self._lock:
+            if self._stop.is_set() or (
+                stop_event is not None and stop_event.is_set()
+            ):
+                return False
             self._sequence += 1
             frame = CapturedFrame(
                 source=source,
@@ -555,15 +585,17 @@ class CameraCaptureService:
                     LOGGER.exception(
                         "capture frame observer failed for %s/%s "
                         "(failures=%s)",
-                        self.camera_id,
-                        source,
-                        failures,
-                    )
+                    self.camera_id,
+                    source,
+                    failures,
+                )
+        return True
 
     def _source_finished(self, source: str, stop_event: threading.Event) -> None:
         current = threading.current_thread()
         owns_source = False
         with self._lock:
+            self._all_threads.pop(current, None)
             if (
                 self._threads.get(source) is current
                 and self._source_stops.get(source) is stop_event

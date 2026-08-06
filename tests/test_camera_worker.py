@@ -14,12 +14,15 @@ import numpy as np
 import cv2
 
 from survng.app.camera import (
-    CAPTURE_OPEN_TIMEOUT_MS,
-    CAPTURE_OPEN_CONCURRENCY,
-    CAPTURE_READ_TIMEOUT_MS,
     CAPTURE_STOP_TIMEOUT_SECONDS,
     CameraWorker,
+)
+from survng.app.camera_capture import (
+    CAPTURE_OPEN_CONCURRENCY,
+    CAPTURE_OPEN_TIMEOUT_MS,
+    CAPTURE_READ_TIMEOUT_MS,
     FRAME_STALE_SECONDS,
+    CapturedFrame,
 )
 from survng.app.config import CameraConfig, ImageStorageConfig, MotionQualificationConfig, ObjectTrackingConfig
 from survng.app.detector import objects_to_json
@@ -149,6 +152,34 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
     for captured_at in (started_at, warmup_end, warmup_end + 0.75, warmup_end + 1.5):
         worker._visual_backup_readiness(stable, captured_at)
     assert worker._visual_backup_scene_ready
+
+
+def seed_capture_frame(
+    worker: CameraWorker,
+    source: str,
+    frame: np.ndarray,
+    captured_at: float,
+    frame_clock: float,
+) -> None:
+    with worker.capture._lock:
+        worker.capture._stop.clear()
+        worker.capture._sequence += 1
+        worker.capture._frames[source] = CapturedFrame(
+            source=source,
+            image=frame.copy(),
+            captured_at_epoch=captured_at,
+            captured_at_monotonic=frame_clock,
+            captured_at_iso=datetime.fromtimestamp(
+                captured_at, timezone.utc
+            ).isoformat(),
+            width=int(frame.shape[1]),
+            height=int(frame.shape[0]),
+            sequence=worker.capture._sequence,
+        )
+        worker.capture._dimensions[source] = {
+            "width": int(frame.shape[1]),
+            "height": int(frame.shape[0]),
+        }
 
 
 class CameraWorkerTest(unittest.TestCase):
@@ -296,11 +327,20 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            with worker._frame_lock:
-                worker._source_frame_dimensions = {
-                    "live": {"width": 896, "height": 672},
-                    "main": {"width": 1920, "height": 1080},
-                }
+            seed_capture_frame(
+                worker,
+                "live",
+                np.zeros((672, 896, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            )
+            seed_capture_frame(
+                worker,
+                "main",
+                np.zeros((1080, 1920, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            )
 
             dimensions = worker.status()["stream_dimensions"]
 
@@ -336,6 +376,38 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual([sample[0] for sample in worker._tracking_frames], [100.0, 100.5])
 
+    def test_capture_observer_preserves_timestamp_for_motion_and_tracking(self) -> None:
+        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(mode="adaptive", sample_fps=2.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            live = CapturedFrame(
+                source="live",
+                image=np.zeros((90, 160, 3), dtype=np.uint8),
+                captured_at_epoch=100.25,
+                captured_at_monotonic=50.25,
+                captured_at_iso="1970-01-01T00:01:40.250000+00:00",
+                width=160,
+                height=90,
+                sequence=1,
+            )
+            main = CapturedFrame(
+                source="main",
+                image=np.zeros((90, 160, 3), dtype=np.uint8),
+                captured_at_epoch=100.5,
+                captured_at_monotonic=50.5,
+                captured_at_iso="1970-01-01T00:01:40.500000+00:00",
+                width=160,
+                height=90,
+                sequence=2,
+            )
+
+            worker._capture_frame(live)
+            worker._capture_frame(main)
+
+        self.assertEqual(worker._motion_frames[-1][0], 100.25)
+        self.assertEqual(worker._tracking_frames[-1][0], 100.5)
+
     def test_tracking_frame_includes_capture_time_and_rejects_stale_cache(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -344,15 +416,26 @@ class CameraWorkerTest(unittest.TestCase):
             frame = np.zeros((20, 30, 3), dtype=np.uint8)
             captured_at = time.time() - 0.1
             frame_clock = time.monotonic() - 0.1
-            with worker._frame_lock:
-                worker._source_frames["main"] = frame
-                worker._source_frame_epoch["main"] = captured_at
-                worker._source_frame_monotonic["main"] = frame_clock
-            with patch.object(worker, "_start_source", return_value=True):
+            seed_capture_frame(worker, "main", frame, captured_at, frame_clock)
+            with patch.object(
+                worker.capture,
+                "ensure_source",
+                return_value=SimpleNamespace(running=True),
+            ):
                 sample = worker._get_latest_tracking_frame("main")
-                with worker._frame_lock:
-                    worker._source_frame_monotonic["main"] = (
-                        time.monotonic() - FRAME_STALE_SECONDS - 1.0
+                with worker.capture._lock:
+                    cached = worker.capture._frames["main"]
+                    worker.capture._frames["main"] = CapturedFrame(
+                        source=cached.source,
+                        image=cached.image,
+                        captured_at_epoch=cached.captured_at_epoch,
+                        captured_at_monotonic=(
+                            time.monotonic() - FRAME_STALE_SECONDS - 1.0
+                        ),
+                        captured_at_iso=cached.captured_at_iso,
+                        width=cached.width,
+                        height=cached.height,
+                        sequence=cached.sequence,
                     )
                 stale = worker._get_latest_tracking_frame("main")
 
@@ -376,11 +459,12 @@ class CameraWorkerTest(unittest.TestCase):
             live_frame = np.full((20, 30, 3), 7, dtype=np.uint8)
             live_epoch = time.time() - 0.1
             live_clock = time.monotonic() - 0.1
-            with worker._frame_lock:
-                worker._source_frames["live"] = live_frame
-                worker._source_frame_epoch["live"] = live_epoch
-                worker._source_frame_monotonic["live"] = live_clock
-            with patch.object(worker, "_start_source", return_value=True) as start_source:
+            seed_capture_frame(worker, "live", live_frame, live_epoch, live_clock)
+            with patch.object(
+                worker.capture,
+                "ensure_source",
+                return_value=SimpleNamespace(running=True),
+            ) as ensure_source:
                 sample = worker._get_latest_tracking_frame_with_fallback()
 
         self.assertIsNotNone(sample)
@@ -389,7 +473,7 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(sampled_at, live_epoch)
         self.assertEqual(sampled_clock, live_clock)
         self.assertEqual(
-            [call.args[0] for call in start_source.call_args_list],
+            [call.args[0] for call in ensure_source.call_args_list],
             ["main", "live"],
         )
 
@@ -405,21 +489,32 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             now_epoch = time.time() - 0.1
             now_clock = time.monotonic() - 0.1
-            with worker._frame_lock:
-                worker._source_frames["main"] = np.full((40, 60, 3), 9, dtype=np.uint8)
-                worker._source_frame_epoch["main"] = now_epoch
-                worker._source_frame_monotonic["main"] = now_clock
-                worker._source_frames["live"] = np.full((20, 30, 3), 7, dtype=np.uint8)
-                worker._source_frame_epoch["live"] = now_epoch
-                worker._source_frame_monotonic["live"] = now_clock
-            with patch.object(worker, "_start_source", return_value=True) as start_source:
+            seed_capture_frame(
+                worker,
+                "main",
+                np.full((40, 60, 3), 9, dtype=np.uint8),
+                now_epoch,
+                now_clock,
+            )
+            seed_capture_frame(
+                worker,
+                "live",
+                np.full((20, 30, 3), 7, dtype=np.uint8),
+                now_epoch,
+                now_clock,
+            )
+            with patch.object(
+                worker.capture,
+                "ensure_source",
+                return_value=SimpleNamespace(running=True),
+            ) as ensure_source:
                 sample = worker._get_latest_tracking_frame_with_fallback()
 
         self.assertIsNotNone(sample)
         sampled_frame, _, _ = sample
         self.assertEqual(sampled_frame.shape, (40, 60, 3))
         self.assertEqual(int(sampled_frame[0, 0, 0]), 9)
-        start_source.assert_called_once_with("main")
+        ensure_source.assert_called_once_with("main")
 
     def test_snapshot_filename_uses_event_time_not_processing_time(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -495,12 +590,14 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
 
             def stop_after_open(*_args):
-                worker._stop.set()
+                worker.capture._stop.set()
                 return False
 
             capture.open.side_effect = stop_after_open
+            with worker.capture._lock:
+                worker.capture._stop.clear()
             with patch("survng.app.camera_capture.cv2.VideoCapture", return_value=capture):
-                worker._run_source("live", threading.Event())
+                worker.capture._run_source("live", threading.Event())
 
         _, backend, options = capture.open.call_args.args
         self.assertEqual(backend, cv2.CAP_FFMPEG)
@@ -533,14 +630,18 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            limiter = worker.capture_backend.limiter
+            limiter = worker.capture.backend.limiter
             for _ in range(CAPTURE_OPEN_CONCURRENCY):
                 limiter.acquire(timeout=0.1)
             try:
-                handle = worker.capture_backend.create_handle()
+                handle = worker.capture.backend.create_handle()
                 thread = threading.Thread(
                     target=lambda: result.append(
-                        worker._open_capture(handle, "live", stop_event)
+                        worker.capture.backend.open(
+                            handle,
+                            camera.source_url("live"),
+                            lambda: stop_event.is_set(),
+                        )
                     )
                 )
                 thread.start()
@@ -2155,10 +2256,14 @@ class CameraWorkerTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            with patch.object(worker, "_start_source", wraps=worker._start_source) as start_source:
+            with patch.object(
+                worker.capture,
+                "ensure_source",
+                wraps=worker.capture.ensure_source,
+            ) as ensure_source:
                 self.assertIsNone(worker.snapshot("main"))
 
-        start_source.assert_not_called()
+        ensure_source.assert_not_called()
 
     def test_status_separates_power_capture_and_frame_freshness(self) -> None:
         camera = CameraConfig(
@@ -2171,9 +2276,15 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir))
             worker._enabled = True
             worker._stop.clear()
-            worker._source_threads["live"] = Mock(is_alive=lambda: True)
-            worker._source_frame_at["live"] = "2026-07-14T12:00:00+00:00"
-            worker._source_frame_monotonic["live"] = time.monotonic()
+            seed_capture_frame(
+                worker,
+                "live",
+                np.zeros((10, 10, 3), dtype=np.uint8),
+                time.time(),
+                time.monotonic(),
+            )
+            with worker.capture._lock:
+                worker.capture._threads["live"] = Mock(is_alive=lambda: True)
             status = worker.status()
 
         self.assertTrue(status["running"])
@@ -2190,22 +2301,30 @@ class CameraWorkerTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker._source_last_access["main"] = time.monotonic() - 60
+            with worker.capture._lock:
+                worker.capture._last_access["main"] = time.monotonic() - 60
 
-            self.assertTrue(worker._source_is_idle("main"))
-            self.assertFalse(worker._source_is_idle("live"))
+            self.assertTrue(worker.capture.source_is_idle("main"))
+            self.assertFalse(worker.capture.source_is_idle("live"))
 
     def test_snapshot_rejects_a_stale_cached_frame(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            worker._source_threads["live"] = Mock(is_alive=lambda: True)
-            worker._source_stops["live"] = threading.Event()
-            worker._source_frames["live"] = np.zeros((10, 10, 3), dtype=np.uint8)
-            worker._source_frame_monotonic["live"] = time.monotonic() - 60
-
-            self.assertIsNone(worker.snapshot())
+            seed_capture_frame(
+                worker,
+                "live",
+                np.zeros((10, 10, 3), dtype=np.uint8),
+                time.time() - 60,
+                time.monotonic() - 60,
+            )
+            with patch.object(
+                worker.capture,
+                "ensure_source",
+                return_value=SimpleNamespace(running=True),
+            ):
+                self.assertIsNone(worker.snapshot())
 
     def test_start_source_replaces_a_stopping_capture_thread(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -2215,15 +2334,18 @@ class CameraWorkerTest(unittest.TestCase):
             old_thread = Mock(is_alive=lambda: True)
             old_stop = threading.Event()
             old_stop.set()
-            worker._source_threads["live"] = old_thread
-            worker._source_stops["live"] = old_stop
-            with patch.object(worker, "_run_source"):
-                self.assertTrue(worker._start_source("live"))
-                replacement = worker._source_threads["live"]
+            with worker.capture._lock:
+                worker.capture._stop.clear()
+                worker.capture._threads["live"] = old_thread
+                worker.capture._source_stops["live"] = old_stop
+            with patch.object(worker.capture, "_run_source_when_released"):
+                self.assertTrue(worker.capture.ensure_source("live").running)
+                replacement = worker.capture.threads()["live"]
                 replacement.join(timeout=1)
 
         self.assertIsNot(replacement, old_thread)
-        self.assertIsNot(worker._source_stops.get("live"), old_stop)
+        with worker.capture._lock:
+            self.assertIsNot(worker.capture._source_stops.get("live"), old_stop)
 
     def test_capture_does_not_publish_a_read_completed_after_stop(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -2240,17 +2362,20 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
+            with worker.capture._lock:
+                worker.capture._stop.clear()
             with patch("survng.app.camera_capture.cv2.VideoCapture", return_value=capture):
-                worker._run_source("live", stop_event)
+                worker.capture._run_source("live", stop_event)
 
-        self.assertNotIn("live", worker._source_frames)
-        self.assertEqual(worker.last_frame_at, "")
+        with worker.capture._lock:
+            self.assertNotIn("live", worker.capture._frames)
+        self.assertIsNone(worker.capture.latest("live"))
 
     def test_start_rolls_back_workers_when_capture_start_fails(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            with patch.object(worker, "_start_source", side_effect=RuntimeError("no threads")):
+            with patch.object(worker.capture, "start", side_effect=RuntimeError("no threads")):
                 with self.assertRaisesRegex(RuntimeError, "no threads"):
                     worker.start()
 

@@ -101,6 +101,8 @@ def test_latest_frame_is_copied_and_rejected_when_stale() -> None:
         stale_seconds=10.0,
     )
     source = np.ones((10, 20, 3), dtype=np.uint8)
+    with service._lock:
+        service._stop.clear()
     service._publish_frame("live", source)
 
     first = service.latest("live")
@@ -148,6 +150,31 @@ def test_replacing_stopping_source_does_not_let_old_runner_remove_new_one() -> N
     assert service.wait_stopped(1.0) == {}
 
 
+def test_shutdown_joins_replaced_and_current_source_generations() -> None:
+    service = _service(main_idle_seconds=5.0)
+    release_old = threading.Event()
+    old_stop = threading.Event()
+    new_stop = threading.Event()
+    old_thread = threading.Thread(target=lambda: release_old.wait(0.5))
+    new_thread = threading.Thread(target=lambda: new_stop.wait(0.5))
+    old_thread.start()
+    new_thread.start()
+    with service._lock:
+        service._stop.clear()
+        service._threads["main"] = new_thread
+        service._source_stops["main"] = new_stop
+        service._all_threads[old_thread] = ("main", old_stop)
+        service._all_threads[new_thread] = ("main", new_stop)
+
+    service.request_stop()
+    release_old.set()
+    alive = service.wait_stopped(1.0)
+
+    assert alive == {}
+    assert old_stop.is_set()
+    assert new_stop.is_set()
+
+
 def test_frame_observer_failure_does_not_reconnect_healthy_source() -> None:
     backend = FakeBackend([[
         np.ones((10, 20, 3), dtype=np.uint8),
@@ -190,9 +217,11 @@ def test_source_started_notification_precedes_first_frame() -> None:
 def test_start_rejects_lingering_thread_from_previous_stop() -> None:
     service = _service()
     lingering = threading.Thread(target=lambda: time.sleep(0.1))
+    lingering_stop = threading.Event()
     lingering.start()
     with service._lock:
         service._threads["live"] = lingering
+        service._all_threads[lingering] = ("live", lingering_stop)
 
     try:
         try:
@@ -203,3 +232,20 @@ def test_start_rejects_lingering_thread_from_previous_stop() -> None:
             raise AssertionError("capture restart should reject a lingering source")
     finally:
         lingering.join(timeout=1.0)
+
+
+def test_frame_is_not_published_when_stop_wins_after_native_read() -> None:
+    service = _service()
+    with service._lock:
+        service._stop.clear()
+    source_stop = threading.Event()
+    source_stop.set()
+
+    stored = service._publish_frame(
+        "live",
+        np.ones((10, 20, 3), dtype=np.uint8),
+        source_stop,
+    )
+
+    assert stored is False
+    assert service.latest("live") is None
