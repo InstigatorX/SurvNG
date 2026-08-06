@@ -105,10 +105,10 @@ class CameraWorker:
         self.motion_analysis_limiter = motion_analysis_limiter
         self.image_writer = image_writer
         self.runtime_state = CameraRuntimeState()
-        # Compatibility aliases remain while downstream services migrate to
-        # the explicit runtime-state owner.
+        # Runtime-state reads are independent from tracking-session operations;
+        # neither lock is held while camera lifecycle I/O is blocking.
         self._stop = self.runtime_state.stop_event
-        self._lifecycle_lock = self.runtime_state.lock
+        self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
         effective_capture_backend = capture_backend or OpenCvFfmpegCaptureBackend(
             CaptureOpenLimiter()
@@ -441,35 +441,43 @@ class CameraWorker:
     # integrations stable while MotionEventCoordinator owns the runtime.
     @property
     def _enabled(self) -> bool:
-        return self.runtime_state.enabled
+        with self.runtime_state.lock:
+            return self.runtime_state.enabled
 
     @_enabled.setter
     def _enabled(self, value: bool) -> None:
-        self.runtime_state.enabled = bool(value)
+        with self.runtime_state.lock:
+            self.runtime_state.enabled = bool(value)
 
     @property
     def _detection_enabled(self) -> bool:
-        return self.runtime_state.detection_enabled
+        with self.runtime_state.lock:
+            return self.runtime_state.detection_enabled
 
     @_detection_enabled.setter
     def _detection_enabled(self, value: bool) -> None:
-        self.runtime_state.detection_enabled = bool(value)
+        with self.runtime_state.lock:
+            self.runtime_state.detection_enabled = bool(value)
 
     @property
     def _accepting_motion_events(self) -> bool:
-        return self.runtime_state.accepting_motion_events
+        with self.runtime_state.lock:
+            return self.runtime_state.accepting_motion_events
 
     @_accepting_motion_events.setter
     def _accepting_motion_events(self, value: bool) -> None:
-        self.runtime_state.accepting_motion_events = bool(value)
+        with self.runtime_state.lock:
+            self.runtime_state.accepting_motion_events = bool(value)
 
     @property
     def _active_incident_event_id(self) -> int | None:
-        return self.runtime_state.active_incident_event_id
+        with self.runtime_state.lock:
+            return self.runtime_state.active_incident_event_id
 
     @_active_incident_event_id.setter
     def _active_incident_event_id(self, value: int | None) -> None:
-        self.runtime_state.active_incident_event_id = value
+        with self.runtime_state.lock:
+            self.runtime_state.active_incident_event_id = value
 
     @property
     def _motion_queue(self) -> queue.Queue:
@@ -614,8 +622,12 @@ class CameraWorker:
         self.lifecycle.close()
 
     def _status_runtime_state(self) -> tuple[bool, bool, str]:
-        with self._lifecycle_lock:
-            return self._enabled, self._detection_enabled, self.last_motion_at
+        with self.runtime_state.lock:
+            return (
+                self.runtime_state.enabled,
+                self.runtime_state.detection_enabled,
+                self.last_motion_at,
+            )
 
     def _motion_stats_snapshot(self) -> dict[str, Any]:
         with self._motion_stats_lock:

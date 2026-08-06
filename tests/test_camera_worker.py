@@ -97,7 +97,7 @@ def make_worker(
             services={EVIDENCE_REPOSITORY_SERVICE: evidence},
         ),
     )
-    return CameraWorker(
+    worker = CameraWorker(
         camera,
         storage_dir,
         motion_config,
@@ -138,6 +138,12 @@ def make_worker(
         motion_analysis_limiter=FairMotionAnalysisLimiter(2),
         image_writer=DurableImageWriter(ImageStorageConfig()),
     )
+    # Most worker unit tests exercise motion ingress without starting camera
+    # I/O. Production workers now begin in the explicit stopped/non-accepting
+    # lifecycle phase, so opt this test fixture into ingress unless a test
+    # deliberately disables it.
+    worker._accepting_motion_events = True
+    return worker
 
 
 def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:

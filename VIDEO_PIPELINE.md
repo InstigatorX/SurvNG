@@ -633,6 +633,14 @@ camera/ONVIF workers, face recognition, the isolated inference processes, and
 recorder processes before process exit. Systemd then provides boot startup and
 crash recovery.
 
+Each camera exposes an explicit `stopped`, `starting`, `running`, `stopping`,
+`failed`, or `closed` lifecycle phase and a runtime-generation counter. A short
+state lock protects only those in-memory transitions. A separate operation lock
+serializes start, stop, and close commands while blocking capture, ONVIF, and
+worker joins run without holding the state lock. Status and health reads
+therefore remain available while a camera connection is slow to open or close,
+and failures retain their last lifecycle error for diagnosis.
+
 The object process owns its OpenVINO `Core`, compiled detector, and GPU context.
 The face process separately owns the embedding and landmark models on its
 configured CPU or AUTO device. Uvicorn does not perform OpenVINO device or

@@ -7940,7 +7940,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
               <dl>
                 <div><dt>Last frame</dt><dd>{formatAge(camera.last_frame_age_seconds)}</dd></div>
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
-                <div><dt>Camera workers</dt><dd>{camera.lifecycle?.active_worker_count || 0} active{camera.lifecycle?.active_workers?.length ? ` · ${camera.lifecycle.active_workers.join(", ")}` : ""}</dd></div>
+                <div><dt>Lifecycle / workers</dt><dd>{camera.lifecycle?.phase || "unknown"} · {camera.lifecycle?.active_worker_count || 0} active{camera.lifecycle?.active_workers?.length ? ` · ${camera.lifecycle.active_workers.join(", ")}` : ""}</dd></div>
                 <div><dt>Recorder clock recovery</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
                 <div><dt>Decoded FPS · live / main</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)} / {Number(camera.capture?.main?.fps || 0).toFixed(1)}</dd></div>
                 <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 
-from survng.app.camera_lifecycle import CameraLifecycleService, CameraRuntimeState
+from survng.app.camera_lifecycle import (
+    CameraLifecyclePhase,
+    CameraLifecycleService,
+    CameraRuntimeState,
+)
 
 
 def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
@@ -61,7 +66,8 @@ def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
 def test_start_orders_state_cleanup_before_producers() -> None:
     service, owned = _service()
     assert owned.state.enabled is False
-    assert owned.state.accepting_motion_events is True
+    assert owned.state.accepting_motion_events is False
+    assert owned.state.phase is CameraLifecyclePhase.STOPPED
     assert owned.state.stop_event.is_set()
     order: list[str] = []
     owned.tracking.sync_accepting.side_effect = lambda: order.append("tracking")
@@ -80,6 +86,8 @@ def test_start_orders_state_cleanup_before_producers() -> None:
     assert order == ["tracking", "clear", "analysis", "capture"]
     assert owned.state.enabled is True
     assert owned.state.accepting_motion_events is True
+    assert owned.state.phase is CameraLifecyclePhase.RUNNING
+    assert owned.state.generation == 1
     assert not owned.state.stop_event.is_set()
     assert owned.motion_events.thread is motion_thread
     motion_thread.start.assert_called_once_with()
@@ -95,6 +103,8 @@ def test_start_failure_rolls_back_runtime_state() -> None:
 
     assert owned.state.enabled is False
     assert owned.state.accepting_motion_events is False
+    assert owned.state.phase is CameraLifecyclePhase.FAILED
+    assert "capture unavailable" in owned.state.last_failure
     assert owned.state.stop_event.is_set()
     owned.capture.request_stop.assert_called_once_with()
     owned.onvif.stop.assert_called_once_with()
@@ -113,6 +123,7 @@ def test_stop_attempts_later_cleanup_after_early_failure() -> None:
     owned.motion_events.signal_stop.assert_called_once_with()
     owned.tracking_frames.clear.assert_called_once_with()
     owned.motion_events.reset.assert_called_once_with()
+    assert owned.state.phase is CameraLifecyclePhase.FAILED
 
 
 def test_detection_change_rolls_back_when_tracking_sync_fails() -> None:
@@ -129,12 +140,14 @@ def test_detection_change_rolls_back_when_tracking_sync_fails() -> None:
 def test_runtime_status_reports_authoritative_state_and_active_workers() -> None:
     service, owned = _service()
     owned.state.enabled = True
+    owned.state.phase = CameraLifecyclePhase.RUNNING
     owned.motion_analysis.thread = Mock()
     owned.motion_analysis.thread.is_alive.return_value = True
 
     status = service.runtime_status()
 
     assert status["enabled"] is True
+    assert status["phase"] == "running"
     assert status["detection_enabled"] is True
     assert status["active_workers"] == ["motion analysis"]
     assert status["active_worker_count"] == 1
@@ -149,3 +162,82 @@ def test_close_attempts_all_owned_resources() -> None:
 
     owned.pipelines[1][1].close.assert_called_once_with()
     owned.capture.close.assert_called_once_with()
+    assert owned.state.phase is CameraLifecyclePhase.FAILED
+
+
+def test_starting_camera_does_not_block_runtime_status() -> None:
+    service, owned = _service()
+    capture_entered = threading.Event()
+    release_capture = threading.Event()
+
+    def blocking_capture_start() -> bool:
+        capture_entered.set()
+        assert release_capture.wait(1.0)
+        return True
+
+    owned.capture.start.side_effect = blocking_capture_start
+    motion_thread = Mock()
+    motion_thread.is_alive.return_value = False
+    runner = threading.Thread(target=service.start)
+
+    with patch(
+        "survng.app.camera_lifecycle.threading.Thread",
+        return_value=motion_thread,
+    ):
+        runner.start()
+        assert capture_entered.wait(1.0)
+        status = service.runtime_status()
+        assert status["phase"] == "starting"
+        assert status["enabled"] is True
+        release_capture.set()
+        runner.join(timeout=1.0)
+
+    assert not runner.is_alive()
+    assert service.runtime_status()["phase"] == "running"
+
+
+def test_stopping_camera_does_not_block_runtime_status() -> None:
+    service, owned = _service()
+    owned.state.phase = CameraLifecyclePhase.RUNNING
+    owned.state.enabled = True
+    capture_wait_entered = threading.Event()
+    release_capture_wait = threading.Event()
+
+    def blocking_capture_wait(_timeout: float) -> dict:
+        capture_wait_entered.set()
+        assert release_capture_wait.wait(1.0)
+        return {}
+
+    owned.capture.wait_stopped.side_effect = blocking_capture_wait
+    runner = threading.Thread(target=service.stop)
+    runner.start()
+    assert capture_wait_entered.wait(1.0)
+
+    status = service.runtime_status()
+    assert status["phase"] == "stopping"
+    assert status["enabled"] is False
+    release_capture_wait.set()
+    runner.join(timeout=1.0)
+
+    assert not runner.is_alive()
+    assert service.runtime_status()["phase"] == "stopped"
+
+
+def test_closed_camera_cannot_be_restarted() -> None:
+    service, owned = _service()
+    service.close()
+
+    assert owned.state.phase is CameraLifecyclePhase.CLOSED
+    with pytest.raises(RuntimeError, match="closed"):
+        service.start()
+
+
+def test_close_rejects_running_camera_even_without_visible_worker_threads() -> None:
+    service, owned = _service()
+    owned.state.phase = CameraLifecyclePhase.RUNNING
+    owned.state.enabled = True
+
+    with pytest.raises(RuntimeError, match="phase is running"):
+        service.close()
+
+    owned.capture.close.assert_not_called()
