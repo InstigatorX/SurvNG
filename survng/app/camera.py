@@ -16,13 +16,13 @@ import cv2
 import numpy as np
 
 from .camera_capture import (
-    FRAME_STALE_SECONDS,
     CaptureBackend,
     CameraCaptureService,
     CapturedFrame,
     CaptureOpenLimiter,
     OpenCvFfmpegCaptureBackend,
 )
+from .camera_status import CameraStatusHooks, CameraStatusService
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
@@ -363,6 +363,37 @@ class CameraWorker:
             self.handle_motion_event,
             cache_dir=onvif_cache_dir or storage_dir / "onvif",
         )
+        self.status_reporter = CameraStatusService(
+            camera=camera,
+            motion_config=self.motion_config,
+            capture=self.capture,
+            motion_analysis=self.motion_analysis,
+            motion_evidence=self.motion_evidence,
+            onvif=self.onvif,
+            qualification_pipeline=self.motion_pipeline,
+            observation_pipeline=self.motion_observation_pipeline,
+            fusion_pipeline=self.motion_fusion_pipeline,
+            debug_store=self.motion_debug,
+            pipeline_origins=self.motion_pipeline_origins,
+            hooks=CameraStatusHooks(
+                runtime_state=self._status_runtime_state,
+                motion_settings=self._motion_settings,
+                stationary_object_tolerance=self._stationary_object_tolerance,
+                rescue_settings=self._motion_rescue_settings,
+                visual_backup_settings=self._visual_backup_settings,
+                illumination_filter_enabled=self._illumination_filter_enabled,
+                suppression_verification_rate=self._suppression_verification_rate,
+                motion_stats=self._motion_stats_snapshot,
+                object_tracking_status=lambda: self.object_tracking.status(),
+                incident_status=self.motion_incidents.status,
+                event_worker_running=lambda: bool(
+                    self._motion_thread is not None
+                    and self._motion_thread.is_alive()
+                ),
+                event_queue_depth=self._motion_queue.qsize,
+                retry_queue_depth=lambda: len(self._motion_retry_batches),
+            ),
+        )
 
     # Transitional compatibility accessors keep diagnostics and existing
     # integrations stable while MotionEventCoordinator owns the runtime.
@@ -674,127 +705,16 @@ class CameraWorker:
                     f"one or more camera resources failed to close for {self.camera.id}"
                 ) from first_error
 
-    def status(self) -> dict[str, Any]:
+    def _status_runtime_state(self) -> tuple[bool, bool, str]:
         with self._lifecycle_lock:
-            enabled = self._enabled
-        capture_status = self.capture.status()
-        motion_analysis_status = self.motion_analysis.status()
-        live_frame_at = str(capture_status["live_frame_at"])
-        main_frame_at = str(capture_status["main_frame_at"])
-        live_frame_clock = capture_status["live_frame_monotonic"]
-        main_frame_clock = capture_status["main_frame_monotonic"]
-        evidence_status = self.motion_evidence.status()
-        mog2_status = evidence_status.get("mog2", {})
-        now = time.monotonic()
-        live_age = max(0.0, now - live_frame_clock) if live_frame_clock is not None else None
-        main_age = max(0.0, now - main_frame_clock) if main_frame_clock is not None else None
-        connected = bool(enabled and live_age is not None and live_age <= FRAME_STALE_SECONDS)
-        mode, sensitivity, frame_width = self._motion_settings()
-        stationary_object_tolerance = self._stationary_object_tolerance()
-        rescue_enabled, rescue_margin = self._motion_rescue_settings()
-        visual_backup = self._visual_backup_settings()
-        visual_backup_status = self.motion_analysis.visual_backup_snapshot()
+            return self._enabled, self._detection_enabled, self.last_motion_at
+
+    def _motion_stats_snapshot(self) -> dict[str, Any]:
         with self._motion_stats_lock:
-            motion_stats = dict(self._motion_stats)
-        return {
-            "id": self.camera.id,
-            "name": self.camera.name,
-            "running": enabled,
-            "connected": connected,
-            "capture_running": bool(capture_status["live_running"]),
-            "frame_fresh": connected,
-            "last_frame_age_seconds": round(live_age, 3) if live_age is not None else None,
-            "main_running": bool(capture_status["main_running"]),
-            "main_frame_fresh": bool(main_age is not None and main_age <= FRAME_STALE_SECONDS),
-            "main_last_frame_age_seconds": round(main_age, 3) if main_age is not None else None,
-            "last_frame_at": live_frame_at,
-            "main_last_frame_at": main_frame_at,
-            "last_error": capture_status["last_error"],
-            "main_last_error": capture_status["main_error"],
-            "capture_stats": capture_status["capture_stats"],
-            "stream_dimensions": capture_status["stream_dimensions"],
-            "onvif_enabled": self.camera.onvif.enabled,
-            "onvif_connected": self.onvif.connected,
-            "onvif_last_event_at": self.onvif.last_event_at,
-            "onvif_last_camera_event_at": self.onvif.last_camera_event_at,
-            "onvif_last_motion_event_at": self.onvif.last_motion_event_at,
-            "last_motion_at": self.last_motion_at,
-            "detection_enabled": self._detection_enabled,
-            "object_tracking": {
-                **self.object_tracking.status(),
-                **self.motion_incidents.status(),
-            },
-            "onvif_last_error": self.onvif.last_error,
-            "onvif_last_connected_at": self.onvif.last_connected_at,
-            "onvif_last_poll_success_at": self.onvif.last_poll_success_at,
-            "onvif_last_poll_error": self.onvif.last_poll_error,
-            "onvif_last_poll_error_at": self.onvif.last_poll_error_at,
-            "onvif_retry_attempts": self.onvif.retry_attempts,
-            "onvif_poll_timeouts": self.onvif.poll_timeouts,
-            "onvif_poll_errors": self.onvif.poll_errors,
-            "onvif_resubscriptions": self.onvif.resubscriptions,
-            "onvif_notifications_received": self.onvif.notifications_received,
-            "onvif_motion_events_received": self.onvif.motion_events_received,
-            "onvif_inactive_motion_events": self.onvif.inactive_motion_events,
-            "onvif_unrecognized_notifications": self.onvif.unrecognized_notifications,
-            "onvif_callback_errors": self.onvif.callback_errors,
-            "onvif_renewal_attempts": self.onvif.renewal_attempts,
-            "onvif_renewals": self.onvif.renewals,
-            "onvif_renewal_errors": self.onvif.renewal_errors,
-            "onvif_last_renewed_at": self.onvif.last_renewed_at,
-            "onvif_subscription_current_time": self.onvif.subscription_current_time,
-            "onvif_subscription_termination_time": self.onvif.subscription_termination_time,
-            "onvif_subscription_lifetime_seconds": self.onvif.subscription_lifetime_seconds,
-            "motion_qualification": {
-                **motion_stats,
-                "mode": mode,
-                "sensitivity": sensitivity,
-                "stationary_object_tolerance": stationary_object_tolerance,
-                "illumination_filter_enabled": self._illumination_filter_enabled(),
-                "frame_width": frame_width,
-                "camera_mode_background_fps": self.motion_config.camera_mode_background_fps,
-                "visual_backup": {
-                    "enabled": mode == "camera_rescue",
-                    "warmup_seconds": self.motion_config.visual_backup_warmup_seconds,
-                    "grace_seconds": visual_backup["grace_seconds"],
-                    "minimum_score": visual_backup["minimum_score"],
-                    "score_margin": self.motion_config.visual_backup_score_margin,
-                    "minimum_consecutive": visual_backup["minimum_consecutive"],
-                    "cooldown_seconds": visual_backup["cooldown_seconds"],
-                    "maximum_triggers_5m": visual_backup["maximum_triggers_5m"],
-                    **visual_backup_status,
-                },
-                "suppression_verification_rate": self._suppression_verification_rate(),
-                "borderline_rescue_enabled": rescue_enabled,
-                "borderline_margin": rescue_margin,
-                "mog2_audit_enabled": bool(mog2_status.get("enabled", False)),
-                "mog2_history_seconds": self.motion_config.mog2_history_seconds,
-                "mog2_last": mog2_status.get("last"),
-                "evidence_sources": evidence_status,
-                "pipeline_origins": dict(self.motion_pipeline_origins),
-                "queue_depth": self._motion_queue.qsize(),
-                "retry_queue_depth": len(self._motion_retry_batches),
-                "analysis_queue_depth": motion_analysis_status["queue_depth"],
-                "analysis_worker_running": motion_analysis_status["worker_running"],
-                "event_worker_running": bool(
-                    self._motion_thread is not None
-                    and self._motion_thread.is_alive()
-                ),
-                "continuous_last_result": motion_analysis_status[
-                    "continuous_last_result"
-                ],
-                "buffered_frames": motion_analysis_status["buffered_frames"],
-                "frame_shape": motion_analysis_status["frame_shape"],
-                "color_buffered_frames": motion_analysis_status[
-                    "color_buffered_frames"
-                ],
-                "color_frame_shape": motion_analysis_status["color_frame_shape"],
-                "pipeline": self.motion_pipeline.status(),
-                "observation_pipeline": self.motion_observation_pipeline.status(),
-                "fusion_pipeline": self.motion_fusion_pipeline.status(),
-                "debug": self.motion_debug.status(),
-            },
-        }
+            return dict(self._motion_stats)
+
+    def status(self) -> dict[str, Any]:
+        return self.status_reporter.snapshot()
 
     def update_zones(self, zones: list[DetectionZone]) -> None:
         next_zones = [zone.model_copy(deep=True) for zone in zones]
