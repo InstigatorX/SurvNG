@@ -35,6 +35,7 @@ from .motion_coordinator import (
     VisualBackupCoordinator,
     VisualBackupPolicy,
 )
+from .motion_events import MotionEventCoordinator
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
 from .security import redact_secret_text
@@ -151,15 +152,11 @@ class CameraWorker:
             maxsize=MOTION_ANALYSIS_QUEUE_SIZE
         )
         self._motion_analysis_thread: threading.Thread | None = None
-        self._motion_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=MOTION_QUEUE_SIZE)
-        self._motion_retry_batches: deque[dict[str, Any]] = deque()
-        self._motion_thread: threading.Thread | None = None
-        self._active_motion_triggers: list[dict[str, Any]] | None = None
+        self.motion_events = MotionEventCoordinator(
+            queue_size=MOTION_QUEUE_SIZE,
+            retry_limit=MOTION_EVENT_MAX_RETRIES,
+        )
         self._active_incident_event_id: int | None = None
-        self._adaptive_trigger_pending = False
-        self._adaptive_last_completed_at = 0.0
-        self._priority_motion_times: deque[float] = deque(maxlen=16)
-        self._camera_motion_times: deque[float] = deque(maxlen=32)
         self.visual_backup = VisualBackupCoordinator()
         self._motion_stats_lock = threading.Lock()
         self._motion_stats: dict[str, Any] = {
@@ -219,6 +216,56 @@ class CameraWorker:
             cache_dir=onvif_cache_dir or storage_dir / "onvif",
         )
 
+    # Transitional compatibility accessors keep diagnostics and existing
+    # integrations stable while MotionEventCoordinator owns the runtime.
+    @property
+    def _motion_queue(self) -> queue.Queue[dict[str, Any] | None]:
+        return self.motion_events.queue
+
+    @property
+    def _motion_retry_batches(self) -> deque[dict[str, Any]]:
+        return self.motion_events.retry_batches
+
+    @property
+    def _motion_thread(self) -> threading.Thread | None:
+        return self.motion_events.thread
+
+    @_motion_thread.setter
+    def _motion_thread(self, value: threading.Thread | None) -> None:
+        self.motion_events.thread = value
+
+    @property
+    def _active_motion_triggers(self) -> list[dict[str, Any]] | None:
+        return self.motion_events.active_triggers
+
+    @_active_motion_triggers.setter
+    def _active_motion_triggers(self, value: list[dict[str, Any]] | None) -> None:
+        self.motion_events.active_triggers = value
+
+    @property
+    def _adaptive_trigger_pending(self) -> bool:
+        return self.motion_events.adaptive_trigger_pending
+
+    @_adaptive_trigger_pending.setter
+    def _adaptive_trigger_pending(self, value: bool) -> None:
+        self.motion_events.adaptive_trigger_pending = value
+
+    @property
+    def _adaptive_last_completed_at(self) -> float:
+        return self.motion_events.adaptive_last_completed_at
+
+    @_adaptive_last_completed_at.setter
+    def _adaptive_last_completed_at(self, value: float) -> None:
+        self.motion_events.adaptive_last_completed_at = value
+
+    @property
+    def _priority_motion_times(self) -> deque[float]:
+        return self.motion_events.priority_motion_times
+
+    @property
+    def _camera_motion_times(self) -> deque[float]:
+        return self.motion_events.camera_motion_times
+
     def start(self) -> None:
         with self._lifecycle_lock:
             self._enabled = True
@@ -273,10 +320,7 @@ class CameraWorker:
             self.capture.request_stop()
             self.onvif.stop()
             self._signal_motion_analysis_stop()
-            try:
-                self._motion_queue.put_nowait(None)
-            except queue.Full:
-                pass
+            self.motion_events.signal_stop()
             motion_thread = self._motion_thread
             if motion_thread is not None:
                 motion_thread.join(timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS)
@@ -337,11 +381,7 @@ class CameraWorker:
                     "preserving motion runtime for %s because a motion worker is still active",
                     self.camera.id,
                 )
-            self._active_motion_triggers = None
-            self._adaptive_trigger_pending = False
-            self._adaptive_last_completed_at = 0.0
-            self._priority_motion_times.clear()
-            self._camera_motion_times.clear()
+            self.motion_events.reset()
             with self._motion_stats_lock:
                 self.visual_backup.reset()
             shutdown_failures: list[str] = []
@@ -667,6 +707,10 @@ class CameraWorker:
                 event_type,
             )
 
+    def _increment_motion_stat(self, name: str) -> None:
+        with self._motion_stats_lock:
+            self._motion_stats[name] = int(self._motion_stats.get(name) or 0) + 1
+
     def handle_motion_event(
         self,
         topic: str = "manual",
@@ -693,8 +737,7 @@ class CameraWorker:
         if self._priority_motion_topic(topic):
             self._remember_priority_motion(received_at)
         if not topic.startswith("manual"):
-            with self._motion_stats_lock:
-                self._camera_motion_times.append(received_at)
+            self.motion_events.remember_camera_motion(received_at)
 
         self._publish_event_safely("motion", {
             "camera_id": self.camera.id,
@@ -715,35 +758,15 @@ class CameraWorker:
         *,
         evict_oldest: bool = True,
     ) -> bool:
-        with self._motion_stats_lock:
-            self._motion_stats["triggers"] += 1
-        try:
-            self._motion_queue.put_nowait(trigger)
-            return True
-        except queue.Full:
-            if not evict_oldest:
-                with self._motion_stats_lock:
-                    self._motion_stats["dropped_triggers"] += 1
-                return False
-            try:
-                self._motion_queue.get_nowait()
-            except queue.Empty:
-                pass
-            with self._motion_stats_lock:
-                self._motion_stats["dropped_triggers"] += 1
-            try:
-                self._motion_queue.put_nowait(trigger)
-                return True
-            except queue.Full:
-                return False
+        return self.motion_events.enqueue(
+            trigger,
+            evict_oldest=evict_oldest,
+            on_trigger=self._increment_motion_stat,
+            on_drop=self._increment_motion_stat,
+        )
 
     def _clear_motion_queue(self) -> None:
-        self._motion_retry_batches.clear()
-        while True:
-            try:
-                self._motion_queue.get_nowait()
-            except queue.Empty:
-                return
+        self.motion_events.clear()
 
     def _clear_motion_analysis_queue(self) -> None:
         while True:
@@ -990,7 +1013,7 @@ class CameraWorker:
                 captured_at,
                 self._visual_backup_policy(),
                 detection_enabled=self._detection_enabled,
-                camera_motion_times=tuple(self._camera_motion_times),
+                camera_motion_times=self.motion_events.camera_motion_snapshot(),
                 illumination_probe_allowed=illumination_probe_allowed,
             )
         result = decision.result
@@ -1116,16 +1139,17 @@ class CameraWorker:
 
     def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
         with self._motion_stats_lock:
-            allowed = self.visual_backup.reserve_trigger(
-                captured_at,
-                self._visual_backup_policy(),
-                trigger_pending=self._adaptive_trigger_pending,
-                last_completed_at=self._adaptive_last_completed_at,
+            allowed = self.motion_events.reserve_with(
+                lambda pending, last_completed_at: self.visual_backup.reserve_trigger(
+                    captured_at,
+                    self._visual_backup_policy(),
+                    trigger_pending=pending,
+                    last_completed_at=last_completed_at,
+                )
             )
             if not allowed:
                 self._motion_stats["visual_backup_rate_limited"] += 1
                 return False
-            self._adaptive_trigger_pending = True
             return True
 
     def _reserve_adaptive_trigger(self, captured_at: float) -> bool:
@@ -1135,17 +1159,14 @@ class CameraWorker:
             + self.motion_config.post_trigger_seconds
             + self.motion_config.burst_quiet_seconds,
         )
-        priority_duplicate = self._matches_recent_priority_motion(captured_at)
-        with self._motion_stats_lock:
-            if (
-                self._adaptive_trigger_pending
-                or priority_duplicate
-                or captured_at - self._adaptive_last_completed_at < rearm_seconds
-            ):
-                self._motion_stats["adaptive_triggers_deferred"] += 1
-                return False
-            self._adaptive_trigger_pending = True
-            return True
+        allowed = self.motion_events.reserve_adaptive(
+            captured_at,
+            rearm_seconds=rearm_seconds,
+            priority_tolerance_seconds=self._priority_dedup_seconds(),
+        )
+        if not allowed:
+            self._increment_motion_stat("adaptive_triggers_deferred")
+        return allowed
 
     def _priority_dedup_seconds(self) -> float:
         return max(
@@ -1155,28 +1176,19 @@ class CameraWorker:
         )
 
     def _remember_priority_motion(self, observed_at: float) -> None:
-        with self._motion_stats_lock:
-            self._priority_motion_times.append(observed_at)
+        self.motion_events.remember_priority(observed_at)
 
     def _matches_recent_priority_motion(self, event_at: float) -> bool:
-        tolerance = self._priority_dedup_seconds()
-        with self._motion_stats_lock:
-            return any(
-                abs(event_at - priority_at) <= tolerance
-                for priority_at in self._priority_motion_times
-            )
+        return self.motion_events.matches_recent_priority(
+            event_at,
+            rearm_seconds=self._priority_dedup_seconds(),
+        )
 
     def _defer_adaptive_trigger(self, captured_at: float) -> None:
-        with self._motion_stats_lock:
-            self._adaptive_trigger_pending = False
-            self._adaptive_last_completed_at = captured_at
+        self.motion_events.defer_adaptive(captured_at)
 
     def _complete_adaptive_trigger(self, triggers: list[dict[str, Any]]) -> None:
-        if not any(str(item.get("topic") or "").startswith("adaptive/") for item in triggers):
-            return
-        with self._motion_stats_lock:
-            self._adaptive_trigger_pending = False
-            self._adaptive_last_completed_at = time.time()
+        self.motion_events.complete_adaptive(triggers, time.time())
 
     def _capture_motion_debug(self, captured_at: float) -> None:
         with self._frame_lock:
@@ -1816,80 +1828,36 @@ class CameraWorker:
                 self._run_motion_events_until_error()
                 return
             except Exception:
-                failed_triggers = self._active_motion_triggers
-                self._active_motion_triggers = None
+                failed_triggers = self.motion_events.fail_active(time.time())
                 with self._motion_stats_lock:
                     self._motion_stats["event_worker_errors"] += 1
-                    if self._adaptive_trigger_pending:
-                        self._adaptive_trigger_pending = False
-                        self._adaptive_last_completed_at = time.time()
                 LOGGER.exception("motion event cycle failed for %s", self.camera.id)
                 if failed_triggers and not self._stop.is_set():
                     self._retry_motion_trigger_batch(failed_triggers)
 
     def _retry_motion_trigger_batch(self, triggers: list[dict[str, Any]]) -> None:
-        retry_count = max(
-            (int(item.get("_event_retry_count") or 0) for item in triggers),
-            default=0,
-        ) + 1
-        if retry_count > MOTION_EVENT_MAX_RETRIES:
-            with self._motion_stats_lock:
-                self._motion_stats["event_retry_drops"] += 1
-            return
-        retry_triggers = [
-            {**item, "_event_retry_count": retry_count}
-            for item in triggers
-        ]
-        if self._stop.wait(0.25 * retry_count):
-            return
-        wrapper = {
-            "topic": "internal/retry_batch",
-            "message": f"motion event retry {retry_count}",
-            "event_at": min(item["event_at"] for item in retry_triggers),
-            "received_at": min(
-                float(item.get("received_at") or time.time())
-                for item in retry_triggers
-            ),
-            "_retry_batch": retry_triggers,
-        }
-        self._motion_retry_batches.append(wrapper)
-        with self._motion_stats_lock:
-            self._motion_stats["event_retries"] += 1
+        self.motion_events.schedule_retry(
+            triggers,
+            stop_event=self._stop,
+            on_retry=self._increment_motion_stat,
+            on_drop=self._increment_motion_stat,
+        )
 
     def _run_motion_events_until_error(self) -> None:
         while not self._stop.is_set():
-            if self._motion_retry_batches:
-                first = self._motion_retry_batches.popleft()
-            else:
-                try:
-                    first = self._motion_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
+            try:
+                first = self.motion_events.next_trigger(timeout=0.5)
+            except queue.Empty:
+                continue
             if first is None or self._stop.is_set():
                 return
-
-            retry_batch = first.get("_retry_batch")
-            if isinstance(retry_batch, list):
-                triggers = [dict(item) for item in retry_batch]
-            else:
-                triggers = [first]
-                quiet_deadline = time.monotonic() + self.motion_config.burst_quiet_seconds
-                hard_deadline = time.monotonic() + max(2.0, self.motion_config.burst_quiet_seconds * 4)
-                while not self._stop.is_set():
-                    remaining = min(quiet_deadline, hard_deadline) - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    try:
-                        item = self._motion_queue.get(timeout=remaining)
-                    except queue.Empty:
-                        break
-                    if item is None:
-                        return
-                    triggers.append(item)
-                    quiet_deadline = min(
-                        hard_deadline,
-                        time.monotonic() + self.motion_config.burst_quiet_seconds,
-                    )
+            triggers = self.motion_events.coalesce(
+                first,
+                quiet_seconds=self.motion_config.burst_quiet_seconds,
+                stop_event=self._stop,
+            )
+            if triggers is None:
+                return
             self._active_motion_triggers = triggers
 
             priority_triggers = [
@@ -1930,7 +1898,7 @@ class CameraWorker:
             visual_backup = adaptive_only and visual_backup_queued
             if visual_backup_queued and not visual_backup:
                 with self._motion_stats_lock:
-                    matched_camera_at = max(self._camera_motion_times, default=0.0)
+                    matched_camera_at = self.motion_events.latest_camera_motion()
                     if self.visual_backup.record_camera_match(matched_camera_at):
                         self._motion_stats["visual_backup_onvif_matches"] += 1
             prequalified = [
