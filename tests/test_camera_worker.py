@@ -1399,8 +1399,8 @@ class CameraWorkerTest(unittest.TestCase):
                     np.zeros((90, 160), dtype=np.uint8),
                 ))
             with patch.object(
-                worker,
-                "_run_motion_pipeline",
+                worker.motion_qualification,
+                "run_pipeline",
                 side_effect=RuntimeError("validator unavailable"),
             ):
                 result, diagnostics = worker._qualify_motion_burst(
@@ -1448,8 +1448,16 @@ class CameraWorkerTest(unittest.TestCase):
                     np.zeros((90, 160), dtype=np.uint8),
                 ))
             with (
-                patch.object(worker, "_run_motion_pipeline", return_value=accepted) as analyze,
-                patch.object(worker, "_with_source_evidence", return_value=accepted) as fuse,
+                patch.object(
+                    worker.motion_qualification,
+                    "run_pipeline",
+                    return_value=accepted,
+                ) as analyze,
+                patch.object(
+                    worker.motion_qualification,
+                    "with_source_evidence",
+                    return_value=accepted,
+                ) as fuse,
             ):
                 result, _diagnostics = worker._qualify_motion_burst(
                     datetime.fromtimestamp(received_at, timezone.utc),
@@ -1488,7 +1496,11 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             with (
                 patch.object(worker._stop, "wait", return_value=False) as wait_for_evidence,
-                patch.object(worker, "_with_source_evidence", return_value=accepted) as fuse,
+                patch.object(
+                    worker.motion_qualification,
+                    "with_source_evidence",
+                    return_value=accepted,
+                ) as fuse,
             ):
                 result, diagnostics = worker._qualify_motion_burst(
                     datetime.fromtimestamp(received_at, timezone.utc),

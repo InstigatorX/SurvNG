@@ -29,6 +29,10 @@ from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_analysis_service import MotionAnalysisHooks, MotionAnalysisService
+from .motion_qualification_service import (
+    MotionQualificationHooks,
+    MotionQualificationService,
+)
 from .motion_coordinator import (
     VisualBackupCoordinator,
     VisualBackupPolicy,
@@ -52,14 +56,11 @@ from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
 from .security import redact_secret_text
 from .motion_pipeline import (
-    MotionContext,
     MotionDecisionHandlerFactory,
     MotionDebugSnapshotStore,
     MotionEvidenceRepository,
     MotionPipeline,
-    MotionScoring,
     RecordedMotionObjectDetectorFactory,
-    resolved_trigger_mode,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -73,7 +74,6 @@ TRACKING_CATCHUP_FRAME_WIDTH = 640
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
 MOTION_EVENT_MAX_RETRIES = 2
-FUSION_STALE_TOLERANCE_SECONDS = 5.0
 INCIDENT_ACTIVITY_REASONS = frozenset({"event_state_active", "event_state_cooldown"})
 
 
@@ -143,9 +143,6 @@ class CameraWorker:
         self._accepting_motion_events = True
         self._lifecycle_lock = threading.RLock()
         self._frame_lock = threading.Lock()
-        self._motion_analysis_lock = threading.Lock()
-        self._motion_fusion_lock = threading.Lock()
-        self._motion_fusion_last_at = 0.0
         tracking_buffer_size = max(
             4,
             round(self.object_tracking.config.sample_fps * TRACKING_CATCHUP_SECONDS) + 2,
@@ -209,6 +206,24 @@ class CameraWorker:
             "suppression_verification_rescues": 0,
             "last_result": None,
         }
+        self.motion_qualification = MotionQualificationService(
+            camera=camera,
+            config=self.motion_config,
+            qualification_pipeline=self.motion_pipeline,
+            observation_pipeline=self.motion_observation_pipeline,
+            fusion_pipeline=self.motion_fusion_pipeline,
+            pipeline_origins=self.motion_pipeline_origins,
+            debug_store=self.motion_debug,
+            stop_event=self._stop,
+            hooks=MotionQualificationHooks(
+                samples_since=lambda captured_at: self.motion_analysis.samples_since(
+                    captured_at
+                ),
+                increment_stat=lambda name, amount: self._increment_motion_stat(
+                    name, amount
+                ),
+            ),
+        )
         self.motion_decisions = MotionDecisionOrchestrator(
             camera_id=camera.id,
             events=self.motion_events,
@@ -268,7 +283,7 @@ class CameraWorker:
         self.motion_analysis = MotionAnalysisService(
             camera_id=camera.id,
             frame_lock=self._frame_lock,
-            analysis_lock=self._motion_analysis_lock,
+            analysis_lock=self.motion_qualification.analysis_lock,
             ring_size=ring_size,
             queue_size=MOTION_ANALYSIS_QUEUE_SIZE,
             limiter=self.motion_analysis_limiter,
@@ -586,11 +601,7 @@ class CameraWorker:
             if motion_workers_stopped:
                 self.motion_analysis.reset()
                 self.motion_evidence.clear()
-                self.motion_observation_pipeline.runtime.reset()
-                self.motion_pipeline.runtime.reset()
-                with self._motion_fusion_lock:
-                    self.motion_fusion_pipeline.runtime.reset()
-                    self._motion_fusion_last_at = 0.0
+                self.motion_qualification.reset_runtime()
             else:
                 LOGGER.error(
                     "preserving motion runtime for %s because a motion worker is still active",
@@ -1132,117 +1143,31 @@ class CameraWorker:
         event_at: datetime,
         received_at: float,
     ) -> None:
-        observation = MotionContext(
-            camera_id=self.camera.id,
-            captured_at=received_at,
-            original_frame=None,
-            configuration={
-                "observation_kind": "motion_event",
-                "event_source": "manual" if topic.startswith("manual") else "onvif",
-                "event_topic": topic,
-                "event_message": message,
-                "event_at": event_at.timestamp(),
-            },
-            runtime=self.motion_observation_pipeline.runtime,
-        )
-        try:
-            if self.motion_observation_pipeline.handles_observation("motion_event"):
-                self.motion_observation_pipeline.process(observation)
-        except Exception as error:
-            LOGGER.warning(
-                "motion event evidence failed for %s: %s",
-                self.camera.id,
-                error,
-            )
+        self.motion_qualification.observe_event(topic, message, event_at, received_at)
 
     def _motion_settings(self) -> tuple[str, str, int]:
-        override = self.camera.motion_qualification
-        mode = self.motion_config.mode if override.mode == "inherit" else override.mode
-        sensitivity = self.motion_config.sensitivity if override.sensitivity == "inherit" else override.sensitivity
-        frame_width = int(override.frame_width or self.motion_config.frame_width)
-        return mode, sensitivity, frame_width
+        return self.motion_qualification.settings()
 
     def _stationary_object_tolerance(self) -> str:
-        override = self.camera.motion_qualification.stationary_object_tolerance
-        if override == "inherit":
-            return self.motion_config.stationary_object_tolerance
-        return override
+        return self.motion_qualification.stationary_object_tolerance()
 
     def _visual_backup_settings(self) -> dict[str, float | int]:
-        override = self.camera.motion_qualification
-        return {
-            "grace_seconds": float(
-                self.motion_config.visual_backup_grace_seconds
-                if override.visual_backup_grace_seconds is None
-                else override.visual_backup_grace_seconds
-            ),
-            "minimum_score": float(
-                self.motion_config.visual_backup_min_score
-                if override.visual_backup_min_score is None
-                else override.visual_backup_min_score
-            ),
-            "minimum_consecutive": int(
-                self.motion_config.visual_backup_min_consecutive
-                if override.visual_backup_min_consecutive is None
-                else override.visual_backup_min_consecutive
-            ),
-            "cooldown_seconds": float(
-                self.motion_config.visual_backup_cooldown_seconds
-                if override.visual_backup_cooldown_seconds is None
-                else override.visual_backup_cooldown_seconds
-            ),
-            "maximum_triggers_5m": int(
-                self.motion_config.visual_backup_max_triggers_5m
-                if override.visual_backup_max_triggers_5m is None
-                else override.visual_backup_max_triggers_5m
-            ),
-        }
+        return self.motion_qualification.visual_backup_settings()
 
     def _visual_backup_policy(self) -> VisualBackupPolicy:
-        settings = self._visual_backup_settings()
-        return VisualBackupPolicy(
-            warmup_seconds=self.motion_config.visual_backup_warmup_seconds,
-            grace_seconds=float(settings["grace_seconds"]),
-            minimum_score=float(settings["minimum_score"]),
-            score_margin=self.motion_config.visual_backup_score_margin,
-            minimum_consecutive=int(settings["minimum_consecutive"]),
-            cooldown_seconds=float(settings["cooldown_seconds"]),
-            maximum_triggers_5m=int(settings["maximum_triggers_5m"]),
-            sample_fps=self.motion_config.sample_fps,
-            background_fps=self.motion_config.camera_mode_background_fps,
-        )
+        return self.motion_qualification.visual_backup_policy()
 
     def _trigger_mode(self) -> str:
-        return resolved_trigger_mode(self._motion_settings()[0])
+        return self.motion_qualification.trigger_mode()
 
     def _fusion_options(self) -> dict[str, Any]:
-        return next(
-            (
-                dict(stage.get("options") or {})
-                for stage in self.motion_fusion_pipeline.stage_configuration
-                if stage.get("implementation") == "buffered_evidence_fusion"
-            ),
-            {},
-        )
+        return self.motion_qualification.fusion_options()
 
     def _adaptive_analysis_required(self) -> bool:
-        if self._trigger_mode() in {"adaptive", "camera_rescue"}:
-            return True
-        options = self._fusion_options()
-        return (
-            str(options.get("policy", "audit")).strip().lower() != "bypass"
-            and bool(options.get("include_primary", True))
-        )
+        return self.motion_qualification.adaptive_analysis_required()
 
     def _continuous_primary_analysis_required(self) -> bool:
-        """Return whether this mode needs frame-driven qualification cycles."""
-        return bool(
-            self._adaptive_analysis_required()
-            and (
-                self.motion_pipeline.continuous_analysis
-                or self._trigger_mode() in {"adaptive", "camera_rescue"}
-            )
-        )
+        return self.motion_qualification.continuous_primary_required()
 
     def _continuous_primary_analysis_due(
         self,
@@ -1250,76 +1175,29 @@ class CameraWorker:
         *,
         last_processed_at: float | None = None,
     ) -> bool:
-        if self._trigger_mode() == "adaptive":
-            return True
-        background_fps = min(
-            self.motion_config.sample_fps,
-            self.motion_config.camera_mode_background_fps,
-        )
-        interval = 1.0 / max(0.5, background_fps)
         previous = (
             self._motion_primary_last_processed_at
             if last_processed_at is None
             else last_processed_at
         )
-        return bool(
-            previous <= 0.0 or captured_at - previous >= interval * 0.85
+        return self.motion_qualification.continuous_primary_due(
+            captured_at, previous
         )
 
     def _external_confirmation_required(self) -> bool:
-        options = self._fusion_options()
-        raw_sources = options.get("sources", [])
-        source_values = (raw_sources,) if isinstance(raw_sources, str) else raw_sources
-        sources = tuple(
-            normalized
-            for source in source_values
-            if (normalized := str(source).strip().lower())
-        ) if isinstance(source_values, (list, tuple)) else ()
-        policy = str(options.get("policy", "audit")).strip().lower()
-        return bool(
-            sources
-            and (
-                policy in {"all", "weighted"}
-                or not bool(options.get("include_primary", True))
-            )
-        )
+        return self.motion_qualification.external_confirmation_required()
 
     def _frame_motion_analysis_required(self) -> bool:
-        return bool(
-            self._adaptive_analysis_required()
-            or self.motion_observation_pipeline.handles_observation("frame")
-            or self.motion_debug.enabled()
-        )
+        return self.motion_qualification.frame_analysis_required()
 
     def _motion_rescue_settings(self) -> tuple[bool, float]:
-        override = self.camera.motion_qualification
-        enabled = (
-            self.motion_config.borderline_rescue_enabled
-            if override.borderline_rescue_enabled is None
-            else override.borderline_rescue_enabled
-        )
-        margin = (
-            self.motion_config.borderline_margin
-            if override.borderline_margin is None
-            else override.borderline_margin
-        )
-        return bool(enabled), float(margin)
+        return self.motion_qualification.rescue_settings()
 
     def _suppression_verification_rate(self) -> float:
-        override = self.camera.motion_qualification.suppression_verification_rate
-        return float(
-            self.motion_config.suppression_verification_rate
-            if override is None
-            else override
-        )
+        return self.motion_qualification.suppression_verification_rate()
 
     def _illumination_filter_enabled(self) -> bool:
-        override = self.camera.motion_qualification.illumination_filter_enabled
-        return bool(
-            self.motion_config.illumination_filter_enabled
-            if override is None
-            else override
-        )
+        return self.motion_qualification.illumination_filter_enabled()
 
     @staticmethod
     def _should_verify_suppression(decision_id: str, rate: float) -> bool:
@@ -1342,109 +1220,16 @@ class CameraWorker:
         include_telemetry: bool = True,
         require_primary_trigger: bool = False,
     ) -> MotionQualificationResult:
-        with self._motion_fusion_lock:
-            stale_by = self._motion_fusion_last_at - end_epoch
-            if 0.0 < stale_by <= FUSION_STALE_TOLERANCE_SECONDS:
-                with self._motion_stats_lock:
-                    self._motion_stats["stale_fusion_samples"] += 1
-                return MotionQualificationResult(
-                    accepted=False,
-                    score=0.0,
-                    threshold=1.0,
-                    reason="stale_fusion_evidence",
-                    frame_count=result.frame_count,
-                    features={
-                        **result.features,
-                        "stale_fusion_seconds": round(stale_by, 3),
-                        "stale_fusion_original_score": result.score,
-                    },
-                    telemetry=dict(result.telemetry),
-                )
-            context = MotionContext(
-                camera_id=self.camera.id,
-                captured_at=end_epoch,
-                original_frame=None,
-                configuration={
-                    "evidence_started_at": start_epoch,
-                    "evidence_ended_at": end_epoch,
-                    "require_primary_trigger": require_primary_trigger,
-                },
-                runtime=self.motion_fusion_pipeline.runtime,
-                scoring=MotionScoring(
-                    accepted=result.accepted,
-                    score=result.score,
-                    threshold=result.threshold,
-                    reason=result.reason,
-                    frame_count=result.frame_count,
-                    features=dict(result.features),
-                ),
-            )
-            try:
-                processed = self.motion_fusion_pipeline.process(context)
-            except Exception as error:
-                return self._validation_fail_open_result(
-                    "motion fusion pipeline",
-                    error,
-                    result,
-                    allow_detection=not (
-                        require_primary_trigger and not result.accepted
-                    ),
-                )
-            self._motion_fusion_last_at = end_epoch
-        scoring = processed.scoring
-        decision = processed.decision
-        features = dict(scoring.features)
-        features.update(
-            {
-                "event_state_phase": processed.event_state.phase.value,
-                "event_state_transition": processed.event_state.transition_reason,
-                "event_state_consecutive_accepts": (
-                    processed.event_state.consecutive_accepts
-                ),
-                "event_state_consecutive_rejects": (
-                    processed.event_state.consecutive_rejects
-                ),
-            }
-        )
-        if processed.event_state.cooldown_until is not None:
-            features["event_state_cooldown_remaining"] = round(
-                max(0.0, processed.event_state.cooldown_until - end_epoch),
-                3,
-            )
-        telemetry = dict(result.telemetry)
-        if include_telemetry:
-            graphs = dict(telemetry.get("graphs") or {})
-            graphs.setdefault("qualification", self.motion_pipeline.audit_snapshot())
-            graphs["observation"] = self.motion_observation_pipeline.audit_snapshot()
-            graphs["fusion"] = self.motion_fusion_pipeline.audit_snapshot(processed.timings)
-            telemetry.update({
-                "schema_version": 1,
-                "origins": dict(self.motion_pipeline_origins),
-                "graphs": graphs,
-            })
-        return MotionQualificationResult(
-            accepted=(
-                decision.run_object_detection
-                if decision is not None
-                else scoring.accepted
-            ),
-            score=decision.score if decision is not None else scoring.score,
-            threshold=scoring.threshold,
-            reason=decision.reason if decision is not None else scoring.reason,
-            frame_count=scoring.frame_count,
-            features=features,
-            telemetry=telemetry,
+        return self.motion_qualification.with_source_evidence(
+            result,
+            start_epoch,
+            end_epoch,
+            include_telemetry=include_telemetry,
+            require_primary_trigger=require_primary_trigger,
         )
 
     def _reset_motion_fusion_runtime(self) -> None:
-        """Reset event-state stages without disturbing unrelated fusion state."""
-        event_state_stage_ids = frozenset(
-            str(stage.get("stage_id") or "")
-            for stage in self.motion_fusion_pipeline.stage_configuration
-            if stage.get("implementation") == "score_event_state"
-        )
-        with self._motion_fusion_lock:
-            self.motion_fusion_pipeline.runtime.reset_stages(event_state_stage_ids)
+        self.motion_qualification.reset_event_state_runtime()
 
     def _validation_fail_open_result(
         self,
@@ -1454,31 +1239,11 @@ class CameraWorker:
         *,
         allow_detection: bool = True,
     ) -> MotionQualificationResult:
-        with self._motion_stats_lock:
-            self._motion_stats["validation_failures"] += 1
-            self._motion_stats["validation_fail_opens"] += int(allow_detection)
-        LOGGER.error(
-            "%s unavailable for %s; %s (%s)",
+        return self.motion_qualification.validation_fail_open_result(
             component,
-            self.camera.id,
-            "allowing object detection" if allow_detection else "preserving rejected primary trigger",
-            type(error).__name__,
-        )
-        features = dict(original.features) if original is not None else {}
-        features.update({
-            "validation_unavailable": True,
-            "validation_fail_open": allow_detection,
-            "validation_failure_component": component,
-            "validation_failure_type": type(error).__name__,
-        })
-        return MotionQualificationResult(
-            allow_detection,
-            1.0 if allow_detection else (original.score if original is not None else 0.0),
-            0.0 if allow_detection else (original.threshold if original is not None else 1.0),
-            "validation_unavailable_fail_open" if allow_detection else "primary_trigger_rejected",
-            original.frame_count if original is not None else 0,
-            features,
-            telemetry=dict(original.telemetry) if original is not None else {},
+            error,
+            original,
+            allow_detection=allow_detection,
         )
 
     @staticmethod
@@ -1489,25 +1254,7 @@ class CameraWorker:
         self,
         result: MotionQualificationResult,
     ) -> MotionQualificationResult:
-        if result.telemetry:
-            return result
-        return MotionQualificationResult(
-            accepted=result.accepted,
-            score=result.score,
-            threshold=result.threshold,
-            reason=result.reason,
-            frame_count=result.frame_count,
-            features=dict(result.features),
-            telemetry={
-                "schema_version": 1,
-                "origins": dict(self.motion_pipeline_origins),
-                "graphs": {
-                    "qualification": self.motion_pipeline.audit_snapshot(),
-                    "observation": self.motion_observation_pipeline.audit_snapshot(),
-                    "fusion": self.motion_fusion_pipeline.audit_snapshot(),
-                },
-            },
-        )
+        return self.motion_qualification.with_pipeline_telemetry(result)
 
     @staticmethod
     def _priority_motion_topic(topic: str) -> bool:
@@ -1519,119 +1266,9 @@ class CameraWorker:
         received_at: float,
         sensitivity: str,
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
-        event_epoch = event_at.timestamp()
-        anchor = min(event_epoch, received_at) if abs(event_epoch - received_at) <= 10.0 else received_at
-        if not self._adaptive_analysis_required():
-            if self._external_confirmation_required():
-                self._stop.wait(self.motion_config.post_trigger_seconds)
-            result = MotionQualificationResult(
-                False,
-                0.0,
-                1.0,
-                "adaptive_validation_disabled",
-                0,
-                {},
-            )
-            return self._with_source_evidence(
-                result,
-                anchor - self.motion_config.window_seconds,
-                time.time(),
-            ), {
-                "windows_evaluated": 0,
-                "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
-            }
-        deadline = time.monotonic() + self.motion_config.post_trigger_seconds
-        best_result: MotionQualificationResult | None = None
-        evaluated_windows: set[tuple[float, ...]] = set()
-        samples: list[tuple[float, np.ndarray]] = []
-
-        while not self._stop.is_set():
-            samples = self.motion_analysis.samples_since(
-                anchor - self.motion_config.window_seconds
-            )
-
-            for end_index in range(3, len(samples)):
-                window_end = samples[end_index][0]
-                if window_end < received_at:
-                    continue
-                window_start = window_end - self.motion_config.window_seconds
-                window = [item for item in samples[:end_index + 1] if item[0] >= window_start]
-                if len(window) < 4 or window[-1][0] - window[0][0] < self.motion_config.window_seconds * 0.45:
-                    continue
-                key = tuple(round(item[0], 3) for item in window)
-                if key in evaluated_windows:
-                    continue
-                evaluated_windows.add(key)
-                try:
-                    result = self._run_motion_pipeline(
-                        [item[1] for item in window],
-                        sensitivity,
-                        window_end,
-                        [item[0] for item in window],
-                    )
-                except Exception as error:
-                    return self._validation_fail_open_result(
-                        "adaptive validation pipeline",
-                        error,
-                    ), {
-                        "windows_evaluated": len(evaluated_windows),
-                        "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
-                    }
-                if best_result is None or result.score > best_result.score:
-                    best_result = result
-                if result.accepted and not self._external_confirmation_required():
-                    return self._with_source_evidence(
-                        result,
-                        anchor - self.motion_config.window_seconds,
-                        time.time(),
-                    ), {
-                        "windows_evaluated": len(evaluated_windows),
-                        "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
-                    }
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if self._stop.wait(min(0.2, remaining)):
-                break
-
-        diagnostics = {
-            "windows_evaluated": len(evaluated_windows),
-            "event_receipt_delta_seconds": round(received_at - event_epoch, 3),
-        }
-        if best_result is None:
-            result = MotionQualificationResult(
-                True,
-                1.0,
-                0.0,
-                "insufficient_frames",
-                len(samples),
-                {},
-            )
-            return self._with_source_evidence(
-                result,
-                anchor - self.motion_config.window_seconds,
-                time.time(),
-            ), diagnostics
-        if best_result.score == 0.0 and not best_result.features.get("global_change"):
-            result = MotionQualificationResult(
-                True,
-                0.0,
-                best_result.threshold,
-                "no_temporal_signal",
-                best_result.frame_count,
-                best_result.features,
-            )
-            return self._with_source_evidence(
-                result,
-                anchor - self.motion_config.window_seconds,
-                time.time(),
-            ), diagnostics
-        return self._with_source_evidence(
-            best_result,
-            anchor - self.motion_config.window_seconds,
-            time.time(),
-        ), diagnostics
+        return self.motion_qualification.qualify_burst(
+            event_at, received_at, sensitivity
+        )
 
     def _run_motion_pipeline(
         self,
@@ -1644,83 +1281,24 @@ class CameraWorker:
         capture_debug: bool = True,
         include_telemetry: bool = True,
     ) -> MotionQualificationResult:
-        mode, _resolved_sensitivity, frame_width = self._motion_settings()
-        if isolated:
-            with self._motion_analysis_lock:
-                pipeline = self.motion_pipeline.isolated_copy(clone_runtime=True)
-        else:
-            pipeline = self.motion_pipeline
-        context = MotionContext(
-            camera_id=self.camera.id,
-            captured_at=captured_at,
-            original_frame=frames[-1] if frames else None,
-            frame_history=tuple(frames),
-            frame_timestamps=tuple(frame_timestamps or ()),
-            configuration={
-                **self.motion_config.model_dump(mode="python"),
-                "camera_id": self.camera.id,
-                "mode": mode,
-                "sensitivity": sensitivity,
-                "stationary_object_tolerance": self._stationary_object_tolerance(),
-                "illumination_filter_enabled": self._illumination_filter_enabled(),
-                "frame_width": frame_width,
-                "motion_zones": [
-                    zone.model_dump(mode="python")
-                    for zone in self.camera.zones
-                ],
-            },
-            runtime=pipeline.runtime,
-        )
-        try:
-            processed = pipeline.process(context)
-        finally:
-            if isolated:
-                pipeline.close()
-        if capture_debug:
-            self.motion_debug.capture(processed)
-        result = processed.scoring
-        features = dict(result.features)
-        features.setdefault(
-            "primary_motion_source",
-            self.motion_pipeline.primary_motion_source,
-        )
-        dominant = processed.dominant_track
-        if dominant is not None and dominant.observations:
-            features.setdefault(
-                "motion_regions",
-                [
-                    [round(float(value), 5) for value in blob.box]
-                    for blob in dominant.observations[-12:]
-                ],
-            )
-            features.setdefault("motion_region_track_id", dominant.track_id)
-        telemetry: dict[str, Any] = {}
-        if include_telemetry:
-            telemetry = {
-                "schema_version": 1,
-                "origins": dict(self.motion_pipeline_origins),
-                "graphs": {
-                    "qualification": pipeline.audit_snapshot(processed.timings),
-                },
-            }
-        return MotionQualificationResult(
-            accepted=result.accepted,
-            score=result.score,
-            threshold=result.threshold,
-            reason=result.reason,
-            frame_count=result.frame_count,
-            features=features,
-            telemetry=telemetry,
+        return self.motion_qualification.run_pipeline(
+            frames,
+            sensitivity,
+            captured_at,
+            frame_timestamps,
+            isolated=isolated,
+            capture_debug=capture_debug,
+            include_telemetry=include_telemetry,
         )
 
     def set_motion_debug_enabled(self, enabled: bool) -> None:
-        self.motion_debug.set_enabled(enabled)
+        self.motion_qualification.set_debug_enabled(enabled)
 
     def motion_debug_status(self) -> dict[str, Any]:
-        return self.motion_debug.status()
+        return self.motion_qualification.debug_status()
 
     def motion_debug_image(self, layer: str) -> bytes | None:
-        return self.motion_debug.image(layer)
+        return self.motion_qualification.debug_image(layer)
 
     def _run_motion_events(self) -> None:
         self.motion_decisions.run(self._stop)
