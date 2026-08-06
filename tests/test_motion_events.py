@@ -58,6 +58,15 @@ def test_full_queue_race_does_not_report_an_eviction_that_never_happened() -> No
     assert drops == []
 
 
+def test_successful_enqueue_records_minimum_sampled_high_water() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=2)
+    coordinator.queue.qsize = Mock(return_value=0)
+
+    assert coordinator.enqueue(_trigger())
+
+    assert coordinator.runtime_status()["queue_high_water"] == 1
+
+
 def test_coalesce_preserves_batch_order_and_stop_sentinel() -> None:
     coordinator = MotionEventCoordinator(queue_size=4, retry_limit=2)
     coordinator.queue.put_nowait(_trigger(2))
@@ -143,6 +152,24 @@ def test_clear_removes_primary_and_retry_queues() -> None:
     assert coordinator.queue.empty()
     with pytest.raises(queue.Empty):
         coordinator.next_trigger(timeout=0.001)
+
+
+def test_timebase_reset_preserves_queued_work_and_active_reservation() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    trigger = _trigger()
+    coordinator.enqueue(trigger)
+    coordinator.adaptive_trigger_pending = True
+    coordinator.adaptive_last_completed_at = 100.0
+    coordinator.remember_priority(101.0)
+    coordinator.remember_camera_motion(102.0)
+
+    coordinator.reset_timebase()
+
+    assert coordinator.next_trigger(timeout=0.001) is trigger
+    assert coordinator.adaptive_trigger_pending is True
+    assert coordinator.adaptive_last_completed_at == 0.0
+    assert tuple(coordinator.priority_motion_times) == ()
+    assert coordinator.camera_motion_snapshot() == ()
 
 
 def test_retry_queue_depth_reports_coordinator_owned_state() -> None:

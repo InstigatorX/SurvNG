@@ -292,7 +292,6 @@ class CameraWorker:
             ring_size=ring_size,
             queue_size=MOTION_ANALYSIS_QUEUE_SIZE,
             limiter=self.motion_analysis_limiter,
-            observation_pipeline=self.motion_observation_pipeline,
             events=self.motion_events,
             visual_backup=self.visual_backup,
             audit_recorder=self.motion_decision_handler,
@@ -301,6 +300,10 @@ class CameraWorker:
                 frame_analysis_required=lambda: self._frame_motion_analysis_required(),
                 sample_fps=lambda: self.motion_config.sample_fps,
                 frame_width=lambda: self._motion_settings()[2],
+                preprocessor_implementation=(
+                    self.motion_qualification.preprocessor_implementation
+                ),
+                observe_frame=self.motion_qualification.observe_frame,
                 motion_settings=lambda: self._motion_settings(),
                 continuous_primary_required=(
                     lambda: self._continuous_primary_analysis_required()
@@ -355,6 +358,7 @@ class CameraWorker:
                 record_analysis_wait=(
                     lambda wait_ms: self._record_analysis_wait(wait_ms)
                 ),
+                reset_temporal_runtime=self._reset_motion_temporal_runtime,
             ),
         )
         self.motion_ingress = MotionEventIngressService(
@@ -708,6 +712,11 @@ class CameraWorker:
                 wait_ms,
             )
 
+    def _reset_motion_temporal_runtime(self) -> None:
+        self.motion_qualification.reset_runtime(
+            clear_observation_evidence=self.motion_evidence.clear,
+        )
+
     def _set_last_motion_at(self, value: str) -> None:
         self.last_motion_at = value
 
@@ -1011,6 +1020,7 @@ class CameraWorker:
         capture_debug: bool = True,
         include_telemetry: bool = True,
         processed_frames: list[np.ndarray] | None = None,
+        processed_frame_implementation: str = "",
     ) -> MotionQualificationResult:
         return self.motion_qualification.run_pipeline(
             frames,
@@ -1021,6 +1031,7 @@ class CameraWorker:
             capture_debug=capture_debug,
             include_telemetry=include_telemetry,
             processed_frames=processed_frames,
+            processed_frame_implementation=processed_frame_implementation,
         )
 
     def set_motion_debug_enabled(self, enabled: bool) -> None:

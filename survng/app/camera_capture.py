@@ -320,16 +320,23 @@ class CameraCaptureService:
             frame = self._frames.get(source)
             if frame is None or now - frame.captured_at_monotonic > self.stale_seconds:
                 return None
-            return CapturedFrame(
-                source=frame.source,
-                image=frame.image.copy(),
-                captured_at_epoch=frame.captured_at_epoch,
-                captured_at_monotonic=frame.captured_at_monotonic,
-                captured_at_iso=frame.captured_at_iso,
-                width=frame.width,
-                height=frame.height,
-                sequence=frame.sequence,
-            )
+        # Published frames are immutable, so retaining the frame reference is
+        # safe while the potentially large writable copy happens without
+        # blocking capture publication or lifecycle/status access.
+        copied_image = frame.image.copy()
+        with self._lock:
+            self._stats[source]["frame_copy_count"] += 1
+            self._stats[source]["frame_copy_bytes"] += int(copied_image.nbytes)
+        return CapturedFrame(
+            source=frame.source,
+            image=copied_image,
+            captured_at_epoch=frame.captured_at_epoch,
+            captured_at_monotonic=frame.captured_at_monotonic,
+            captured_at_iso=frame.captured_at_iso,
+            width=frame.width,
+            height=frame.height,
+            sequence=frame.sequence,
+        )
 
     def request_stop(self) -> None:
         self._stop.set()

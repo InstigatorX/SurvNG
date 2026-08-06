@@ -58,6 +58,7 @@ class MotionQualificationService:
         self.stop_event = stop_event
         self.hooks = hooks
         self.analysis_lock = threading.Lock()
+        self._observation_lock = threading.Lock()
         self._fusion_lock = threading.Lock()
         self._fusion_last_at = 0.0
 
@@ -150,6 +151,17 @@ class MotionQualificationService:
             )
         )
 
+    def preprocessor_implementation(self) -> str:
+        """Return the configured qualification preprocessor implementation."""
+        return next(
+            (
+                str(stage.get("implementation") or "")
+                for stage in self.qualification_pipeline.stage_configuration
+                if str(stage.get("stage_id") or "") == "preprocess"
+            ),
+            "",
+        )
+
     def continuous_primary_due(
         self,
         captured_at: float,
@@ -233,28 +245,43 @@ class MotionQualificationService:
         event_at: datetime,
         received_at: float,
     ) -> None:
-        context = MotionContext(
-            camera_id=self.camera.id,
-            captured_at=received_at,
-            original_frame=None,
-            configuration={
-                "observation_kind": "motion_event",
-                "event_source": "manual" if topic.startswith("manual") else "onvif",
-                "event_topic": topic,
-                "event_message": message,
-                "event_at": event_at.timestamp(),
-            },
-            runtime=self.observation_pipeline.runtime,
-        )
         try:
-            if self.observation_pipeline.handles_observation("motion_event"):
-                self.observation_pipeline.process(context)
+            with self._observation_lock:
+                if self.observation_pipeline.handles_observation("motion_event"):
+                    self.observation_pipeline.process(MotionContext(
+                        camera_id=self.camera.id,
+                        captured_at=received_at,
+                        original_frame=None,
+                        configuration={
+                            "observation_kind": "motion_event",
+                            "event_source": (
+                                "manual" if topic.startswith("manual") else "onvif"
+                            ),
+                            "event_topic": topic,
+                            "event_message": message,
+                            "event_at": event_at.timestamp(),
+                        },
+                        runtime=self.observation_pipeline.runtime,
+                    ))
         except Exception as error:
             LOGGER.warning(
                 "motion event evidence failed for %s: %s",
                 self.camera.id,
                 error,
             )
+
+    def observe_frame(self, frame: np.ndarray, captured_at: float) -> None:
+        """Apply frame observations under the observation runtime's own lock."""
+        with self._observation_lock:
+            if not self.observation_pipeline.handles_observation("frame"):
+                return
+            self.observation_pipeline.process(MotionContext(
+                camera_id=self.camera.id,
+                captured_at=captured_at,
+                original_frame=frame,
+                configuration={"observation_kind": "frame"},
+                runtime=self.observation_pipeline.runtime,
+            ))
 
     def with_source_evidence(
         self,
@@ -360,9 +387,20 @@ class MotionQualificationService:
         with self._fusion_lock:
             self.fusion_pipeline.runtime.reset_stages(stage_ids)
 
-    def reset_runtime(self) -> None:
-        self.observation_pipeline.runtime.reset()
-        self.qualification_pipeline.runtime.reset()
+    def reset_runtime(
+        self,
+        *,
+        clear_observation_evidence: Callable[[], None] | None = None,
+    ) -> None:
+        # Observation and qualification stages have independent execution
+        # lanes. Reset each runtime under the lock used by its own lane so a
+        # native/GPU stage is never closed while it is processing.
+        with self._observation_lock:
+            if clear_observation_evidence is not None:
+                clear_observation_evidence()
+            self.observation_pipeline.runtime.reset()
+        with self.analysis_lock:
+            self.qualification_pipeline.runtime.reset()
         with self._fusion_lock:
             self.fusion_pipeline.runtime.reset()
             self._fusion_last_at = 0.0
@@ -551,7 +589,13 @@ class MotionQualificationService:
         capture_debug: bool = True,
         include_telemetry: bool = True,
         processed_frames: list[np.ndarray] | None = None,
+        processed_frame_implementation: str = "",
     ) -> MotionQualificationResult:
+        if (
+            processed_frames is not None
+            and processed_frame_implementation != self.preprocessor_implementation()
+        ):
+            processed_frames = None
         if processed_frames is not None and len(processed_frames) != len(frames):
             raise ValueError(
                 "processed_frames must contain one derivative for each source frame"

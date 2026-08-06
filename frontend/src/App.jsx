@@ -7946,7 +7946,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                 <div><dt>Capture read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
                 <div><dt>Live capture observer · avg / p99</dt><dd>{formatMilliseconds(camera.capture?.live?.observer_average_ms)} / {formatMilliseconds(camera.capture?.live?.observer_p99_ms)}</dd></div>
-                <div><dt>Stored frame ownership</dt><dd>{Number(camera.capture?.live?.frame_transfer_count || 0).toLocaleString()} transferred · {Number(camera.capture?.live?.frame_copy_count || 0).toLocaleString()} copied</dd></div>
+                <div><dt>Frame ownership / writable copies</dt><dd>{Number(camera.capture?.live?.frame_transfer_count || 0).toLocaleString()} transferred · {Number(camera.capture?.live?.frame_copy_count || 0).toLocaleString()} copied</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
                 <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>
                 <div><dt>ONVIF notices / motion</dt><dd>{camera.onvif.notifications} / {camera.onvif.motion_events}</dd></div>
@@ -7955,12 +7955,14 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Motion suppressed / dropped</dt><dd>{camera.motion.suppressed} / {camera.motion.dropped}</dd></div>
                 <div><dt>Motion analysis frames dropped</dt><dd>{camera.motion.analysis_frames_dropped || 0}</dd></div>
                 <div><dt>Motion preprocessing · avg / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.preprocess_average_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.preprocess_p99_ms)}</dd></div>
+                <div><dt>Motion qualification · avg / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.qualification_average_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.qualification_p99_ms)}</dd></div>
                 <div><dt>Capture to analysis · p95 / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p95_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p99_ms)}</dd></div>
-                <div><dt>Raw motion handoffs / replaced</dt><dd>{Number(camera.motion.analysis_runtime?.raw_frames_submitted || 0).toLocaleString()} / {Number(camera.motion.analysis_runtime?.mailbox_replacements || 0).toLocaleString()}</dd></div>
+                <div><dt>Raw handoffs / replaced / deferred requests</dt><dd>{Number(camera.motion.analysis_runtime?.raw_frames_submitted || 0).toLocaleString()} / {Number(camera.motion.analysis_runtime?.mailbox_replacements || 0).toLocaleString()} / {Number(camera.motion.analysis_runtime?.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
+                <div><dt>Camera-clock recovery resets</dt><dd>{Number(camera.motion.analysis_runtime?.clock_discontinuity_resets || 0).toLocaleString()}</dd></div>
                 <div><dt>Motion frame copies</dt><dd>{Number(camera.motion.analysis_runtime?.copy_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.copy_bytes || 0)}</dd></div>
                 <div><dt>Motion shared frame reuse</dt><dd>{Number(camera.motion.analysis_runtime?.shared_read_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.shared_read_bytes || 0)}</dd></div>
                 <div><dt>Cached motion derivatives reused</dt><dd>{Number(camera.motion.analysis_runtime?.cached_derivative_reuse_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.cached_derivative_reuse_bytes || 0)}</dd></div>
-                <div><dt>Event queue · peak / evicted / rejected</dt><dd>{camera.motion.event_runtime?.queue_high_water || 0} / {camera.motion.event_runtime?.evicted || 0} / {camera.motion.event_runtime?.rejected || 0}</dd></div>
+                <div><dt>Event queue · sampled peak / evicted / rejected</dt><dd>{camera.motion.event_runtime?.queue_high_water || 0} / {camera.motion.event_runtime?.evicted || 0} / {camera.motion.event_runtime?.rejected || 0}</dd></div>
                 <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>
                 <div><dt>Tracking waits / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {camera.tracking?.capacity_timeouts || 0}</dd></div>
                 <div><dt>Tracking prewarm / handoff failures</dt><dd>{camera.tracking?.prewarm_failures || 0} / {camera.tracking?.handoff_failures || 0}{camera.tracking?.last_handoff_failure?.timestamp ? ` · last handoff ${formatDateTime(camera.tracking.last_handoff_failure.timestamp, timeZone)}` : ""}</dd></div>

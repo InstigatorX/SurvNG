@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -110,6 +111,21 @@ def test_start_failure_rolls_back_runtime_state() -> None:
     owned.onvif.stop.assert_called_once_with()
 
 
+def test_start_failure_redacts_credentials_from_runtime_status() -> None:
+    service, owned = _service()
+    owned.capture.start.side_effect = RuntimeError(
+        "open failed for rtsp://admin:supersecret@192.0.2.10/live"
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        service.start()
+
+    status = service.runtime_status()
+    assert "supersecret" not in str(raised.value)
+    assert "supersecret" not in status["last_failure"]
+    assert "rtsp://admin:***@192.0.2.10/live" in status["last_failure"]
+
+
 def test_stop_attempts_later_cleanup_after_early_failure() -> None:
     service, owned = _service()
     owned.capture.request_stop.side_effect = RuntimeError("capture stop failed")
@@ -124,6 +140,18 @@ def test_stop_attempts_later_cleanup_after_early_failure() -> None:
     owned.tracking_frames.clear.assert_called_once_with()
     owned.motion_events.reset.assert_called_once_with()
     assert owned.state.phase is CameraLifecyclePhase.FAILED
+
+
+def test_stop_failure_does_not_chain_unredacted_credentials() -> None:
+    service, owned = _service()
+    secret = "rtsp://admin:supersecret@192.0.2.10/live"
+    owned.capture.request_stop.side_effect = RuntimeError(f"failed {secret}")
+
+    with pytest.raises(RuntimeError) as raised:
+        service.stop()
+
+    formatted = "".join(traceback.format_exception(raised.value))
+    assert "supersecret" not in formatted
 
 
 def test_detection_change_rolls_back_when_tracking_sync_fails() -> None:
@@ -163,6 +191,18 @@ def test_close_attempts_all_owned_resources() -> None:
     owned.pipelines[1][1].close.assert_called_once_with()
     owned.capture.close.assert_called_once_with()
     assert owned.state.phase is CameraLifecyclePhase.FAILED
+
+
+def test_close_failure_does_not_chain_unredacted_credentials() -> None:
+    service, owned = _service()
+    secret = "rtsp://admin:supersecret@192.0.2.10/live"
+    owned.pipelines[0][1].close.side_effect = RuntimeError(f"failed {secret}")
+
+    with pytest.raises(RuntimeError) as raised:
+        service.close()
+
+    formatted = "".join(traceback.format_exception(raised.value))
+    assert "supersecret" not in formatted
 
 
 def test_starting_camera_does_not_block_runtime_status() -> None:
@@ -240,4 +280,30 @@ def test_close_rejects_running_camera_even_without_visible_worker_threads() -> N
     with pytest.raises(RuntimeError, match="phase is running"):
         service.close()
 
+    owned.capture.close.assert_not_called()
+
+
+@pytest.mark.parametrize("residual_kind", ["onvif", "tracking", "capture"])
+def test_close_never_marks_camera_closed_with_residual_worker(
+    residual_kind: str,
+) -> None:
+    service, owned = _service()
+    owned.state.phase = CameraLifecyclePhase.FAILED
+    if residual_kind == "onvif":
+        owned.onvif.running = True
+    elif residual_kind == "tracking":
+        owned.tracking.running.return_value = True
+        owned.tracking.stop.return_value = False
+    else:
+        capture_thread = Mock()
+        capture_thread.is_alive.return_value = True
+        owned.capture.threads.return_value = {"live": capture_thread}
+        owned.capture.wait_stopped.return_value = {"live": capture_thread}
+
+    with pytest.raises(RuntimeError, match="owned workers remain"):
+        service.close()
+
+    assert owned.state.phase is CameraLifecyclePhase.FAILED
+    for _label, pipeline in owned.pipelines:
+        pipeline.close.assert_not_called()
     owned.capture.close.assert_not_called()

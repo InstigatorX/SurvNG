@@ -11,6 +11,7 @@ import pytest
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_analysis_service import (
+    ANALYSIS_SLOT_WAKEUP,
     MotionAnalysisHooks,
     MotionAnalysisService,
     MotionFrameSubmission,
@@ -34,11 +35,15 @@ def _hooks(
     increment_stat: Mock | None = None,
     trigger_mode: str = "camera_rescue",
     execute_continuous: Mock | None = None,
+    preprocessor_implementation: str = "gray_blur",
+    reset_temporal_runtime: Mock | None = None,
 ) -> MotionAnalysisHooks:
     return MotionAnalysisHooks(
         frame_analysis_required=lambda: True,
         sample_fps=lambda: 5.0,
         frame_width=lambda: 320,
+        preprocessor_implementation=lambda: preprocessor_implementation,
+        observe_frame=Mock(),
         motion_settings=lambda: (trigger_mode, "balanced", 320),
         continuous_primary_required=lambda: True,
         continuous_primary_due=lambda _captured_at, _last_at: True,
@@ -76,12 +81,11 @@ def _hooks(
         set_last_motion_at=set_last_motion_at or Mock(),
         increment_stat=increment_stat or Mock(),
         record_analysis_wait=Mock(),
+        reset_temporal_runtime=reset_temporal_runtime or Mock(),
     )
 
 
 def _service(hooks: MotionAnalysisHooks, queue_size: int = 1) -> MotionAnalysisService:
-    observation = Mock()
-    observation.handles_observation.return_value = False
     return MotionAnalysisService(
         camera_id="gate",
         frame_lock=threading.Lock(),
@@ -89,7 +93,6 @@ def _service(hooks: MotionAnalysisHooks, queue_size: int = 1) -> MotionAnalysisS
         ring_size=8,
         queue_size=queue_size,
         limiter=FairMotionAnalysisLimiter(1),
-        observation_pipeline=observation,
         events=MotionEventCoordinator(queue_size=4, retry_limit=2),
         visual_backup=VisualBackupCoordinator(),
         audit_recorder=Mock(),
@@ -118,6 +121,46 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert telemetry["derived_frame_count"] == 3
     assert telemetry["derived_frame_bytes"] == 90 * 320 * 5
     assert telemetry["preprocess_count"] == 1
+
+
+def test_cached_derivatives_are_bounded_to_the_reusable_three_frame_window() -> None:
+    service = _service(_hooks())
+    stop_event = threading.Event()
+
+    for index in range(6):
+        service.remember_frame(
+            np.full((180, 640, 3), index, dtype=np.uint8),
+            10.0 + index,
+            stop_event,
+            100.0 + index,
+        )
+
+    assert len(service.frames) == 6
+    assert len(service.color_frames) == 3
+    assert len(service.processed_frames) == 3
+    assert [timestamp for timestamp, _frame in service.processed_frames] == [
+        103.0,
+        104.0,
+        105.0,
+    ]
+
+
+def test_unrecognized_preprocessor_does_not_create_gray_blur_cache() -> None:
+    service = _service(_hooks(preprocessor_implementation="future_gpu"))
+    stop_event = threading.Event()
+
+    service.remember_frame(
+        np.zeros((180, 640, 3), dtype=np.uint8),
+        10.0,
+        stop_event,
+        100.0,
+    )
+
+    assert len(service.frames) == 1
+    assert not service.processed_frames
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["derived_frame_count"] == 2
+    assert telemetry["derived_frame_bytes"] == 90 * 320 * 4
 
 
 def test_raw_submission_defers_preprocessing_to_analysis_worker() -> None:
@@ -163,13 +206,36 @@ def test_raw_submission_mailbox_replaces_stale_frame_before_preprocessing() -> N
     queued = service.queue.get_nowait()
     assert isinstance(queued, MotionFrameSubmission)
     assert queued.captured_at_epoch == 101.0
-    assert queued.image is latest
+    assert queued.image is not latest
+    assert not queued.image.flags.writeable
+    latest.fill(7)
+    assert int(queued.image[0, 0, 0]) == 1
     assert not service.frames
     increment_stat.assert_called_once_with("analysis_frames_dropped", 1)
-    assert service.telemetry_snapshot()["mailbox_replacements"] == 1
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["mailbox_replacements"] == 1
+    assert telemetry["copies_by_reason"]["submission_safety"]["count"] == 2
 
 
-def test_worker_uses_latest_raw_frame_after_waiting_for_analysis_slot() -> None:
+def test_read_only_view_is_copied_before_async_submission() -> None:
+    service = _service(_hooks())
+    stop_event = threading.Event()
+    owner = np.ones((90, 160, 3), dtype=np.uint8)
+    view = owner[:, :, :]
+    view.setflags(write=False)
+
+    service.submit_frame(view, 10.0, stop_event, 100.0)
+    queued = service.queue.get_nowait()
+    owner.fill(9)
+
+    assert isinstance(queued, MotionFrameSubmission)
+    assert queued.image.flags.owndata
+    assert not queued.image.flags.writeable
+    assert int(queued.image[0, 0, 0]) == 1
+    assert service.telemetry_snapshot()["copy_count"] == 1
+
+
+def test_worker_preserves_temporal_history_while_analysis_slot_is_busy() -> None:
     increment_stat = Mock()
     stop_event = threading.Event()
     execute_continuous = Mock(side_effect=lambda _at: stop_event.set())
@@ -183,7 +249,8 @@ def test_worker_uses_latest_raw_frame_after_waiting_for_analysis_slot() -> None:
     latest = np.ones((180, 320, 3), dtype=np.uint8)
 
     with limiter.acquire("blocker"):
-        service.submit_frame(first, 10.0, stop_event, time.time())
+        first_at = time.time()
+        service.submit_frame(first, 10.0, stop_event, first_at)
         worker = threading.Thread(target=service.run, args=(stop_event,))
         worker.start()
         deadline = time.monotonic() + 1.0
@@ -196,10 +263,164 @@ def test_worker_uses_latest_raw_frame_after_waiting_for_analysis_slot() -> None:
     worker.join(timeout=1.0)
 
     assert not worker.is_alive()
-    assert [captured_at for captured_at, _frame in service.frames] == [latest_at]
+    assert [captured_at for captured_at, _frame in service.frames] == [
+        first_at,
+        latest_at,
+    ]
+    assert len(service.frames) == 2
     assert int(service.color_frames[-1][1][0, 0, 0]) == 1
-    increment_stat.assert_called_once_with("analysis_frames_dropped", 1)
-    assert service.telemetry_snapshot()["mailbox_replacements"] == 1
+    increment_stat.assert_not_called()
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["mailbox_replacements"] == 0
+    assert telemetry["analysis_slot_deferrals"] >= 1
+
+
+def test_released_analysis_slot_wakes_worker_without_polling_delay() -> None:
+    limiter = FairMotionAnalysisLimiter(1)
+    stop_event = threading.Event()
+    executed = threading.Event()
+    service = _service(_hooks(
+        execute_continuous=Mock(side_effect=lambda _at: executed.set()),
+    ))
+    service.limiter = limiter
+    worker = threading.Thread(target=service.run, args=(stop_event,))
+
+    with limiter.acquire("blocker"):
+        worker.start()
+        service.submit_frame(
+            np.zeros((90, 160, 3), dtype=np.uint8),
+            10.0,
+            stop_event,
+            100.0,
+        )
+        deadline = time.monotonic() + 1.0
+        while limiter.status()["pending"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert limiter.status()["pending"] == 1
+        assert not executed.is_set()
+
+    # The queue fallback is 500 ms; completion well before that proves the
+    # limiter release callback woke the frame lane directly.
+    assert executed.wait(timeout=0.25)
+    service.request_stop()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["analysis_slot_deferrals"] == 1
+    assert telemetry["qualification_count"] == 1
+
+
+def test_fleet_contention_preserves_each_cameras_sampled_history() -> None:
+    limiter = FairMotionAnalysisLimiter(2)
+    blocker_release = threading.Event()
+    blockers_ready = threading.Barrier(3)
+
+    def hold_slot(camera_id: str) -> None:
+        with limiter.acquire(camera_id):
+            blockers_ready.wait()
+            assert blocker_release.wait(2.0)
+
+    blocker_threads = [
+        threading.Thread(target=hold_slot, args=(f"blocker-{index}",))
+        for index in range(2)
+    ]
+    for thread in blocker_threads:
+        thread.start()
+    blockers_ready.wait()
+
+    stop_events = [threading.Event() for _index in range(12)]
+    services = [_service(_hooks()) for _index in range(12)]
+    workers = []
+    for index, service in enumerate(services):
+        service.camera_id = f"camera-{index}"
+        service.limiter = limiter
+        worker = threading.Thread(target=service.run, args=(stop_events[index],))
+        worker.start()
+        workers.append(worker)
+
+    for sample in range(4):
+        for index, service in enumerate(services):
+            service.submit_frame(
+                np.full((90, 160, 3), sample, dtype=np.uint8),
+                10.0 + sample,
+                stop_events[index],
+                100.0 + sample,
+            )
+        deadline = time.monotonic() + 2.0
+        while (
+            any(len(service.frames) < sample + 1 for service in services)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert all(len(service.frames) == sample + 1 for service in services)
+
+    assert all(
+        service.telemetry_snapshot()["analysis_slot_deferrals"] >= 1
+        for service in services
+    )
+    blocker_release.set()
+    for thread in blocker_threads:
+        thread.join(timeout=1.0)
+    for service in services:
+        service.request_stop()
+    for worker in workers:
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+
+
+def test_backward_wall_clock_step_resets_runtime_without_suspending_frames() -> None:
+    stop_event = threading.Event()
+    reset_runtime = Mock()
+    analyzed: list[float] = []
+
+    def execute(captured_at: float) -> None:
+        analyzed.append(captured_at)
+        if len(analyzed) == 2:
+            stop_event.set()
+
+    service = _service(_hooks(
+        execute_continuous=Mock(side_effect=execute),
+        reset_temporal_runtime=reset_runtime,
+    ))
+    worker = threading.Thread(target=service.run, args=(stop_event,))
+    worker.start()
+    service.submit_frame(
+        np.zeros((90, 160, 3), dtype=np.uint8),
+        10.0,
+        stop_event,
+        100.0,
+    )
+    deadline = time.monotonic() + 1.0
+    while len(analyzed) < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    service.submit_frame(
+        np.ones((90, 160, 3), dtype=np.uint8),
+        11.0,
+        stop_event,
+        90.0,
+    )
+    worker.join(timeout=1.0)
+
+    assert analyzed == [100.0, 90.0]
+    assert service.last_processed_sequence == 2
+    assert service.last_processed_at == 90.0
+    assert [timestamp for timestamp, _frame in service.frames] == [90.0]
+    reset_runtime.assert_called_once_with()
+    assert service.telemetry_snapshot()["clock_discontinuity_resets"] == 1
+
+
+def test_failed_deferred_analysis_is_not_retried_in_idle_loop() -> None:
+    failure = RuntimeError("pipeline failed")
+    execute = Mock(side_effect=failure)
+    service = _service(_hooks(execute_continuous=execute))
+    service._pending_analysis_at = 100.0
+
+    with pytest.raises(RuntimeError, match="pipeline failed"):
+        service._try_execute_pending_analysis()
+
+    assert service._pending_analysis_at == 0.0
+    execute.assert_called_once_with(100.0)
+    assert service.telemetry_snapshot()["qualification_count"] == 1
 
 
 def test_latest_only_schedule_replaces_stale_pending_work() -> None:
@@ -215,6 +436,19 @@ def test_latest_only_schedule_replaces_stale_pending_work() -> None:
     telemetry = service.telemetry_snapshot()
     assert telemetry["mailbox_high_water"] == 1
     assert telemetry["mailbox_replacements"] == 1
+
+
+def test_raw_frame_replacing_slot_wakeup_is_not_counted_as_frame_drop() -> None:
+    increment_stat = Mock()
+    service = _service(_hooks(increment_stat=increment_stat))
+    stop_event = threading.Event()
+    service.queue.put_nowait(ANALYSIS_SLOT_WAKEUP)
+
+    service.schedule(101.0, stop_event)
+
+    assert service.queue.get_nowait() == 101.0
+    increment_stat.assert_not_called()
+    assert service.telemetry_snapshot()["mailbox_replacements"] == 0
 
 
 def test_schedule_does_not_report_drop_when_consumer_wins_full_queue_race() -> None:
@@ -320,6 +554,10 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
     cached = run_pipeline.call_args.kwargs["processed_frames"]
     assert cached[0] is first_processed
     assert cached[1] is second_processed
+    assert (
+        run_pipeline.call_args.kwargs["processed_frame_implementation"]
+        == "gray_blur"
+    )
     telemetry = service.telemetry_snapshot()
     assert telemetry["cached_derivative_reuse_count"] == 2
     assert telemetry["cached_derivative_reuse_bytes"] == 90 * 160 * 2
@@ -338,6 +576,43 @@ def test_request_stop_replaces_pending_work_with_sentinel() -> None:
         pass
     else:
         raise AssertionError("stop queue should contain only the sentinel")
+
+
+def test_reset_cancels_pending_fair_limiter_request() -> None:
+    limiter = FairMotionAnalysisLimiter(1)
+    service = _service(_hooks())
+    service.limiter = limiter
+    service._pending_analysis_at = 100.0
+
+    with limiter.acquire("holder"):
+        assert not service._try_execute_pending_analysis()
+        assert limiter.status()["pending"] == 1
+        service.reset()
+        assert limiter.status()["pending"] == 0
+
+    with limiter.try_acquire("foyer") as waited:
+        assert waited is not None
+
+
+def test_unexpected_worker_exit_cancels_pending_fair_limiter_request() -> None:
+    limiter = FairMotionAnalysisLimiter(1)
+    service = _service(_hooks())
+    service.limiter = limiter
+
+    def fail_with_pending(_stop_event: threading.Event) -> None:
+        service._pending_analysis_at = 100.0
+        with limiter.try_acquire("gate") as waited:
+            assert waited is None
+        raise RuntimeError("unexpected worker failure")
+
+    service._run = fail_with_pending
+    with limiter.acquire("holder"):
+        with pytest.raises(RuntimeError, match="unexpected worker failure"):
+            service.run(threading.Event())
+        assert limiter.status()["pending"] == 0
+
+    with limiter.try_acquire("foyer") as waited:
+        assert waited is not None
 
 
 def test_stopped_service_rejects_late_capture_callbacks() -> None:

@@ -19,6 +19,7 @@ from .motion_pipeline import MotionEvidenceRepository, MotionPipeline
 from .motion_qualification_service import MotionQualificationService
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .onvif_events import OnvifEventListener
+from .security import redact_secret_text
 from .tracking_frames import TrackingFrameService
 
 LOGGER = logging.getLogger(__name__)
@@ -153,12 +154,19 @@ class CameraLifecycleService:
                         final_phase=CameraLifecyclePhase.FAILED,
                         failure=f"{type(startup_error).__name__}: {startup_error}",
                     )
-                except BaseException:
-                    LOGGER.exception(
-                        "camera startup rollback was incomplete for %s",
+                except BaseException as rollback_error:
+                    LOGGER.error(
+                        "camera startup rollback was incomplete for %s: %s",
                         self.camera_id,
+                        redact_secret_text(rollback_error),
                     )
-                raise
+                if not isinstance(startup_error, Exception):
+                    raise
+                raise RuntimeError(
+                    redact_secret_text(
+                        f"{type(startup_error).__name__}: {startup_error}"
+                    )
+                ) from None
             with self.state.lock:
                 self._transition_locked(CameraLifecyclePhase.RUNNING)
 
@@ -179,7 +187,12 @@ class CameraLifecycleService:
                 return operation()
             except BaseException as error:
                 shutdown_errors.append((label, error))
-                LOGGER.exception("%s stop failed for %s", label, self.camera_id)
+                LOGGER.error(
+                    "%s stop failed for %s: %s",
+                    label,
+                    self.camera_id,
+                    redact_secret_text(error),
+                )
                 return None
 
         with self.state.lock:
@@ -282,7 +295,7 @@ class CameraLifecycleService:
                 first_error = shutdown_errors[0][1]
                 if not isinstance(first_error, Exception):
                     raise first_error
-                raise stop_error from first_error
+                raise stop_error from None
             raise stop_error
         with self.state.lock:
             self._transition_locked(final_phase, failure=failure)
@@ -305,35 +318,53 @@ class CameraLifecycleService:
                         f"cannot close camera {self.camera_id} while lifecycle "
                         f"phase is {self.state.phase.value}"
                     )
-            active = [
-                label
-                for label, thread in (
-                    ("motion events", self.motion_events.thread),
-                    ("motion analysis", self.motion_analysis.thread),
+            residual = self._residual_workers()
+            cleanup_error: BaseException | None = None
+            if residual:
+                try:
+                    self._stop_runtime()
+                except BaseException as error:
+                    cleanup_error = error
+                residual = self._residual_workers()
+            if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+                raise cleanup_error
+            if residual:
+                message = (
+                    f"cannot close camera {self.camera_id} while owned workers "
+                    f"remain: {', '.join(residual)}"
                 )
-                if thread is not None and thread.is_alive()
-            ]
-            if active:
-                raise RuntimeError(
-                    f"cannot close camera {self.camera_id} pipelines while "
-                    f"{', '.join(active)} is running"
-                )
+                with self.state.lock:
+                    self._transition_locked(
+                        CameraLifecyclePhase.FAILED,
+                        failure=message,
+                    )
+                close_error = RuntimeError(message)
+                if cleanup_error is not None:
+                    if not isinstance(cleanup_error, Exception):
+                        raise cleanup_error
+                    raise close_error from None
+                raise close_error
             failures: list[BaseException] = []
             for label, pipeline in self.motion_pipelines:
                 try:
                     pipeline.close()
                 except BaseException as error:
                     failures.append(error)
-                    LOGGER.exception(
-                        "%s motion pipeline cleanup failed for %s",
+                    LOGGER.error(
+                        "%s motion pipeline cleanup failed for %s: %s",
                         label,
                         self.camera_id,
+                        redact_secret_text(error),
                     )
             try:
                 self.capture.close()
             except BaseException as error:
                 failures.append(error)
-                LOGGER.exception("capture cleanup failed for %s", self.camera_id)
+                LOGGER.error(
+                    "capture cleanup failed for %s: %s",
+                    self.camera_id,
+                    redact_secret_text(error),
+                )
             if failures:
                 first_error = failures[0]
                 with self.state.lock:
@@ -346,7 +377,7 @@ class CameraLifecycleService:
                 raise RuntimeError(
                     f"one or more camera resources failed to close for "
                     f"{self.camera_id}"
-                ) from first_error
+                ) from None
             with self.state.lock:
                 self.state.enabled = False
                 self.state.accepting_motion_events = False
@@ -425,7 +456,7 @@ class CameraLifecycleService:
         self.state.transition_count += 1
         self.state.last_transition_at = datetime.now(timezone.utc).isoformat()
         if failure:
-            self.state.last_failure = failure
+            self.state.last_failure = redact_secret_text(failure)[:1000]
         elif phase in {
             CameraLifecyclePhase.STARTING,
             CameraLifecyclePhase.RUNNING,

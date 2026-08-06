@@ -157,10 +157,23 @@ paths.
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
-writable latest frame receive a copy. Motion sampling produces immutable color,
+writable latest frame receive a copy. Those copies occur outside the capture
+state lock and are counted separately. Motion sampling produces immutable color,
 grayscale, and Gaussian-preprocessed derivatives once per admitted frame. The
 motion ring shares those derivatives across overlapping continuous-analysis
-windows, avoiding repeated frame copies and repeated preprocessing. Main-source
+windows, avoiding repeated frame copies and repeated preprocessing. Cached
+derivatives carry their configured preprocessor provenance and are ignored if
+the selected pluggable preprocessor changes.
+
+Each camera's lightweight preprocessing worker continues filling its temporal
+ring at the configured sample rate even when expensive qualification is busy.
+Only qualification competes for the fleet-wide fair two-camera limit. A camera
+that cannot immediately obtain a slot retains one fair pending request and
+keeps ingesting newer temporal samples. Slot release wakes the next fair camera
+without polling or blocking preprocessing; its grant evaluates the latest
+coherent window. Capture sequence provides processing order, while wall-clock
+time remains event metadata. A backward camera-clock discontinuity resets the
+affected temporal runtime instead of suspending motion analysis. Main-source
 OpenCV capture is demand-driven and stops after an idle
 period; continuous main recording is handled by its own FFmpeg process.
 

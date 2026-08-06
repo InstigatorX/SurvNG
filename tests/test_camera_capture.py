@@ -134,10 +134,47 @@ def test_latest_frame_is_copied_and_rejected_when_stale() -> None:
     assert second is not None
     assert int(second.image[0, 0, 0]) == 1
     assert second.captured_at_epoch == 1_700_000_000.0
+    status = service.status()["capture_stats"]["live"]
+    assert status["frame_copy_count"] == 2
+    assert status["frame_copy_bytes"] == source.nbytes * 2
     assert service.frame_ready("live") is True
     now[0] = 111.0
     assert service.latest("live") is None
     assert service.frame_ready("live") is False
+
+
+def test_latest_copy_does_not_hold_capture_lock_during_image_copy() -> None:
+    copy_entered = threading.Event()
+    release_copy = threading.Event()
+
+    class SlowCopyArray(np.ndarray):
+        def copy(self, *args, **kwargs):
+            copy_entered.set()
+            assert release_copy.wait(1.0)
+            return super().copy(*args, **kwargs)
+
+    service = _service()
+    with service._lock:
+        service._stop.clear()
+    slow = np.ones((20, 30, 3), dtype=np.uint8).view(SlowCopyArray)
+    assert service._publish_frame("live", slow)
+    reader = threading.Thread(target=service.latest, args=("live",))
+    reader.start()
+    assert copy_entered.wait(1.0)
+
+    publish_started = time.monotonic()
+    assert service._publish_frame(
+        "live",
+        np.zeros((20, 30, 3), dtype=np.uint8),
+    )
+    assert time.monotonic() - publish_started < 0.1
+
+    release_copy.set()
+    reader.join(timeout=1.0)
+    assert not reader.is_alive()
+    status = service.status()["capture_stats"]["live"]
+    assert status["frame_copy_count"] == 1
+    assert status["frame_copy_bytes"] == slow.nbytes
 
 
 def test_main_source_is_lazy_and_expires_after_demand_lease() -> None:

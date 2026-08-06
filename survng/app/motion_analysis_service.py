@@ -26,9 +26,10 @@ from .motion_decisions import (
     should_verify_suppression,
 )
 from .motion_events import MotionEventCoordinator, MotionTrigger
-from .motion_pipeline import MotionContext, MotionDebugSnapshotStore, MotionPipeline
+from .motion_pipeline import MotionDebugSnapshotStore
 
 LOGGER = logging.getLogger(__name__)
+CACHED_PREPROCESSOR_IMPLEMENTATION = "gray_blur"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,8 @@ class MotionAnalysisHooks:
     frame_analysis_required: Callable[[], bool]
     sample_fps: Callable[[], float]
     frame_width: Callable[[], int]
+    preprocessor_implementation: Callable[[], str]
+    observe_frame: Callable[[np.ndarray, float], None]
     motion_settings: Callable[[], tuple[str, str, int]]
     continuous_primary_required: Callable[[], bool]
     continuous_primary_due: Callable[[float, float], bool]
@@ -57,6 +60,7 @@ class MotionAnalysisHooks:
     set_last_motion_at: Callable[[str], None]
     increment_stat: Callable[[str, int], None]
     record_analysis_wait: Callable[[float], None]
+    reset_temporal_runtime: Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,15 @@ class MotionFrameSubmission:
     image: np.ndarray
     captured_at_epoch: float
     captured_at_monotonic: float
+    sequence: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalysisSlotWakeup:
+    """Mailbox signal emitted when a fair qualification slot becomes available."""
+
+
+ANALYSIS_SLOT_WAKEUP = _AnalysisSlotWakeup()
 
 
 class MotionAnalysisService:
@@ -80,7 +93,6 @@ class MotionAnalysisService:
         ring_size: int,
         queue_size: int,
         limiter: FairMotionAnalysisLimiter,
-        observation_pipeline: MotionPipeline,
         events: MotionEventCoordinator,
         visual_backup: VisualBackupCoordinator,
         audit_recorder: MotionAuditRecorder,
@@ -91,7 +103,6 @@ class MotionAnalysisService:
         self.frame_lock = frame_lock
         self.analysis_lock = analysis_lock
         self.limiter = limiter
-        self.observation_pipeline = observation_pipeline
         self.events = events
         self.visual_backup = visual_backup
         self.audit_recorder = audit_recorder
@@ -99,16 +110,21 @@ class MotionAnalysisService:
         self.hooks = hooks
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
-        self.processed_frames: deque[tuple[float, np.ndarray]] = deque(
-            maxlen=ring_size
-        )
-        self.queue: queue.Queue[float | MotionFrameSubmission | None] = queue.Queue(
+        self.processed_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+        self.queue: queue.Queue[
+            float | MotionFrameSubmission | _AnalysisSlotWakeup | None
+        ] = queue.Queue(
             maxsize=queue_size
         )
         self.thread: threading.Thread | None = None
         self.last_sample_clock = 0.0
         self.last_processed_at = 0.0
+        self.last_processed_sequence = 0
+        self._submission_sequence = 0
+        self._last_frame_epoch = 0.0
         self.primary_last_processed_at = 0.0
+        self._pending_analysis_at = 0.0
+        self._analysis_request_deferred = False
         self.last_continuous_result: MotionQualificationResult | None = None
         self.debug_last_run_clock = 0.0
         self._visual_lock = threading.Lock()
@@ -120,6 +136,8 @@ class MotionAnalysisService:
         self._telemetry: dict[str, Any] = {
             "mailbox_high_water": 0,
             "mailbox_replacements": 0,
+            "analysis_slot_deferrals": 0,
+            "clock_discontinuity_resets": 0,
             "raw_frames_submitted": 0,
             "frames_sampled": 0,
             "preprocess_count": 0,
@@ -136,6 +154,10 @@ class MotionAnalysisService:
             "analysis_cycle_total_ms": 0.0,
             "analysis_cycle_last_ms": 0.0,
             "analysis_cycle_max_ms": 0.0,
+            "qualification_count": 0,
+            "qualification_total_ms": 0.0,
+            "qualification_last_ms": 0.0,
+            "qualification_max_ms": 0.0,
             "copy_count": 0,
             "copy_bytes": 0,
             "copies_by_reason": {},
@@ -149,6 +171,7 @@ class MotionAnalysisService:
             "preprocess": deque(maxlen=600),
             "capture_to_analysis": deque(maxlen=600),
             "analysis_cycle": deque(maxlen=600),
+            "qualification": deque(maxlen=600),
         }
 
     def start(self, stop_event: threading.Event) -> None:
@@ -180,6 +203,7 @@ class MotionAnalysisService:
         with self._admission_lock:
             self._accepting_frames = False
             self._stop_requested.set()
+            self.limiter.cancel(self.camera_id)
             self.clear_queue()
             try:
                 self.queue.put_nowait(None)
@@ -204,6 +228,7 @@ class MotionAnalysisService:
                 return
 
     def reset(self) -> None:
+        self.limiter.cancel(self.camera_id)
         with self.frame_lock:
             self.frames.clear()
             self.color_frames.clear()
@@ -211,7 +236,11 @@ class MotionAnalysisService:
             self.last_sample_clock = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
+            self.last_processed_sequence = 0
+            self._last_frame_epoch = 0.0
             self.primary_last_processed_at = 0.0
+            self._pending_analysis_at = 0.0
+            self._analysis_request_deferred = False
         self.clear_queue()
         with self._visual_lock:
             self.visual_backup.reset()
@@ -229,12 +258,23 @@ class MotionAnalysisService:
         """Hand a stable raw frame to the analysis worker without preprocessing."""
         if not self._admit_frame(frame_clock, stop_event):
             return
+        safe_frame = frame
+        if frame.flags.writeable or not frame.flags.owndata:
+            safe_frame = frame.copy()
+            safe_frame.setflags(write=False)
+            self._record_copy(safe_frame, "submission_safety")
+        else:
+            safe_frame.setflags(write=False)
         frame_epoch = captured_at if captured_at is not None else time.time()
+        with self.frame_lock:
+            self._submission_sequence += 1
+            sequence = self._submission_sequence
         queued = self._enqueue_latest(
             MotionFrameSubmission(
-                image=frame,
+                image=safe_frame,
                 captured_at_epoch=frame_epoch,
                 captured_at_monotonic=frame_clock,
+                sequence=sequence,
             ),
             stop_event,
         )
@@ -257,8 +297,9 @@ class MotionAnalysisService:
             except queue.Full:
                 dropped = 0
                 try:
-                    self.queue.get_nowait()
-                    dropped += 1
+                    evicted = self.queue.get_nowait()
+                    if evicted is not ANALYSIS_SLOT_WAKEUP:
+                        dropped += 1
                 except queue.Empty:
                     pass
             try:
@@ -311,7 +352,8 @@ class MotionAnalysisService:
         self,
         frame: np.ndarray,
         frame_epoch: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+        self._reset_for_clock_discontinuity(frame_epoch)
         preprocess_started = time.monotonic()
         try:
             height, width = frame.shape[:2]
@@ -323,25 +365,57 @@ class MotionAnalysisService:
                 interpolation=cv2.INTER_AREA,
             )
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-            processed = preprocess_motion_frame(gray)
+            processed = (
+                preprocess_motion_frame(gray)
+                if self.hooks.preprocessor_implementation()
+                == CACHED_PREPROCESSOR_IMPLEMENTATION
+                else None
+            )
         except (cv2.error, ValueError):
             return None
         resized.setflags(write=False)
         gray.setflags(write=False)
-        processed.setflags(write=False)
+        if processed is not None:
+            processed.setflags(write=False)
         preprocess_ms = max(0.0, (time.monotonic() - preprocess_started) * 1000.0)
         with self._telemetry_lock:
             self._record_timing_locked("preprocess", preprocess_ms)
             self._telemetry["frames_sampled"] += 1
-            self._telemetry["derived_frame_count"] += 3
+            self._telemetry["derived_frame_count"] += 2 + int(processed is not None)
             self._telemetry["derived_frame_bytes"] += int(
-                resized.nbytes + gray.nbytes + processed.nbytes
+                resized.nbytes
+                + gray.nbytes
+                + (processed.nbytes if processed is not None else 0)
             )
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
             self.color_frames.append((frame_epoch, resized))
-            self.processed_frames.append((frame_epoch, processed))
+            if processed is not None:
+                self.processed_frames.append((frame_epoch, processed))
+            else:
+                self.processed_frames.clear()
         return gray, resized, processed
+
+    def _reset_for_clock_discontinuity(self, frame_epoch: float) -> None:
+        with self.frame_lock:
+            previous_epoch = self._last_frame_epoch
+            self._last_frame_epoch = frame_epoch
+            if previous_epoch <= 0.0 or frame_epoch > previous_epoch:
+                return
+            self.frames.clear()
+            self.color_frames.clear()
+            self.processed_frames.clear()
+            self.last_processed_at = 0.0
+            self.primary_last_processed_at = 0.0
+            self._pending_analysis_at = 0.0
+            self._analysis_request_deferred = False
+        self.limiter.cancel(self.camera_id)
+        with self._visual_lock:
+            self.visual_backup.reset()
+        self.events.reset_timebase()
+        with self._telemetry_lock:
+            self._telemetry["clock_discontinuity_resets"] += 1
+        self.hooks.reset_temporal_runtime()
 
     def samples(self) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
@@ -411,7 +485,12 @@ class MotionAnalysisService:
                 prefix: sorted(samples)
                 for prefix, samples in self._timing_samples_ms.items()
             }
-        for prefix in ("preprocess", "capture_to_analysis", "analysis_cycle"):
+        for prefix in (
+            "preprocess",
+            "capture_to_analysis",
+            "analysis_cycle",
+            "qualification",
+        ):
             count = int(result.get(f"{prefix}_count") or 0)
             total = float(result.get(f"{prefix}_total_ms") or 0.0)
             result[f"{prefix}_average_ms"] = round(total / count, 3) if count else 0.0
@@ -461,6 +540,17 @@ class MotionAnalysisService:
             reason_stats["bytes"] += int(frame.nbytes)
         return frame
 
+    def _record_copy(self, frame: np.ndarray, reason: str) -> None:
+        with self._telemetry_lock:
+            self._telemetry["copy_count"] += 1
+            self._telemetry["copy_bytes"] += int(frame.nbytes)
+            reason_stats = self._telemetry["copies_by_reason"].setdefault(
+                reason,
+                {"count": 0, "bytes": 0},
+            )
+            reason_stats["count"] += 1
+            reason_stats["bytes"] += int(frame.nbytes)
+
     @staticmethod
     def _percentile(values: list[float], percentile: float) -> float:
         if not values:
@@ -506,80 +596,98 @@ class MotionAnalysisService:
             self.visual_backup.reset_candidate()
 
     def run(self, stop_event: threading.Event) -> None:
+        try:
+            self._run(stop_event)
+        finally:
+            self.limiter.cancel(self.camera_id)
+            self._pending_analysis_at = 0.0
+            self._analysis_request_deferred = False
+
+    def _run(self, stop_event: threading.Event) -> None:
         self._stop_event = stop_event
         while not self._stopping():
             try:
                 work = self.queue.get(timeout=0.5)
             except queue.Empty:
+                if self._pending_analysis_at <= 0.0:
+                    continue
+                try:
+                    self._try_execute_pending_analysis()
+                except Exception:
+                    self.hooks.increment_stat("analysis_worker_errors", 1)
+                    LOGGER.exception(
+                        "deferred motion analysis cycle failed for %s",
+                        self.camera_id,
+                    )
                 continue
             if work is None or stop_event.is_set():
                 return
+            if work is ANALYSIS_SLOT_WAKEUP:
+                try:
+                    self._try_execute_pending_analysis()
+                except Exception:
+                    self.hooks.increment_stat("analysis_worker_errors", 1)
+                    LOGGER.exception(
+                        "woken motion analysis cycle failed for %s",
+                        self.camera_id,
+                    )
+                continue
             cycle_started = time.monotonic()
             try:
-                with self.limiter.acquire(
-                    self.camera_id,
-                    cancel_event=self._stop_requested,
-                ) as wait_seconds:
-                    if wait_seconds is None or self._stopping():
-                        return
-                    work = self._take_latest_pending(work)
-                    if work is None or self._stopping():
-                        return
-                    handoff_ms = (
-                        (time.monotonic() - work.captured_at_monotonic) * 1000.0
-                        if isinstance(work, MotionFrameSubmission)
-                        else (time.time() - work) * 1000.0
+                work = self._take_latest_pending(work)
+                if work is None or self._stopping():
+                    return
+                handoff_ms = (
+                    (time.monotonic() - work.captured_at_monotonic) * 1000.0
+                    if isinstance(work, MotionFrameSubmission)
+                    else (time.time() - work) * 1000.0
+                )
+                self._record_timing(
+                    "capture_to_analysis",
+                    max(0.0, handoff_ms),
+                )
+                sequence = 0
+                if isinstance(work, MotionFrameSubmission):
+                    prepared = self._preprocess_frame(
+                        work.image,
+                        work.captured_at_epoch,
                     )
-                    self.hooks.record_analysis_wait(
-                        max(0.0, wait_seconds * 1000.0)
-                    )
-                    self._record_timing(
-                        "capture_to_analysis",
-                        max(0.0, handoff_ms),
-                    )
-                    if isinstance(work, MotionFrameSubmission):
-                        prepared = self._preprocess_frame(
-                            work.image,
-                            work.captured_at_epoch,
-                        )
-                        if prepared is None:
-                            continue
-                        captured_at = work.captured_at_epoch
-                        frame = self._share_frame(
-                            prepared[0],
-                            "analysis_latest",
-                        )
-                    else:
-                        with self.frame_lock:
-                            if not self.frames:
-                                continue
-                            captured_at, frame = self.frames[-1]
-                            frame = self._share_frame(frame, "analysis_latest")
-                    if captured_at <= self.last_processed_at:
+                    if prepared is None:
                         continue
-                    self.last_processed_at = captured_at
-                    if self.observation_pipeline.handles_observation("frame"):
-                        observation = MotionContext(
-                            camera_id=self.camera_id,
-                            captured_at=captured_at,
-                            original_frame=frame,
-                            configuration={"observation_kind": "frame"},
-                            runtime=self.observation_pipeline.runtime,
-                        )
-                        self.observation_pipeline.process(observation)
-                    if self.hooks.continuous_primary_required() and (
-                        self.hooks.continuous_primary_due(
-                            captured_at,
-                            self.primary_last_processed_at,
-                        )
-                    ):
-                        self.hooks.execute_continuous(captured_at)
-                    elif (
-                        self.debug_store.enabled()
-                        and time.monotonic() - self.debug_last_run_clock >= 1.0
-                    ):
-                        self.debug_last_run_clock = time.monotonic()
-                        self.hooks.execute_debug_capture(captured_at)
+                    captured_at = work.captured_at_epoch
+                    sequence = work.sequence
+                    frame = self._share_frame(
+                        prepared[0],
+                        "analysis_latest",
+                    )
+                else:
+                    with self.frame_lock:
+                        if not self.frames:
+                            continue
+                        captured_at, frame = self.frames[-1]
+                        frame = self._share_frame(frame, "analysis_latest")
+                if sequence > 0:
+                    if sequence <= self.last_processed_sequence:
+                        continue
+                    self.last_processed_sequence = sequence
+                elif captured_at <= self.last_processed_at:
+                    continue
+                self.last_processed_at = captured_at
+                self.hooks.observe_frame(frame, captured_at)
+                if self.hooks.continuous_primary_required() and (
+                    self.hooks.continuous_primary_due(
+                        captured_at,
+                        self.primary_last_processed_at,
+                    )
+                ):
+                    self._pending_analysis_at = captured_at
+                    self._try_execute_pending_analysis()
+                elif (
+                    self.debug_store.enabled()
+                    and time.monotonic() - self.debug_last_run_clock >= 1.0
+                ):
+                    self.debug_last_run_clock = time.monotonic()
+                    self.hooks.execute_debug_capture(captured_at)
             except Exception:
                 self.hooks.increment_stat("analysis_worker_errors", 1)
                 LOGGER.exception("motion analysis cycle failed for %s", self.camera_id)
@@ -589,11 +697,63 @@ class MotionAnalysisService:
                     max(0.0, (time.monotonic() - cycle_started) * 1000.0),
                 )
 
+    def _try_execute_pending_analysis(self) -> bool:
+        captured_at = self._pending_analysis_at
+        if captured_at <= 0.0 or self._stopping():
+            return False
+        if not self.hooks.continuous_primary_required():
+            self._pending_analysis_at = 0.0
+            self._analysis_request_deferred = False
+            self.limiter.cancel(self.camera_id)
+            return False
+        with self.limiter.try_acquire(
+            self.camera_id,
+            on_available=self._wake_for_analysis_slot,
+        ) as wait_seconds:
+            if wait_seconds is None:
+                if not self._analysis_request_deferred:
+                    with self._telemetry_lock:
+                        self._telemetry["analysis_slot_deferrals"] += 1
+                    self._analysis_request_deferred = True
+                return False
+            self._analysis_request_deferred = False
+            self.hooks.record_analysis_wait(max(0.0, wait_seconds * 1000.0))
+            qualification_started = time.monotonic()
+            try:
+                self.hooks.execute_continuous(captured_at)
+            except BaseException:
+                if self._pending_analysis_at == captured_at:
+                    self._pending_analysis_at = 0.0
+                self._analysis_request_deferred = False
+                raise
+            finally:
+                self._record_timing(
+                    "qualification",
+                    max(
+                        0.0,
+                        (time.monotonic() - qualification_started) * 1000.0,
+                    ),
+                )
+            if self._pending_analysis_at == captured_at:
+                self._pending_analysis_at = 0.0
+            self._analysis_request_deferred = False
+            return True
+
+    def _wake_for_analysis_slot(self) -> None:
+        if self._stopping():
+            return
+        try:
+            self.queue.put_nowait(ANALYSIS_SLOT_WAKEUP)
+        except queue.Full:
+            # A raw frame already in the latest-only mailbox will wake the
+            # worker and retry the same pending qualification request.
+            return
+
     def _take_latest_pending(
         self,
         work: float | MotionFrameSubmission,
     ) -> float | MotionFrameSubmission | None:
-        """Replace work held during limiter wait with the newest pending frame."""
+        """Replace queued work with the newest pending capture."""
         superseded = 0
         while True:
             try:
@@ -602,6 +762,8 @@ class MotionAnalysisService:
                 break
             if candidate is None:
                 return None
+            if candidate is ANALYSIS_SLOT_WAKEUP:
+                continue
             work = candidate
             superseded += 1
         if superseded:
@@ -654,6 +816,11 @@ class MotionAnalysisService:
                     capture_debug=self.debug_store.enabled(),
                     include_telemetry=False,
                     processed_frames=cached_processed or None,
+                    processed_frame_implementation=(
+                        CACHED_PREPROCESSOR_IMPLEMENTATION
+                        if cached_processed
+                        else ""
+                    ),
                 )
         except Exception as error:
             LOGGER.warning(

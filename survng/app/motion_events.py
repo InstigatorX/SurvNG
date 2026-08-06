@@ -389,12 +389,16 @@ class MotionEventCoordinator:
             }
 
     def _record_enqueue(self, *, evicted: int = 0) -> None:
+        # qsize() is an observational value because Queue owns its own lock and
+        # the consumer may drain immediately after admission. A successful
+        # enqueue nevertheless establishes a minimum sampled depth of one.
+        observed_depth = max(1, self.queue.qsize())
         with self._lock:
             self._runtime_metrics["enqueued"] += 1
             self._runtime_metrics["evicted"] += max(0, evicted)
             self._runtime_metrics["queue_high_water"] = max(
                 self._runtime_metrics["queue_high_water"],
-                self.queue.qsize(),
+                observed_depth,
             )
 
     def _record_rejected(self, *, evicted: int = 0) -> None:
@@ -491,6 +495,13 @@ class MotionEventCoordinator:
         with self._lock:
             self.active_triggers = None
             self.adaptive_trigger_pending = False
+            self.adaptive_last_completed_at = 0.0
+            self.priority_motion_times.clear()
+            self.camera_motion_times.clear()
+
+    def reset_timebase(self) -> None:
+        """Discard wall-clock histories without disturbing queued work."""
+        with self._lock:
             self.adaptive_last_completed_at = 0.0
             self.priority_motion_times.clear()
             self.camera_motion_times.clear()

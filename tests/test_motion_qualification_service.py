@@ -120,6 +120,50 @@ def test_runtime_reset_clears_all_pipeline_state_and_fusion_clock() -> None:
     assert service._fusion_last_at == 0.0
 
 
+def test_observation_reset_waits_for_inflight_frame_observation() -> None:
+    service = _service()
+    service.observation_pipeline.handles_observation.return_value = True
+    processing = threading.Event()
+    release = threading.Event()
+    reset_called = threading.Event()
+    reset_order: list[str] = []
+
+    def reset_observation_runtime() -> None:
+        reset_order.append("runtime")
+        reset_called.set()
+
+    service.observation_pipeline.runtime.reset.side_effect = reset_observation_runtime
+
+    def process(_context: object) -> None:
+        processing.set()
+        assert release.wait(timeout=1.0)
+
+    service.observation_pipeline.process.side_effect = process
+    observer = threading.Thread(
+        target=service.observe_frame,
+        args=(np.zeros((8, 8), dtype=np.uint8), 100.0),
+    )
+    resetter = threading.Thread(
+        target=lambda: service.reset_runtime(
+            clear_observation_evidence=lambda: reset_order.append("evidence")
+        )
+    )
+
+    observer.start()
+    assert processing.wait(timeout=1.0)
+    resetter.start()
+    assert not reset_called.wait(timeout=0.05)
+    assert reset_order == []
+    release.set()
+    observer.join(timeout=1.0)
+    resetter.join(timeout=1.0)
+
+    assert not observer.is_alive()
+    assert not resetter.is_alive()
+    service.observation_pipeline.runtime.reset.assert_called_once_with()
+    assert reset_order == ["evidence", "runtime"]
+
+
 def test_pipeline_rejects_misaligned_preprocessed_derivatives() -> None:
     service = _service()
     frames = [np.zeros((10, 10), dtype=np.uint8) for _index in range(2)]
@@ -131,3 +175,53 @@ def test_pipeline_rejects_misaligned_preprocessed_derivatives() -> None:
             10.0,
             processed_frames=[frames[0]],
         )
+
+
+def test_cached_derivatives_are_used_only_for_matching_preprocessor() -> None:
+    service = _service()
+    service.qualification_pipeline.stage_configuration = [
+        {"stage_id": "preprocess", "implementation": "future_gpu"}
+    ]
+    service.qualification_pipeline.process.side_effect = lambda context: context
+    frames = [np.zeros((10, 10), dtype=np.uint8) for _index in range(2)]
+    cached = [np.ones((10, 10), dtype=np.uint8) for _index in range(2)]
+
+    service.run_pipeline(
+        frames,
+        "balanced",
+        10.0,
+        isolated=False,
+        capture_debug=False,
+        include_telemetry=False,
+        processed_frames=cached,
+        processed_frame_implementation="gray_blur",
+    )
+
+    context = service.qualification_pipeline.process.call_args.args[0]
+    assert context.processed_frame_history == ()
+    assert context.processed_frame is None
+
+
+def test_cached_derivatives_reach_matching_configured_preprocessor() -> None:
+    service = _service()
+    service.qualification_pipeline.stage_configuration = [
+        {"stage_id": "preprocess", "implementation": "gray_blur"}
+    ]
+    service.qualification_pipeline.process.side_effect = lambda context: context
+    frames = [np.zeros((10, 10), dtype=np.uint8) for _index in range(2)]
+    cached = [np.ones((10, 10), dtype=np.uint8) for _index in range(2)]
+
+    service.run_pipeline(
+        frames,
+        "balanced",
+        10.0,
+        isolated=False,
+        capture_debug=False,
+        include_telemetry=False,
+        processed_frames=cached,
+        processed_frame_implementation="gray_blur",
+    )
+
+    context = service.qualification_pipeline.process.call_args.args[0]
+    assert context.processed_frame_history == tuple(cached)
+    assert context.processed_frame is cached[-1]

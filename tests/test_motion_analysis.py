@@ -113,6 +113,73 @@ class FairMotionAnalysisLimiterTest(unittest.TestCase):
         self.assertIn(("first", None), results)
         self.assertTrue(any(name == "second" and waited is not None for name, waited in results))
 
+    def test_nonblocking_request_remains_pending_and_preserves_fair_order(self) -> None:
+        limiter = FairMotionAnalysisLimiter(1)
+        with limiter.acquire("holder"):
+            with limiter.try_acquire("gate") as waited:
+                self.assertIsNone(waited)
+            with limiter.try_acquire("foyer") as waited:
+                self.assertIsNone(waited)
+            self.assertEqual(limiter.status()["pending"], 2)
+
+        with limiter.try_acquire("gate") as waited:
+            self.assertIsNotNone(waited)
+        with limiter.try_acquire("foyer") as waited:
+            self.assertIsNotNone(waited)
+        self.assertEqual(limiter.status(), {"capacity": 1, "active": 0, "pending": 0})
+
+    def test_nonblocking_pending_request_can_be_cancelled(self) -> None:
+        limiter = FairMotionAnalysisLimiter(1)
+        with limiter.acquire("holder"):
+            with limiter.try_acquire("gate") as waited:
+                self.assertIsNone(waited)
+            limiter.cancel("gate")
+            self.assertEqual(limiter.status()["pending"], 0)
+
+    def test_nonblocking_waiter_is_woken_immediately_when_slot_is_released(self) -> None:
+        limiter = FairMotionAnalysisLimiter(1)
+        available = threading.Event()
+
+        with limiter.acquire("holder"):
+            with limiter.try_acquire(
+                "gate",
+                on_available=available.set,
+            ) as waited:
+                self.assertIsNone(waited)
+            self.assertFalse(available.is_set())
+
+        self.assertTrue(available.wait(timeout=0.05))
+        with limiter.try_acquire("gate") as waited:
+            self.assertIsNotNone(waited)
+
+    def test_capacity_two_wakes_waiters_in_acquisition_order(self) -> None:
+        limiter = FairMotionAnalysisLimiter(2)
+        gate_available = threading.Event()
+        foyer_available = threading.Event()
+
+        with limiter.acquire("holder-1"):
+            with limiter.acquire("holder-2"):
+                with limiter.try_acquire(
+                    "gate",
+                    on_available=gate_available.set,
+                ) as waited:
+                    self.assertIsNone(waited)
+                with limiter.try_acquire(
+                    "foyer",
+                    on_available=foyer_available.set,
+                ) as waited:
+                    self.assertIsNone(waited)
+
+        self.assertTrue(gate_available.is_set())
+        self.assertFalse(foyer_available.is_set())
+        with limiter.try_acquire("gate") as gate_waited:
+            self.assertIsNotNone(gate_waited)
+            self.assertTrue(foyer_available.wait(timeout=0.05))
+            with limiter.try_acquire("foyer") as foyer_waited:
+                self.assertIsNotNone(foyer_waited)
+
+        self.assertEqual(limiter.status(), {"capacity": 2, "active": 0, "pending": 0})
+
 
 if __name__ == "__main__":
     unittest.main()
