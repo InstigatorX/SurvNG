@@ -13,7 +13,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from .motion import MotionQualificationResult
+from .motion import MotionQualificationResult, preprocess_motion_frame
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_coordinator import (
     VisualBackupAction,
@@ -99,6 +99,9 @@ class MotionAnalysisService:
         self.hooks = hooks
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+        self.processed_frames: deque[tuple[float, np.ndarray]] = deque(
+            maxlen=ring_size
+        )
         self.queue: queue.Queue[float | MotionFrameSubmission | None] = queue.Queue(
             maxsize=queue_size
         )
@@ -136,6 +139,11 @@ class MotionAnalysisService:
             "copy_count": 0,
             "copy_bytes": 0,
             "copies_by_reason": {},
+            "shared_read_count": 0,
+            "shared_read_bytes": 0,
+            "shared_reads_by_reason": {},
+            "cached_derivative_reuse_count": 0,
+            "cached_derivative_reuse_bytes": 0,
         }
         self._timing_samples_ms: dict[str, deque[float]] = {
             "preprocess": deque(maxlen=600),
@@ -199,6 +207,7 @@ class MotionAnalysisService:
         with self.frame_lock:
             self.frames.clear()
             self.color_frames.clear()
+            self.processed_frames.clear()
             self.last_sample_clock = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
@@ -302,7 +311,7 @@ class MotionAnalysisService:
         self,
         frame: np.ndarray,
         frame_epoch: float,
-    ) -> tuple[np.ndarray, np.ndarray] | None:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         preprocess_started = time.monotonic()
         try:
             height, width = frame.shape[:2]
@@ -314,32 +323,37 @@ class MotionAnalysisService:
                 interpolation=cv2.INTER_AREA,
             )
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            processed = preprocess_motion_frame(gray)
         except (cv2.error, ValueError):
             return None
+        resized.setflags(write=False)
+        gray.setflags(write=False)
+        processed.setflags(write=False)
         preprocess_ms = max(0.0, (time.monotonic() - preprocess_started) * 1000.0)
         with self._telemetry_lock:
             self._record_timing_locked("preprocess", preprocess_ms)
             self._telemetry["frames_sampled"] += 1
-            self._telemetry["derived_frame_count"] += 2
+            self._telemetry["derived_frame_count"] += 3
             self._telemetry["derived_frame_bytes"] += int(
-                resized.nbytes + gray.nbytes
+                resized.nbytes + gray.nbytes + processed.nbytes
             )
         with self.frame_lock:
             self.frames.append((frame_epoch, gray))
             self.color_frames.append((frame_epoch, resized))
-        return gray, resized
+            self.processed_frames.append((frame_epoch, processed))
+        return gray, resized, processed
 
     def samples(self) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
             return [
-                (timestamp, self._copy_frame(frame, "samples"))
+                (timestamp, self._share_frame(frame, "samples"))
                 for timestamp, frame in self.frames
             ]
 
     def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
             return [
-                (timestamp, self._copy_frame(frame, "samples_since"))
+                (timestamp, self._share_frame(frame, "samples_since"))
                 for timestamp, frame in self.frames
                 if timestamp >= captured_at
             ]
@@ -351,6 +365,12 @@ class MotionAnalysisService:
             color_buffered_frames = len(self.color_frames)
             color_frame_shape = (
                 list(self.color_frames[-1][1].shape) if self.color_frames else None
+            )
+            processed_buffered_frames = len(self.processed_frames)
+            processed_frame_shape = (
+                list(self.processed_frames[-1][1].shape)
+                if self.processed_frames
+                else None
             )
             last_result = (
                 self.last_continuous_result.as_dict()
@@ -364,6 +384,8 @@ class MotionAnalysisService:
             "frame_shape": frame_shape,
             "color_buffered_frames": color_buffered_frames,
             "color_frame_shape": color_frame_shape,
+            "processed_buffered_frames": processed_buffered_frames,
+            "processed_frame_shape": processed_frame_shape,
             "continuous_last_result": last_result,
             "telemetry": self.telemetry_snapshot(),
         }
@@ -425,19 +447,19 @@ class MotionAnalysisService:
         )
         self._timing_samples_ms[prefix].append(duration_ms)
 
-    def _copy_frame(self, frame: np.ndarray, reason: str) -> np.ndarray:
-        copied = frame.copy()
+    def _share_frame(self, frame: np.ndarray, reason: str) -> np.ndarray:
+        frame.setflags(write=False)
         with self._telemetry_lock:
-            self._telemetry["copy_count"] += 1
-            self._telemetry["copy_bytes"] += int(copied.nbytes)
-            copies_by_reason = self._telemetry["copies_by_reason"]
-            reason_stats = copies_by_reason.setdefault(
+            self._telemetry["shared_read_count"] += 1
+            self._telemetry["shared_read_bytes"] += int(frame.nbytes)
+            reads_by_reason = self._telemetry["shared_reads_by_reason"]
+            reason_stats = reads_by_reason.setdefault(
                 reason,
                 {"count": 0, "bytes": 0},
             )
             reason_stats["count"] += 1
-            reason_stats["bytes"] += int(copied.nbytes)
-        return copied
+            reason_stats["bytes"] += int(frame.nbytes)
+        return frame
 
     @staticmethod
     def _percentile(values: list[float], percentile: float) -> float:
@@ -523,7 +545,7 @@ class MotionAnalysisService:
                         if prepared is None:
                             continue
                         captured_at = work.captured_at_epoch
-                        frame = self._copy_frame(
+                        frame = self._share_frame(
                             prepared[0],
                             "analysis_latest",
                         )
@@ -532,7 +554,7 @@ class MotionAnalysisService:
                             if not self.frames:
                                 continue
                             captured_at, frame = self.frames[-1]
-                            frame = self._copy_frame(frame, "analysis_latest")
+                            frame = self._share_frame(frame, "analysis_latest")
                     if captured_at <= self.last_processed_at:
                         continue
                     self.last_processed_at = captured_at
@@ -597,11 +619,30 @@ class MotionAnalysisService:
                 else list(self.frames)[-3:]
             )
             samples = [
-                (timestamp, self._copy_frame(frame, "continuous_samples"))
+                (timestamp, self._share_frame(frame, "continuous_samples"))
                 for timestamp, frame in source_samples
             ]
+            processed_by_timestamp = dict(self.processed_frames)
+            cached_processed = [
+                processed_by_timestamp[timestamp]
+                for timestamp, _frame in samples
+                if timestamp in processed_by_timestamp
+            ]
+            if len(cached_processed) != len(samples):
+                cached_processed = []
+            else:
+                for frame in cached_processed:
+                    frame.setflags(write=False)
         if len(samples) < 2:
             return
+        if cached_processed:
+            with self._telemetry_lock:
+                self._telemetry["cached_derivative_reuse_count"] += len(
+                    cached_processed
+                )
+                self._telemetry["cached_derivative_reuse_bytes"] += sum(
+                    int(frame.nbytes) for frame in cached_processed
+                )
         try:
             with self.analysis_lock:
                 result = self.hooks.run_pipeline(
@@ -612,6 +653,7 @@ class MotionAnalysisService:
                     isolated=False,
                     capture_debug=self.debug_store.enabled(),
                     include_telemetry=False,
+                    processed_frames=cached_processed or None,
                 )
         except Exception as error:
             LOGGER.warning(

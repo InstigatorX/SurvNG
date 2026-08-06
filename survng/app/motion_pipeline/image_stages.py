@@ -32,6 +32,9 @@ class MotionFramePreprocessorStage:
         return self._stage_id
 
     def process(self, context: MotionContext) -> MotionContext:
+        if context.processed_frame_history:
+            context.processed_frame = context.processed_frame_history[-1]
+            return context
         prepared = preprocess_motion_frames(list(context.frame_history))
         context.processed_frame_history = tuple(prepared)
         context.processed_frame = prepared[-1] if prepared else None

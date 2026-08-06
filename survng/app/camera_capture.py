@@ -31,11 +31,15 @@ LOGGER = logging.getLogger(__name__)
 
 
 class CaptureHandle(Protocol):
+    """Native decoder handle whose successful reads transfer frame ownership."""
+
     def is_opened(self) -> bool: ...
 
     def set_buffer_size(self, size: int) -> None: ...
 
-    def read(self) -> tuple[bool, np.ndarray | None]: ...
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        """Return a frame the caller exclusively owns and may retain."""
+        ...
 
     def close(self) -> None: ...
 
@@ -144,6 +148,8 @@ class OpenCvFfmpegCaptureBackend:
 
 @dataclass(frozen=True, slots=True)
 class CapturedFrame:
+    """Timestamped frame; shared instances expose a read-only image array."""
+
     source: str
     image: np.ndarray
     captured_at_epoch: float
@@ -224,6 +230,8 @@ class CameraCaptureService:
                 "close_failures": 0,
                 "frame_copy_count": 0,
                 "frame_copy_bytes": 0,
+                "frame_transfer_count": 0,
+                "frame_transfer_bytes": 0,
                 "observer_calls": 0,
                 "observer_total_ms": 0.0,
                 "observer_last_ms": 0.0,
@@ -603,7 +611,11 @@ class CameraCaptureService:
             ):
                 return False
             self._sequence += 1
-            stored_image = image.copy()
+            # CaptureHandle.read() transfers ownership. Store that allocation
+            # directly and make shared access read-only; latest() remains the
+            # explicit writable-copy boundary for independent consumers.
+            stored_image = image
+            stored_image.setflags(write=False)
             frame = CapturedFrame(
                 source=source,
                 image=stored_image,
@@ -621,8 +633,8 @@ class CameraCaptureService:
             }
             self._frame_times[source].append(captured_at_monotonic)
             self._stats[source]["frames_received"] += 1
-            self._stats[source]["frame_copy_count"] += 1
-            self._stats[source]["frame_copy_bytes"] += int(stored_image.nbytes)
+            self._stats[source]["frame_transfer_count"] += 1
+            self._stats[source]["frame_transfer_bytes"] += int(stored_image.nbytes)
         if self._frame_observer is not None:
             observer_started = self._monotonic_clock()
             try:

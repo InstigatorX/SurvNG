@@ -1010,6 +1010,7 @@ class CameraWorker:
         isolated: bool = True,
         capture_debug: bool = True,
         include_telemetry: bool = True,
+        processed_frames: list[np.ndarray] | None = None,
     ) -> MotionQualificationResult:
         return self.motion_qualification.run_pipeline(
             frames,
@@ -1019,6 +1020,7 @@ class CameraWorker:
             isolated=isolated,
             capture_debug=capture_debug,
             include_telemetry=include_telemetry,
+            processed_frames=processed_frames,
         )
 
     def set_motion_debug_enabled(self, enabled: bool) -> None:

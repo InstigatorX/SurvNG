@@ -550,7 +550,12 @@ class MotionQualificationService:
         isolated: bool = True,
         capture_debug: bool = True,
         include_telemetry: bool = True,
+        processed_frames: list[np.ndarray] | None = None,
     ) -> MotionQualificationResult:
+        if processed_frames is not None and len(processed_frames) != len(frames):
+            raise ValueError(
+                "processed_frames must contain one derivative for each source frame"
+            )
         mode, _resolved_sensitivity, frame_width = self.settings()
         if isolated:
             with self.analysis_lock:
@@ -565,6 +570,8 @@ class MotionQualificationService:
             original_frame=frames[-1] if frames else None,
             frame_history=tuple(frames),
             frame_timestamps=tuple(frame_timestamps or ()),
+            processed_frame_history=tuple(processed_frames or ()),
+            processed_frame=(processed_frames[-1] if processed_frames else None),
             configuration={
                 **self.config.model_dump(mode="python"),
                 "camera_id": self.camera.id,

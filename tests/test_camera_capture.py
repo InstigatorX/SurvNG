@@ -5,6 +5,7 @@ import time
 from collections import deque
 
 import numpy as np
+import pytest
 
 from survng.app.camera_capture import (
     CameraCaptureService,
@@ -218,8 +219,10 @@ def test_frame_observer_failure_does_not_reconnect_healthy_source() -> None:
 
     assert status["capture_stats"]["live"]["frames_received"] >= 2
     assert status["capture_stats"]["live"]["starts"] == 1
-    assert status["capture_stats"]["live"]["frame_copy_count"] >= 2
-    assert status["capture_stats"]["live"]["frame_copy_bytes"] >= 1200
+    assert status["capture_stats"]["live"]["frame_copy_count"] == 0
+    assert status["capture_stats"]["live"]["frame_copy_bytes"] == 0
+    assert status["capture_stats"]["live"]["frame_transfer_count"] >= 2
+    assert status["capture_stats"]["live"]["frame_transfer_bytes"] >= 1200
     assert status["capture_stats"]["live"]["observer_calls"] >= 2
     assert status["capture_stats"]["live"]["observer_p99_ms"] >= 0.0
 
@@ -303,12 +306,20 @@ def test_frame_observer_receives_stable_stored_frame_ownership() -> None:
     source = np.ones((10, 20, 3), dtype=np.uint8)
 
     assert service._publish_frame("live", source)
-    source.fill(9)
 
     assert len(observed) == 1
     assert int(observed[0].image[0, 0, 0]) == 1
+    assert observed[0].image is source
+    assert not observed[0].image.flags.writeable
+    with pytest.raises(ValueError):
+        source.fill(9)
     with service._lock:
         assert observed[0].image is service._frames["live"].image
+    independent = service.latest("live")
+    assert independent is not None
+    assert independent.image.flags.writeable
+    independent.image.fill(7)
+    assert int(observed[0].image[0, 0, 0]) == 1
 
 
 def test_repeated_start_stop_leaves_no_capture_generations() -> None:

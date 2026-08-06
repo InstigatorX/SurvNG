@@ -108,11 +108,15 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert service.frames[-1][0] == 100.0
     assert service.frames[-1][1].shape == (90, 320)
     assert service.color_frames[-1][1].shape == (90, 320, 3)
+    assert service.processed_frames[-1][1].shape == (90, 320)
+    assert not service.frames[-1][1].flags.writeable
+    assert not service.color_frames[-1][1].flags.writeable
+    assert not service.processed_frames[-1][1].flags.writeable
     assert service.queue.get_nowait() == 100.0
     telemetry = service.telemetry_snapshot()
     assert telemetry["frames_sampled"] == 1
-    assert telemetry["derived_frame_count"] == 2
-    assert telemetry["derived_frame_bytes"] == 90 * 320 * 4
+    assert telemetry["derived_frame_count"] == 3
+    assert telemetry["derived_frame_bytes"] == 90 * 320 * 5
     assert telemetry["preprocess_count"] == 1
 
 
@@ -271,8 +275,9 @@ def test_worker_loop_uses_injected_execution_boundary_and_stops_cleanly() -> Non
     telemetry = service.telemetry_snapshot()
     assert telemetry["capture_to_analysis_count"] == 1
     assert telemetry["analysis_cycle_count"] == 1
-    assert telemetry["copy_count"] == 1
-    assert telemetry["copies_by_reason"]["analysis_latest"]["count"] == 1
+    assert telemetry["copy_count"] == 0
+    assert telemetry["shared_read_count"] == 1
+    assert telemetry["shared_reads_by_reason"]["analysis_latest"]["count"] == 1
 
 
 def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
@@ -291,11 +296,16 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
         )
     )
     with service.frame_lock:
+        first_processed = np.zeros((90, 160), dtype=np.uint8)
+        second_processed = np.zeros((90, 160), dtype=np.uint8)
         service.color_frames.extend(
             [
                 (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
                 (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
             ]
+        )
+        service.processed_frames.extend(
+            [(99.5, first_processed), (100.0, second_processed)]
         )
 
     service.analyze_continuous(100.0)
@@ -307,6 +317,12 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
     set_last_motion_at.assert_called_once()
     publish_event.assert_called_once()
     assert service.events.adaptive_trigger_pending
+    cached = run_pipeline.call_args.kwargs["processed_frames"]
+    assert cached[0] is first_processed
+    assert cached[1] is second_processed
+    telemetry = service.telemetry_snapshot()
+    assert telemetry["cached_derivative_reuse_count"] == 2
+    assert telemetry["cached_derivative_reuse_bytes"] == 90 * 160 * 2
 
 
 def test_request_stop_replaces_pending_work_with_sentinel() -> None:

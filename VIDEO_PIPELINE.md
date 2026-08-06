@@ -153,9 +153,15 @@ paths.
 
 ## 2. Live Capture And Browser Delivery
 
-`CameraWorker` keeps the live source open through OpenCV/FFmpeg. It retains the
-latest frame for snapshots and MJPEG while sampling a separate grayscale motion
-ring. Main-source OpenCV capture is demand-driven and stops after an idle
+`CameraWorker` keeps the live source open through OpenCV/FFmpeg. A successful
+capture read transfers exclusive ownership of its NumPy buffer to the capture
+service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
+motion observers share that buffer; only consumers that explicitly request a
+writable latest frame receive a copy. Motion sampling produces immutable color,
+grayscale, and Gaussian-preprocessed derivatives once per admitted frame. The
+motion ring shares those derivatives across overlapping continuous-analysis
+windows, avoiding repeated frame copies and repeated preprocessing. Main-source
+OpenCV capture is demand-driven and stops after an idle
 period; continuous main recording is handled by its own FFmpeg process.
 
 Browser live-view modes currently include:

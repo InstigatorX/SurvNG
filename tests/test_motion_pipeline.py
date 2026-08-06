@@ -1233,6 +1233,31 @@ class MotionPipelineTest(unittest.TestCase):
                 "scoring",
             ],
         )
+
+    def test_modular_pipeline_reuses_preprocessed_frame_derivatives(self) -> None:
+        frames = [np.zeros((90, 160), dtype=np.uint8) for _index in range(3)]
+        prepared = preprocess_motion_frames(frames)
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "gate",
+            default_motion_stage_configs(),
+        )
+        context = MotionContext(
+            camera_id="gate",
+            captured_at=10.0,
+            original_frame=frames[-1],
+            frame_history=tuple(frames),
+            processed_frame_history=tuple(prepared),
+            processed_frame=prepared[-1],
+            configuration={"sensitivity": "balanced"},
+            runtime=pipeline.runtime,
+        )
+
+        result = pipeline.process(context)
+
+        self.assertEqual(len(result.processed_frame_history), 3)
+        for actual, expected in zip(result.processed_frame_history, prepared):
+            self.assertIs(actual, expected)
+        self.assertIs(result.processed_frame, prepared[-1])
         self.assertIsNone(result.decision)
 
 

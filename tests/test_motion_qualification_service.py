@@ -3,6 +3,9 @@ from __future__ import annotations
 import threading
 from unittest.mock import Mock
 
+import numpy as np
+import pytest
+
 from survng.app.config import CameraConfig, MotionQualificationConfig
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
@@ -115,3 +118,16 @@ def test_runtime_reset_clears_all_pipeline_state_and_fusion_clock() -> None:
     service.observation_pipeline.runtime.reset.assert_called_once_with()
     service.fusion_pipeline.runtime.reset.assert_called_once_with()
     assert service._fusion_last_at == 0.0
+
+
+def test_pipeline_rejects_misaligned_preprocessed_derivatives() -> None:
+    service = _service()
+    frames = [np.zeros((10, 10), dtype=np.uint8) for _index in range(2)]
+
+    with pytest.raises(ValueError, match="one derivative for each source frame"):
+        service.run_pipeline(
+            frames,
+            "balanced",
+            10.0,
+            processed_frames=[frames[0]],
+        )
