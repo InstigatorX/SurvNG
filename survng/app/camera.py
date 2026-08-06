@@ -28,8 +28,8 @@ from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
 from .motion import MotionQualificationResult
 from .motion_analysis import FairMotionAnalysisLimiter
+from .motion_analysis_service import MotionAnalysisHooks, MotionAnalysisService
 from .motion_coordinator import (
-    VisualBackupAction,
     VisualBackupCoordinator,
     VisualBackupPolicy,
 )
@@ -113,7 +113,6 @@ class CameraWorker:
             CaptureOpenLimiter()
         )
         self.motion_debug = MotionDebugSnapshotStore()
-        self._motion_debug_last_run = 0.0
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
@@ -161,16 +160,6 @@ class CameraWorker:
                 * (self.motion_config.window_seconds + self.motion_config.post_trigger_seconds + 3.0)
             ),
         )
-        self._motion_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
-        self._motion_color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
-        self._motion_last_sample = 0.0
-        self._motion_last_continuous_result: MotionQualificationResult | None = None
-        self._motion_analysis_last_processed_at = 0.0
-        self._motion_primary_last_processed_at = 0.0
-        self._motion_analysis_queue: queue.Queue[float | None] = queue.Queue(
-            maxsize=MOTION_ANALYSIS_QUEUE_SIZE
-        )
-        self._motion_analysis_thread: threading.Thread | None = None
         self.motion_events = MotionEventCoordinator(
             queue_size=MOTION_QUEUE_SIZE,
             retry_limit=MOTION_EVENT_MAX_RETRIES,
@@ -275,6 +264,78 @@ class CameraWorker:
                 ),
             ),
         )
+        self.motion_analysis = MotionAnalysisService(
+            camera_id=camera.id,
+            frame_lock=self._frame_lock,
+            analysis_lock=self._motion_analysis_lock,
+            ring_size=ring_size,
+            queue_size=MOTION_ANALYSIS_QUEUE_SIZE,
+            limiter=self.motion_analysis_limiter,
+            observation_pipeline=self.motion_observation_pipeline,
+            events=self.motion_events,
+            visual_backup=self.visual_backup,
+            audit_recorder=self.motion_decision_handler,
+            debug_store=self.motion_debug,
+            hooks=MotionAnalysisHooks(
+                frame_analysis_required=lambda: self._frame_motion_analysis_required(),
+                sample_fps=lambda: self.motion_config.sample_fps,
+                frame_width=lambda: self._motion_settings()[2],
+                motion_settings=lambda: self._motion_settings(),
+                continuous_primary_required=(
+                    lambda: self._continuous_primary_analysis_required()
+                ),
+                continuous_primary_due=(
+                    lambda captured_at, last_processed_at: (
+                        self._continuous_primary_analysis_due(
+                            captured_at,
+                            last_processed_at=last_processed_at,
+                        )
+                    )
+                ),
+                execute_continuous=(
+                    lambda captured_at: self._analyze_continuous_motion(captured_at)
+                ),
+                execute_debug_capture=(
+                    lambda captured_at: self._capture_motion_debug(captured_at)
+                ),
+                adaptive_rearm_seconds=lambda: self._adaptive_rearm_seconds(),
+                priority_dedup_seconds=lambda: self._priority_dedup_seconds(),
+                run_pipeline=lambda *args, **kwargs: self._run_motion_pipeline(
+                    *args, **kwargs
+                ),
+                illumination_filter_enabled=(
+                    lambda: self._illumination_filter_enabled()
+                ),
+                trigger_mode=lambda: self._trigger_mode(),
+                detection_enabled=lambda: self._detection_enabled,
+                with_source_evidence=lambda *args, **kwargs: self._with_source_evidence(
+                    *args, **kwargs
+                ),
+                visual_backup_settings=lambda: self._visual_backup_settings(),
+                visual_backup_policy=lambda: self._visual_backup_policy(),
+                suppression_verification_rate=(
+                    lambda: self._suppression_verification_rate()
+                ),
+                visual_backup_warmup_seconds=(
+                    lambda: self.motion_config.visual_backup_warmup_seconds
+                ),
+                sample_rejected_motion=(
+                    lambda event_at, result: self._sample_rejected_motion(
+                        event_at, result
+                    )
+                ),
+                publish_event=lambda event_type, payload: self._publish_event_safely(
+                    event_type, payload
+                ),
+                set_last_motion_at=lambda value: self._set_last_motion_at(value),
+                increment_stat=lambda name, amount: self._increment_motion_stat(
+                    name, amount
+                ),
+                record_analysis_wait=(
+                    lambda wait_ms: self._record_analysis_wait(wait_ms)
+                ),
+            ),
+        )
         self.last_motion_at = ""
         self._detection_enabled = True
         self.capture = CameraCaptureService(
@@ -346,25 +407,76 @@ class CameraWorker:
     def _camera_motion_times(self) -> deque[float]:
         return self.motion_events.camera_motion_times
 
+    @property
+    def _motion_frames(self) -> deque[tuple[float, np.ndarray]]:
+        return self.motion_analysis.frames
+
+    @property
+    def _motion_color_frames(self) -> deque[tuple[float, np.ndarray]]:
+        return self.motion_analysis.color_frames
+
+    @property
+    def _motion_analysis_queue(self) -> queue.Queue[float | None]:
+        return self.motion_analysis.queue
+
+    @property
+    def _motion_analysis_thread(self) -> threading.Thread | None:
+        return self.motion_analysis.thread
+
+    @_motion_analysis_thread.setter
+    def _motion_analysis_thread(self, value: threading.Thread | None) -> None:
+        self.motion_analysis.thread = value
+
+    @property
+    def _motion_last_sample(self) -> float:
+        return self.motion_analysis.last_sample_clock
+
+    @_motion_last_sample.setter
+    def _motion_last_sample(self, value: float) -> None:
+        self.motion_analysis.last_sample_clock = value
+
+    @property
+    def _motion_last_continuous_result(self) -> MotionQualificationResult | None:
+        return self.motion_analysis.last_continuous_result
+
+    @_motion_last_continuous_result.setter
+    def _motion_last_continuous_result(
+        self,
+        value: MotionQualificationResult | None,
+    ) -> None:
+        self.motion_analysis.last_continuous_result = value
+
+    @property
+    def _motion_analysis_last_processed_at(self) -> float:
+        return self.motion_analysis.last_processed_at
+
+    @_motion_analysis_last_processed_at.setter
+    def _motion_analysis_last_processed_at(self, value: float) -> None:
+        self.motion_analysis.last_processed_at = value
+
+    @property
+    def _motion_primary_last_processed_at(self) -> float:
+        return self.motion_analysis.primary_last_processed_at
+
+    @_motion_primary_last_processed_at.setter
+    def _motion_primary_last_processed_at(self, value: float) -> None:
+        self.motion_analysis.primary_last_processed_at = value
+
+    @property
+    def _motion_debug_last_run(self) -> float:
+        return self.motion_analysis.debug_last_run_clock
+
+    @_motion_debug_last_run.setter
+    def _motion_debug_last_run(self, value: float) -> None:
+        self.motion_analysis.debug_last_run_clock = value
+
     def start(self) -> None:
         with self._lifecycle_lock:
             self._enabled = True
             self._stop.clear()
             self.object_tracking.set_accepting(self._detection_enabled)
             try:
-                if self._motion_analysis_thread is None or not self._motion_analysis_thread.is_alive():
-                    self._clear_motion_analysis_queue()
-                    analysis_thread = threading.Thread(
-                        target=self._run_motion_analysis,
-                        name=f"motion-analysis-{self.camera.id}",
-                        daemon=False,
-                    )
-                    self._motion_analysis_thread = analysis_thread
-                    try:
-                        analysis_thread.start()
-                    except BaseException:
-                        self._motion_analysis_thread = None
-                        raise
+                self.motion_analysis.start(self._stop)
                 if not self.capture.start():
                     raise RuntimeError(f"camera source did not start for {self.camera.id}")
                 if self._motion_thread is None or not self._motion_thread.is_alive():
@@ -401,7 +513,7 @@ class CameraWorker:
             self.capture.request_stop()
             self.onvif.stop()
             self.object_tracking.stop()
-            self._signal_motion_analysis_stop()
+            self.motion_analysis.request_stop()
             self.motion_events.signal_stop()
             motion_thread = self._motion_thread
             if motion_thread is not None:
@@ -409,16 +521,8 @@ class CameraWorker:
                 if motion_thread.is_alive():
                     LOGGER.error("motion worker did not stop for %s", self.camera.id)
             self._motion_thread = motion_thread if motion_thread is not None and motion_thread.is_alive() else None
-            analysis_thread = self._motion_analysis_thread
-            if analysis_thread is not None:
-                analysis_thread.join(timeout=CAPTURE_STOP_TIMEOUT_SECONDS)
-                if analysis_thread.is_alive():
-                    LOGGER.error("motion analysis worker did not stop for %s", self.camera.id)
-            self._motion_analysis_thread = (
-                analysis_thread
-                if analysis_thread is not None and analysis_thread.is_alive()
-                else None
-            )
+            if not self.motion_analysis.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS):
+                LOGGER.error("motion analysis worker did not stop for %s", self.camera.id)
             alive_threads = self.capture.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS)
             alive = sorted(alive_threads)
             if alive:
@@ -442,11 +546,7 @@ class CameraWorker:
             with self._frame_lock:
                 self._tracking_frames.clear()
                 self._tracking_last_sample_epoch = 0.0
-                self._motion_frames.clear()
-                self._motion_color_frames.clear()
-                self._motion_last_sample = 0.0
-                self._motion_last_continuous_result = None
-                self._motion_analysis_last_processed_at = 0.0
+            self.motion_analysis.reset()
             self.motion_evidence.clear()
             motion_workers_stopped = (
                 self._motion_thread is None
@@ -464,8 +564,6 @@ class CameraWorker:
                     self.camera.id,
                 )
             self.motion_events.reset()
-            with self._motion_stats_lock:
-                self.visual_backup.reset()
             shutdown_failures: list[str] = []
             if alive:
                 shutdown_failures.append(f"capture sources: {', '.join(alive)}")
@@ -532,19 +630,7 @@ class CameraWorker:
         with self._lifecycle_lock:
             enabled = self._enabled
         capture_status = self.capture.status()
-        with self._frame_lock:
-            motion_buffered_frames = len(self._motion_frames)
-            motion_frame_shape = (
-                list(self._motion_frames[-1][1].shape[:2])
-                if self._motion_frames
-                else None
-            )
-            motion_color_buffered_frames = len(self._motion_color_frames)
-            motion_color_frame_shape = (
-                list(self._motion_color_frames[-1][1].shape)
-                if self._motion_color_frames
-                else None
-            )
+        motion_analysis_status = self.motion_analysis.status()
         live_frame_at = str(capture_status["live_frame_at"])
         main_frame_at = str(capture_status["main_frame_at"])
         live_frame_clock = capture_status["live_frame_monotonic"]
@@ -559,9 +645,9 @@ class CameraWorker:
         stationary_object_tolerance = self._stationary_object_tolerance()
         rescue_enabled, rescue_margin = self._motion_rescue_settings()
         visual_backup = self._visual_backup_settings()
+        visual_backup_status = self.motion_analysis.visual_backup_snapshot()
         with self._motion_stats_lock:
             motion_stats = dict(self._motion_stats)
-            visual_backup_status = self.visual_backup.snapshot()
         return {
             "id": self.camera.id,
             "name": self.camera.name,
@@ -640,24 +726,21 @@ class CameraWorker:
                 "pipeline_origins": dict(self.motion_pipeline_origins),
                 "queue_depth": self._motion_queue.qsize(),
                 "retry_queue_depth": len(self._motion_retry_batches),
-                "analysis_queue_depth": self._motion_analysis_queue.qsize(),
-                "analysis_worker_running": bool(
-                    self._motion_analysis_thread is not None
-                    and self._motion_analysis_thread.is_alive()
-                ),
+                "analysis_queue_depth": motion_analysis_status["queue_depth"],
+                "analysis_worker_running": motion_analysis_status["worker_running"],
                 "event_worker_running": bool(
                     self._motion_thread is not None
                     and self._motion_thread.is_alive()
                 ),
-                "continuous_last_result": (
-                    self._motion_last_continuous_result.as_dict()
-                    if self._motion_last_continuous_result is not None
-                    else None
-                ),
-                "buffered_frames": motion_buffered_frames,
-                "frame_shape": motion_frame_shape,
-                "color_buffered_frames": motion_color_buffered_frames,
-                "color_frame_shape": motion_color_frame_shape,
+                "continuous_last_result": motion_analysis_status[
+                    "continuous_last_result"
+                ],
+                "buffered_frames": motion_analysis_status["buffered_frames"],
+                "frame_shape": motion_analysis_status["frame_shape"],
+                "color_buffered_frames": motion_analysis_status[
+                    "color_buffered_frames"
+                ],
+                "color_frame_shape": motion_analysis_status["color_frame_shape"],
                 "pipeline": self.motion_pipeline.status(),
                 "observation_pipeline": self.motion_observation_pipeline.status(),
                 "fusion_pipeline": self.motion_fusion_pipeline.status(),
@@ -796,6 +879,17 @@ class CameraWorker:
         with self._motion_stats_lock:
             self._motion_stats[name] = int(self._motion_stats.get(name) or 0) + amount
 
+    def _record_analysis_wait(self, wait_ms: float) -> None:
+        with self._motion_stats_lock:
+            self._motion_stats["analysis_wait_ms_total"] += wait_ms
+            self._motion_stats["analysis_wait_ms_max"] = max(
+                float(self._motion_stats["analysis_wait_ms_max"]),
+                wait_ms,
+            )
+
+    def _set_last_motion_at(self, value: str) -> None:
+        self.last_motion_at = value
+
     def _record_decision_stats(
         self,
         *,
@@ -829,8 +923,7 @@ class CameraWorker:
             self._motion_stats["last_result"] = qualification
 
     def _record_visual_camera_match(self, observed_at: float) -> bool:
-        with self._motion_stats_lock:
-            return self.visual_backup.record_camera_match(observed_at)
+        return self.motion_analysis.record_visual_camera_match(observed_at)
 
     def _set_active_incident_event_id(self, event_id: int) -> None:
         self._active_incident_event_id = event_id
@@ -893,36 +986,13 @@ class CameraWorker:
         self.motion_events.clear()
 
     def _clear_motion_analysis_queue(self) -> None:
-        while True:
-            try:
-                self._motion_analysis_queue.get_nowait()
-            except queue.Empty:
-                return
+        self.motion_analysis.clear_queue()
 
     def _signal_motion_analysis_stop(self) -> None:
-        self._clear_motion_analysis_queue()
-        try:
-            self._motion_analysis_queue.put_nowait(None)
-        except queue.Full:
-            pass
+        self.motion_analysis.request_stop()
 
     def _schedule_motion_analysis(self, captured_at: float) -> None:
-        if self._stop.is_set():
-            return
-        try:
-            self._motion_analysis_queue.put_nowait(captured_at)
-            return
-        except queue.Full:
-            try:
-                self._motion_analysis_queue.get_nowait()
-            except queue.Empty:
-                pass
-        with self._motion_stats_lock:
-            self._motion_stats["analysis_frames_dropped"] += 1
-        try:
-            self._motion_analysis_queue.put_nowait(captured_at)
-        except queue.Full:
-            pass
+        self.motion_analysis.schedule(captured_at, self._stop)
 
     def _remember_motion_frame(
         self,
@@ -930,164 +1000,21 @@ class CameraWorker:
         frame_clock: float,
         captured_at: float | None = None,
     ) -> None:
-        if not self._frame_motion_analysis_required():
-            return
-        interval = 1.0 / max(1.0, self.motion_config.sample_fps)
-        with self._frame_lock:
-            if frame_clock - self._motion_last_sample < interval * 0.85:
-                return
-            self._motion_last_sample = frame_clock
-        try:
-            height, width = frame.shape[:2]
-            frame_width = self._motion_settings()[2]
-            target_height = max(90, round(height * frame_width / max(1, width)))
-            resized = cv2.resize(frame, (frame_width, target_height), interpolation=cv2.INTER_AREA)
-            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        except (cv2.error, ValueError):
-            return
-        frame_epoch = captured_at if captured_at is not None else time.time()
-        with self._frame_lock:
-            # The full analysis window remains compact grayscale. Only the
-            # three samples needed by the illumination stage retain color.
-            self._motion_frames.append((frame_epoch, gray))
-            self._motion_color_frames.append((frame_epoch, resized))
-        self._schedule_motion_analysis(frame_epoch)
+        self.motion_analysis.remember_frame(
+            frame,
+            frame_clock,
+            self._stop,
+            captured_at,
+        )
 
     def _run_motion_analysis(self) -> None:
-        while not self._stop.is_set():
-            try:
-                _scheduled_at = self._motion_analysis_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if _scheduled_at is None or self._stop.is_set():
-                return
-            try:
-                with self.motion_analysis_limiter.acquire(self.camera.id) as wait_seconds:
-                    if self._stop.is_set():
-                        return
-                    wait_ms = max(0.0, wait_seconds * 1000.0)
-                    with self._motion_stats_lock:
-                        self._motion_stats["analysis_wait_ms_total"] += wait_ms
-                        self._motion_stats["analysis_wait_ms_max"] = max(
-                            float(self._motion_stats["analysis_wait_ms_max"]), wait_ms
-                        )
-                    with self._frame_lock:
-                        if not self._motion_frames:
-                            continue
-                        captured_at, frame = self._motion_frames[-1]
-                        frame = frame.copy()
-                    if captured_at <= self._motion_analysis_last_processed_at:
-                        continue
-                    self._motion_analysis_last_processed_at = captured_at
-                    if self.motion_observation_pipeline.handles_observation("frame"):
-                        observation = MotionContext(
-                            camera_id=self.camera.id,
-                            captured_at=captured_at,
-                            original_frame=frame,
-                            configuration={"observation_kind": "frame"},
-                            runtime=self.motion_observation_pipeline.runtime,
-                        )
-                        self.motion_observation_pipeline.process(observation)
-                    if (
-                        self._continuous_primary_analysis_required()
-                        and self._continuous_primary_analysis_due(captured_at)
-                    ):
-                        self._analyze_continuous_motion(captured_at)
-                    elif self.motion_debug.enabled() and time.monotonic() - self._motion_debug_last_run >= 1.0:
-                        self._motion_debug_last_run = time.monotonic()
-                        self._capture_motion_debug(captured_at)
-            except Exception:
-                with self._motion_stats_lock:
-                    self._motion_stats["analysis_worker_errors"] += 1
-                LOGGER.exception("motion analysis cycle failed for %s", self.camera.id)
+        self.motion_analysis.run(self._stop)
 
     def _analyze_continuous_motion(self, captured_at: float) -> None:
-        mode, sensitivity, _frame_width = self._motion_settings()
-        with self._frame_lock:
-            source_samples = (
-                self._motion_color_frames
-                if len(self._motion_color_frames) >= 2
-                else list(self._motion_frames)[-3:]
-            )
-            samples = [
-                (timestamp, frame.copy())
-                for timestamp, frame in source_samples
-            ]
-        if len(samples) < 2:
-            return
-        try:
-            with self._motion_analysis_lock:
-                result = self._run_motion_pipeline(
-                    [frame for _timestamp, frame in samples],
-                    sensitivity,
-                    captured_at,
-                    [timestamp for timestamp, _frame in samples],
-                    isolated=False,
-                    capture_debug=self.motion_debug.enabled(),
-                    include_telemetry=False,
-                )
-        except Exception as error:
-            LOGGER.warning("continuous motion analysis failed for %s: %s", self.camera.id, error)
-            return
-        self._motion_last_continuous_result = result
-        self._motion_primary_last_processed_at = captured_at
-        with self._motion_stats_lock:
-            self._motion_stats["continuous_frames"] += 1
-            self._motion_stats["continuous_candidates"] += int(result.accepted)
-            illumination_available = bool(
-                result.features.get("illumination_evidence_available")
-            )
-            illumination_candidate = bool(
-                result.features.get("illumination_would_reject")
-            )
-            self._motion_stats["illumination_evaluations"] += int(
-                illumination_available
-            )
-            self._motion_stats["illumination_candidates"] += int(
-                illumination_candidate
-            )
-            self._motion_stats["illumination_filtered"] += int(
-                illumination_candidate
-                and self._illumination_filter_enabled()
-                and not result.accepted
-            )
-        trigger_mode = self._trigger_mode()
-        if trigger_mode == "camera_rescue":
-            self._consider_visual_backup(result, samples, captured_at)
-            return
-        if trigger_mode != "adaptive" or not self._detection_enabled:
-            return
-        fused = self._with_source_evidence(
-            result,
-            samples[0][0],
-            captured_at,
-            include_telemetry=False,
-            require_primary_trigger=True,
-        )
-        self._motion_last_continuous_result = fused
-        if not fused.accepted or not self._reserve_adaptive_trigger(captured_at):
-            return
-        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        queued = self._enqueue_motion_trigger(MotionTrigger(
-            topic="adaptive/motion",
-            message="adaptive motion transition",
-            event_at=event_at,
-            received_at=captured_at,
-            prequalified=fused,
-        ), evict_oldest=False)
-        if not queued:
-            self._defer_adaptive_trigger(captured_at)
-            return
-        self.last_motion_at = event_at.isoformat()
-        self._publish_event_safely("motion", {
-            "camera_id": self.camera.id,
-            "timestamp": event_at.isoformat(),
-            "source": "adaptive",
-        })
+        self.motion_analysis.analyze_continuous(captured_at)
 
     def _reset_visual_backup_candidate(self) -> None:
-        with self._motion_stats_lock:
-            self.visual_backup.reset_candidate()
+        self.motion_analysis.reset_visual_backup_candidate()
 
     def _visual_backup_readiness(
         self,
@@ -1095,22 +1022,15 @@ class CameraWorker:
         captured_at: float,
     ) -> bool:
         """Compatibility facade for tests and existing runtime callers."""
-        with self._motion_stats_lock:
-            return self.visual_backup.readiness(
-                result,
-                captured_at,
-                self._visual_backup_policy(),
-            )
+        return self.motion_analysis.visual_backup_readiness(result, captured_at)
 
     @property
     def _visual_backup_scene_ready(self) -> bool:
-        with self._motion_stats_lock:
-            return self.visual_backup.scene_ready
+        return self.motion_analysis.visual_backup_scene_ready
 
     @property
     def _visual_backup_stable_samples(self) -> int:
-        with self._motion_stats_lock:
-            return self.visual_backup.stable_samples
+        return self.motion_analysis.visual_backup_stable_samples
 
     def _consider_visual_backup(
         self,
@@ -1118,179 +1038,28 @@ class CameraWorker:
         samples: list[tuple[float, np.ndarray]],
         captured_at: float,
     ) -> None:
-        visual_backup = self._visual_backup_settings()
-        illumination_probe_allowed = bool(
-            self._detection_enabled
-            and result.reason == "illumination_change"
-            and result.features.get("illumination_would_reject")
-            and self._should_verify_suppression(
-                (
-                    f"illumination:{self.camera.id}:"
-                    f"{int(captured_at // max(5.0, float(visual_backup['cooldown_seconds'])))}"
-                ),
-                self._suppression_verification_rate(),
-            )
-        )
-        with self._motion_stats_lock:
-            decision = self.visual_backup.evaluate(
-                result,
-                captured_at,
-                self._visual_backup_policy(),
-                detection_enabled=self._detection_enabled,
-                camera_motion_times=self.motion_events.camera_motion_snapshot(),
-                illumination_probe_allowed=illumination_probe_allowed,
-            )
-        result = decision.result
-        if decision.action in {VisualBackupAction.DISABLED, VisualBackupAction.IGNORED}:
-            if decision.count_nonpromotion:
-                self._note_visual_backup_nonpromotion()
-            return
-        if decision.action == VisualBackupAction.NOT_READY:
-            with self._motion_stats_lock:
-                self._motion_stats["visual_backup_not_ready"] += 1
-            if decision.readiness_audit_needed:
-                self._record_visual_backup_readiness_audit(result, captured_at)
-            return
-        if decision.action in {
-            VisualBackupAction.ACCUMULATING,
-            VisualBackupAction.CAMERA_NOTICE,
-            VisualBackupAction.READY,
-        }:
-            with self._motion_stats_lock:
-                self._motion_stats["visual_backup_candidates"] += 1
-        if decision.action == VisualBackupAction.ACCUMULATING:
-            return
-        if decision.action == VisualBackupAction.CAMERA_NOTICE:
-            if decision.new_camera_match:
-                with self._motion_stats_lock:
-                    self._motion_stats["visual_backup_onvif_matches"] += 1
-            return
-        if decision.action != VisualBackupAction.READY:
-            return
-        if not self._reserve_visual_backup_trigger(captured_at):
-            self._note_visual_backup_nonpromotion()
-            self._reset_visual_backup_candidate()
-            return
-
-        fused = self._with_source_evidence(
-            result,
-            samples[0][0],
-            captured_at,
-            include_telemetry=False,
-            require_primary_trigger=True,
-        )
-        self._motion_last_continuous_result = fused
-        if not fused.accepted:
-            self._defer_adaptive_trigger(captured_at)
-            self._reset_visual_backup_candidate()
-            return
-        features = {
-            **fused.features,
-            "visual_backup": True,
-            "visual_backup_required_score": round(decision.required_score, 4),
-            "visual_backup_consecutive": decision.consecutive,
-            "visual_backup_grace_seconds": visual_backup["grace_seconds"],
-        }
-        fused = MotionQualificationResult(
-            accepted=fused.accepted,
-            score=fused.score,
-            threshold=fused.threshold,
-            reason=fused.reason,
-            frame_count=fused.frame_count,
-            features=features,
-            telemetry=dict(fused.telemetry),
-        )
-        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        queued = self._enqueue_motion_trigger(MotionTrigger(
-            topic="adaptive/visual_backup",
-            message="adaptive visual backup after missing camera notice",
-            event_at=event_at,
-            received_at=captured_at,
-            prequalified=fused,
-        ), evict_oldest=False)
-        if not queued:
-            self._defer_adaptive_trigger(captured_at)
-            self._reset_visual_backup_candidate()
-            return
-        with self._motion_stats_lock:
-            self._motion_stats["visual_backup_triggers"] += 1
-            self._motion_stats["illumination_verification_probes"] += int(
-                decision.illumination_probe
-            )
-            self.visual_backup.record_trigger(captured_at)
-        self.last_motion_at = event_at.isoformat()
-        self._publish_event_safely("motion", {
-            "camera_id": self.camera.id,
-            "timestamp": event_at.isoformat(),
-            "source": "visual_backup",
-        })
-        self._reset_visual_backup_candidate()
+        self.motion_analysis.consider_visual_backup(result, samples, captured_at)
 
     def _record_visual_backup_readiness_audit(
         self,
         result: MotionQualificationResult,
         captured_at: float,
     ) -> None:
-        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        try:
-            self.motion_decision_handler.record_audit(
-                snapshot_path=self._sample_rejected_motion(event_at, result),
-                event_at=event_at,
-                mode="camera_rescue",
-                sensitivity=self._motion_settings()[1],
-                score=result.score,
-                threshold=result.threshold,
-                reason="startup_not_ready",
-                object_detected=None,
-                trigger_count=0,
-                features={
-                    **self._audit_features(result),
-                    "visual_backup_scene_ready": False,
-                    "visual_backup_warmup_seconds": self.motion_config.visual_backup_warmup_seconds,
-                },
-                category="visual_backup",
-            )
-        except Exception:
-            LOGGER.exception(
-                "failed to record visual backup readiness audit for %s",
-                self.camera.id,
-            )
-
-    def _note_visual_backup_nonpromotion(self) -> None:
-        """Expose withheld visual candidates as telemetry, never audit spam."""
-        with self._motion_stats_lock:
-            self._motion_stats["visual_backup_not_promoted"] += 1
-
-    def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
-        with self._motion_stats_lock:
-            allowed = self.motion_events.reserve_with(
-                lambda pending, last_completed_at: self.visual_backup.reserve_trigger(
-                    captured_at,
-                    self._visual_backup_policy(),
-                    trigger_pending=pending,
-                    last_completed_at=last_completed_at,
-                )
-            )
-            if not allowed:
-                self._motion_stats["visual_backup_rate_limited"] += 1
-                return False
-            return True
+        self.motion_analysis.record_visual_backup_readiness_audit(
+            result,
+            captured_at,
+        )
 
     def _reserve_adaptive_trigger(self, captured_at: float) -> bool:
-        rearm_seconds = max(
+        return self.motion_analysis.reserve_adaptive_trigger(captured_at)
+
+    def _adaptive_rearm_seconds(self) -> float:
+        return max(
             5.0,
             self.motion_config.window_seconds
             + self.motion_config.post_trigger_seconds
             + self.motion_config.burst_quiet_seconds,
         )
-        allowed = self.motion_events.reserve_adaptive(
-            captured_at,
-            rearm_seconds=rearm_seconds,
-            priority_tolerance_seconds=self._priority_dedup_seconds(),
-        )
-        if not allowed:
-            self._increment_motion_stat("adaptive_triggers_deferred")
-        return allowed
 
     def _priority_dedup_seconds(self) -> float:
         return max(
@@ -1315,26 +1084,7 @@ class CameraWorker:
         self.motion_events.complete_adaptive(triggers, time.time())
 
     def _capture_motion_debug(self, captured_at: float) -> None:
-        with self._frame_lock:
-            samples = [
-                (timestamp, frame.copy())
-                for timestamp, frame in self._motion_frames
-            ]
-        frames = [frame for _timestamp, frame in samples]
-        if len(frames) < 2:
-            return
-        _mode, sensitivity, _frame_width = self._motion_settings()
-        try:
-            self._run_motion_pipeline(
-                frames,
-                sensitivity,
-                captured_at,
-                [timestamp for timestamp, _frame in samples],
-                isolated=True,
-                capture_debug=True,
-            )
-        except Exception as error:
-            LOGGER.debug("motion debug capture failed for %s: %s", self.camera.id, error)
+        self.motion_analysis.capture_debug(captured_at)
 
     def _observe_motion_event(
         self,
@@ -1455,7 +1205,12 @@ class CameraWorker:
             )
         )
 
-    def _continuous_primary_analysis_due(self, captured_at: float) -> bool:
+    def _continuous_primary_analysis_due(
+        self,
+        captured_at: float,
+        *,
+        last_processed_at: float | None = None,
+    ) -> bool:
         if self._trigger_mode() == "adaptive":
             return True
         background_fps = min(
@@ -1463,9 +1218,13 @@ class CameraWorker:
             self.motion_config.camera_mode_background_fps,
         )
         interval = 1.0 / max(0.5, background_fps)
+        previous = (
+            self._motion_primary_last_processed_at
+            if last_processed_at is None
+            else last_processed_at
+        )
         return bool(
-            self._motion_primary_last_processed_at <= 0.0
-            or captured_at - self._motion_primary_last_processed_at >= interval * 0.85
+            previous <= 0.0 or captured_at - previous >= interval * 0.85
         )
 
     def _external_confirmation_required(self) -> bool:
@@ -1748,12 +1507,9 @@ class CameraWorker:
         samples: list[tuple[float, np.ndarray]] = []
 
         while not self._stop.is_set():
-            with self._frame_lock:
-                samples = [
-                    (captured_at, frame.copy())
-                    for captured_at, frame in self._motion_frames
-                    if captured_at >= anchor - self.motion_config.window_seconds
-                ]
+            samples = self.motion_analysis.samples_since(
+                anchor - self.motion_config.window_seconds
+            )
 
             for end_index in range(3, len(samples)):
                 window_end = samples[end_index][0]
