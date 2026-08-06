@@ -6,16 +6,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from survng.app.motion_events import MotionEventCoordinator
+from survng.app.motion_events import MotionEventCoordinator, MotionTrigger
 
 
-def _trigger(index: int = 1) -> dict[str, object]:
-    return {
-        "topic": "manual/test",
-        "message": str(index),
-        "event_at": datetime.now(timezone.utc),
-        "received_at": float(index),
-    }
+def _trigger(index: int = 1, *, topic: str = "manual/test") -> MotionTrigger:
+    return MotionTrigger(
+        topic=topic,
+        message=str(index),
+        event_at=datetime.now(timezone.utc),
+        received_at=float(index),
+    )
 
 
 def test_full_queue_evicts_oldest_trigger_and_reports_drop() -> None:
@@ -81,7 +81,7 @@ def test_adaptive_reservation_deduplicates_priority_and_rearms() -> None:
         priority_tolerance_seconds=2.0,
     )
     coordinator.complete_adaptive(
-        [{"topic": "adaptive/visual_backup"}],
+        [_trigger(topic="adaptive/visual_backup")],
         completed_at=110.0,
     )
     assert not coordinator.reserve_adaptive(
@@ -99,8 +99,46 @@ def test_adaptive_reservation_deduplicates_priority_and_rearms() -> None:
 def test_clear_removes_primary_and_retry_queues() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     coordinator.queue.put_nowait(_trigger())
-    coordinator.retry_batches.append({**_trigger(2), "_retry_batch": [_trigger(2)]})
+    retry = _trigger(2)
+    coordinator.retry_batches.append(MotionTrigger(
+        topic="internal/retry_batch",
+        message="retry",
+        event_at=retry.event_at,
+        received_at=retry.received_at,
+        retry_batch=(retry,),
+    ))
     coordinator.clear()
     assert coordinator.queue.empty()
     with pytest.raises(queue.Empty):
         coordinator.next_trigger(timeout=0.001)
+
+
+def test_legacy_mapping_adapter_rejects_unknown_payload_fields() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    trigger = {
+        "topic": "onvif/motion",
+        "message": "motion",
+        "event_at": datetime.now(timezone.utc),
+        "received_at": 1.0,
+        "typo_decison_id": "silently-lost-before",
+    }
+
+    with pytest.raises(ValueError, match="typo_decison_id"):
+        coordinator.enqueue(trigger)
+
+
+def test_typed_batch_assignments_do_not_change_trigger_order() -> None:
+    coordinator = MotionEventCoordinator(queue_size=4, retry_limit=1)
+    first = _trigger(1)
+    second = _trigger(2)
+    coordinator.queue.put_nowait(second)
+
+    batch = coordinator.coalesce(
+        first,
+        quiet_seconds=0.001,
+        stop_event=threading.Event(),
+    )
+
+    assert batch is not None
+    assert tuple(item.message for item in batch) == ("1", "2")
+    assert batch.triggers == (first, second)

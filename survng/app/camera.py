@@ -35,7 +35,7 @@ from .motion_coordinator import (
     VisualBackupCoordinator,
     VisualBackupPolicy,
 )
-from .motion_events import MotionEventCoordinator
+from .motion_events import MotionEventCoordinator, MotionTrigger, MotionTriggerBatch
 from .motion_incidents import MotionIncidentService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .tracking_comparison import sampled_video_frames
@@ -227,7 +227,7 @@ class CameraWorker:
     # Transitional compatibility accessors keep diagnostics and existing
     # integrations stable while MotionEventCoordinator owns the runtime.
     @property
-    def _motion_queue(self) -> queue.Queue[dict[str, Any] | None]:
+    def _motion_queue(self) -> queue.Queue:
         return self.motion_events.queue
 
     @property
@@ -243,12 +243,17 @@ class CameraWorker:
         self.motion_events.thread = value
 
     @property
-    def _active_motion_triggers(self) -> list[dict[str, Any]] | None:
+    def _active_motion_triggers(self) -> MotionTriggerBatch | None:
         return self.motion_events.active_triggers
 
     @_active_motion_triggers.setter
-    def _active_motion_triggers(self, value: list[dict[str, Any]] | None) -> None:
-        self.motion_events.active_triggers = value
+    def _active_motion_triggers(
+        self,
+        value: MotionTriggerBatch | list[MotionTrigger | dict[str, Any]] | None,
+    ) -> None:
+        self.motion_events.active_triggers = (
+            None if value is None else MotionTriggerBatch.coerce(value)
+        )
 
     @property
     def _adaptive_trigger_pending(self) -> bool:
@@ -756,16 +761,16 @@ class CameraWorker:
             "source": "manual" if topic.startswith("manual") else "onvif",
         })
 
-        self._enqueue_motion_trigger({
-            "topic": topic,
-            "message": message,
-            "event_at": event_at,
-            "received_at": received_at,
-        })
+        self._enqueue_motion_trigger(MotionTrigger(
+            topic=topic,
+            message=message,
+            event_at=event_at,
+            received_at=received_at,
+        ))
 
     def _enqueue_motion_trigger(
         self,
-        trigger: dict[str, Any],
+        trigger: MotionTrigger | dict[str, Any],
         *,
         evict_oldest: bool = True,
     ) -> bool:
@@ -955,13 +960,13 @@ class CameraWorker:
         if not fused.accepted or not self._reserve_adaptive_trigger(captured_at):
             return
         event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        queued = self._enqueue_motion_trigger({
-            "topic": "adaptive/motion",
-            "message": "adaptive motion transition",
-            "event_at": event_at,
-            "received_at": captured_at,
-            "prequalified": fused,
-        }, evict_oldest=False)
+        queued = self._enqueue_motion_trigger(MotionTrigger(
+            topic="adaptive/motion",
+            message="adaptive motion transition",
+            event_at=event_at,
+            received_at=captured_at,
+            prequalified=fused,
+        ), evict_oldest=False)
         if not queued:
             self._defer_adaptive_trigger(captured_at)
             return
@@ -1088,13 +1093,13 @@ class CameraWorker:
             telemetry=dict(fused.telemetry),
         )
         event_at = datetime.fromtimestamp(captured_at, timezone.utc)
-        queued = self._enqueue_motion_trigger({
-            "topic": "adaptive/visual_backup",
-            "message": "adaptive visual backup after missing camera notice",
-            "event_at": event_at,
-            "received_at": captured_at,
-            "prequalified": fused,
-        }, evict_oldest=False)
+        queued = self._enqueue_motion_trigger(MotionTrigger(
+            topic="adaptive/visual_backup",
+            message="adaptive visual backup after missing camera notice",
+            event_at=event_at,
+            received_at=captured_at,
+            prequalified=fused,
+        ), evict_oldest=False)
         if not queued:
             self._defer_adaptive_trigger(captured_at)
             self._reset_visual_backup_candidate()
@@ -1198,7 +1203,7 @@ class CameraWorker:
     def _defer_adaptive_trigger(self, captured_at: float) -> None:
         self.motion_events.defer_adaptive(captured_at)
 
-    def _complete_adaptive_trigger(self, triggers: list[dict[str, Any]]) -> None:
+    def _complete_adaptive_trigger(self, triggers: MotionTriggerBatch) -> None:
         self.motion_events.complete_adaptive(triggers, time.time())
 
     def _capture_motion_debug(self, captured_at: float) -> None:
@@ -1846,7 +1851,10 @@ class CameraWorker:
                 if failed_triggers and not self._stop.is_set():
                     self._retry_motion_trigger_batch(failed_triggers)
 
-    def _retry_motion_trigger_batch(self, triggers: list[dict[str, Any]]) -> None:
+    def _retry_motion_trigger_batch(
+        self,
+        triggers: MotionTriggerBatch | list[dict[str, Any]],
+    ) -> None:
         self.motion_events.schedule_retry(
             triggers,
             stop_event=self._stop,
@@ -1874,36 +1882,36 @@ class CameraWorker:
             priority_triggers = [
                 item
                 for item in triggers
-                if self._priority_motion_topic(str(item["topic"]))
+                if self._priority_motion_topic(item.topic)
             ]
             representative = min(
                 priority_triggers or triggers,
-                key=lambda item: item["event_at"],
+                key=lambda item: item.event_at,
             )
-            event_at = representative["event_at"]
-            received_at = min(float(item.get("received_at") or time.time()) for item in triggers)
+            event_at = representative.event_at
+            received_at = min(item.received_at for item in triggers)
             decision_id = next(
                 (
-                    str(item["_motion_decision_id"])
+                    item.decision_id
                     for item in triggers
-                    if item.get("_motion_decision_id")
+                    if item.decision_id
                 ),
                 "",
             )
             if not decision_id:
                 decision_id = uuid.uuid4().hex
             for item in triggers:
-                item["_motion_decision_id"] = decision_id
+                item.decision_id = decision_id
 
             mode, sensitivity, frame_width = self._motion_settings()
             rescue_enabled, rescue_margin = self._motion_rescue_settings()
             priority = bool(priority_triggers)
             adaptive_only = all(
-                str(item.get("topic") or "").startswith("adaptive/")
+                item.topic.startswith("adaptive/")
                 for item in triggers
             )
             visual_backup_queued = any(
-                str(item.get("topic") or "") == "adaptive/visual_backup"
+                item.topic == "adaptive/visual_backup"
                 for item in triggers
             )
             visual_backup = adaptive_only and visual_backup_queued
@@ -1913,17 +1921,14 @@ class CameraWorker:
                     if self.visual_backup.record_camera_match(matched_camera_at):
                         self._motion_stats["visual_backup_onvif_matches"] += 1
             prequalified = [
-                item["prequalified"]
+                item.prequalified
                 for item in triggers
-                if isinstance(item.get("prequalified"), MotionQualificationResult)
+                if item.prequalified is not None
             ]
             retry_results = [
-                item["_retry_qualification_result"]
+                item.retry_qualification_result
                 for item in triggers
-                if isinstance(
-                    item.get("_retry_qualification_result"),
-                    MotionQualificationResult,
-                )
+                if item.retry_qualification_result is not None
             ]
             diagnostics: dict[str, Any] = {
                 "windows_evaluated": 0,
@@ -1931,9 +1936,9 @@ class CameraWorker:
             }
             retry_diagnostics = next(
                 (
-                    dict(item["_retry_diagnostics"])
+                    dict(item.retry_diagnostics)
                     for item in triggers
-                    if isinstance(item.get("_retry_diagnostics"), dict)
+                    if item.retry_diagnostics is not None
                 ),
                 None,
             )
@@ -2003,10 +2008,7 @@ class CameraWorker:
                 "trigger_source": "visual_backup" if visual_backup else (
                     "adaptive" if adaptive_only else "camera"
                 ),
-                "retry_count": max(
-                    (int(item.get("_event_retry_count") or 0) for item in triggers),
-                    default=0,
-                ),
+                "retry_count": max((item.retry_count for item in triggers), default=0),
                 "would_suppress": bool(
                     mode in {"audit", "camera", "camera_rescue", "adaptive", "enforce"}
                     and not result.accepted
@@ -2025,8 +2027,8 @@ class CameraWorker:
             qualification["effective_accepted"] = effective_accepted
             retry_attempt = qualification["retry_count"] > 0
             for item in triggers:
-                item["_retry_qualification_result"] = result
-                item["_retry_diagnostics"] = dict(diagnostics)
+                item.retry_qualification_result = result
+                item.retry_diagnostics = dict(diagnostics)
             with self._motion_stats_lock:
                 if not retry_attempt:
                     self._motion_stats["bursts"] += 1
@@ -2058,9 +2060,9 @@ class CameraWorker:
                 try:
                     snapshot_path = next(
                         (
-                            str(item["_motion_audit_snapshot_path"])
+                            item.audit_snapshot_path
                             for item in triggers
-                            if item.get("_motion_audit_snapshot_path")
+                            if item.audit_snapshot_path
                         ),
                         None,
                     )
@@ -2071,7 +2073,7 @@ class CameraWorker:
                             else self._sample_rejected_motion(event_at, result)
                         )
                         for item in triggers:
-                            item["_motion_audit_snapshot_path"] = snapshot_path
+                            item.audit_snapshot_path = snapshot_path
                     self.motion_decision_handler.record_audit(
                         decision_id=decision_id,
                         snapshot_path=snapshot_path,
@@ -2093,8 +2095,8 @@ class CameraWorker:
 
             try:
                 outcome = self._process_motion_event(
-                    str(representative["topic"]),
-                    str(representative["message"]),
+                    representative.topic,
+                    representative.message,
                     event_at,
                     qualification,
                     require_eligible_object=bool(
