@@ -5952,8 +5952,10 @@ section.detection-settings-card {
 }
 
 .telemetry-interruption-summary span {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
   font-size: 11px;
 }
 
@@ -5961,19 +5963,9 @@ section.detection-settings-card {
   color: var(--ink);
 }
 
-.telemetry-interruption-summary small {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.telemetry-interruption-summary em {
   color: var(--muted);
-  font-size: 9px;
-}
-
-.telemetry-interruption-summary small i {
-  width: 10px;
-  height: 8px;
-  border-radius: 2px;
-  background: color-mix(in srgb, #2dd4bf 22%, transparent);
+  font-style: normal;
 }
 
 .telemetry-interruption-summary.warning {

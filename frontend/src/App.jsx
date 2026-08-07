@@ -7907,7 +7907,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
 
       {!selected ? <div className={`telemetry-interruption-summary ${interruptionSummary.unexpected ? "danger" : interruptionSummary.unknown ? "warning" : "healthy"}`}>
         <Clock3 size={16} />
-        <span><strong>Service continuity · last 24 hours</strong>{interruptionParts.length ? `${interruptionParts.join(" · ")} · ${formatDuration(interruptionSummary.duration_seconds || 0)} without telemetry` : "No recorded service interruptions."}<small><i /> Shaded chart bands mark service restarts; point at or tap any graph to see its values.</small></span>
+        <span><strong>Service continuity · 24h</strong><em>{interruptionParts.length ? `${interruptionParts.join(" · ")} · ${formatDuration(interruptionSummary.duration_seconds || 0)} unavailable` : "No interruptions"}</em></span>
       </div> : null}
 
       <section className="telemetry-section">
