@@ -17,6 +17,7 @@ from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 from survng.app.image_cache import LocalImageCache
 from survng.app.state_events import StateEventBroker
 from survng.app.semantic_search import SemanticSearchHit
+from survng.app.system_telemetry import SystemTelemetryService
 from fastapi import HTTPException
 
 
@@ -236,7 +237,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            status = main._cgroup_memory_status(root, process_cgroup)
+            status = SystemTelemetryService.cgroup_memory_status(root, process_cgroup)
 
         self.assertEqual(status["total_bytes"], 9000)
         self.assertEqual(status["working_set_bytes"], 3300)
@@ -246,12 +247,10 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(status["kernel_bytes"], 500)
 
     def test_telemetry_history_throttles_samples_and_replaces_latest(self) -> None:
-        history = main.deque(maxlen=360)
-        state = {"last_sample_at": 0.0}
-        with patch.object(main, "TELEMETRY_HISTORY", history), patch.object(main, "TELEMETRY_HISTORY_STATE", state):
-            first = main._record_telemetry_history({"sampled_at": "first"}, 10.0)
-            replaced = main._record_telemetry_history({"sampled_at": "replacement"}, 12.0)
-            appended = main._record_telemetry_history({"sampled_at": "second"}, 16.0)
+        service = SystemTelemetryService()
+        first = service.record_history({"sampled_at": "first"}, 10.0)
+        replaced = service.record_history({"sampled_at": "replacement"}, 12.0)
+        appended = service.record_history({"sampled_at": "second"}, 16.0)
 
         self.assertEqual(first, [{"sampled_at": "first"}])
         self.assertEqual(replaced, [{"sampled_at": "replacement"}])
@@ -271,13 +270,18 @@ class EventApiSerializationTest(unittest.TestCase):
             "driver": "i915",
         }
 
+        service = SystemTelemetryService()
+        service._gpu_sample = {
+            "at": 8.0,
+            "pids": (42,),
+            "engines": {"render": 1_000_000_000},
+        }
         with (
-            patch.dict(main.GPU_SAMPLE, {"at": 8.0, "pids": (42,), "engines": {"render": 1_000_000_000}}, clear=True),
-            patch.object(main, "_drm_worker_counters", return_value=counters),
-            patch.object(main, "_read_integer", return_value=None),
-            patch.object(main.time, "monotonic", return_value=10.0),
+            patch.object(SystemTelemetryService, "drm_worker_counters", return_value=counters),
+            patch.object(SystemTelemetryService, "read_integer", return_value=None),
+            patch("survng.app.system_telemetry.time.monotonic", return_value=10.0),
         ):
-            status = main._gpu_status(detector)
+            status = service.gpu_status(detector)
 
         self.assertEqual(status["utilization_percent"], 50.0)
         self.assertEqual(status["engine_utilization"], {"render": 50.0})
@@ -371,8 +375,11 @@ class EventApiSerializationTest(unittest.TestCase):
                 }]),
             )
 
-            with patch.object(main, "manager", fake_manager), patch.object(main.os, "getloadavg", return_value=(1.0, 0.5, 0.25)):
-                payload = main.telemetry(hours=24, camera_id="gate")
+            service = SystemTelemetryService()
+            with patch("survng.app.system_telemetry.os.getloadavg", return_value=(1.0, 0.5, 0.25)):
+                payload = service.telemetry(
+                    fake_manager, main.config, hours=24, camera_id="gate"
+                )
 
             self.assertEqual(payload["activity"], activity)
             self.assertEqual(payload["semantic_search"]["state"], "ready")
@@ -422,11 +429,9 @@ class EventApiSerializationTest(unittest.TestCase):
         )
         fake_manager = SimpleNamespace(events=events)
 
-        with (
-            patch.object(main, "manager", fake_manager),
-            patch.object(main.time, "monotonic", return_value=1234.0),
-        ):
-            history = main._persisted_telemetry_history("")
+        service = SystemTelemetryService()
+        with patch("survng.app.system_telemetry.time.monotonic", return_value=1234.0):
+            history = service.persisted_history(fake_manager, "")
 
         self.assertEqual(history["interruptions"], [])
         self.assertEqual(history["interruption_summary"]["total"], 0)
@@ -442,11 +447,9 @@ class EventApiSerializationTest(unittest.TestCase):
         )
         fake_manager = SimpleNamespace(events=events)
 
-        with (
-            patch.object(main, "manager", fake_manager),
-            patch.object(main.time, "monotonic", return_value=2345.0),
-        ):
-            history = main._persisted_telemetry_history("gate")
+        service = SystemTelemetryService()
+        with patch("survng.app.system_telemetry.time.monotonic", return_value=2345.0):
+            history = service.persisted_history(fake_manager, "gate")
 
         self.assertEqual(history["interruptions"], [])
         self.assertEqual(history["interruption_summary"]["total"], 0)
@@ -897,7 +900,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
             with (
                 patch.object(main, "manager", manager),
-                patch.object(main, "system_status", return_value={}),
+                patch.object(SystemTelemetryService, "system_status", return_value={}),
                 patch.object(main.asyncio, "to_thread", new=inline_to_thread),
             ):
                 response = await main.application_event_stream(Request())

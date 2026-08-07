@@ -148,16 +148,16 @@ from .recording_routes import (
     create_recording_router,
     recording_source,
 )
-from .process_memory import process_memory_status
 from .object_tracking import ultralytics_deepocsort_dependency_status
 from .tracking_comparison import (
     TRACKING_COMPARISON_IMPLEMENTATIONS,
     TrackingComparisonRunner,
     sampled_video_frames,
 )
-from .telemetry_interruptions import (
-    classify_telemetry_interruptions,
-    summarize_interruptions,
+from .system_telemetry import (
+    SystemTelemetryDependencies,
+    SystemTelemetryService,
+    create_system_telemetry_router,
 )
 from .zones import apply_detection_zones, detection_threshold
 from .security import redact_secret_text
@@ -219,15 +219,8 @@ AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
 AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
 EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
-PROCESS_STARTED_MONOTONIC = time.monotonic()
-PROCESS_INSTANCE_ID = secrets.token_hex(12)
-GPU_SAMPLE_LOCK = threading.Lock()
-GPU_SAMPLE: dict[str, object] = {"at": 0.0, "pids": (), "engines": {}}
-TELEMETRY_HISTORY_LOCK = threading.Lock()
-TELEMETRY_HISTORY: deque[dict[str, object]] = deque(maxlen=360)
-TELEMETRY_HISTORY_STATE: dict[str, float] = {"last_sample_at": 0.0}
-TELEMETRY_PERSISTED_CACHE_LOCK = threading.Lock()
-TELEMETRY_PERSISTED_CACHE: dict[tuple[int, str], dict[str, Any]] = {}
+SYSTEM_TELEMETRY = SystemTelemetryService()
+PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
 MEDIA_EXPORTS_LOCK = threading.Lock()
 MEDIA_EXPORTS: MediaExportManager | None = None
@@ -718,6 +711,15 @@ app.include_router(
         )
     )
 )
+app.include_router(
+    create_system_telemetry_router(
+        SystemTelemetryDependencies(
+            get_config=lambda: config,
+            get_manager=lambda: manager,
+        ),
+        SYSTEM_TELEMETRY,
+    )
+)
 
 
 @app.exception_handler(StorageTasksActiveError)
@@ -833,7 +835,10 @@ async def application_event_stream(request: Request) -> StreamingResponse:
                 connection_cursor = active_manager.state_events.cursor
                 snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
                 yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
-                yield _sse_message("system_state", await asyncio.to_thread(system_status))
+                yield _sse_message(
+                    "system_state",
+                    await asyncio.to_thread(SYSTEM_TELEMETRY.system_status, manager),
+                )
             else:
                 for event in replay:
                     replayed_ids.add(event.id)
@@ -851,7 +856,10 @@ async def application_event_stream(request: Request) -> StreamingResponse:
                     event = subscriber.get_nowait()
                 except queue.Empty:
                     if time.monotonic() >= next_system_update:
-                        yield _sse_message("system_state", await asyncio.to_thread(system_status))
+                        yield _sse_message(
+                            "system_state",
+                            await asyncio.to_thread(SYSTEM_TELEMETRY.system_status, manager),
+                        )
                         next_system_update = time.monotonic() + 5.0
                     await asyncio.sleep(0.2)
                     continue
@@ -1557,519 +1565,6 @@ def recording_cache_status() -> dict:
         "prewarm": bool(config.recording_cache_prewarm),
         "metrics": metrics,
     }
-
-
-@app.get("/api/system/status")
-def system_status() -> dict:
-    storage_path = manager.storage_dir
-    storage_path.mkdir(parents=True, exist_ok=True)
-    usage = shutil.disk_usage(storage_path)
-    cameras = manager.statuses()
-    detector = manager.detector_status()
-    return {
-        "instance_id": PROCESS_INSTANCE_ID,
-        "storage": {
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-            "free_bytes": usage.free,
-            "used_percent": round((usage.used / usage.total) * 100, 1) if usage.total else 0,
-        },
-        "detector": detector,
-        "cameras": {
-            "total": len(cameras),
-            "online": sum(1 for camera in cameras if camera.get("running")),
-            "recording": sum(1 for camera in cameras if camera.get("recording")),
-        },
-        "mqtt": manager.mqtt_status(),
-        "go2rtc": manager.go2rtc_status(),
-        "camera_startup": manager.camera_startup_status(),
-    }
-
-
-def _linux_memory_status() -> dict[str, int | float]:
-    values: dict[str, int] = {}
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-            key, raw = line.split(":", 1)
-            values[key] = int(raw.strip().split()[0]) * 1024
-    except (OSError, ValueError, IndexError):
-        return {"total_bytes": 0, "available_bytes": 0, "used_bytes": 0, "used_percent": 0.0}
-    total = values.get("MemTotal", 0)
-    available = values.get("MemAvailable", values.get("MemFree", 0))
-    used = max(0, total - available)
-    return {
-        "total_bytes": total,
-        "available_bytes": available,
-        "used_bytes": used,
-        "used_percent": round((used / total) * 100, 1) if total else 0.0,
-    }
-
-
-def _process_rss_bytes() -> int:
-    return int(process_memory_status()["rss_bytes"])
-
-
-def _cgroup_memory_status(
-    cgroup_root: Path = Path("/sys/fs/cgroup"),
-    process_cgroup: Path = Path("/proc/self/cgroup"),
-) -> dict[str, int]:
-    """Return service-wide cgroup v2 memory without conflating file cache with heap."""
-    empty = {
-        "total_bytes": 0,
-        "working_set_bytes": 0,
-        "application_bytes": 0,
-        "file_cache_bytes": 0,
-        "reclaimable_file_cache_bytes": 0,
-        "kernel_bytes": 0,
-    }
-    try:
-        relative = next(
-            line.split(":", 2)[2].strip().lstrip("/")
-            for line in process_cgroup.read_text(encoding="utf-8").splitlines()
-            if line.startswith("0::")
-        )
-        base = cgroup_root / relative
-        total = int((base / "memory.current").read_text(encoding="utf-8").strip())
-        stats = {
-            key: int(value)
-            for key, value in (
-                line.split(maxsplit=1)
-                for line in (base / "memory.stat").read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            )
-        }
-    except (OSError, StopIteration, ValueError):
-        return empty
-    shmem = max(0, stats.get("shmem", 0))
-    file_cache = max(0, stats.get("file", 0) - shmem)
-    reclaimable_file_cache = min(
-        file_cache,
-        max(0, stats.get("inactive_file", 0) - shmem),
-    )
-    return {
-        "total_bytes": max(0, total),
-        "working_set_bytes": max(0, total - reclaimable_file_cache),
-        "application_bytes": max(0, stats.get("anon", 0)) + shmem,
-        "file_cache_bytes": file_cache,
-        "reclaimable_file_cache_bytes": reclaimable_file_cache,
-        "kernel_bytes": max(0, stats.get("kernel", 0)),
-    }
-
-
-def _database_bytes() -> int:
-    total = 0
-    for path in manager.database_dir.glob("*.sqlite3*"):
-        try:
-            if path.is_file():
-                total += path.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def _read_integer(path: Path, *, scale: int = 1) -> int | None:
-    try:
-        return int(path.read_text(encoding="utf-8").strip(), 0) * scale
-    except (OSError, ValueError):
-        return None
-
-
-def _drm_worker_counters(pid: int) -> dict[str, object]:
-    engines: dict[str, int] = {}
-    allocated_bytes = 0
-    resident_bytes = 0
-    clients: set[str] = set()
-    driver = ""
-    try:
-        fdinfo_paths = list(Path(f"/proc/{pid}/fdinfo").iterdir())
-    except OSError:
-        return {"engines": engines, "allocated_bytes": 0, "resident_bytes": 0, "driver": ""}
-    for path in fdinfo_paths:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        values: dict[str, str] = {}
-        for line in lines:
-            if not line.startswith("drm-") or ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            values[key] = value.strip()
-        if not values:
-            continue
-        driver = values.get("drm-driver", driver)
-        client_id = values.get("drm-client-id", str(path))
-        for key, value in values.items():
-            if not key.startswith("drm-engine-"):
-                continue
-            try:
-                nanoseconds = int(value.split()[0])
-            except (ValueError, IndexError):
-                continue
-            name = key.removeprefix("drm-engine-")
-            engines[name] = engines.get(name, 0) + nanoseconds
-        if client_id in clients:
-            continue
-        clients.add(client_id)
-        for key, target in (("drm-total-system0", "allocated"), ("drm-resident-system0", "resident")):
-            try:
-                byte_count = int(values.get(key, "0").split()[0]) * 1024
-            except (ValueError, IndexError):
-                byte_count = 0
-            if target == "allocated":
-                allocated_bytes += byte_count
-            else:
-                resident_bytes += byte_count
-    return {
-        "engines": engines,
-        "allocated_bytes": allocated_bytes,
-        "resident_bytes": resident_bytes,
-        "driver": driver,
-    }
-
-
-def _gpu_status(detector: dict) -> dict[str, object]:
-    workers = detector.get("workers") or {}
-    pids = tuple(sorted({
-        int(worker.get("worker_pid") or 0)
-        for worker in workers.values()
-        if isinstance(worker, dict) and worker.get("worker_alive") and int(worker.get("worker_pid") or 0) > 0
-    })) if isinstance(workers, dict) else ()
-    engines: dict[str, int] = {}
-    allocated_bytes = 0
-    resident_bytes = 0
-    driver = ""
-    for pid in pids:
-        counters = _drm_worker_counters(pid)
-        driver = str(counters.get("driver") or driver)
-        allocated_bytes += int(counters.get("allocated_bytes") or 0)
-        resident_bytes += int(counters.get("resident_bytes") or 0)
-        for name, value in dict(counters.get("engines") or {}).items():
-            engines[str(name)] = engines.get(str(name), 0) + int(value)
-
-    sampled_at = time.monotonic()
-    engine_usage: dict[str, float] = {}
-    with GPU_SAMPLE_LOCK:
-        previous_at = float(GPU_SAMPLE.get("at") or 0.0)
-        previous_pids = tuple(GPU_SAMPLE.get("pids") or ())
-        previous_engines = dict(GPU_SAMPLE.get("engines") or {})
-        elapsed_ns = (sampled_at - previous_at) * 1_000_000_000
-        if pids and pids == previous_pids and elapsed_ns > 0:
-            for name, value in engines.items():
-                delta = value - int(previous_engines.get(name, value))
-                if delta >= 0:
-                    engine_usage[name] = round(min(100.0, (delta / elapsed_ns) * 100.0), 1)
-        GPU_SAMPLE.update({"at": sampled_at, "pids": pids, "engines": engines})
-
-    card = Path("/sys/class/drm/card0")
-    vendor_id = _read_integer(card / "device/vendor")
-    device_id = _read_integer(card / "device/device")
-    current_frequency = _read_integer(card / "gt_act_freq_mhz")
-    maximum_frequency = _read_integer(card / "gt_max_freq_mhz")
-    temperature_millidegrees = next(
-        (value for value in (_read_integer(path) for path in (card / "device/hwmon").glob("hwmon*/temp1_input")) if value is not None),
-        None,
-    )
-    vendor_names = {0x8086: "Intel", 0x1002: "AMD", 0x10DE: "NVIDIA"}
-    vendor = vendor_names.get(vendor_id, f"0x{vendor_id:04x}" if vendor_id is not None else "Unknown")
-    utilization = round(min(100.0, sum(engine_usage.values())), 1) if engine_usage else None
-    return {
-        "available": bool(card.exists() or engines),
-        "scope": "SurvNG inference workers",
-        "vendor": vendor,
-        "device_id": f"0x{device_id:04x}" if device_id is not None else "",
-        "driver": driver,
-        "worker_pids": list(pids),
-        "utilization_percent": utilization,
-        "engine_utilization": engine_usage,
-        "allocated_bytes": allocated_bytes,
-        "resident_bytes": resident_bytes,
-        "current_frequency_mhz": current_frequency,
-        "maximum_frequency_mhz": maximum_frequency,
-        "temperature_celsius": round(temperature_millidegrees / 1000.0, 1) if temperature_millidegrees is not None else None,
-        "sample_ready": utilization is not None,
-    }
-
-
-def _record_telemetry_history(sample: dict[str, object], sampled_at: float) -> list[dict[str, object]]:
-    """Keep one rolling system sample per five seconds for up to one hour."""
-    with TELEMETRY_HISTORY_LOCK:
-        last_sample_at = TELEMETRY_HISTORY_STATE["last_sample_at"]
-        if not TELEMETRY_HISTORY or sampled_at - last_sample_at >= 5.0:
-            TELEMETRY_HISTORY.append(sample)
-            TELEMETRY_HISTORY_STATE["last_sample_at"] = sampled_at
-        else:
-            TELEMETRY_HISTORY[-1] = sample
-        return [dict(item) for item in TELEMETRY_HISTORY]
-
-
-def _persisted_telemetry_history(camera_id: str) -> dict[str, Any]:
-    """Cache database-backed graph series for one sampling interval."""
-    cache_key = (id(manager.events), camera_id)
-    now = time.monotonic()
-    with TELEMETRY_PERSISTED_CACHE_LOCK:
-        cached = TELEMETRY_PERSISTED_CACHE.get(cache_key)
-        if cached is not None and now - float(cached["at"]) < 55.0:
-            return cached["value"]
-    interruptions: list[dict[str, Any]] = []
-    if not camera_id:
-        sample_times_reader = getattr(
-            manager.events,
-            "runtime_telemetry_sample_times",
-            None,
-        )
-        lifecycle_reader = getattr(manager.events, "lifecycle_events", None)
-        try:
-            interruptions = classify_telemetry_interruptions(
-                sample_times_reader(hours=168) if callable(sample_times_reader) else [],
-                lifecycle_reader(hours=168) if callable(lifecycle_reader) else [],
-                observed_at=datetime.now(timezone.utc),
-            )
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "could not load telemetry interruption annotations"
-            )
-    value = {
-        "runtime": {
-            "short": manager.events.runtime_telemetry_history(
-                hours=2, bucket_minutes=1, camera_id=camera_id
-            ),
-            "long": manager.events.runtime_telemetry_history(
-                hours=168, bucket_minutes=15, camera_id=camera_id
-            ),
-        },
-        "tracking": {
-            "short": manager.events.tracking_capacity_activity(
-                hours=2, bucket_minutes=1, camera_id=camera_id
-            ),
-            "long": manager.events.tracking_capacity_activity(
-                hours=168, bucket_minutes=15, camera_id=camera_id
-            ),
-        },
-        "memory": (
-            {
-                "short": manager.events.process_memory_history(
-                    hours=24, bucket_minutes=5
-                ),
-                "long": manager.events.process_memory_history(
-                    hours=168, bucket_minutes=15
-                ),
-            }
-            if not camera_id
-            else {"short": [], "long": []}
-        ),
-        "interruptions": interruptions,
-        "interruption_summary": summarize_interruptions(interruptions, hours=24),
-    }
-    with TELEMETRY_PERSISTED_CACHE_LOCK:
-        if len(TELEMETRY_PERSISTED_CACHE) >= 32:
-            TELEMETRY_PERSISTED_CACHE.clear()
-        TELEMETRY_PERSISTED_CACHE[cache_key] = {"at": now, "value": value}
-    return value
-
-
-@app.get("/api/telemetry")
-def telemetry(hours: int = 24, camera_id: str = "") -> dict:
-    """Operational history and runtime counters for the Config telemetry view."""
-    storage_path = manager.storage_dir
-    storage_path.mkdir(parents=True, exist_ok=True)
-    usage = shutil.disk_usage(storage_path)
-    camera_statuses = manager.statuses()
-    detector = manager.detector_status()
-    semantic_search = manager.semantic_search_status()
-    gpu = _gpu_status(detector)
-    activity = manager.events.telemetry_activity(hours=hours)
-    selected_camera_id = str(camera_id or "").strip()[:128]
-    persisted_history = _persisted_telemetry_history(selected_camera_id)
-    runtime_history = persisted_history["runtime"]
-    tracking_capacity_history = persisted_history["tracking"]
-    process_memory_history = persisted_history["memory"]
-    interruptions = persisted_history["interruptions"]
-    interruption_summary = persisted_history["interruption_summary"]
-    per_camera_activity = activity.get("by_camera", {})
-    load_1m, load_5m, load_15m = os.getloadavg()
-    memory = _linux_memory_status()
-    process_memory = process_memory_status()
-    process_rss_bytes = int(process_memory["rss_bytes"])
-    runtime_monitor = getattr(manager, "runtime_monitor", None)
-    worker_memory_status = getattr(runtime_monitor, "worker_memory_status", None)
-    worker_memory = (
-        worker_memory_status(detector_status=detector)
-        if callable(worker_memory_status)
-        else {"total_rss_bytes": 0, "total_pss_bytes": 0, "workers": {}}
-    )
-    allocator_memory_status = getattr(runtime_monitor, "memory_maintenance_status", None)
-    memory_maintenance = (
-        allocator_memory_status()
-        if callable(allocator_memory_status)
-        else {}
-    )
-    service_memory = _cgroup_memory_status()
-    cpu_count = os.cpu_count() or 1
-    generated_at = datetime.now(timezone.utc).isoformat()
-    cameras = []
-    for status in camera_statuses:
-        status_camera_id = str(status.get("id") or "")
-        motion = status.get("motion_qualification") or {}
-        analysis_runtime = dict(motion.get("analysis_runtime") or {})
-        event_runtime = dict(motion.get("event_runtime") or {})
-        tracking = status.get("object_tracking") or {}
-        cameras.append({
-            "id": status_camera_id,
-            "name": status.get("name") or status_camera_id,
-            "connected": bool(status.get("connected")),
-            "expected_enabled": bool(status.get("expected_enabled", True)),
-            "frame_fresh": bool(status.get("frame_fresh")),
-            "last_frame_age_seconds": status.get("last_frame_age_seconds"),
-            "recording": bool(status.get("recording") or status.get("sub_recording")),
-            "recording_timestamps": dict(status.get("recording_timestamp_health") or {}),
-            "detection_enabled": bool(status.get("detection_enabled")),
-            "onvif": {
-                "enabled": bool(status.get("onvif_enabled")),
-                "connected": bool(status.get("onvif_connected")),
-                "notifications": int(status.get("onvif_notifications_received") or 0),
-                "motion_events": int(status.get("onvif_motion_events_received") or 0),
-                "poll_errors": int(status.get("onvif_poll_errors") or 0),
-                "poll_timeouts": int(status.get("onvif_poll_timeouts") or 0),
-                "renewals": int(status.get("onvif_renewals") or 0),
-                "renewal_errors": int(status.get("onvif_renewal_errors") or 0),
-                "last_motion_at": status.get("onvif_last_motion_event_at"),
-                "last_error": status.get("onvif_last_error") or "",
-            },
-            "motion": {
-                "mode": motion.get("mode") or "",
-                "triggers": int(motion.get("triggers") or 0),
-                "bursts": int(motion.get("bursts") or 0),
-                "passed": int(motion.get("passed") or 0),
-                "rejected": int(motion.get("audit_rejected") or 0),
-                "suppressed": int(motion.get("suppressed") or 0),
-                "dropped": int(motion.get("dropped_triggers") or 0),
-                "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
-                "analysis_wait_ms_total": round(float(motion.get("analysis_wait_ms_total") or 0.0), 1),
-                "analysis_wait_ms_max": round(float(motion.get("analysis_wait_ms_max") or 0.0), 1),
-                "queue_depth": int(motion.get("queue_depth") or 0),
-                "analysis_runtime": analysis_runtime,
-                "event_runtime": event_runtime,
-                "visual_backup_candidates": int(motion.get("visual_backup_candidates") or 0),
-                "visual_backup_triggers": int(motion.get("visual_backup_triggers") or 0),
-                "visual_backup_onvif_matches": int(motion.get("visual_backup_onvif_matches") or 0),
-                "visual_backup_rate_limited": int(motion.get("visual_backup_rate_limited") or 0),
-                "visual_backup_not_ready": int(motion.get("visual_backup_not_ready") or 0),
-                "visual_backup_not_promoted": int(motion.get("visual_backup_not_promoted") or 0),
-                "visual_backup_uncorrelated_objects": int(motion.get("visual_backup_uncorrelated_objects") or 0),
-            },
-            "tracking": {
-                "active": bool(tracking.get("active")),
-                "frames_processed": int(tracking.get("frames_processed") or 0),
-                "track_count": int(tracking.get("track_count") or 0),
-                "capacity_requests": int(tracking.get("capacity_requests") or 0),
-                "capacity_waits": int(tracking.get("capacity_waits") or 0),
-                "capacity_timeouts": int(tracking.get("capacity_timeouts") or 0),
-                "capacity_wait_seconds_total": float(tracking.get("capacity_wait_seconds_total") or 0.0),
-                "capacity_wait_seconds_max": float(tracking.get("capacity_wait_seconds_max") or 0.0),
-                "capacity_wait_seconds_last": float(tracking.get("capacity_wait_seconds_last") or 0.0),
-                "reid_attempts": int(tracking.get("reid_attempts") or 0),
-                "reid_successes": int(tracking.get("reid_successes") or 0),
-                "reid_failures": int(tracking.get("reid_failures") or 0),
-                "reid_average_ms": float(tracking.get("reid_average_ms") or 0.0),
-                "reid_attempts_by_label": dict(tracking.get("reid_attempts_by_label") or {}),
-                "reid_attempts_by_reason": dict(tracking.get("reid_attempts_by_reason") or {}),
-                "reid_recoveries": int(tracking.get("reid_recoveries") or 0),
-                "reid_recoveries_by_label": dict(tracking.get("reid_recoveries_by_label") or {}),
-                "reid_avoided_geometry_matches": int(
-                    tracking.get("reid_avoided_geometry_matches") or 0
-                ),
-                "reid_avoided_by_label": dict(tracking.get("reid_avoided_by_label") or {}),
-                "prewarm_failures": int(tracking.get("prewarm_failures") or 0),
-                "last_prewarm_failure": tracking.get("last_prewarm_failure"),
-                "handoff_failures": int(tracking.get("handoff_failures") or 0),
-                "last_handoff_failure": tracking.get("last_handoff_failure"),
-            },
-            "capture": dict(status.get("capture_stats") or {}),
-            "lifecycle": dict(status.get("lifecycle") or {}),
-            "activity": per_camera_activity.get(
-                status_camera_id,
-                {
-                    "last_hour": {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}},
-                    "last_24h": {"events": 0, "object_incidents": 0, "objects": 0, "labels": {}},
-                    "hourly": [],
-                },
-            ),
-        })
-    detector_runtime = detector.get("runtime") or {}
-    history = _record_telemetry_history(
-        {
-            "sampled_at": generated_at,
-            "cpu_load_percent": round(min(100.0, (load_1m / cpu_count) * 100.0), 2),
-            "memory_used_percent": float(memory.get("used_percent") or 0.0),
-            "storage_used_percent": round((usage.used / usage.total) * 100.0, 3) if usage.total else 0.0,
-            "process_rss_bytes": process_rss_bytes,
-            "service_application_bytes": service_memory["application_bytes"],
-            "service_file_cache_bytes": service_memory["file_cache_bytes"],
-            "service_reclaimable_file_cache_bytes": service_memory[
-                "reclaimable_file_cache_bytes"
-            ],
-            "service_working_set_bytes": service_memory["working_set_bytes"],
-            "gpu_utilization_percent": gpu.get("utilization_percent"),
-            "inference_ms": detector_runtime.get("average_inference_ms"),
-            "detection_fps": detector_runtime.get("detection_fps"),
-        },
-        time.monotonic(),
-    )
-    return {
-        "generated_at": generated_at,
-        "system": {
-            "uptime_seconds": round(max(0.0, time.monotonic() - PROCESS_STARTED_MONOTONIC), 1),
-            "cpu_count": cpu_count,
-            "load_average": {"one": round(load_1m, 2), "five": round(load_5m, 2), "fifteen": round(load_15m, 2)},
-            "memory": memory,
-            "process_rss_bytes": process_rss_bytes,
-            "process_memory": process_memory,
-            "worker_memory": worker_memory,
-            "memory_maintenance": memory_maintenance,
-            "service_memory": service_memory,
-            "storage": {
-                "path": str(storage_path),
-                "total_bytes": usage.total,
-                "used_bytes": usage.used,
-                "free_bytes": usage.free,
-                "used_percent": round((usage.used / usage.total) * 100, 1) if usage.total else 0.0,
-            },
-            "database": {"path": str(manager.database_dir), "bytes": _database_bytes()},
-        },
-        "detector": detector,
-        "semantic_search": semantic_search,
-        "gpu": gpu,
-        "history": history,
-        "runtime_history": runtime_history,
-        "tracking_capacity_history": tracking_capacity_history,
-        "process_memory_history": process_memory_history,
-        "interruptions": interruptions,
-        "interruption_summary": interruption_summary,
-        "tracking_capacity": {
-            "limit": int(config.detector.tracking.max_active_cameras),
-            "burst_limit": int(config.detector.tracking.burst_max_active_cameras),
-            "adaptive_burst_enabled": bool(config.detector.tracking.adaptive_burst_enabled),
-            "wait_seconds": float(config.detector.tracking.capacity_wait_seconds),
-            "active": sum(1 for item in cameras if item["tracking"]["active"]),
-            "requests_since_restart": sum(item["tracking"]["capacity_requests"] for item in cameras),
-            "waits_since_restart": sum(item["tracking"]["capacity_waits"] for item in cameras),
-            "timeouts_since_restart": sum(item["tracking"]["capacity_timeouts"] for item in cameras),
-            "limiter": (
-                manager.inference.tracking_limiter.status()
-                if hasattr(manager, "inference")
-                else {}
-            ),
-        },
-        "appearance_backfill": (
-            manager.appearance_backfill.status()
-            if hasattr(manager, "appearance_backfill")
-            else {"enabled": False, "running": False, "counts": {}}
-        ),
-        "activity": activity,
-        "cameras": cameras,
-    }
-
 
 @app.get("/api/events")
 def events(limit: int = 100) -> list[dict]:
@@ -4591,7 +4086,7 @@ def _assistant_catalog(active_config: AppConfig, active_manager: AppManager) -> 
 
 
 def _assistant_system_evidence(active_manager: AppManager) -> AssistantEvidence:
-    status = system_status()
+    status = SYSTEM_TELEMETRY.system_status(active_manager)
     cameras = active_manager.statuses()
     unhealthy = [
         {
