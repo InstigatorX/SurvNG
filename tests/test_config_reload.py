@@ -126,7 +126,7 @@ class ConfigReloadTest(unittest.TestCase):
 
         with (
             patch.object(main.STORAGE_MAINTENANCE, "status", return_value={"status": "idle"}),
-            patch.object(main, "MEDIA_EXPORTS", exports),
+            patch.object(main._recording_media_runtime, "media_exports", exports),
         ):
             tasks = main._active_storage_tasks(active)
 
@@ -140,7 +140,7 @@ class ConfigReloadTest(unittest.TestCase):
         main.manager = active
 
         with (
-            patch.object(main, "MEDIA_EXPORTS", exports),
+            patch.object(main._recording_media_runtime, "media_exports", exports),
             patch.object(main, "save_config") as save,
             self.assertRaisesRegex(main.StorageTasksActiveError, "media recording export"),
         ):
@@ -692,39 +692,41 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(active.config, current)
 
     def test_start_does_not_revive_a_prewarmer_that_is_still_stopping(self) -> None:
-        original_thread = main.RECORDING_PREWARM_THREAD
-        original_stop_state = main.RECORDING_PREWARM_STOP.is_set()
+        runtime = main._recording_media_runtime
+        original_thread = runtime.recording_prewarm_thread
+        original_stop_state = runtime.recording_prewarm_stop.is_set()
         active = Mock()
         active.is_alive.return_value = True
-        main.RECORDING_PREWARM_THREAD = active
-        main.RECORDING_PREWARM_STOP.set()
+        runtime.recording_prewarm_thread = active
+        runtime.recording_prewarm_stop.set()
         try:
             main._start_recording_prewarmer()
-            self.assertTrue(main.RECORDING_PREWARM_STOP.is_set())
+            self.assertTrue(runtime.recording_prewarm_stop.is_set())
             active.start.assert_not_called()
         finally:
-            main.RECORDING_PREWARM_THREAD = original_thread
+            runtime.recording_prewarm_thread = original_thread
             if original_stop_state:
-                main.RECORDING_PREWARM_STOP.set()
+                runtime.recording_prewarm_stop.set()
             else:
-                main.RECORDING_PREWARM_STOP.clear()
+                runtime.recording_prewarm_stop.clear()
 
     def test_stop_reports_a_prewarmer_that_cannot_be_reaped(self) -> None:
-        original_thread = main.RECORDING_PREWARM_THREAD
-        original_stop_state = main.RECORDING_PREWARM_STOP.is_set()
+        runtime = main._recording_media_runtime
+        original_thread = runtime.recording_prewarm_thread
+        original_stop_state = runtime.recording_prewarm_stop.is_set()
         active = Mock()
         active.is_alive.return_value = True
-        main.RECORDING_PREWARM_THREAD = active
+        runtime.recording_prewarm_thread = active
         try:
-            with patch("survng.app.main.RECORDING_PREWARM_PROCESS", None):
+            with patch.object(runtime, "recording_prewarm_process", None):
                 with self.assertRaisesRegex(RuntimeError, "did not stop"):
                     main._stop_recording_prewarmer()
         finally:
-            main.RECORDING_PREWARM_THREAD = original_thread
+            runtime.recording_prewarm_thread = original_thread
             if original_stop_state:
-                main.RECORDING_PREWARM_STOP.set()
+                runtime.recording_prewarm_stop.set()
             else:
-                main.RECORDING_PREWARM_STOP.clear()
+                runtime.recording_prewarm_stop.clear()
 
 
 if __name__ == "__main__":

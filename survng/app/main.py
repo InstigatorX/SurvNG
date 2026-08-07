@@ -1,25 +1,16 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import hmac
 import logging
 import math
-import mmap
 import asyncio
-import functools
 import queue
-import os
 import signal
 import secrets
 import platform
 import shutil
 import time
-import struct
-import subprocess
-import tempfile
 import threading
-import weakref
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -168,10 +159,10 @@ from .intelligence_routes import (
     MotionAiReviewRequest,
     create_intelligence_router,
 )
-from .recording_media import (
-    concatenated_clip_timing,
-    event_clip_window,
-    playback_segment_duration,
+from .recording_media_runtime import (
+    RecordingMediaDependencies,
+    RecordingMediaRuntime,
+    RecordingPrewarmCancelled,
 )
 from .recording_routes import (
     MediaExportBatchRequest,
@@ -205,43 +196,6 @@ config = load_config()
 manager = AppManager(config)
 LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
-RECORDING_FMP4_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
-RECORDING_FMP4_LOCKS_GUARD = threading.Lock()
-EVENT_CLIP_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
-EVENT_CLIP_LOCKS_GUARD = threading.Lock()
-RECORDING_DAY_CACHE: dict[tuple[str, str, int, int], tuple[float, list[dict]]] = {}
-RECORDING_DAY_CACHE_LOCK = threading.Lock()
-RECORDING_DAY_CACHE_SECONDS = 30.0
-RECORDING_NEAR_LIVE_CACHE_SECONDS = 2.0
-RECORDING_PREVIEW_INTERVAL_SECONDS = 5.0
-RECORDING_PREVIEW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
-RECORDING_PREVIEW_MAX_BYTES = 256 * 1024 * 1024
-RECORDING_PREVIEW_BUILD_LIMITER = threading.BoundedSemaphore(1)
-RECORDING_PREVIEW_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
-RECORDING_PREVIEW_LOCKS_GUARD = threading.Lock()
-RECORDING_PREVIEW_MAINTENANCE_LOCK = threading.Lock()
-RECORDING_PREVIEW_LAST_MAINTENANCE = 0.0
-RECORDING_CACHE_MAINTENANCE_LOCK = threading.Lock()
-RECORDING_CACHE_LAST_MAINTENANCE = 0.0
-RECORDING_CACHE_METRICS_LOCK = threading.Lock()
-RECORDING_CACHE_METRICS = {
-    "playback_hits": 0,
-    "playback_misses": 0,
-    "playback_remuxes": 0,
-    "playback_failures": 0,
-    "playback_remux_ms": 0.0,
-    "playback_last_remux_ms": 0.0,
-    "prewarm_hits": 0,
-    "prewarm_misses": 0,
-    "prewarm_remuxes": 0,
-    "prewarm_failures": 0,
-    "prewarm_remux_ms": 0.0,
-    "prewarm_last_remux_ms": 0.0,
-}
-RECORDING_PREWARM_STOP = threading.Event()
-RECORDING_PREWARM_THREAD: threading.Thread | None = None
-RECORDING_PREWARM_PROCESS_LOCK = threading.Lock()
-RECORDING_PREWARM_PROCESS: subprocess.Popen | None = None
 FACE_OBSERVATIONS_SYNCED = False
 FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD_LOCK = threading.Lock()
@@ -255,18 +209,11 @@ AI_ACTIVITY_LOCK = threading.Lock()
 AI_ACTIVE_OPERATIONS: dict[str, int] = {}
 AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
 AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
-EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
-MEDIA_EXPORTS_LOCK = threading.Lock()
-MEDIA_EXPORTS: MediaExportManager | None = None
-
-
-class RecordingPrewarmCancelled(Exception):
-    pass
 
 
 def _begin_ai_operation(kind: str) -> None:
@@ -517,11 +464,10 @@ def _active_storage_tasks(active_manager: AppManager) -> list[str]:
     if maintenance.get("status") in {"running", "cancelling"}:
         mode = str(maintenance.get("mode") or "maintenance").replace("_", " ")
         tasks.append(f"storage {mode}")
-    if MEDIA_EXPORTS is not None:
-        exports = MEDIA_EXPORTS.active_jobs()
-        if exports:
-            kinds = sorted({str(job.get("kind") or "media") for job in exports})
-            tasks.append(f"media {'/'.join(kinds)} export")
+    exports = _recording_media_runtime.active_export_jobs()
+    if exports:
+        kinds = sorted({str(job.get("kind") or "media") for job in exports})
+        tasks.append(f"media {'/'.join(kinds)} export")
     return tasks
 
 
@@ -546,10 +492,7 @@ def reload_manager(
         global FACE_OBSERVATIONS_SYNCED
         FACE_OBSERVATIONS_SYNCED = False
         _start_face_observation_sync()
-        with RECORDING_DAY_CACHE_LOCK:
-            RECORDING_DAY_CACHE.clear()
-        _ffmpeg_qsv_info.cache_clear()
-        _ffmpeg_vaapi_info.cache_clear()
+        _recording_media_runtime.clear_runtime_caches()
 
     lifecycle = ManagerGenerationLifecycle(
         lock=MANAGER_RELOAD_LOCK,
@@ -558,10 +501,7 @@ def reload_manager(
         hooks=ManagerReloadHooks(
             active_storage_tasks=_active_storage_tasks,
             active_ai_operations=_active_ai_operations,
-            prewarmer_running=lambda: bool(
-                RECORDING_PREWARM_THREAD is not None
-                and RECORDING_PREWARM_THREAD.is_alive()
-            ),
+            prewarmer_running=_recording_media_runtime.prewarmer_running,
             stop_prewarmer=_stop_recording_prewarmer,
             start_prewarmer=_start_recording_prewarmer,
             save_config=save_config,
@@ -591,9 +531,7 @@ def apply_config_update(
     application = TargetedConfigApplication(
         lock=MANAGER_RELOAD_LOCK,
         save=save_config,
-        active_exports=lambda: (
-            MEDIA_EXPORTS.active_jobs() if MEDIA_EXPORTS is not None else []
-        ),
+        active_exports=_recording_media_runtime.active_export_jobs,
         storage_error=StorageTasksActiveError,
     )
     effective = application.normalize(next_config, assign_ids=assign_ids)
@@ -940,445 +878,6 @@ def get_motion_pipeline_catalog() -> dict:
 
 
 
-def _run_ffmpeg_list(args: list[str], timeout: float = 5.0) -> str:
-    try:
-        result = subprocess.run(
-            [config.ffmpeg_path, "-hide_banner", *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-        )
-        return result.stdout or ""
-    except Exception:
-        return ""
-
-
-def _dri_render_devices() -> list[str]:
-    return sorted(str(path) for path in Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").exists() else []
-
-
-@functools.lru_cache(maxsize=1)
-def _ffmpeg_qsv_info() -> dict:
-    hwaccels = _run_ffmpeg_list(["-hwaccels"])
-    encoders = _run_ffmpeg_list(["-encoders"])
-    decoders = _run_ffmpeg_list(["-decoders"])
-    render_devices = _dri_render_devices()
-    qsv_encoders = sorted({name for name in ("h264_qsv", "hevc_qsv", "av1_qsv", "mjpeg_qsv") if name in encoders})
-    qsv_decoders = sorted({name for name in ("h264_qsv", "hevc_qsv", "av1_qsv", "mjpeg_qsv") if name in decoders})
-    listed = "qsv" in hwaccels and "h264_qsv" in encoders
-    runtime_usable = False
-    runtime_error = ""
-    if listed:
-        probe_args = [config.ffmpeg_path, "-hide_banner", "-v", "error"]
-        if render_devices:
-            probe_args.extend(["-qsv_device", render_devices[0]])
-        probe_args.extend(["-f", "lavfi", "-i", "color=size=64x64:rate=1", "-frames:v", "1", "-c:v", "h264_qsv", "-f", "null", "-"])
-        try:
-            probe = subprocess.run(
-                probe_args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=8,
-            )
-            runtime_usable = probe.returncode == 0
-            runtime_error = "" if runtime_usable else (probe.stderr or "QSV runtime probe failed").strip()[-500:]
-        except Exception as exc:
-            runtime_error = str(exc) or "QSV runtime probe failed"
-    return {
-        "available": bool(listed and runtime_usable),
-        "listed": bool(listed),
-        "runtime_usable": runtime_usable,
-        "runtime_error": runtime_error,
-        "hwaccel_listed": "qsv" in hwaccels,
-        "encoders": qsv_encoders,
-        "decoders": qsv_decoders,
-        "render_devices": render_devices,
-    }
-
-
-@functools.lru_cache(maxsize=1)
-def _ffmpeg_vaapi_info() -> dict:
-    hwaccels = _run_ffmpeg_list(["-hwaccels"])
-    encoders = _run_ffmpeg_list(["-encoders"])
-    decoders = _run_ffmpeg_list(["-decoders"])
-    filters = _run_ffmpeg_list(["-filters"])
-    render_devices = _dri_render_devices()
-    vaapi_encoders = sorted({name for name in ("h264_vaapi", "hevc_vaapi", "av1_vaapi", "mjpeg_vaapi", "mpeg2_vaapi", "vp8_vaapi", "vp9_vaapi") if name in encoders})
-    vaapi_decoders = sorted({name for name in ("h264_vaapi", "hevc_vaapi", "av1_vaapi", "mjpeg_vaapi", "mpeg2_vaapi", "vp8_vaapi", "vp9_vaapi") if name in decoders})
-    vaapi_filters = sorted({name for name in ("hwupload", "scale_vaapi") if name in filters})
-    listed = "vaapi" in hwaccels and "h264_vaapi" in encoders and "hwupload" in filters
-    runtime_usable = False
-    runtime_error = ""
-    if listed and render_devices:
-        probe_args = [
-            config.ffmpeg_path,
-            "-hide_banner",
-            "-v",
-            "error",
-            "-vaapi_device",
-            render_devices[0],
-            "-f",
-            "lavfi",
-            "-i",
-            "color=size=64x64:rate=1",
-            "-frames:v",
-            "1",
-            "-vf",
-            "format=nv12,hwupload",
-            "-c:v",
-            "h264_vaapi",
-            "-f",
-            "null",
-            "-",
-        ]
-        try:
-            probe = subprocess.run(
-                probe_args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=8,
-            )
-            runtime_usable = probe.returncode == 0
-            runtime_error = "" if runtime_usable else (probe.stderr or "VAAPI runtime probe failed").strip()[-500:]
-        except Exception as exc:
-            runtime_error = str(exc) or "VAAPI runtime probe failed"
-    elif listed:
-        runtime_error = "No /dev/dri/renderD* render device found"
-    return {
-        "available": bool(listed and runtime_usable),
-        "listed": bool(listed),
-        "runtime_usable": runtime_usable,
-        "runtime_error": runtime_error,
-        "hwaccel_listed": "vaapi" in hwaccels,
-        "encoders": vaapi_encoders,
-        "decoders": vaapi_decoders,
-        "filters": vaapi_filters,
-        "render_devices": render_devices,
-        "device": render_devices[0] if render_devices else "",
-    }
-
-
-def _hardware_acceleration_mode() -> str:
-    mode = str(getattr(config, "hardware_acceleration", "auto") or "auto").lower()
-    return mode if mode in {"auto", "vaapi", "qsv", "off"} else "auto"
-
-
-def _media_export_hardware_backend() -> str:
-    """Resolve the configured, currently usable H.264 export encoder."""
-    mode = _hardware_acceleration_mode()
-    if mode == "off":
-        return "cpu"
-    if mode in {"auto", "vaapi"}:
-        info = _ffmpeg_vaapi_info()
-        if info.get("available") and "h264_vaapi" in set(info.get("encoders") or []):
-            return "vaapi"
-        if mode == "vaapi":
-            return "cpu"
-    if mode in {"auto", "qsv"}:
-        info = _ffmpeg_qsv_info()
-        if info.get("available") and "h264_qsv" in set(info.get("encoders") or []):
-            return "qsv"
-    return "cpu"
-
-
-def _media_export_hardware_device(backend: str) -> str:
-    info = _ffmpeg_qsv_info() if backend == "qsv" else _ffmpeg_vaapi_info()
-    devices = info.get("render_devices") or []
-    return str(devices[0]) if devices else str(info.get("device") or "")
-
-
-def _media_export_manager() -> MediaExportManager:
-    global MEDIA_EXPORTS
-    with MEDIA_EXPORTS_LOCK:
-        if MEDIA_EXPORTS is None:
-            MEDIA_EXPORTS = MediaExportManager(
-                storage_dir=manager.storage_dir,
-                database_dir=manager.database_dir,
-                recorder=lambda: manager.recorder,
-                ffmpeg_path=lambda: config.ffmpeg_path,
-                hardware_backend=_media_export_hardware_backend,
-                hardware_device=_media_export_hardware_device,
-            )
-        return MEDIA_EXPORTS
-
-
-def _probe_video_codec(path: Path) -> str:
-    try:
-        result = subprocess.run(
-            [
-                _ffprobe_path(),
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=nw=1:nk=1",
-                str(path),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=8,
-        )
-        return (result.stdout or "").strip().lower()
-    except Exception:
-        return ""
-
-
-def _mp4_boxes(data: bytes | bytearray, start: int = 0, end: int | None = None):
-    limit = len(data) if end is None else min(end, len(data))
-    cursor = start
-    while cursor + 8 <= limit:
-        size = struct.unpack_from(">I", data, cursor)[0]
-        box_type = bytes(data[cursor + 4:cursor + 8])
-        header = 8
-        if size == 1 and cursor + 16 <= limit:
-            size = struct.unpack_from(">Q", data, cursor + 8)[0]
-            header = 16
-        elif size == 0:
-            size = limit - cursor
-        if size < header or cursor + size > limit:
-            break
-        yield box_type, cursor, cursor + header, cursor + size
-        cursor += size
-
-
-def _mp4_track_timescales(init_data: bytes) -> dict[int, int]:
-    timescales: dict[int, int] = {}
-    for box_type, _, payload, box_end in _mp4_boxes(init_data):
-        if box_type != b"moov":
-            continue
-        for child_type, _, child_payload, child_end in _mp4_boxes(init_data, payload, box_end):
-            if child_type != b"trak":
-                continue
-            track_id = None
-            timescale = None
-            for trak_type, _, trak_payload, trak_end in _mp4_boxes(init_data, child_payload, child_end):
-                if trak_type == b"tkhd":
-                    version = init_data[trak_payload]
-                    offset = trak_payload + (20 if version == 1 else 12)
-                    if offset + 4 <= trak_end:
-                        track_id = struct.unpack_from(">I", init_data, offset)[0]
-                elif trak_type == b"mdia":
-                    for mdia_type, _, mdia_payload, mdia_end in _mp4_boxes(init_data, trak_payload, trak_end):
-                        if mdia_type != b"mdhd":
-                            continue
-                        version = init_data[mdia_payload]
-                        offset = mdia_payload + (20 if version == 1 else 12)
-                        if offset + 4 <= mdia_end:
-                            timescale = struct.unpack_from(">I", init_data, offset)[0]
-            if track_id and timescale:
-                timescales[track_id] = timescale
-    return timescales
-
-
-def _offset_fmp4_timestamps(init_path: Path, media_path: Path, seconds: float) -> None:
-    if seconds <= 0:
-        return
-    timescales = _mp4_track_timescales(init_path.read_bytes())
-    if not timescales:
-        raise RuntimeError("fragment init has no track timescales")
-    adjusted = 0
-    with media_path.open("r+b") as media_file, mmap.mmap(media_file.fileno(), 0) as data:
-        for box_type, _, payload, box_end in _mp4_boxes(data):
-            if box_type != b"moof":
-                continue
-            for child_type, _, child_payload, child_end in _mp4_boxes(data, payload, box_end):
-                if child_type != b"traf":
-                    continue
-                track_id = None
-                tfdt = None
-                for traf_type, _, traf_payload, traf_end in _mp4_boxes(data, child_payload, child_end):
-                    if traf_type == b"tfhd" and traf_payload + 8 <= traf_end:
-                        track_id = struct.unpack_from(">I", data, traf_payload + 4)[0]
-                    elif traf_type == b"tfdt":
-                        tfdt = (traf_payload, traf_end)
-                if not track_id or not tfdt or track_id not in timescales:
-                    continue
-                tfdt_payload, tfdt_end = tfdt
-                version = data[tfdt_payload]
-                value_offset = tfdt_payload + 4
-                increment = round(seconds * timescales[track_id])
-                if version == 1 and value_offset + 8 <= tfdt_end:
-                    current = struct.unpack_from(">Q", data, value_offset)[0]
-                    struct.pack_into(">Q", data, value_offset, current + increment)
-                    adjusted += 1
-                elif version == 0 and value_offset + 4 <= tfdt_end:
-                    current = struct.unpack_from(">I", data, value_offset)[0]
-                    next_value = current + increment
-                    if next_value > 0xFFFFFFFF:
-                        raise RuntimeError("fragment timestamp exceeds version 0 tfdt")
-                    struct.pack_into(">I", data, value_offset, next_value)
-                    adjusted += 1
-        data.flush()
-    if not adjusted:
-        raise RuntimeError("fragment has no adjustable tfdt boxes")
-
-
-def _event_clip_cache_suffix(source_codec: str, backend: str) -> str:
-    codec = source_codec or "unknown"
-    return f"a3-{backend}-{codec}"
-
-
-def _event_clip_vaapi_enabled(source_codec: str) -> bool:
-    mode = _hardware_acceleration_mode()
-    if mode not in {"auto", "vaapi"}:
-        return False
-    if source_codec not in {"h264", "hevc"}:
-        return False
-    info = _ffmpeg_vaapi_info()
-    has_encoder = "h264_vaapi" in set(info.get("encoders") or [])
-    return bool(info.get("available") and has_encoder)
-
-
-def _event_clip_qsv_enabled(source_codec: str) -> bool:
-    mode = _hardware_acceleration_mode()
-    if mode == "off":
-        return False
-    if mode == "auto" and _ffmpeg_vaapi_info().get("available"):
-        return False
-    if mode not in {"auto", "qsv"}:
-        return False
-    if source_codec not in {"h264", "hevc"}:
-        return False
-    info = _ffmpeg_qsv_info()
-    decoder = f"{source_codec}_qsv"
-    has_decoder = decoder in set(info.get("decoders") or [])
-    has_encoder = "h264_qsv" in set(info.get("encoders") or [])
-    return bool(info.get("available") and has_decoder and has_encoder)
-
-
-def _event_clip_cpu_command(concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
-    return [
-        config.ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_path),
-        "-ss",
-        f"{local_start:.3f}",
-        "-t",
-        f"{duration:.3f}",
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-vf",
-        "format=yuv420p",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        str(tmp_path),
-    ]
-
-
-def _event_clip_vaapi_command(source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
-    info = _ffmpeg_vaapi_info()
-    device = str(info.get("device") or "/dev/dri/renderD128")
-    return [
-        config.ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-vaapi_device",
-        device,
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_path),
-        "-ss",
-        f"{local_start:.3f}",
-        "-t",
-        f"{duration:.3f}",
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-vf",
-        "format=nv12,hwupload",
-        "-c:v",
-        "h264_vaapi",
-        "-qp",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        str(tmp_path),
-    ]
-
-
-def _event_clip_qsv_command(source_codec: str, concat_path: Path, local_start: float, duration: float, tmp_path: Path) -> list[str]:
-    decoder = "hevc_qsv" if source_codec == "hevc" else "h264_qsv"
-    info = _ffmpeg_qsv_info()
-    render_devices = info.get("render_devices") or []
-    device_args = ["-qsv_device", render_devices[0]] if render_devices else []
-    return [
-        config.ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        *device_args,
-        "-hwaccel",
-        "qsv",
-        "-hwaccel_output_format",
-        "qsv",
-        "-c:v",
-        decoder,
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_path),
-        "-ss",
-        f"{local_start:.3f}",
-        "-t",
-        f"{duration:.3f}",
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "h264_qsv",
-        "-preset",
-        "veryfast",
-        "-global_quality",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        str(tmp_path),
-    ]
 
 @app.get("/api/accelerator")
 def accelerator() -> dict:
@@ -1513,34 +1012,7 @@ def event_clip_settings() -> dict:
 
 @app.get("/api/recordings/cache/status")
 def recording_cache_status() -> dict:
-    root = manager.storage_dir / "playback-cache" / "fmp4"
-    files = [path for path in root.glob("*/*") if path.is_file()] if root.exists() else []
-    existing_files: list[Path] = []
-    total_bytes = 0
-    for path in files:
-        try:
-            total_bytes += path.stat().st_size
-            existing_files.append(path)
-        except OSError:
-            continue
-    with RECORDING_CACHE_METRICS_LOCK:
-        metrics = dict(RECORDING_CACHE_METRICS)
-    for origin in ("playback", "prewarm"):
-        remuxes = int(metrics[f"{origin}_remuxes"])
-        metrics[f"{origin}_avg_remux_ms"] = round(
-            float(metrics[f"{origin}_remux_ms"]) / remuxes,
-            1,
-        ) if remuxes else 0.0
-        metrics[f"{origin}_last_remux_ms"] = round(float(metrics[f"{origin}_last_remux_ms"]), 1)
-        metrics.pop(f"{origin}_remux_ms", None)
-    return {
-        "entries": len({path.parent for path in existing_files}),
-        "bytes": total_bytes,
-        "max_bytes": int(float(config.recording_cache_max_gb) * 1024 * 1024 * 1024),
-        "max_days": int(config.recording_cache_max_days),
-        "prewarm": bool(config.recording_cache_prewarm),
-        "metrics": metrics,
-    }
+    return _recording_media_runtime.cache_status()
 
 
 
@@ -1644,867 +1116,67 @@ def _start_face_observation_sync() -> None:
         FACE_OBSERVATIONS_SYNC_THREAD.start()
 
 
-
-
-def _recording_day_rows(
-    camera_id: str,
-    start_epoch: float,
-    end_epoch: float,
-    source: str,
-    *,
-    fresh: bool = False,
-    active_manager: AppManager | None = None,
-) -> list[dict]:
-    selected_manager = active_manager or manager
-    selected_source = recording_source(source)
-    cache_key = (camera_id, selected_source, int(start_epoch), int(end_epoch))
-    now = time.monotonic()
-    if not fresh:
-        with RECORDING_DAY_CACHE_LOCK:
-            cached = RECORDING_DAY_CACHE.get(cache_key)
-            near_live = end_epoch >= time.time() - max(
-                30.0,
-                selected_manager.recorder.segment_seconds * 3,
-            )
-            cache_seconds = (
-                RECORDING_NEAR_LIVE_CACHE_SECONDS
-                if near_live
-                else RECORDING_DAY_CACHE_SECONDS
-            )
-            if cached is not None and now - cached[0] < cache_seconds:
-                selected_manager.recorder.lease_recordings_for_playback(cached[1])
-                return cached[1]
-    rows = [
-        row for row in selected_manager.recorder.recording_rows_between(
-            camera_id,
-            start_epoch,
-            end_epoch,
-            selected_source,
-            discover_missing=False,
-        )
-        if int(row.get("size_bytes") or 0) > 1024
-    ]
-    if fresh:
-        rows = selected_manager.recorder.discard_missing_recording_rows(rows)
-    selected_manager.recorder.lease_recordings_for_playback(rows)
-    selected_manager.recorder.queue_stream_fingerprints(rows)
-    with RECORDING_DAY_CACHE_LOCK:
-        RECORDING_DAY_CACHE[cache_key] = (now, rows)
-        expired = [key for key, value in RECORDING_DAY_CACHE.items() if now - value[0] >= RECORDING_DAY_CACHE_SECONDS]
-        for key in expired:
-            RECORDING_DAY_CACHE.pop(key, None)
-    return rows
-
-
-def _recording_cache_metric(origin: str, metric: str, value: float = 1.0) -> None:
-    key = f"{origin}_{metric}"
-    with RECORDING_CACHE_METRICS_LOCK:
-        RECORDING_CACHE_METRICS[key] = float(RECORDING_CACHE_METRICS.get(key, 0.0)) + value
-
-
-def _signal_recording_prewarm_process(process: subprocess.Popen, sig: signal.Signals) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, sig)
-    except ProcessLookupError:
-        pass
-
-
-def _run_recording_remux(command: list[str], origin: str) -> subprocess.CompletedProcess:
-    global RECORDING_PREWARM_PROCESS
-    if origin != "prewarm":
-        return subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
-
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
+_recording_media_runtime = RecordingMediaRuntime(
+    RecordingMediaDependencies(
+        get_config=lambda: config,
+        get_manager=lambda: manager,
+        ffprobe_path=_ffprobe_path,
+        validate_recording_range=_validate_recording_range,
+        recording_playback_window=_recording_playback_window,
     )
-    with RECORDING_PREWARM_PROCESS_LOCK:
-        RECORDING_PREWARM_PROCESS = process
-    terminate_at: float | None = None
-    timeout_at = time.monotonic() + 30.0
-    try:
-        while True:
-            if not RECORDING_PREWARM_STOP.is_set() and time.monotonic() >= timeout_at:
-                _signal_recording_prewarm_process(process, signal.SIGTERM)
-                try:
-                    _stdout, stderr = process.communicate(timeout=3)
-                except subprocess.TimeoutExpired:
-                    _signal_recording_prewarm_process(process, signal.SIGKILL)
-                    _stdout, stderr = process.communicate()
-                raise subprocess.TimeoutExpired(command, 30, stderr=stderr)
-            if RECORDING_PREWARM_STOP.is_set() and process.poll() is None:
-                if terminate_at is None:
-                    _signal_recording_prewarm_process(process, signal.SIGTERM)
-                    terminate_at = time.monotonic() + 3.0
-                elif time.monotonic() >= terminate_at:
-                    _signal_recording_prewarm_process(process, signal.SIGKILL)
-            try:
-                _stdout, stderr = process.communicate(timeout=0.25)
-                if RECORDING_PREWARM_STOP.is_set():
-                    raise RecordingPrewarmCancelled
-                return subprocess.CompletedProcess(command, process.returncode, None, stderr)
-            except subprocess.TimeoutExpired:
-                continue
-    finally:
-        with RECORDING_PREWARM_PROCESS_LOCK:
-            if RECORDING_PREWARM_PROCESS is process:
-                RECORDING_PREWARM_PROCESS = None
+)
 
-
-def _recording_fmp4_files(
-    path: Path,
-    duration: float,
-    media_offset: float,
-    origin: str = "playback",
-) -> tuple[Path, Path]:
-    stat = path.stat()
-    fingerprint = f"v3:{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}:{duration:.3f}:{media_offset:.3f}"
-    cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
-    cache_dir = manager.storage_dir / "playback-cache" / "fmp4" / cache_key
-    init_path = cache_dir / "init.mp4"
-    media_path = cache_dir / "media.m4s"
-    if _recording_cache_files_ready(init_path, media_path, touch=True):
-        _recording_cache_metric(origin, "hits")
-        return init_path, media_path
-
-    with RECORDING_FMP4_LOCKS_GUARD:
-        lock = RECORDING_FMP4_LOCKS.setdefault(cache_key, threading.Lock())
-    with lock:
-        if _recording_cache_files_ready(init_path, media_path, touch=True):
-            _recording_cache_metric(origin, "hits")
-            return init_path, media_path
-        _recording_cache_metric(origin, "misses")
-        remux_started = time.monotonic()
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        temp_dir = Path(tempfile.mkdtemp(prefix="fmp4-", dir=cache_dir))
-        codec = _probe_video_codec(path)
-        command = [
-            config.ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-i",
-            str(path),
-            "-t",
-            f"{duration:.3f}",
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-c",
-            "copy",
-            "-output_ts_offset",
-            f"{media_offset:.3f}",
-        ]
-        if codec in {"hevc", "h265"}:
-            command.extend(["-tag:v", "hvc1"])
-        command.extend([
-            "-f",
-            "hls",
-            "-hls_time",
-            "300",
-            "-hls_list_size",
-            "0",
-            "-hls_segment_type",
-            "fmp4",
-            "-hls_fmp4_init_filename",
-            "init.mp4",
-            "-hls_segment_filename",
-            str(temp_dir / "media_%d.m4s"),
-            str(temp_dir / "index.m3u8"),
-        ])
-        try:
-            result = _run_recording_remux(command, origin)
-        except RecordingPrewarmCancelled:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
-        except subprocess.TimeoutExpired as exc:
-            _recording_cache_metric(origin, "failures")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise HTTPException(status_code=504, detail="recording fragment remux timed out") from exc
-        except OSError as exc:
-            _recording_cache_metric(origin, "failures")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=f"recording fragment remux failed: {exc}") from exc
-        generated_init = temp_dir / "init.mp4"
-        generated_media = temp_dir / "media_0.m4s"
-        if result.returncode != 0 or not generated_init.exists() or not generated_media.exists():
-            _recording_cache_metric(origin, "failures")
-            error = (result.stderr or b"").decode("utf-8", errors="replace").strip()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            if time.time() - stat.st_mtime >= float(config.recording_segment_seconds) * 2:
-                manager.recorder.schedule_revalidation(path, error or "recording fragment failed")
-            with RECORDING_DAY_CACHE_LOCK:
-                RECORDING_DAY_CACHE.clear()
-            raise HTTPException(status_code=500, detail=f"recording fragment failed: {error[-300:]}")
-        try:
-            _offset_fmp4_timestamps(generated_init, generated_media, media_offset)
-        except Exception as exc:
-            _recording_cache_metric(origin, "failures")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=f"recording fragment timestamp repair failed: {exc}") from exc
-        try:
-            os.replace(generated_init, init_path)
-            os.replace(generated_media, media_path)
-        except OSError as exc:
-            _recording_cache_metric(origin, "failures")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=f"recording fragment cache write failed: {exc}") from exc
-        remux_ms = (time.monotonic() - remux_started) * 1000
-        _recording_cache_metric(origin, "remuxes")
-        _recording_cache_metric(origin, "remux_ms", remux_ms)
-        with RECORDING_CACHE_METRICS_LOCK:
-            RECORDING_CACHE_METRICS[f"{origin}_last_remux_ms"] = remux_ms
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        _maintain_recording_cache(cache_dir)
-        return init_path, media_path
-
-
-def _recording_cache_files_ready(init_path: Path, media_path: Path, *, touch: bool = False) -> bool:
-    try:
-        ready = init_path.is_file() and init_path.stat().st_size > 0 and media_path.is_file() and media_path.stat().st_size > 0
-        if ready and touch:
-            now = time.time()
-            os.utime(init_path, (now, now))
-            os.utime(media_path, (now, now))
-        return ready
-    except OSError:
-        return False
-
-
-def _recording_file_response(path: Path, media_type: str) -> FileResponse:
-    try:
-        now = time.time()
-        os.utime(path, (now, now))
-    except OSError:
-        raise HTTPException(status_code=404, detail="recording fragment cache entry disappeared")
-    return FileResponse(
-        path,
-        media_type=media_type,
-        headers={"Cache-Control": "private, max-age=86400"},
+# Transitional aliases keep direct internal/test callers stable until the
+# final composition-root campaign removes the legacy main-module surface.
+for _recording_media_name in (
+    "_run_ffmpeg_list",
+    "_dri_render_devices",
+    "_ffmpeg_qsv_info",
+    "_ffmpeg_vaapi_info",
+    "_hardware_acceleration_mode",
+    "_media_export_hardware_backend",
+    "_media_export_hardware_device",
+    "_media_export_manager",
+    "_probe_video_codec",
+    "_mp4_boxes",
+    "_mp4_track_timescales",
+    "_offset_fmp4_timestamps",
+    "_event_clip_cache_suffix",
+    "_event_clip_vaapi_enabled",
+    "_event_clip_qsv_enabled",
+    "_event_clip_cpu_command",
+    "_event_clip_vaapi_command",
+    "_event_clip_qsv_command",
+    "_recording_day_rows",
+    "_recording_cache_metric",
+    "_signal_recording_prewarm_process",
+    "_run_recording_remux",
+    "_recording_fmp4_files",
+    "_recording_cache_files_ready",
+    "_recording_file_response",
+    "_recording_preview_path",
+    "_recording_preview_ready",
+    "_maintain_recording_preview_cache",
+    "_maintain_recording_cache",
+    "_start_recording_prewarmer",
+    "_stop_recording_prewarmer",
+    "_recording_prewarm_loop",
+    "_recording_day_fmp4_paths",
+    "_recording_rows",
+    "_recording_storage_path",
+    "_event_clip_window",
+    "_event_clip_path",
+    "_ensure_event_clip",
+    "_build_event_clip",
+    "_write_concat_file",
+    "_recording_start_epoch",
+):
+    globals()[_recording_media_name] = getattr(
+        _recording_media_runtime, _recording_media_name
     )
 
 
-def _recording_preview_path(
-    row: dict,
-    epoch: float,
-    *,
-    active_manager: AppManager | None = None,
-) -> Path:
-    """Return a small cached JPEG near an epoch without mutating playback."""
-    selected_manager = active_manager or manager
-    selected_config = getattr(selected_manager, "config", config)
-    source_path = _recording_storage_path(
-        row.get("path"),
-        active_manager=selected_manager,
-    )
-    start_epoch = float(row.get("start_epoch") or 0)
-    end_epoch = float(row.get("end_epoch") or start_epoch)
-    if not start_epoch <= epoch < end_epoch:
-        raise HTTPException(status_code=404, detail="no recording exists at this time")
-    duration = max(0.05, end_epoch - start_epoch)
-    raw_offset = max(0.0, epoch - start_epoch)
-    preview_offset = min(
-        max(0.0, math.floor(raw_offset / RECORDING_PREVIEW_INTERVAL_SECONDS) * RECORDING_PREVIEW_INTERVAL_SECONDS),
-        max(0.0, duration - 0.05),
-    )
-    try:
-        stat = source_path.stat()
-    except OSError as exc:
-        raise HTTPException(status_code=404, detail="recording file not found") from exc
-    fingerprint = (
-        f"v1:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:"
-        f"{preview_offset:.3f}:480"
-    )
-    cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
-    cache_dir = selected_manager.database_dir / "recording-preview-cache"
-    preview_path = cache_dir / f"{cache_key}.jpg"
-    if _recording_preview_ready(preview_path, touch=True):
-        return preview_path
 
-    with RECORDING_PREVIEW_LOCKS_GUARD:
-        lock = RECORDING_PREVIEW_LOCKS.setdefault(cache_key, threading.Lock())
-    with lock:
-        if _recording_preview_ready(preview_path, touch=True):
-            return preview_path
-        if not RECORDING_PREVIEW_BUILD_LIMITER.acquire(timeout=3.0):
-            raise HTTPException(
-                status_code=429,
-                detail="recording preview generator is busy",
-                headers={"Retry-After": "1"},
-            )
-        temporary = cache_dir / f".{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg"
-        try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            command = [
-                selected_config.ffmpeg_path,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                f"{preview_offset:.3f}",
-                "-i",
-                str(source_path),
-                "-map",
-                "0:v:0",
-                "-frames:v",
-                "1",
-                "-threads",
-                "1",
-                "-vf",
-                "scale='min(480,iw)':-2",
-                "-q:v",
-                "5",
-                "-y",
-                str(temporary),
-            ]
-            try:
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=8,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise HTTPException(status_code=504, detail="recording preview timed out") from exc
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail="recording preview failed") from exc
-            if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
-                error = (result.stderr or b"").decode("utf-8", errors="replace").strip()
-                LOGGER.warning(
-                    "recording preview failed for %s at %.3f: %s",
-                    source_path.name,
-                    preview_offset,
-                    redact_secret_text(error[-300:]),
-                )
-                raise HTTPException(status_code=500, detail="recording preview failed")
-            os.replace(temporary, preview_path)
-        finally:
-            temporary.unlink(missing_ok=True)
-            RECORDING_PREVIEW_BUILD_LIMITER.release()
-        _maintain_recording_preview_cache(preview_path)
-        return preview_path
-
-
-def _recording_preview_ready(path: Path, *, touch: bool = False) -> bool:
-    try:
-        ready = path.is_file() and path.stat().st_size > 0
-        if ready and touch:
-            now = time.time()
-            os.utime(path, (now, now))
-        return ready
-    except OSError:
-        return False
-
-
-def _maintain_recording_preview_cache(active_path: Path) -> None:
-    global RECORDING_PREVIEW_LAST_MAINTENANCE
-    now_monotonic = time.monotonic()
-    if now_monotonic - RECORDING_PREVIEW_LAST_MAINTENANCE < 600:
-        return
-    if not RECORDING_PREVIEW_MAINTENANCE_LOCK.acquire(blocking=False):
-        return
-    try:
-        RECORDING_PREVIEW_LAST_MAINTENANCE = now_monotonic
-        cache_dir = active_path.parent
-        now_epoch = time.time()
-        entries: list[tuple[float, int, Path]] = []
-        for path in cache_dir.glob("*.jpg"):
-            if path == active_path:
-                continue
-            try:
-                stat = path.stat()
-                if now_epoch - stat.st_mtime > RECORDING_PREVIEW_MAX_AGE_SECONDS:
-                    path.unlink(missing_ok=True)
-                else:
-                    entries.append((stat.st_mtime, stat.st_size, path))
-            except OSError:
-                continue
-        try:
-            active_size = active_path.stat().st_size
-        except OSError:
-            active_size = 0
-        total_size = sum(size for _, size, _ in entries) + active_size
-        for _modified_at, size, path in sorted(entries):
-            if total_size <= RECORDING_PREVIEW_MAX_BYTES:
-                break
-            try:
-                path.unlink(missing_ok=True)
-                total_size -= size
-            except OSError:
-                continue
-    finally:
-        RECORDING_PREVIEW_MAINTENANCE_LOCK.release()
-
-
-def _maintain_recording_cache(active_dir: Path) -> None:
-    global RECORDING_CACHE_LAST_MAINTENANCE
-    now_monotonic = time.monotonic()
-    if now_monotonic - RECORDING_CACHE_LAST_MAINTENANCE < 600:
-        return
-    if not RECORDING_CACHE_MAINTENANCE_LOCK.acquire(blocking=False):
-        return
-    try:
-        RECORDING_CACHE_LAST_MAINTENANCE = now_monotonic
-        root = manager.storage_dir / "playback-cache" / "fmp4"
-        if not root.exists():
-            return
-        now_epoch = time.time()
-        entries: list[tuple[float, int, Path]] = []
-        for directory in root.iterdir():
-            if not directory.is_dir() or directory == active_dir:
-                continue
-            with RECORDING_FMP4_LOCKS_GUARD:
-                entry_lock = RECORDING_FMP4_LOCKS.setdefault(directory.name, threading.Lock())
-            if not entry_lock.acquire(blocking=False):
-                continue
-            try:
-                for child in directory.iterdir():
-                    if child.is_dir() and child.name.startswith("fmp4-"):
-                        try:
-                            if now_epoch - child.stat().st_mtime > 300:
-                                shutil.rmtree(child, ignore_errors=True)
-                        except OSError:
-                            continue
-                files = [item for item in directory.iterdir() if item.is_file()]
-                modified_at = max((item.stat().st_mtime for item in files), default=directory.stat().st_mtime)
-                size = sum(item.stat().st_size for item in files)
-                max_age_seconds = int(config.recording_cache_max_days) * 24 * 60 * 60
-                if now_epoch - modified_at > max_age_seconds:
-                    shutil.rmtree(directory, ignore_errors=True)
-                else:
-                    entries.append((modified_at, size, directory))
-            except OSError:
-                continue
-            finally:
-                entry_lock.release()
-        total_size = sum(size for _, size, _ in entries)
-        max_bytes = int(float(config.recording_cache_max_gb) * 1024 * 1024 * 1024)
-        for modified_at, size, directory in sorted(entries):
-            if total_size <= max_bytes:
-                break
-            if now_epoch - modified_at < 300:
-                continue
-            with RECORDING_FMP4_LOCKS_GUARD:
-                entry_lock = RECORDING_FMP4_LOCKS.setdefault(directory.name, threading.Lock())
-            if not entry_lock.acquire(blocking=False):
-                continue
-            try:
-                shutil.rmtree(directory, ignore_errors=True)
-                total_size -= size
-            finally:
-                entry_lock.release()
-    finally:
-        RECORDING_CACHE_MAINTENANCE_LOCK.release()
-
-
-def _start_recording_prewarmer() -> None:
-    global RECORDING_PREWARM_THREAD
-    if RECORDING_PREWARM_THREAD is not None and RECORDING_PREWARM_THREAD.is_alive():
-        return
-    RECORDING_PREWARM_STOP.clear()
-    thread = threading.Thread(
-        target=_recording_prewarm_loop,
-        name="recording-prewarmer",
-        daemon=False,
-    )
-    RECORDING_PREWARM_THREAD = thread
-    try:
-        thread.start()
-    except BaseException:
-        RECORDING_PREWARM_THREAD = None
-        RECORDING_PREWARM_STOP.set()
-        raise
-
-
-def _stop_recording_prewarmer() -> None:
-    global RECORDING_PREWARM_THREAD
-    logger = logging.getLogger(__name__)
-    RECORDING_PREWARM_STOP.set()
-    with RECORDING_PREWARM_PROCESS_LOCK:
-        process = RECORDING_PREWARM_PROCESS
-    if process is not None:
-        _signal_recording_prewarm_process(process, signal.SIGTERM)
-    if RECORDING_PREWARM_THREAD is not None:
-        RECORDING_PREWARM_THREAD.join(timeout=5)
-        if RECORDING_PREWARM_THREAD.is_alive():
-            with RECORDING_PREWARM_PROCESS_LOCK:
-                process = RECORDING_PREWARM_PROCESS
-            if process is not None:
-                _signal_recording_prewarm_process(process, signal.SIGKILL)
-            RECORDING_PREWARM_THREAD.join(timeout=3)
-        if RECORDING_PREWARM_THREAD.is_alive():
-            logger.error("recording prewarmer did not stop after cancellation")
-            raise RuntimeError("recording prewarmer did not stop after cancellation")
-        else:
-            RECORDING_PREWARM_THREAD = None
-
-
-def _recording_prewarm_loop() -> None:
-    while not RECORDING_PREWARM_STOP.wait(5):
-        if not config.recording_cache_prewarm:
-            continue
-        for camera in config.cameras:
-            sources = []
-            if camera.record:
-                sources.append("main")
-            if camera.record_sub and camera.live_stream_url:
-                sources.append("live")
-            for source in sources:
-                if RECORDING_PREWARM_STOP.is_set():
-                    return
-                try:
-                    row = manager.recorder.latest_indexed_row(camera.id, source)
-                    if row is None:
-                        continue
-                    path = Path(row["path"])
-                    if not path.exists() or time.time() - path.stat().st_mtime < float(config.recording_segment_seconds) * 2:
-                        continue
-                    window_start, window_end = _recording_playback_window(float(row["start_epoch"]))
-                    rows = manager.recorder.recording_rows_between(
-                        camera.id,
-                        window_start,
-                        window_end,
-                        source,
-                        discover_missing=False,
-                    )
-                    targets = [rows[0], row] if rows else []
-                    warmed: set[str] = set()
-                    for target in targets:
-                        target_path = str(target["path"])
-                        if target_path in warmed:
-                            continue
-                        index = next((i for i, item in enumerate(rows) if item["path"] == target_path), None)
-                        if index is None:
-                            continue
-                        warmed.add(target_path)
-                        media_offset = sum(float(item["duration_seconds"]) for item in rows[:index])
-                        _recording_fmp4_files(
-                            Path(target_path),
-                            float(target["duration_seconds"]),
-                            media_offset,
-                            origin="prewarm",
-                        )
-                except RecordingPrewarmCancelled:
-                    return
-                except Exception:
-                    logging.getLogger(__name__).exception("Recording prewarm failed for %s/%s", camera.id, source)
-
-
-def _recording_day_fmp4_paths(
-    camera_id: str,
-    segment_name: str,
-    start_epoch: float,
-    end_epoch: float,
-    source: str = "main",
-    media_offset: float = 0.0,
-    trim_end: bool = False,
-    *,
-    active_manager: AppManager | None = None,
-) -> tuple[Path, Path]:
-    selected_manager = active_manager or manager
-    if selected_manager.camera(camera_id) is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
-    if not math.isfinite(media_offset) or media_offset < 0:
-        raise HTTPException(status_code=400, detail="invalid recording media offset")
-    rows = _recording_day_rows(
-        camera_id,
-        start_epoch,
-        end_epoch,
-        source,
-        active_manager=selected_manager,
-    )
-    if not segment_name or Path(segment_name).name != segment_name:
-        raise HTTPException(status_code=404, detail="recording segment not found")
-    segment_index = next(
-        (index for index, row in enumerate(rows) if str(row.get("name") or "") == segment_name),
-        None,
-    )
-    if segment_index is None:
-        raise HTTPException(status_code=404, detail="recording segment not found")
-    row = rows[segment_index]
-    path = _recording_storage_path(
-        row.get("path"),
-        active_manager=selected_manager,
-    )
-    segment_duration = playback_segment_duration(
-        float(row["start_epoch"]),
-        float(row["duration_seconds"]),
-        end_epoch,
-        trim_end,
-    )
-    expected_offset = sum(float(row["duration_seconds"]) for row in rows[:segment_index])
-    if abs(media_offset - expected_offset) > 0.1:
-        media_offset = expected_offset
-    return _recording_fmp4_files(path, segment_duration, media_offset)
-
-
-def _recording_rows(
-    camera_id: str,
-    limit: int,
-    source: str = "main",
-    *,
-    active_manager: AppManager | None = None,
-) -> list[dict]:
-    selected_manager = active_manager or manager
-    return selected_manager.recorder.recording_rows(
-        camera_id,
-        limit=limit,
-        source=recording_source(source),
-    )
-
-
-def _recording_storage_path(
-    value: object,
-    *,
-    active_manager: AppManager | None = None,
-) -> Path:
-    selected_manager = active_manager or manager
-    if not value:
-        raise HTTPException(status_code=404, detail="recording file not found")
-    try:
-        path = Path(str(value)).resolve(strict=True)
-        path.relative_to(selected_manager.recorder.recordings_dir.resolve())
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="recording file not found") from None
-    except (OSError, ValueError):
-        raise HTTPException(status_code=403, detail="recording file is outside storage") from None
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="recording file not found")
-    return path
-
-
-
-
-
-
-
-
-
-
-def _event_clip_window(
-    before: float | None,
-    after: float | None,
-    *,
-    active_manager: AppManager | None = None,
-) -> tuple[float, float]:
-    selected_config = (active_manager or manager).config
-    try:
-        return event_clip_window(
-            selected_config.event_clip_before_seconds,
-            selected_config.event_clip_after_seconds,
-            before,
-            after,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-
-def _event_clip_path(
-    event: dict,
-    before: float,
-    after: float,
-    source: str = "main",
-    *,
-    active_manager: AppManager | None = None,
-) -> Path:
-    selected_manager = active_manager or manager
-    event_id = int(event.get("id") or 0)
-    camera_id = slugify_camera_id(str(event.get("camera_id") or "camera"))
-    safe_before = int(max(0.0, min(float(before), 3600.0)) * 1000)
-    safe_after = int(max(0.0, min(float(after), 3600.0)) * 1000)
-    clip_source = recording_source(source)
-    clip_dir = selected_manager.storage_dir / "event_clips" / camera_id / clip_source
-    clip_dir.mkdir(parents=True, exist_ok=True)
-    accel_mode = _hardware_acceleration_mode()
-    return clip_dir / f"{event_id}-{safe_before}-{safe_after}-a3-{accel_mode}.mp4"
-
-
-def _ensure_event_clip(
-    event: dict,
-    *,
-    before: float,
-    after: float,
-    source: str = "main",
-    active_manager: AppManager | None = None,
-) -> Path:
-    selected_manager = active_manager or manager
-    clip_source = recording_source(source)
-    clip_path = _event_clip_path(
-        event,
-        before=before,
-        after=after,
-        source=clip_source,
-        active_manager=selected_manager,
-    )
-    if clip_path.exists() and clip_path.stat().st_size > 0:
-        return clip_path
-    cache_key = str(clip_path)
-    with EVENT_CLIP_LOCKS_GUARD:
-        lock = EVENT_CLIP_LOCKS.setdefault(cache_key, threading.Lock())
-    with lock:
-        if clip_path.exists() and clip_path.stat().st_size > 0:
-            return clip_path
-        if not EVENT_CLIP_BUILD_LIMITER.acquire(blocking=False):
-            raise HTTPException(
-                status_code=429,
-                detail="too many event clips are already being generated",
-                headers={"Retry-After": "3"},
-            )
-        try:
-            _build_event_clip(
-                event,
-                before=before,
-                after=after,
-                output_path=clip_path,
-                source=clip_source,
-                active_manager=selected_manager,
-            )
-        finally:
-            EVENT_CLIP_BUILD_LIMITER.release()
-    return clip_path
-
-
-def _build_event_clip(
-    event: dict,
-    before: float,
-    after: float,
-    output_path: Path,
-    source: str = "main",
-    *,
-    active_manager: AppManager | None = None,
-) -> None:
-    selected_manager = active_manager or manager
-    camera_id = str(event.get("camera_id") or "")
-    if not camera_id:
-        raise HTTPException(status_code=400, detail="event is missing camera")
-
-    event_created_epoch = event_epoch(event)
-    window_before = max(0.0, min(float(before), 3600.0))
-    window_after = max(0.0, min(float(after), 3600.0))
-    window_start = event_created_epoch - window_before
-    window_end = event_created_epoch + window_after
-
-    rows: list[dict] = []
-    for candidate in selected_manager.recorder.recording_rows_between(
-            camera_id,
-            window_start,
-            window_end,
-            recording_source(source),
-            discover_missing=False,
-        ):
-        if candidate.get("start_epoch") is None or candidate.get("end_epoch") is None:
-            continue
-        try:
-            candidate = {
-                **candidate,
-                "path": str(
-                    _recording_storage_path(
-                        candidate.get("path"),
-                        active_manager=selected_manager,
-                    )
-                ),
-            }
-        except HTTPException:
-            continue
-        rows.append(candidate)
-    rows.sort(key=lambda row: float(row["start_epoch"]))
-    selected = [
-        row for row in rows
-        if float(row["end_epoch"]) > window_start and float(row["start_epoch"]) < window_end
-    ]
-    if not selected:
-        raise HTTPException(status_code=404, detail="no recording window found")
-
-    try:
-        local_start, duration = concatenated_clip_timing(selected, window_start, window_end)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
-
-    concat_path = _write_concat_file(selected, active_manager=selected_manager)
-    tmp_path = output_path.with_name(f".{output_path.stem}.{os.getpid()}.tmp.mp4")
-    source_codec = _probe_video_codec(Path(str(selected[0]["path"])))
-    commands: list[tuple[str, list[str]]] = []
-    if _event_clip_vaapi_enabled(source_codec):
-        commands.append(("vaapi", _event_clip_vaapi_command(source_codec, concat_path, local_start, duration, tmp_path)))
-    if _event_clip_qsv_enabled(source_codec):
-        commands.append(("qsv", _event_clip_qsv_command(source_codec, concat_path, local_start, duration, tmp_path)))
-    commands.append(("cpu", _event_clip_cpu_command(concat_path, local_start, duration, tmp_path)))
-
-    try:
-        last_error = "event clip generation failed"
-        for backend, command in commands:
-            tmp_path.unlink(missing_ok=True)
-            clip_timeout = max(60.0, min(600.0, duration * 2.0))
-            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=clip_timeout)
-            if result.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
-                tmp_path.replace(output_path)
-                logging.getLogger(__name__).info(
-                    "built event clip %s using %s acceleration (source codec %s)",
-                    output_path.name,
-                    backend,
-                    source_codec or "unknown",
-                )
-                return
-            last_error = (result.stderr or f"event clip generation failed using {backend}").strip()[-500:]
-            if backend in {"vaapi", "qsv"}:
-                logging.getLogger(__name__).warning(
-                    "%s event clip generation failed for %s, falling back to next backend: %s",
-                    backend.upper(),
-                    output_path.name,
-                    last_error,
-                )
-        logging.getLogger(__name__).error(
-            "event clip generation failed for %s: %s",
-            output_path.name,
-            redact_secret_text(last_error),
-        )
-        raise HTTPException(status_code=500, detail="event clip generation failed")
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="event clip generation timed out") from exc
-    finally:
-        concat_path.unlink(missing_ok=True)
-        tmp_path.unlink(missing_ok=True)
-
-
-def _write_concat_file(
-    rows: list[dict],
-    *,
-    active_manager: AppManager | None = None,
-) -> Path:
-    selected_manager = active_manager or manager
-    paths = [
-        str(
-            _recording_storage_path(
-                row.get("path"),
-                active_manager=selected_manager,
-            )
-        )
-        for row in rows
-    ]
-    if any("\n" in path or "\r" in path for path in paths):
-        raise HTTPException(status_code=400, detail="recording path is invalid")
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".ffconcat",
-        prefix="survng-recordings-",
-        delete=False,
-    )
-    with handle:
-        for path_value in paths:
-            escaped = path_value.replace("\\", "\\\\").replace("'", "'\\''")
-            handle.write(f"file '{escaped}'\n")
-    return Path(handle.name)
-
-
-def _recording_start_epoch(path: Path) -> float | None:
-    return manager.recorder.recording_start_epoch(path)
 
 
 # Assemble incident/event queries after all assistant consumers are defined.

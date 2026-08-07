@@ -53,7 +53,9 @@ class RecordingApiTest(unittest.TestCase):
 
     def test_direct_fragment_lookup_validates_range_before_scanning_recordings(self) -> None:
         manager = SimpleNamespace(camera=lambda _camera_id: object())
-        with patch.object(main, "manager", manager), patch.object(main, "_recording_day_rows") as recording_rows:
+        with patch.object(main, "manager", manager), patch.object(
+            main._recording_media_runtime, "_recording_day_rows"
+        ) as recording_rows:
             with self.assertRaises(HTTPException) as invalid:
                 main._recording_day_fmp4_paths(
                     "gate",
@@ -482,8 +484,14 @@ class RecordingApiTest(unittest.TestCase):
             }
             with (
                 patch.object(main, "manager", manager),
-                patch.object(main.subprocess, "run", side_effect=create_preview) as run,
-                patch.object(main, "_maintain_recording_preview_cache"),
+                patch(
+                    "survng.app.recording_media_runtime.subprocess.run",
+                    side_effect=create_preview,
+                ) as run,
+                patch.object(
+                    main._recording_media_runtime,
+                    "_maintain_recording_preview_cache",
+                ),
             ):
                 first = main._recording_preview_path(row, 107.9)
                 second = main._recording_preview_path(row, 109.8)
@@ -526,7 +534,11 @@ class RecordingApiTest(unittest.TestCase):
 
         with (
             patch.object(main, "manager", manager),
-            patch.object(main, "RECORDING_DAY_CACHE", {cache_key: (100.0, stale)}),
+            patch.object(
+                main._recording_media_runtime,
+                "recording_day_cache",
+                {cache_key: (100.0, stale)},
+            ),
             patch.object(main.time, "monotonic", return_value=101.0),
         ):
             rows = main._recording_day_rows(
@@ -558,7 +570,11 @@ class RecordingApiTest(unittest.TestCase):
 
         with (
             patch.object(main, "manager", manager),
-            patch.object(main, "RECORDING_DAY_CACHE", {cache_key: (100.0, stale)}),
+            patch.object(
+                main._recording_media_runtime,
+                "recording_day_cache",
+                {cache_key: (100.0, stale)},
+            ),
             patch.object(main.time, "monotonic", return_value=103.0),
             patch.object(main.time, "time", return_value=190.0),
         ):
