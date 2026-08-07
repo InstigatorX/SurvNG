@@ -38,10 +38,10 @@ from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
 from .mqtt_lifecycle import MqttLifecycle
-from .process_memory import (
-    AllocatorMemoryTrimmer,
-    process_memory_status,
-    process_memory_status_for_pid,
+from .runtime_monitor import (
+    ApplicationRuntimeMonitor,
+    process_rss_bytes,
+    system_memory_usage,
 )
 from .semantic_search import DisabledSemanticSearch, SemanticIndex
 from .motion_pipeline import (
@@ -235,9 +235,6 @@ class AppManager:
             readiness_timeout_seconds=CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
             recorder_settle_seconds=CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
         )
-        self._state_monitor_stop = threading.Event()
-        self._state_monitor_thread: threading.Thread | None = None
-        self._allocator_memory_trimmer = AllocatorMemoryTrimmer()
         self.motion_evidence: dict[str, MotionEvidenceRepository] = {}
         # Keep the established two-camera CPU ceiling, but dispatch those slots
         # fairly so continuous EMA work from one camera cannot starve another.
@@ -279,6 +276,12 @@ class AppManager:
             startup=camera_startup,
             state_publisher=self.mqtt,
         )
+        self.runtime_monitor = ApplicationRuntimeMonitor(
+            inference=self.inference,
+            events=self.events,
+            state_events=self.state_events,
+            camera_statuses=self.statuses,
+        )
 
     def _tracking_burst_available(self) -> bool:
         """Allow the optional extra tracker only while inference and memory are healthy."""
@@ -292,7 +295,7 @@ class AppManager:
             return False
         try:
             runtime = detector.cached_object_status().get("runtime") or {}
-            _total, _used, memory_percent = self._memory_usage()
+            _total, _used, memory_percent = system_memory_usage()
             return (
                 int(runtime.get("queue_depth") or 0) == 0
                 and int(runtime.get("pending_frames") or 0) == 0
@@ -461,7 +464,7 @@ class AppManager:
             if should_run:
                 self._start_configured_recorders(camera)
             self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
-            self._publish_camera_status(camera_id)
+            self.runtime_monitor.publish_camera_status(camera_id)
             return True
 
     def set_detection(self, camera_id: str, enabled: bool) -> bool:
@@ -484,7 +487,7 @@ class AppManager:
                 raise
             worker.set_detection_enabled(enabled)
             self.mqtt.publish_camera_feature_state(camera_id, "detection", bool(enabled))
-            self._publish_camera_status(camera_id)
+            self.runtime_monitor.publish_camera_status(camera_id)
             return True
 
     def runtime_preferences(self) -> dict[str, dict[str, bool]]:
@@ -575,7 +578,7 @@ class AppManager:
                 phase_started = time.monotonic()
                 self.mqtt.start()
                 self.mqtt.set_server_lifecycle("starting")
-                self._start_state_monitor()
+                self.runtime_monitor.start()
                 self._startup_timings["mqtt_seconds"] = round(
                     time.monotonic() - phase_started,
                     3,
@@ -690,7 +693,7 @@ class AppManager:
                 (f"camera ONVIF {failure.label}", failure.error)
                 for failure in error.failures
             )
-        attempt("state monitor", self._stop_state_monitor)
+        attempt("runtime monitor", self.runtime_monitor.stop)
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
         attempt("MQTT", self.mqtt.stop)
         LOGGER.info("SurvNG shutdown: stopping camera and ONVIF workers")
@@ -756,7 +759,7 @@ class AppManager:
             if self.recording_enabled(camera_id):
                 self._start_configured_recorders(camera)
             self.mqtt.publish_camera_state(camera_id, True)
-            self._publish_camera_status(camera_id)
+            self.runtime_monitor.publish_camera_status(camera_id)
             return True
 
     def stop_camera(self, camera_id: str) -> bool:
@@ -786,10 +789,10 @@ class AppManager:
                 self.camera_fleet.set_camera_enabled(camera_id, False)
                 self.recording.set_camera_enabled(camera_id, False)
                 self.mqtt.publish_camera_state(camera_id, False)
-                self._publish_camera_status(camera_id)
+                self.runtime_monitor.publish_camera_status(camera_id)
                 raise
             self.mqtt.publish_camera_state(camera_id, False)
-            self._publish_camera_status(camera_id)
+            self.runtime_monitor.publish_camera_status(camera_id)
             return True
 
     def update_camera_zones(
@@ -834,30 +837,6 @@ class AppManager:
             running=running,
             allowed=lambda: not self._stopping and not self._closed,
         )
-
-    @staticmethod
-    def _memory_usage() -> tuple[int, int, float]:
-        values: dict[str, int] = {}
-        try:
-            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-                key, raw = line.split(":", 1)
-                values[key] = int(raw.strip().split()[0]) * 1024
-        except (OSError, ValueError, IndexError):
-            return 0, 0, 0.0
-        total = values.get("MemTotal", 0)
-        available = values.get("MemAvailable", values.get("MemFree", 0))
-        used = max(0, total - available)
-        return total, used, round((used / total) * 100.0, 1) if total else 0.0
-
-    @staticmethod
-    def _process_rss_bytes() -> int:
-        try:
-            for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) * 1024
-        except (OSError, ValueError, IndexError):
-            pass
-        return 0
 
     @staticmethod
     def _detector_runtime_ready(status: dict[str, object]) -> bool:
@@ -949,7 +928,7 @@ class AppManager:
             if bool(storage.get("emergency")):
                 health = "fault"
 
-        memory_total, memory_used, memory_percent = self._memory_usage()
+        memory_total, memory_used, memory_percent = system_memory_usage()
         cpu_count = os.cpu_count() or 1
         try:
             load_1m = os.getloadavg()[0]
@@ -975,7 +954,7 @@ class AppManager:
                 "memory_used_percent": memory_percent,
                 "memory_used_bytes": memory_used,
                 "memory_total_bytes": memory_total,
-                "process_rss_bytes": self._process_rss_bytes(),
+                "process_rss_bytes": process_rss_bytes(),
                 "storage_free_percent": storage_free_percent,
                 "storage_free_bytes": storage.get("free_bytes"),
                 "storage_total_bytes": storage.get("total_bytes"),
@@ -1151,170 +1130,8 @@ class AppManager:
                     payload,
                 )
 
-    @staticmethod
-    def _camera_state_fingerprint(status: dict) -> tuple:
-        keys = (
-            "running", "connected", "capture_running", "frame_fresh", "main_running",
-            "main_frame_fresh", "last_error", "main_last_error", "onvif_connected",
-            "onvif_last_event_at", "onvif_last_motion_event_at", "onvif_last_error",
-            "onvif_last_poll_success_at", "onvif_last_poll_error_at",
-            "onvif_notifications_received", "onvif_motion_events_received",
-            "onvif_renewals", "onvif_renewal_errors", "last_motion_at",
-            "detection_enabled", "recording",
-            "sub_recording", "recording_enabled", "recording_configured",
-            "stream_dimensions",
-        )
-        motion = status.get("motion_qualification") or {}
-        return tuple(status.get(key) for key in keys) + (
-            motion.get("passed"),
-            motion.get("audit_rejected"),
-            motion.get("suppressed"),
-            motion.get("last_decision_at"),
-        )
-
-    def _publish_camera_status(self, camera_id: str) -> None:
-        status = next((item for item in self.statuses() if item.get("id") == camera_id), None)
-        if status is not None:
-            self.state_events.publish("camera_state", status)
-
-    def _start_state_monitor(self) -> None:
-        if self._state_monitor_thread is not None and self._state_monitor_thread.is_alive():
-            return
-        self._state_monitor_stop.clear()
-
-        def monitor() -> None:
-            previous: dict[str, tuple] = {}
-            telemetry_sample_at = 0.0
-            while not self._state_monitor_stop.is_set():
-                try:
-                    statuses = self.statuses()
-                    for status in statuses:
-                        camera_id = str(status.get("id") or "")
-                        fingerprint = self._camera_state_fingerprint(status)
-                        if camera_id and previous.get(camera_id) != fingerprint:
-                            previous[camera_id] = fingerprint
-                            self.state_events.publish("camera_state", status)
-                    now = time.monotonic()
-                    detector_status = self.detector_status()
-                    detector_runtime = detector_status.get("runtime") or {}
-                    allocator_idle = self._allocator_trim_safe(
-                        statuses,
-                        detector_runtime,
-                    )
-                    self._allocator_memory_trimmer.observe_idle(allocator_idle, now=now)
-                    if now - telemetry_sample_at >= 60.0:
-                        self.inference.maintain()
-                        process_memory = process_memory_status()
-                        self._allocator_memory_trimmer.maybe_trim(
-                            process_memory,
-                            now=now,
-                        )
-                        _memory_total, _memory_used, memory_used_percent = self._memory_usage()
-                        load_1m = os.getloadavg()[0]
-                        self.events.record_runtime_telemetry(
-                            statuses,
-                            process_memory=process_memory,
-                            worker_memory=self.worker_memory_status(
-                                detector_status=detector_status,
-                            ),
-                            memory_maintenance=self.allocator_memory_status(),
-                            system_runtime={
-                                "cpu_load_percent": round(
-                                    min(100.0, (load_1m / max(1, os.cpu_count() or 1)) * 100.0),
-                                    2,
-                                ),
-                                "memory_used_percent": memory_used_percent,
-                                "inference_ms": detector_runtime.get("average_inference_ms"),
-                            },
-                        )
-                        telemetry_sample_at = now
-                except Exception:
-                    LOGGER.exception("camera state monitor failed")
-                self._state_monitor_stop.wait(1.0)
-
-        self._state_monitor_thread = threading.Thread(target=monitor, name="camera-state-monitor", daemon=False)
-        self._state_monitor_thread.start()
-
-    @staticmethod
-    def _allocator_trim_safe(
-        statuses: list[dict],
-        detector_runtime: dict,
-    ) -> bool:
-        """Allow thread-safe arena reclamation outside inference/tracking work.
-
-        Ordinary main-stream capture continuously allocates decoder frames and
-        is not a reason to retain otherwise-free glibc arenas. Object
-        inference and tracking remain protected from the occasional trim
-        latency.
-        """
-        tracking_busy = any(
-            bool((status.get("object_tracking") or {}).get("active"))
-            or bool((status.get("object_tracking") or {}).get("worker_running"))
-            for status in statuses
-        )
-        inference_busy = (
-            int(detector_runtime.get("queue_depth") or 0) > 0
-            or int(detector_runtime.get("pending_frames") or 0) > 0
-            or int(detector_runtime.get("active_inferences") or 0) > 0
-        )
-        return not tracking_busy and not inference_busy
-
-    def _stop_state_monitor(self) -> None:
-        self._state_monitor_stop.set()
-        thread = self._state_monitor_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=5.0)
-        if thread is not None and thread.is_alive():
-            raise RuntimeError("camera state monitor did not stop")
-        self._state_monitor_thread = None
-
     def mqtt_status(self) -> dict:
         return self.mqtt.status()
-
-    def allocator_memory_status(self) -> dict:
-        return self._allocator_memory_trimmer.status()
-
-    def worker_memory_status(
-        self,
-        *,
-        detector_status: dict | None = None,
-    ) -> dict:
-        """Return current isolated-inference worker memory without shelling out."""
-        detector = detector_status or self.detector_status()
-        workers = dict(detector.get("workers") or {})
-        semantic = self.semantic_search_status()
-        workers["semantic"] = {
-            "worker_pid": semantic.get("worker_pid"),
-            "worker_alive": semantic.get("state") == "ready",
-        }
-        result: dict[str, dict] = {}
-        total_rss = 0
-        total_pss = 0
-        seen_pids: set[int] = set()
-        for role, worker in workers.items():
-            if not isinstance(worker, dict) or not worker.get("worker_alive"):
-                continue
-            pid = int(worker.get("worker_pid") or 0)
-            if pid <= 0 or pid in seen_pids:
-                continue
-            seen_pids.add(pid)
-            memory = process_memory_status_for_pid(pid)
-            rss = int(memory.get("rss_bytes") or 0)
-            pss = int(memory.get("pss_bytes") or 0)
-            result[str(role)] = {
-                "pid": pid,
-                "rss_bytes": rss,
-                "pss_bytes": pss,
-                "threads": int(memory.get("threads") or 0),
-                "file_descriptors": int(memory.get("file_descriptors") or 0),
-            }
-            total_rss += rss
-            total_pss += pss
-        return {
-            "total_rss_bytes": total_rss,
-            "total_pss_bytes": total_pss,
-            "workers": result,
-        }
 
     def statuses(self) -> list[dict]:
         recording_keys = set()

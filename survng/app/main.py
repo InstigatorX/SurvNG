@@ -1891,13 +1891,14 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     memory = _linux_memory_status()
     process_memory = process_memory_status()
     process_rss_bytes = int(process_memory["rss_bytes"])
-    worker_memory_status = getattr(manager, "worker_memory_status", None)
+    runtime_monitor = getattr(manager, "runtime_monitor", None)
+    worker_memory_status = getattr(runtime_monitor, "worker_memory_status", None)
     worker_memory = (
         worker_memory_status(detector_status=detector)
         if callable(worker_memory_status)
         else {"total_rss_bytes": 0, "total_pss_bytes": 0, "workers": {}}
     )
-    allocator_memory_status = getattr(manager, "allocator_memory_status", None)
+    allocator_memory_status = getattr(runtime_monitor, "memory_maintenance_status", None)
     memory_maintenance = (
         allocator_memory_status()
         if callable(allocator_memory_status)

@@ -14,6 +14,7 @@ from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
 from survng.app.mqtt_lifecycle import MqttLifecycle
 from survng.app.recording_lifecycle import RecordingLifecycle
+from survng.app.runtime_monitor import ApplicationRuntimeMonitor
 
 
 def manager_with_mocks() -> AppManager:
@@ -63,10 +64,8 @@ def manager_with_mocks() -> AppManager:
     manager.workers["gate"].wait_stopped.return_value = True
     manager.workers["gate"].wait_onvif_stopped.return_value = True
     manager.workers["gate"].active_workers.return_value = []
-    manager._start_state_monitor = Mock()
-    manager._stop_state_monitor = Mock()
+    manager.runtime_monitor = Mock()
     manager._save_runtime_state = Mock()
-    manager._publish_camera_status = Mock()
     manager.camera_fleet = CameraFleetLifecycle(
         cameras=[camera],
         workers=manager.workers,
@@ -84,15 +83,15 @@ class ManagerLifecycleTest(unittest.TestCase):
             "object_tracking": {"active": False, "worker_running": False},
         }]
 
-        self.assertTrue(AppManager._allocator_trim_safe(statuses, {}))
+        self.assertTrue(ApplicationRuntimeMonitor.allocator_trim_safe(statuses, {}))
 
     def test_allocator_trim_waits_for_tracking_and_inference(self) -> None:
         tracking = [{"object_tracking": {"worker_running": True}}]
 
-        self.assertFalse(AppManager._allocator_trim_safe(tracking, {}))
-        self.assertFalse(AppManager._allocator_trim_safe([], {"queue_depth": 1}))
-        self.assertFalse(AppManager._allocator_trim_safe([], {"pending_frames": 1}))
-        self.assertFalse(AppManager._allocator_trim_safe([], {"active_inferences": 1}))
+        self.assertFalse(ApplicationRuntimeMonitor.allocator_trim_safe(tracking, {}))
+        self.assertFalse(ApplicationRuntimeMonitor.allocator_trim_safe([], {"queue_depth": 1}))
+        self.assertFalse(ApplicationRuntimeMonitor.allocator_trim_safe([], {"pending_frames": 1}))
+        self.assertFalse(ApplicationRuntimeMonitor.allocator_trim_safe([], {"active_inferences": 1}))
 
     def test_tracking_burst_guard_fails_closed_during_manager_construction(self) -> None:
         manager = object.__new__(AppManager)
@@ -310,25 +309,25 @@ class ManagerLifecycleTest(unittest.TestCase):
             "onvif_renewals": 1,
             "motion_qualification": {},
         }
-        original = AppManager._camera_state_fingerprint(status)
+        original = ApplicationRuntimeMonitor.camera_state_fingerprint(status)
 
         self.assertNotEqual(
             original,
-            AppManager._camera_state_fingerprint({
+            ApplicationRuntimeMonitor.camera_state_fingerprint({
                 **status,
                 "onvif_motion_events_received": 3,
             }),
         )
         self.assertNotEqual(
             original,
-            AppManager._camera_state_fingerprint({
+            ApplicationRuntimeMonitor.camera_state_fingerprint({
                 **status,
                 "onvif_renewal_errors": 1,
             }),
         )
         self.assertNotEqual(
             original,
-            AppManager._camera_state_fingerprint({
+            ApplicationRuntimeMonitor.camera_state_fingerprint({
                 **status,
                 "stream_dimensions": {"live": {"width": 896, "height": 672}},
             }),
@@ -339,7 +338,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager = AppManager(AppConfig(storage_dir=tmpdir))
             manager.start_all()
             self.assertTrue(manager._started)
-            self.assertTrue(manager._state_monitor_thread.is_alive())
+            self.assertTrue(manager.runtime_monitor.running)
             server = manager._mqtt_server_status()
             self.assertEqual(server["state"]["health"], "ok")
             self.assertEqual(server["metrics"]["cameras_total"], 0)
@@ -348,7 +347,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager.stop_all()
 
         self.assertTrue(manager._closed)
-        self.assertIsNone(manager._state_monitor_thread)
+        self.assertFalse(manager.runtime_monitor.running)
         self.assertIsNone(manager.recorder._index_thread)
         self.assertIsNone(manager.recorder._watchdog_thread)
 
