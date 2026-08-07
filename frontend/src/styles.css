@@ -5469,6 +5469,36 @@ section.detection-settings-card {
   min-height: min(760px, calc(100dvh - 132px));
 }
 
+.telemetry-panel-head {
+  min-width: 0;
+}
+
+.telemetry-panel-head > div:first-child {
+  flex: 0 0 auto;
+}
+
+.telemetry-header-continuity {
+  min-width: 0;
+  max-width: min(720px, 64%);
+  margin-left: auto;
+  padding: 6px 9px;
+}
+
+.telemetry-header-continuity span {
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.telemetry-header-continuity strong,
+.telemetry-header-continuity em {
+  white-space: nowrap;
+}
+
+.telemetry-header-continuity em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .telemetry-viewer {
   display: grid;
   gap: 12px;
@@ -6235,6 +6265,13 @@ section.detection-settings-card {
 
   .telemetry-viewer {
     padding: 9px;
+  }
+
+  .telemetry-panel-head .telemetry-header-continuity {
+    order: 3;
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
   }
 
   .telemetry-summary-grid,

@@ -7810,6 +7810,22 @@ function formatRecorderTimestampHealth(sources) {
   }).join(" · ");
 }
 
+function TelemetryContinuity({ data }) {
+  if (!data) return null;
+  const summary = data.interruption_summary || {};
+  const parts = [
+    summary.controlled ? `${summary.controlled} controlled restart${summary.controlled === 1 ? "" : "s"}` : "",
+    summary.unexpected ? `${summary.unexpected} unexpected restart${summary.unexpected === 1 ? "" : "s"}` : "",
+    summary.unknown ? `${summary.unknown} unexplained gap${summary.unknown === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return (
+    <div className={`telemetry-interruption-summary telemetry-header-continuity ${summary.unexpected ? "danger" : summary.unknown ? "warning" : "healthy"}`}>
+      <Clock3 size={16} />
+      <span><strong>Service continuity · 24h</strong><em>{parts.length ? `${parts.join(" · ")} · ${formatDuration(summary.duration_seconds || 0)} unavailable` : "No interruptions"}</em></span>
+    </div>
+  );
+}
+
 function TelemetryViewer({ data, cameraId, timeZone }) {
   if (!data) return <div className="empty-state">Waiting for telemetry...</div>;
   const selected = cameraId ? data.cameras?.find((camera) => camera.id === cameraId) : null;
@@ -7878,12 +7894,6 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const formatCoverage = (value) => value == null
     ? "--"
     : `${Number(value).toFixed(Number(value) >= 99.95 ? 2 : 1)}%`;
-  const interruptionSummary = data.interruption_summary || {};
-  const interruptionParts = [
-    interruptionSummary.controlled ? `${interruptionSummary.controlled} controlled restart${interruptionSummary.controlled === 1 ? "" : "s"}` : "",
-    interruptionSummary.unexpected ? `${interruptionSummary.unexpected} unexpected restart${interruptionSummary.unexpected === 1 ? "" : "s"}` : "",
-    interruptionSummary.unknown ? `${interruptionSummary.unknown} unexplained gap${interruptionSummary.unknown === 1 ? "" : "s"}` : "",
-  ].filter(Boolean);
   return (
     <TelemetryInterruptionsContext.Provider value={selected ? [] : (data.interruptions || [])}>
     <div className="telemetry-viewer">
@@ -7895,8 +7905,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <article><span>Stream interruptions · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} interrupted reads · {selectedOpenFailures.toLocaleString()} failed connections</small></article>
           <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
         </> : <>
-          <article><span>Camera availability · 2h</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
-          <article><span>Enhanced motion analysis · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
+          <article><span>Camera Uptime - 2H</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
+          <article><span>EMA - 2H</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
           <article><span>Object detector response</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{Number(runtime.failed_inferences || 0) ? `${Number(runtime.failed_inferences).toLocaleString()} failures since restart` : "No failures since restart"}</small></article>
           <article><span>Detection accelerator</span><strong>{gpu.available ? "Available" : "Unavailable"}</strong><small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "Collecting activity"}</small></article>
           <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
@@ -7904,11 +7914,6 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <article><span>Delayed tracking recovery</span><strong>{Number(backfillCounts.completed || 0).toLocaleString()} recovered</strong><small>{Number(backfillCounts.queued || 0).toLocaleString()} waiting · {Number(backfillCounts.failed || 0).toLocaleString()} failed</small></article>
         </>}
       </div>
-
-      {!selected ? <div className={`telemetry-interruption-summary ${interruptionSummary.unexpected ? "danger" : interruptionSummary.unknown ? "warning" : "healthy"}`}>
-        <Clock3 size={16} />
-        <span><strong>Service continuity · 24h</strong><em>{interruptionParts.length ? `${interruptionParts.join(" · ")} · ${formatDuration(interruptionSummary.duration_seconds || 0)} unavailable` : "No interruptions"}</em></span>
-      </div> : null}
 
       <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>Events by hour{selected ? ` · ${selected.name}` : ""}</h3><p>Persisted events {selected ? "for this camera" : "across all cameras"}; times use your configured zone.</p></div></div>
@@ -8989,8 +8994,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           </div>
         </section>
         <section className="bento-card config-editor settings-panel telemetry-panel">
-          <div className="section-head">
+          <div className="section-head telemetry-panel-head">
             <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
+            {!telemetryCamera ? <TelemetryContinuity data={telemetry} /> : null}
             <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
           </div>
           {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
