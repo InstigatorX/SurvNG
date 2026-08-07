@@ -17,6 +17,11 @@ from survng.app.calibration import (
 )
 from survng.app.config import AppConfig, CameraConfig
 from survng.app.events import EventStore
+from survng.app.intelligence_routes import (
+    CalibrationApplyRequest,
+    CalibrationRollbackRequest,
+    CalibrationRunRequest,
+)
 
 
 def test_calibration_fingerprint_excludes_camera_credentials() -> None:
@@ -312,7 +317,7 @@ def test_calibration_apply_accepts_only_persisted_recommendation_ids() -> None:
         },
         create_calibration_change_set=Mock(return_value={"id": 8, "status": "collecting"}),
     )
-    request = main.CalibrationApplyRequest(
+    request = CalibrationApplyRequest(
         recommendation_ids=["approved"],
         confirmed=True,
         configuration_fingerprint=fingerprint,
@@ -333,7 +338,7 @@ def test_calibration_apply_accepts_only_persisted_recommendation_ids() -> None:
         patch.object(main, "manager", SimpleNamespace(events=events)),
         patch.object(main, "apply_config_update", side_effect=apply),
     ):
-        response = main.calibration_apply(3, request)
+        response = main._intelligence_route_bundle.service.calibration_apply(3, request)
 
     assert response["ok"] is True
     persisted = events.create_calibration_change_set.call_args.kwargs["changes"]
@@ -363,7 +368,7 @@ def test_calibration_run_records_worker_start_failure() -> None:
         patch("survng.app.main.threading.Thread.start", side_effect=RuntimeError("no threads")),
         pytest.raises(HTTPException) as raised,
     ):
-        main.start_calibration_run(main.CalibrationRunRequest(camera_ids=["gate"]))
+        main._intelligence_route_bundle.service.start_calibration_run(CalibrationRunRequest(camera_ids=["gate"]))
 
     assert raised.value.status_code == 503
     assert events.update_calibration_run.call_args.kwargs["status"] == "failed"
@@ -391,14 +396,14 @@ def test_calibration_rollback_reports_newer_value_conflict() -> None:
             "after": 0.76,
         }],
     })
-    request = main.CalibrationRollbackRequest(confirmed=True)
+    request = CalibrationRollbackRequest(confirmed=True)
 
     with (
         patch.object(main, "config", config),
         patch.object(main, "manager", SimpleNamespace(events=events)),
         pytest.raises(HTTPException) as raised,
     ):
-        main.calibration_rollback(8, request)
+        main._intelligence_route_bundle.service.calibration_rollback(8, request)
 
     assert raised.value.status_code == 409
     assert raised.value.detail["conflicts"][0]["current"] == 0.80
@@ -426,7 +431,7 @@ def test_calibration_evaluation_refuses_confounded_configuration() -> None:
     )
 
     with patch.object(main, "config", changed):
-        main._run_calibration_evaluation(
+        main._intelligence_route_bundle.service._run_calibration_evaluation(
             8,
             changed,
             SimpleNamespace(events=events),

@@ -2,195 +2,85 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import asyncio
-import queue
 import signal
 import secrets
-import platform
-import shutil
-import time
 import threading
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
-from urllib.parse import quote, urlsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from urllib.parse import urlsplit
 
-import websockets
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-import cv2
-import numpy as np
 
 from .config import (
     AppConfig,
-    CameraConfig,
-    camera_by_id,
     load_config,
     normalize_config,
     save_config,
-    slugify_camera_id,
 )
 from .config_application import (
-    DETECTOR_FACE_ENGINE_FIELDS,
-    DETECTOR_HOT_POLICY_FIELDS,
-    DETECTOR_OBJECT_ENGINE_FIELDS,
-    DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
-    DETECTOR_SHARED_ENGINE_FIELDS,
-    HOT_CONFIG_FIELDS,
-    RECORDER_CONFIG_FIELDS,
-    TRACKING_REID_ENGINE_FIELDS,
-    TRACKING_SESSION_FIELDS,
     TargetedConfigApplication,
     manager_owned_config,
 )
 from .config_routes import (
-    ConfigProbeRequest,
     ConfigRouteDependencies,
-    SECRET_PLACEHOLDER,
-    _restore_camera_secrets,
     create_config_router,
-    redacted_camera_payload as _redacted_camera_payload,
-    redacted_config_payload as _redacted_config_payload,
-    restore_config_secrets as _restore_config_secrets,
 )
-from .audit_ai import (
-    AuditAiAdvisor,
-    AuditAiChange,
-    AuditAiError,
-    ai_provider_configured,
-    motion_audit_interpretation,
-    motion_paradigm_context,
-    validate_tuning_value,
-)
-from .assistant import (
-    AssistantAnswer,
-    AssistantChatRequest,
-    AssistantEvidence,
-    AssistantProvider,
-    AssistantToolCall,
-    IncidentVisualReviewer,
-)
-from .assistant_investigation import correlate_incident_timeline
 from .appearance_routes import AppearanceRouteDependencies, create_appearance_router
-from .camera_intelligence import (
-    aggregate_camera_intelligence,
-    compare_camera_intelligence_results,
-    select_balanced_samples,
-)
 from .camera_api_routes import (
     CameraApiDependencies,
-    CameraFeatureState,
     create_camera_api_router,
 )
-from .camera_routes import match_camera_route
-from .calibration import (
-    apply_calibration_changes,
-    build_calibration_report,
-    calibration_configuration_fingerprint,
-    calibration_setting_value,
-)
-from .detector import detection_failure, objects_to_json
 from .detection_routes import (
     DetectionRouteDependencies,
-    TrackingComparisonVerdictRequest,
-    _tracking_comparison_duration,
     create_detection_router,
 )
 from .face_routes import (
     FaceRouteDependencies,
-    _public_face_observation,
     create_face_router,
 )
-from .manager import (
-    AppManager,
-    ManagerShutdownIncompleteError,
-    validate_motion_pipeline_configuration,
-)
+from .frontend_routes import FrontendRouteDependencies, create_frontend_router
+from .manager import AppManager, validate_motion_pipeline_configuration
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
-from .motion_pipeline import (
-    analysis_preset_selections,
-    guided_fusion_settings,
-    identify_analysis_preset,
-    motion_pipeline_catalog,
-    resolve_motion_pipeline_graphs,
-)
-from .motion_ai_review import aggregate_motion_ai_review
 from .media_exports import MediaExportManager
-from .go2rtc import Go2RtcError
-from .incident_utils import (
-    DEFAULT_INCIDENT_GAP_SECONDS,
-    event_epoch,
-    event_snapshot_path,
-    snapshot_media_type,
-)
-from .incident_presenter import (
-    _best_incident_event,
-    _event_row,
-    _incident_event_payload,
-    _incident_list_payload,
-    _incident_row,
-    _incident_rows,
-    _recording_event_row,
-    _recording_grid_incident_payload,
-)
 from .incident_queries import (
     IncidentQueryDependencies,
     IncidentQueryService,
-    _filter_incident_summaries,
-    _filter_incidents_by_event_type,
-    _motion_audit_row,
     create_incident_query_router,
 )
 from .intelligence_routes import (
-    AuditAiApplyRequest,
-    CalibrationApplyRequest,
-    CalibrationRollbackRequest,
-    CalibrationRunRequest,
-    CameraIntelligenceApplyRequest,
-    CameraIntelligenceFollowupRequest,
-    IncidentAiApplyRequest,
     IntelligenceDependencies,
-    MotionAiReviewRequest,
     create_intelligence_router,
 )
 from .recording_media_runtime import (
     RecordingMediaDependencies,
     RecordingMediaRuntime,
-    RecordingPrewarmCancelled,
 )
 from .recording_routes import (
-    MediaExportBatchRequest,
-    MediaExportMetadataRequest,
-    MediaExportProtectionRequest,
-    MediaExportRequest,
     RecordingRouteDependencies,
-    _public_recording_row,
     _recording_playback_window,
     _validate_recording_range,
     create_recording_router,
-    recording_source,
+)
+from .semantic_routes import (
+    SemanticRouteDependencies,
+    create_semantic_router,
 )
 from .object_tracking import ultralytics_deepocsort_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
-from .tracking_comparison import (
-    TRACKING_COMPARISON_IMPLEMENTATIONS,
-    TrackingComparisonRunner,
-    sampled_video_frames,
-)
+from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
     SystemTelemetryDependencies,
     SystemTelemetryService,
     create_system_telemetry_router,
 )
-from .zones import apply_detection_zones, detection_threshold
+from .system_routes import SystemRouteDependencies, create_system_router
 from .security import redact_secret_text
-from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
+from .storage_maintenance import StorageMaintenanceRunner
 
 config = load_config()
 manager = AppManager(config)
@@ -401,14 +291,6 @@ def install_memory_log_handler() -> None:
 install_memory_log_handler()
 
 
-class SemanticSearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=500)
-    camera_ids: list[str] = Field(default_factory=list, max_length=100)
-    object_labels: list[str] = Field(default_factory=list, max_length=100)
-    start_at: str = Field(default="", max_length=64)
-    end_at: str = Field(default="", max_length=64)
-    limit: int = Field(default=50, ge=1, le=500)
-    minimum_score: float = Field(default=-1.0, ge=-1.0, le=1.0)
 
 
 def _ffmpeg_sibling_tool(name: str) -> str:
@@ -502,8 +384,8 @@ def reload_manager(
             active_storage_tasks=_active_storage_tasks,
             active_ai_operations=_active_ai_operations,
             prewarmer_running=_recording_media_runtime.prewarmer_running,
-            stop_prewarmer=_stop_recording_prewarmer,
-            start_prewarmer=_start_recording_prewarmer,
+            stop_prewarmer=_recording_media_runtime._stop_recording_prewarmer,
+            start_prewarmer=_recording_media_runtime._start_recording_prewarmer,
             save_config=save_config,
             publish_runtime=publish_runtime,
             refresh_runtime_caches=refresh_runtime_caches,
@@ -609,10 +491,10 @@ async def lifespan(app: FastAPI):
     _record_process_lifecycle("startup_started")
     manager.start_all()
     try:
-        media_exports = _media_export_manager()
+        media_exports = _recording_media_runtime._media_export_manager()
         media_exports.start()
         _start_face_observation_sync()
-        _start_recording_prewarmer()
+        _recording_media_runtime._start_recording_prewarmer()
         calibration_monitor_task = asyncio.create_task(
             _calibration_followup_monitor(),
             name="survng-calibration-followup-monitor",
@@ -643,7 +525,7 @@ async def lifespan(app: FastAPI):
                     )
             finally:
                 try:
-                    _stop_recording_prewarmer()
+                    _recording_media_runtime._stop_recording_prewarmer()
                 finally:
                     try:
                         with MANAGER_RELOAD_LOCK:
@@ -732,350 +614,6 @@ app.add_middleware(SecurityBoundaryMiddleware)
 app.mount("/static", StaticFiles(directory="survng/static"), name="static")
 
 
-@app.get("/api/health", include_in_schema=False)
-def health() -> dict[str, str]:
-    """Cheap liveness check that never probes cameras, media, or network storage."""
-    return {"status": "ok"}
-
-
-@app.get("/favicon.ico", include_in_schema=False)
-def favicon() -> FileResponse:
-    return FileResponse("survng/static/favicon.ico", media_type="image/x-icon")
-
-
-@app.get("/apple-touch-icon.png", include_in_schema=False)
-@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
-def apple_touch_icon() -> FileResponse:
-    return FileResponse("survng/static/apple-touch-icon.png", media_type="image/png")
-
-
-@app.get("/")
-def index() -> HTMLResponse:
-    return frontend_response("index.html")
-
-
-@app.get("/recordings")
-def recordings_page() -> HTMLResponse:
-    return frontend_response("recordings.html")
-
-
-@app.get("/recordings/search")
-def recording_search_page() -> HTMLResponse:
-    return frontend_response("recordings.html")
-
-
-@app.get("/recordings/exports")
-def recording_exports_page() -> HTMLResponse:
-    return frontend_response("recordings.html")
-
-
-@app.get("/config")
-def config_page() -> HTMLResponse:
-    return frontend_response("config.html")
-
-
-@app.get("/incidents")
-def incidents_page() -> HTMLResponse:
-    return frontend_response("index.html")
-
-
-@app.get("/faces")
-def faces_page() -> HTMLResponse:
-    return frontend_response("index.html")
-
-
-@app.get("/api/cameras")
-def cameras() -> list[dict]:
-    return manager.statuses()
-
-
-def _sse_message(event_type: str, payload: object, event_id: str | None = None) -> str:
-    lines = []
-    if event_id is not None:
-        lines.append(f"id: {event_id}")
-    lines.append(f"event: {event_type}")
-    lines.append(f"data: {json.dumps(payload, separators=(',', ':'), default=str)}")
-    return "\n".join(lines) + "\n\n"
-
-
-@app.get("/api/events/stream")
-async def application_event_stream(request: Request) -> StreamingResponse:
-    active_manager = manager
-    subscriber = active_manager.state_events.subscribe()
-
-    async def generate():
-        try:
-            yield "retry: 3000\n\n"
-            last_event_id = request.headers.get("last-event-id", "")
-            replay = active_manager.state_events.events_after(last_event_id)
-            replayed_ids: set[str] = set()
-            snapshot_sequence: int | None = None
-            if replay is None:
-                # Establish the snapshot boundary first. Events accepted after
-                # this cursor remain queued and are delivered after the
-                # snapshots, so a change racing snapshot generation cannot be
-                # lost. Events at or before it are represented by snapshots.
-                connection_cursor = active_manager.state_events.cursor
-                snapshot_sequence = active_manager.state_events.sequence(connection_cursor)
-                yield _sse_message("cameras_state", await asyncio.to_thread(active_manager.statuses))
-                yield _sse_message(
-                    "system_state",
-                    await asyncio.to_thread(SYSTEM_TELEMETRY.system_status, manager),
-                )
-            else:
-                for event in replay:
-                    replayed_ids.add(event.id)
-                    yield _sse_message(event.type, event.data, event.id)
-                connection_cursor = replay[-1].id if replay else last_event_id
-            yield _sse_message("connected", {"instance": active_manager.state_events.instance_id}, connection_cursor)
-            next_system_update = time.monotonic() + 5.0
-            stream_deadline = time.monotonic() + 6.0
-            while True:
-                if await request.is_disconnected():
-                    return
-                if time.monotonic() >= stream_deadline:
-                    return
-                try:
-                    event = subscriber.get_nowait()
-                except queue.Empty:
-                    if time.monotonic() >= next_system_update:
-                        yield _sse_message(
-                            "system_state",
-                            await asyncio.to_thread(SYSTEM_TELEMETRY.system_status, manager),
-                        )
-                        next_system_update = time.monotonic() + 5.0
-                    await asyncio.sleep(0.2)
-                    continue
-                if event is None:
-                    return
-                if event.id in replayed_ids:
-                    continue
-                event_sequence = active_manager.state_events.sequence(event.id)
-                if (
-                    snapshot_sequence is not None
-                    and event_sequence is not None
-                    and event_sequence <= snapshot_sequence
-                ):
-                    continue
-                yield _sse_message(event.type, event.data, event.id)
-        finally:
-            active_manager.state_events.unsubscribe(subscriber)
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/api/motion/pipeline/catalog")
-def get_motion_pipeline_catalog() -> dict:
-    return motion_pipeline_catalog(manager.motion_pipeline_registry)
-
-
-
-
-@app.get("/api/accelerator")
-def accelerator() -> dict:
-    system = platform.system()
-    machine = platform.machine()
-    is_macos = system == "Darwin"
-    is_apple_silicon = is_macos and machine in {"arm64", "aarch64"}
-    openvino_devices: list[str] = []
-    openvino_error = ""
-    coreml_available = False
-    coreml_error = ""
-    openvino_probe = manager.detector.probe_devices()
-    openvino_devices = list(openvino_probe.get("devices") or [])
-    openvino_error = str(openvino_probe.get("error") or "")
-
-    if is_macos:
-        try:
-            import coremltools  # noqa: F401
-
-            coreml_available = True
-        except Exception as exc:
-            coreml_error = str(exc) or "Core ML probe failed"
-
-    recommended_backend = "coreml" if is_apple_silicon and coreml_available else "openvino"
-    vaapi_info = _ffmpeg_vaapi_info()
-    qsv_info = _ffmpeg_qsv_info()
-
-    return {
-        "system": system,
-        "machine": machine,
-        "is_macos": is_macos,
-        "is_apple_silicon": is_apple_silicon,
-        "has_nvidia": shutil.which("nvidia-smi") is not None,
-        "ffmpeg_path": config.ffmpeg_path,
-        "ffprobe_path": _ffprobe_path(),
-        "ffplay_path": _ffplay_path(),
-        "openvino_devices": openvino_devices,
-        "openvino_error": openvino_error,
-        "coreml_available": coreml_available,
-        "coreml_error": coreml_error,
-        "recommended_openvino_device": "GPU" if "GPU" in openvino_devices else "CPU",
-        "recommended_detector_backend": recommended_backend,
-        "ffmpeg_hardware_acceleration": {
-            "configured": _hardware_acceleration_mode(),
-            "ffmpeg_path": config.ffmpeg_path,
-            "ffprobe_path": _ffprobe_path(),
-            "ffplay_path": _ffplay_path(),
-            "vaapi": vaapi_info,
-            "qsv": qsv_info,
-        },
-    }
-
-
-@app.get("/api/detector/status")
-def detector_status() -> dict:
-    return manager.detector_status()
-
-
-@app.get("/api/object-tracking/catalog")
-def object_tracking_catalog() -> dict:
-    return {
-        "active": "survng_hybrid",
-        "implementations": [
-            {
-                "id": "survng_hybrid",
-                "name": "SurvNG Hybrid",
-                "available": True,
-                "description": "Lightweight geometry tracking with SurvNG appearance recovery.",
-            },
-        ],
-    }
-
-
-@app.get("/api/detector/models")
-def detector_models() -> dict:
-    models: list[dict] = []
-    search_roots = sorted({
-        Path("models/openvino_model"),
-        *Path("models").glob("*_openvino_model"),
-        # Preserve discovery for installations that have not consolidated yet.
-        Path("openvino_model"),
-        *Path(".").glob("*_openvino_model"),
-    })
-    for root in search_roots:
-        if not root.exists():
-            continue
-        for xml_path in sorted(root.rglob("*.xml")):
-            bin_path = xml_path.with_suffix(".bin")
-            metadata_path = xml_path.parent / "metadata.yaml"
-            item = {
-                "path": str(xml_path),
-                "name": xml_path.stem,
-                "bin_path": str(bin_path),
-                "bin_present": bin_path.exists(),
-                "metadata_path": str(metadata_path) if metadata_path.exists() else "",
-                "task": "",
-                "classes": [],
-                "input_shape": [],
-                "output_shapes": [],
-                "valid": False,
-                "error": "",
-            }
-            if metadata_path.exists():
-                try:
-                    import yaml
-
-                    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-                    names = metadata.get("names") or {}
-                    if isinstance(names, dict):
-                        item["classes"] = [str(value) for _, value in sorted(names.items(), key=lambda entry: int(entry[0]))]
-                    elif isinstance(names, list):
-                        item["classes"] = [str(value) for value in names]
-                    item["task"] = str(metadata.get("task") or "")
-                except Exception as exc:
-                    item["error"] = f"Metadata: {exc}"
-            inspection = manager.detector.inspect_model(str(xml_path))
-            item["input_shape"] = list(inspection.get("input_shape") or [])
-            item["output_shapes"] = list(inspection.get("output_shapes") or [])
-            if inspection.get("error"):
-                item["error"] = str(inspection["error"])
-            else:
-                item["valid"] = bin_path.exists()
-            models.append(item)
-    return {"models": models, "active_path": config.detector.resolved_model_path()}
-
-
-@app.get("/api/event-clip/settings")
-def event_clip_settings() -> dict:
-    before, after = _event_clip_window(None, None)
-    return {"before_seconds": before, "after_seconds": after}
-
-
-@app.get("/api/recordings/cache/status")
-def recording_cache_status() -> dict:
-    return _recording_media_runtime.cache_status()
-
-
-
-@app.get("/api/semantic-search/status")
-def semantic_search_status() -> dict[str, Any]:
-    with MANAGER_RELOAD_LOCK:
-        return manager.semantic_search_status()
-
-
-@app.post("/api/semantic-search")
-def semantic_search(request: SemanticSearchRequest) -> dict[str, Any]:
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        maximum = min(request.limit, active_manager.config.semantic_search.max_results)
-        semantic_service = active_manager.semantic_search
-        event_store = active_manager.events
-        base_path = active_manager.config.base_path
-    # Text inference may take seconds during worker recovery. The semantic
-    # service serializes inference against close(), so it need not block the
-    # global manager/config lock and unrelated API traffic.
-    try:
-        hits = semantic_service.search_text(
-            request.query,
-            camera_ids=request.camera_ids,
-            object_labels=request.object_labels,
-            start_at=request.start_at,
-            end_at=request.end_at,
-            limit=maximum * 4,
-            minimum_score=request.minimum_score,
-        )
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    best_by_event: dict[int, Any] = {}
-    for hit in hits:
-        best_by_event.setdefault(hit.event_id, hit)
-        if len(best_by_event) >= maximum:
-            break
-    event_rows = {
-        int(row["id"]): {
-            "id": int(row["id"]),
-            "camera_id": str(row.get("camera_id") or ""),
-            "kind": str(row.get("kind") or ""),
-            "created_at": str(row.get("created_at") or ""),
-        }
-        for row in event_store.get_many(list(best_by_event))
-    }
-    results = []
-    for event_id, hit in best_by_event.items():
-        event = event_rows.get(event_id)
-        if event is None:
-            continue
-        results.append({
-            "score": round(hit.score, 6),
-            "evidence": {
-                "source_kind": hit.source_kind,
-                "source_key": hit.source_key,
-                "object_label": hit.object_label,
-                "bbox": hit.bbox,
-            },
-            "event": event,
-            "snapshot_url": f"{base_path}/api/events/{event_id}/snapshot.jpg",
-        })
-    return {"query": request.query.strip(), "count": len(results), "results": results}
 
 
 
@@ -1126,57 +664,61 @@ _recording_media_runtime = RecordingMediaRuntime(
     )
 )
 
-# Transitional aliases keep direct internal/test callers stable until the
-# final composition-root campaign removes the legacy main-module surface.
-for _recording_media_name in (
-    "_run_ffmpeg_list",
-    "_dri_render_devices",
-    "_ffmpeg_qsv_info",
-    "_ffmpeg_vaapi_info",
-    "_hardware_acceleration_mode",
-    "_media_export_hardware_backend",
-    "_media_export_hardware_device",
-    "_media_export_manager",
-    "_probe_video_codec",
-    "_mp4_boxes",
-    "_mp4_track_timescales",
-    "_offset_fmp4_timestamps",
-    "_event_clip_cache_suffix",
-    "_event_clip_vaapi_enabled",
-    "_event_clip_qsv_enabled",
-    "_event_clip_cpu_command",
-    "_event_clip_vaapi_command",
-    "_event_clip_qsv_command",
-    "_recording_day_rows",
-    "_recording_cache_metric",
-    "_signal_recording_prewarm_process",
-    "_run_recording_remux",
-    "_recording_fmp4_files",
-    "_recording_cache_files_ready",
-    "_recording_file_response",
-    "_recording_preview_path",
-    "_recording_preview_ready",
-    "_maintain_recording_preview_cache",
-    "_maintain_recording_cache",
-    "_start_recording_prewarmer",
-    "_stop_recording_prewarmer",
-    "_recording_prewarm_loop",
-    "_recording_day_fmp4_paths",
-    "_recording_rows",
-    "_recording_storage_path",
-    "_event_clip_window",
-    "_event_clip_path",
-    "_ensure_event_clip",
-    "_build_event_clip",
-    "_write_concat_file",
-    "_recording_start_epoch",
-):
-    globals()[_recording_media_name] = getattr(
-        _recording_media_runtime, _recording_media_name
+_frontend_route_bundle = create_frontend_router(
+    FrontendRouteDependencies(frontend_response=frontend_response)
+)
+app.include_router(_frontend_route_bundle.router)
+health = _frontend_route_bundle.handlers["health"]
+favicon = _frontend_route_bundle.handlers["favicon"]
+apple_touch_icon = _frontend_route_bundle.handlers["apple_touch_icon"]
+index = _frontend_route_bundle.handlers["index"]
+recordings_page = _frontend_route_bundle.handlers["recordings_page"]
+recording_search_page = _frontend_route_bundle.handlers["recording_search_page"]
+recording_exports_page = _frontend_route_bundle.handlers["recording_exports_page"]
+config_page = _frontend_route_bundle.handlers["config_page"]
+incidents_page = _frontend_route_bundle.handlers["incidents_page"]
+faces_page = _frontend_route_bundle.handlers["faces_page"]
+
+_semantic_route_bundle = create_semantic_router(
+    SemanticRouteDependencies(
+        get_manager=lambda: manager,
+        manager_lock=MANAGER_RELOAD_LOCK,
     )
+)
+app.include_router(_semantic_route_bundle.router)
+semantic_search_status = _semantic_route_bundle.handlers["semantic_search_status"]
+semantic_search = _semantic_route_bundle.handlers["semantic_search"]
 
-
-
+_system_route_bundle = create_system_router(
+    SystemRouteDependencies(
+        get_manager=lambda: manager,
+        get_config=lambda: config,
+        system_telemetry=SYSTEM_TELEMETRY,
+        ffprobe_path=_ffprobe_path,
+        ffplay_path=_ffplay_path,
+        ffmpeg_qsv_info=_recording_media_runtime._ffmpeg_qsv_info,
+        ffmpeg_vaapi_info=_recording_media_runtime._ffmpeg_vaapi_info,
+        hardware_acceleration_mode=(
+            _recording_media_runtime._hardware_acceleration_mode
+        ),
+        event_clip_window=lambda before, after: (
+            _recording_media_runtime._event_clip_window(before, after)
+        ),
+        recording_cache_status=_recording_media_runtime.cache_status,
+    )
+)
+app.include_router(_system_route_bundle.router)
+cameras = _system_route_bundle.handlers["cameras"]
+application_event_stream = _system_route_bundle.handlers["application_event_stream"]
+get_motion_pipeline_catalog = _system_route_bundle.handlers[
+    "get_motion_pipeline_catalog"
+]
+accelerator = _system_route_bundle.handlers["accelerator"]
+detector_status = _system_route_bundle.handlers["detector_status"]
+object_tracking_catalog = _system_route_bundle.handlers["object_tracking_catalog"]
+detector_models = _system_route_bundle.handlers["detector_models"]
+event_clip_settings = _system_route_bundle.handlers["event_clip_settings"]
+recording_cache_status = _system_route_bundle.handlers["recording_cache_status"]
 
 
 # Assemble incident/event queries after all assistant consumers are defined.
@@ -1212,16 +754,12 @@ _intelligence_route_bundle = create_intelligence_router(
         ),
         begin_ai_operation=lambda *args, **kwargs: _begin_ai_operation(*args, **kwargs),
         end_ai_operation=lambda *args, **kwargs: _end_ai_operation(*args, **kwargs),
-        media_export_manager=lambda: _media_export_manager(),
+        media_export_manager=lambda: (
+            _recording_media_runtime._media_export_manager()
+        ),
     )
 )
 app.include_router(_intelligence_route_bundle.router)
-
-# Transitional direct-call aliases remain until the final composition cleanup.
-for _intelligence_name, _intelligence_handler in (
-    _intelligence_route_bundle.handlers.items()
-):
-    globals()[_intelligence_name] = _intelligence_handler
 
 
 _camera_api_route_bundle = create_camera_api_router(
@@ -1259,7 +797,9 @@ _detection_route_bundle = create_detection_router(
         get_config=lambda: config,
         manager_lock=MANAGER_RELOAD_LOCK,
         get_comparison_limiter=lambda: TRACKING_COMPARISON_LIMITER,
-        ensure_event_clip=lambda *args, **kwargs: _ensure_event_clip(*args, **kwargs),
+        ensure_event_clip=lambda *args, **kwargs: (
+            _recording_media_runtime._ensure_event_clip(*args, **kwargs)
+        ),
         dependency_status=lambda: ultralytics_deepocsort_dependency_status(),
         comparison_runner=lambda *args, **kwargs: TrackingComparisonRunner(
             *args, **kwargs
@@ -1325,42 +865,42 @@ _recording_route_bundle = create_recording_router(
     RecordingRouteDependencies(
         get_manager=lambda: manager,
         get_config=lambda: config,
-        get_media_exports=lambda: _media_export_manager(),
+        get_media_exports=lambda: _recording_media_runtime._media_export_manager(),
         public_url=lambda path: public_url(path),
-        recording_rows=lambda active_manager, *args, **kwargs: _recording_rows(
+        recording_rows=lambda active_manager, *args, **kwargs: _recording_media_runtime._recording_rows(
             *args,
             active_manager=active_manager,
             **kwargs,
         ),
-        recording_day_rows=lambda active_manager, *args, **kwargs: _recording_day_rows(
+        recording_day_rows=lambda active_manager, *args, **kwargs: _recording_media_runtime._recording_day_rows(
             *args,
             active_manager=active_manager,
             **kwargs,
         ),
         recording_preview_path=lambda active_manager, *args, **kwargs: (
-            _recording_preview_path(
+            _recording_media_runtime._recording_preview_path(
                 *args,
                 active_manager=active_manager,
                 **kwargs,
             )
         ),
         recording_day_fmp4_paths=lambda active_manager, *args, **kwargs: (
-            _recording_day_fmp4_paths(
+            _recording_media_runtime._recording_day_fmp4_paths(
                 *args,
                 active_manager=active_manager,
                 **kwargs,
             )
         ),
-        recording_file_response=lambda *args, **kwargs: _recording_file_response(
+        recording_file_response=lambda *args, **kwargs: _recording_media_runtime._recording_file_response(
             *args,
             **kwargs,
         ),
-        event_clip_window=lambda active_manager, before, after: _event_clip_window(
+        event_clip_window=lambda active_manager, before, after: _recording_media_runtime._event_clip_window(
             before,
             after,
             active_manager=active_manager,
         ),
-        ensure_event_clip=lambda active_manager, *args, **kwargs: _ensure_event_clip(
+        ensure_event_clip=lambda active_manager, *args, **kwargs: _recording_media_runtime._ensure_event_clip(
             *args,
             active_manager=active_manager,
             **kwargs,

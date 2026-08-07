@@ -17,9 +17,6 @@ import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-import cv2
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 

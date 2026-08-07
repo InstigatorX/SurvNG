@@ -4,6 +4,15 @@ import unittest
 from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig, DetectorConfig, ObjectTrackingConfig
+from survng.app.config_application import (
+    DETECTOR_FACE_ENGINE_FIELDS,
+    DETECTOR_HOT_POLICY_FIELDS,
+    DETECTOR_OBJECT_ENGINE_FIELDS,
+    DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
+    DETECTOR_SHARED_ENGINE_FIELDS,
+    TRACKING_REID_ENGINE_FIELDS,
+    TRACKING_SESSION_FIELDS,
+)
 from survng.app import main
 from survng.app.manager import ManagerShutdownIncompleteError
 from survng.app.camera_fleet import CameraFleetOperationError, CameraFleetFailure
@@ -22,15 +31,15 @@ class ConfigReloadTest(unittest.TestCase):
 
     def test_detector_reload_classification_covers_each_setting_once(self) -> None:
         detector_groups = (
-            main.DETECTOR_HOT_POLICY_FIELDS,
-            main.DETECTOR_OBJECT_ENGINE_FIELDS,
-            main.DETECTOR_FACE_ENGINE_FIELDS,
-            main.DETECTOR_SHARED_ENGINE_FIELDS,
+            DETECTOR_HOT_POLICY_FIELDS,
+            DETECTOR_OBJECT_ENGINE_FIELDS,
+            DETECTOR_FACE_ENGINE_FIELDS,
+            DETECTOR_SHARED_ENGINE_FIELDS,
             frozenset({"tracking"}),
         )
         tracking_groups = (
-            main.TRACKING_SESSION_FIELDS,
-            main.TRACKING_REID_ENGINE_FIELDS,
+            TRACKING_SESSION_FIELDS,
+            TRACKING_REID_ENGINE_FIELDS,
         )
 
         self.assertEqual(
@@ -50,8 +59,8 @@ class ConfigReloadTest(unittest.TestCase):
             len(set().union(*tracking_groups)),
         )
         self.assertLessEqual(
-            main.DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
-            main.DETECTOR_OBJECT_ENGINE_FIELDS,
+            DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
+            DETECTOR_OBJECT_ENGINE_FIELDS,
         )
 
     def test_manager_reload_is_refused_during_shutdown(self) -> None:
@@ -169,8 +178,8 @@ class ConfigReloadTest(unittest.TestCase):
 
         with (
             patch("survng.app.main.AppManager", side_effect=[candidate, recovery]),
-            patch("survng.app.main._stop_recording_prewarmer"),
-            patch("survng.app.main._start_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._stop_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._start_recording_prewarmer"),
             patch("survng.app.main.save_config") as save,
         ):
             with self.assertRaisesRegex(RuntimeError, "previous configuration was restored"):
@@ -208,7 +217,7 @@ class ConfigReloadTest(unittest.TestCase):
 
         with (
             patch("survng.app.main.AppManager", return_value=candidate) as factory,
-            patch("survng.app.main._stop_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._stop_recording_prewarmer"),
             self.assertRaisesRegex(RuntimeError, "restart SurvNG"),
         ):
             main.reload_manager(AppConfig(base_path="/new"))
@@ -238,8 +247,8 @@ class ConfigReloadTest(unittest.TestCase):
 
         with (
             patch("survng.app.main.AppManager", return_value=candidate),
-            patch("survng.app.main._stop_recording_prewarmer"),
-            patch("survng.app.main._start_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._stop_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._start_recording_prewarmer"),
             patch(
                 "survng.app.main.save_config",
                 side_effect=lambda *_args, **_kwargs: actions.append("save"),
@@ -271,8 +280,8 @@ class ConfigReloadTest(unittest.TestCase):
 
         with (
             patch("survng.app.main.AppManager", side_effect=[candidate, recovery]),
-            patch("survng.app.main._stop_recording_prewarmer"),
-            patch("survng.app.main._start_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._stop_recording_prewarmer"),
+            patch("survng.app.main._recording_media_runtime._start_recording_prewarmer"),
             patch("survng.app.main.save_config", side_effect=OSError("disk full")),
         ):
             with self.assertRaisesRegex(RuntimeError, "previous configuration was restored"):
@@ -700,7 +709,7 @@ class ConfigReloadTest(unittest.TestCase):
         runtime.recording_prewarm_thread = active
         runtime.recording_prewarm_stop.set()
         try:
-            main._start_recording_prewarmer()
+            main._recording_media_runtime._start_recording_prewarmer()
             self.assertTrue(runtime.recording_prewarm_stop.is_set())
             active.start.assert_not_called()
         finally:
@@ -720,7 +729,7 @@ class ConfigReloadTest(unittest.TestCase):
         try:
             with patch.object(runtime, "recording_prewarm_process", None):
                 with self.assertRaisesRegex(RuntimeError, "did not stop"):
-                    main._stop_recording_prewarmer()
+                    main._recording_media_runtime._stop_recording_prewarmer()
         finally:
             runtime.recording_prewarm_thread = original_thread
             if original_stop_state:

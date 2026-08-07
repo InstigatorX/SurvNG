@@ -19,6 +19,15 @@ from survng.app.config import (
     MqttConfig,
     OnvifConfig,
 )
+from survng.app.config_routes import (
+    ConfigProbeRequest,
+    redacted_config_payload,
+    _restore_camera_secrets as restore_camera_secrets,
+    restore_config_secrets,
+)
+from survng.app.face_routes import _public_face_observation
+from survng.app.incident_presenter import _event_row
+from survng.app.recording_routes import _public_recording_row
 from survng.app.security import redact_secret_text
 
 
@@ -54,7 +63,7 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             audit_ai=AuditAiConfig(api_key="ai-secret"),
         )
 
-        payload = main._redacted_config_payload(current)
+        payload = redacted_config_payload(current)
         serialized = json.dumps(payload)
 
         for secret in (
@@ -66,16 +75,16 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             "ai-secret",
         ):
             self.assertNotIn(secret, serialized)
-        restored = main._restore_config_secrets(AppConfig.model_validate(payload), current)
+        restored = restore_config_secrets(AppConfig.model_validate(payload), current)
         self.assertEqual(restored, current)
 
     def test_masked_secrets_follow_a_renamed_camera_only_when_identity_matches(self) -> None:
         current = AppConfig(cameras=[camera(camera_id="legacy", name="Old name")])
-        payload = main._redacted_config_payload(current)
+        payload = redacted_config_payload(current)
         payload["cameras"][0]["id"] = "new-name"
         payload["cameras"][0]["name"] = "New name"
 
-        restored = main._restore_config_secrets(AppConfig.model_validate(payload), current)
+        restored = restore_config_secrets(AppConfig.model_validate(payload), current)
 
         self.assertEqual(restored.cameras[0].onvif.password, "onvif-secret")
 
@@ -90,14 +99,14 @@ class ApiSecretBoundaryTest(unittest.TestCase):
         replacement.baichuan.username = "other"
 
         with self.assertRaisesRegex(ValueError, "new cameras"):
-            main._restore_config_secrets(AppConfig(cameras=[replacement]), current)
+            restore_config_secrets(AppConfig(cameras=[replacement]), current)
 
     def test_placeholder_text_outside_a_url_password_is_not_replaced(self) -> None:
         current = camera()
         incoming = current.model_copy(deep=True)
         incoming.stream_url = "rtsp://viewer:new-secret@camera.local/__SURVNG_SECRET_SET__"
 
-        restored = main._restore_camera_secrets(incoming, current)
+        restored = restore_camera_secrets(incoming, current)
 
         self.assertEqual(restored.stream_url, incoming.stream_url)
 
@@ -116,7 +125,7 @@ class ApiSecretBoundaryTest(unittest.TestCase):
         self.assertIn("rtsps://secure:***@host/live", redacted)
 
     def test_public_rows_do_not_expose_filesystem_paths(self) -> None:
-        event = main._event_row(
+        event = _event_row(
             {
                 "id": 1,
                 "snapshot_path": "/srv/private/snapshot.jpg",
@@ -124,8 +133,8 @@ class ApiSecretBoundaryTest(unittest.TestCase):
                 "objects_json": "[]",
             }
         )
-        recording = main._public_recording_row({"path": "/srv/private/clip.mp4", "name": "clip.mp4"})
-        face = main._public_face_observation({"snapshot_path": "/srv/private/face.jpg", "id": 3})
+        recording = _public_recording_row({"path": "/srv/private/clip.mp4", "name": "clip.mp4"})
+        face = _public_face_observation({"snapshot_path": "/srv/private/face.jpg", "id": 3})
 
         self.assertEqual(event["snapshot_path"], "available")
         self.assertEqual(event["recording_path"], "available")
@@ -144,15 +153,15 @@ class ApiSecretBoundaryTest(unittest.TestCase):
                 recorder=SimpleNamespace(recordings_dir=recordings),
             )
             with patch.object(main, "manager", fake_manager):
-                self.assertEqual(main._recording_storage_path(allowed), allowed.resolve())
+                self.assertEqual(main._recording_media_runtime._recording_storage_path(allowed), allowed.resolve())
                 with self.assertRaisesRegex(Exception, "outside storage"):
-                    main._recording_storage_path(denied)
+                    main._recording_media_runtime._recording_storage_path(denied)
 
     def test_probe_request_rejects_invalid_network_targets(self) -> None:
         with self.assertRaises(ValidationError):
-            main.ConfigProbeRequest(host="camera.local/path")
+            ConfigProbeRequest(host="camera.local/path")
         with self.assertRaises(ValidationError):
-            main.ConfigProbeRequest(host="camera.local", onvif_port=70000)
+            ConfigProbeRequest(host="camera.local", onvif_port=70000)
 
 
 class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):

@@ -13,6 +13,10 @@ from survng.app.camera_intelligence import (
     select_balanced_samples,
 )
 from survng.app.config import AppConfig
+from survng.app.intelligence_routes import (
+    CameraIntelligenceApplyRequest,
+    CameraIntelligenceFollowupRequest,
+)
 
 
 class CameraIntelligenceTest(unittest.TestCase):
@@ -188,7 +192,7 @@ class CameraIntelligenceTest(unittest.TestCase):
     def test_apply_accepts_only_persisted_review_recommendations(self) -> None:
         active_config = self.configured_app()
         camera = active_config.cameras[0]
-        fingerprint = main._assistant_motion_config_fingerprint(active_config, camera)
+        fingerprint = main._intelligence_route_bundle.service._assistant_motion_config_fingerprint(active_config, camera)
         review = {
             "id": 7,
             "camera_id": "gate",
@@ -208,7 +212,7 @@ class CameraIntelligenceTest(unittest.TestCase):
             get_motion_ai_review=lambda _review_id: review,
             create_camera_intelligence_evaluation=create_evaluation,
         ))
-        request = main.CameraIntelligenceApplyRequest.model_validate({
+        request = CameraIntelligenceApplyRequest.model_validate({
             "confirmed": True,
             "configuration_fingerprint": fingerprint,
             "evaluation_hours": 24,
@@ -228,7 +232,7 @@ class CameraIntelligenceTest(unittest.TestCase):
                 "apply_mode": "camera_reload",
             })) as apply_update,
         ):
-            response = main.camera_intelligence_apply(7, request)
+            response = main._intelligence_route_bundle.service.camera_intelligence_apply(7, request)
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["camera_id"], "gate")
@@ -244,7 +248,7 @@ class CameraIntelligenceTest(unittest.TestCase):
     def test_apply_rejects_change_not_in_persisted_review(self) -> None:
         active_config = self.configured_app()
         camera = active_config.cameras[0]
-        fingerprint = main._assistant_motion_config_fingerprint(active_config, camera)
+        fingerprint = main._intelligence_route_bundle.service._assistant_motion_config_fingerprint(active_config, camera)
         fake_manager = SimpleNamespace(events=SimpleNamespace(
             get_motion_ai_review=lambda _review_id: {
                 "id": 7,
@@ -256,7 +260,7 @@ class CameraIntelligenceTest(unittest.TestCase):
                 },
             },
         ))
-        request = main.CameraIntelligenceApplyRequest.model_validate({
+        request = CameraIntelligenceApplyRequest.model_validate({
             "confirmed": True,
             "configuration_fingerprint": fingerprint,
             "changes": [{
@@ -269,7 +273,7 @@ class CameraIntelligenceTest(unittest.TestCase):
 
         with patch.object(main, "config", active_config), patch.object(main, "manager", fake_manager):
             with self.assertRaises(HTTPException) as raised:
-                main.camera_intelligence_apply(7, request)
+                main._intelligence_route_bundle.service.camera_intelligence_apply(7, request)
 
         self.assertEqual(raised.exception.status_code, 400)
 
@@ -307,9 +311,9 @@ class CameraIntelligenceTest(unittest.TestCase):
             ) as candidates,
             patch.object(main.threading, "Thread", return_value=thread) as thread_factory,
         ):
-            response = main.start_camera_intelligence_followup(
+            response = main._intelligence_route_bundle.service.start_camera_intelligence_followup(
                 9,
-                main.CameraIntelligenceFollowupRequest(image_limit=8),
+                CameraIntelligenceFollowupRequest(image_limit=8),
             )
 
         self.assertEqual(response["status"], "reviewing")

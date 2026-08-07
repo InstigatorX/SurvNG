@@ -18,6 +18,23 @@ from survng.app.image_cache import LocalImageCache
 from survng.app.state_events import StateEventBroker
 from survng.app.semantic_search import SemanticSearchHit
 from survng.app.system_telemetry import SystemTelemetryService
+from survng.app.detection_routes import (
+    TrackingComparisonVerdictRequest,
+    _tracking_comparison_duration,
+)
+from survng.app.incident_presenter import (
+    _best_incident_event,
+    _event_row,
+    _incident_event_payload,
+    _incident_list_payload,
+    _incident_row,
+)
+from survng.app.incident_queries import (
+    _filter_incidents_by_event_type,
+    _motion_audit_row,
+)
+from survng.app.intelligence_routes import AuditAiApplyRequest, MotionAiReviewRequest
+from survng.app.semantic_routes import SemanticSearchRequest
 from fastapi import HTTPException
 
 
@@ -37,7 +54,7 @@ class EventApiSerializationTest(unittest.TestCase):
             config=AppConfig(base_path="/survng"),
         )
         with patch.object(main, "manager", active):
-            response = main.semantic_search(main.SemanticSearchRequest(query="red car"))
+            response = main.semantic_search(SemanticSearchRequest(query="red car"))
 
         self.assertEqual(response["count"], 1)
         self.assertEqual(response["results"][0]["score"], 0.91)
@@ -60,8 +77,8 @@ class EventApiSerializationTest(unittest.TestCase):
             value="high",
             reason="The reviewed audit supports this camera adjustment.",
         )
-        fingerprint = main._assistant_motion_config_fingerprint(active_config, camera)
-        token = main._issue_ai_recommendation_token(
+        fingerprint = main._intelligence_route_bundle.service._assistant_motion_config_fingerprint(active_config, camera)
+        token = main._intelligence_route_bundle.service._issue_ai_recommendation_token(
             kind="motion_audit",
             record_id=7,
             camera_id="gate",
@@ -71,7 +88,7 @@ class EventApiSerializationTest(unittest.TestCase):
         active_manager = SimpleNamespace(
             events=SimpleNamespace(get_motion_audit=lambda _audit_id: {"camera_id": "gate"}),
         )
-        request = main.AuditAiApplyRequest(
+        request = AuditAiApplyRequest(
             changes=[change],
             confirmed=True,
             configuration_fingerprint=fingerprint,
@@ -89,13 +106,13 @@ class EventApiSerializationTest(unittest.TestCase):
                 }),
             ) as apply_update,
         ):
-            response = main.motion_audit_ai_apply(7, request)
+            response = main._intelligence_route_bundle.service.motion_audit_ai_apply(7, request)
 
         self.assertTrue(response["ok"])
         apply_update.assert_called_once()
 
         with self.assertRaises(HTTPException) as raised:
-            main.motion_audit_ai_apply(
+            main._intelligence_route_bundle.service.motion_audit_ai_apply(
                 7,
                 request.model_copy(update={"confirmed": False}),
             )
@@ -211,7 +228,7 @@ class EventApiSerializationTest(unittest.TestCase):
         events = SimpleNamespace(motion_audits=Mock(return_value=([], 0)))
         active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"))
         with patch.object(main, "manager", active_manager):
-            response = main.motion_audit(category="visual_backup")
+            response = main._intelligence_route_bundle.service.motion_audit(category="visual_backup")
 
         self.assertEqual(response["total"], 0)
         events.motion_audits.assert_called_once_with(
@@ -222,7 +239,7 @@ class EventApiSerializationTest(unittest.TestCase):
             category="visual_backup",
         )
         with self.assertRaises(HTTPException):
-            main.motion_audit(category="unexpected")
+            main._intelligence_route_bundle.service.motion_audit(category="unexpected")
 
     def test_cgroup_memory_separates_application_and_file_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -558,7 +575,11 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             patch.object(main, "TRACKING_COMPARISON_LIMITER", limiter),
             patch.object(main, "ultralytics_deepocsort_dependency_status", return_value={"available": True, "reason": ""}),
-            patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")) as ensure_clip,
+            patch.object(
+                main._recording_media_runtime,
+                "_ensure_event_clip",
+                return_value=Path("comparison.mp4"),
+            ) as ensure_clip,
             patch.object(main, "sampled_video_frames", return_value=[(1.0, np.zeros((2, 2, 3), dtype=np.uint8))]) as sampled_frames,
             patch.object(main, "TrackingComparisonRunner", return_value=runner),
         ):
@@ -580,10 +601,10 @@ class EventApiSerializationTest(unittest.TestCase):
         limiter.release.assert_called_once_with()
 
     def test_tracking_comparison_duration_defaults_to_full_bounded_window(self) -> None:
-        self.assertEqual(main._tracking_comparison_duration(None), 30.0)
-        self.assertEqual(main._tracking_comparison_duration(6.0), 6.0)
-        self.assertEqual(main._tracking_comparison_duration(200.0), 30.0)
-        self.assertEqual(main._tracking_comparison_duration(1.0), 3.0)
+        self.assertEqual(_tracking_comparison_duration(None), 30.0)
+        self.assertEqual(_tracking_comparison_duration(6.0), 6.0)
+        self.assertEqual(_tracking_comparison_duration(200.0), 30.0)
+        self.assertEqual(_tracking_comparison_duration(1.0), 3.0)
 
     def test_tracking_comparison_keeps_the_original_manager_during_reload(self) -> None:
         event = {
@@ -623,7 +644,11 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "config", active_config),
             patch.object(main, "manager", active_manager),
             patch.object(main, "ultralytics_deepocsort_dependency_status", return_value={"available": True, "reason": ""}),
-            patch.object(main, "_ensure_event_clip", return_value=Path("comparison.mp4")),
+            patch.object(
+                main._recording_media_runtime,
+                "_ensure_event_clip",
+                return_value=Path("comparison.mp4"),
+            ),
             patch.object(main, "sampled_video_frames", return_value=[]),
             patch.object(main, "TrackingComparisonRunner", return_value=SimpleNamespace(run=run)),
         ):
@@ -654,7 +679,7 @@ class EventApiSerializationTest(unittest.TestCase):
             history = main.tracking_comparison_history(camera_id="gate", limit=7)
             verdict = main.update_tracking_comparison_verdict(
                 4,
-                main.TrackingComparisonVerdictRequest(verdict="inconclusive"),
+                TrackingComparisonVerdictRequest(verdict="inconclusive"),
             )
 
         self.assertEqual(history["items"], [{"id": 4}])
@@ -695,7 +720,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 }]
 
         manager = type("Manager", (), {"events": Events()})()
-        context = main._audit_ai_context(
+        context = main._intelligence_route_bundle.service._audit_ai_context(
             {
                 "id": 7,
                 "camera_id": "gate",
@@ -736,7 +761,7 @@ class EventApiSerializationTest(unittest.TestCase):
             for_camera_range=lambda *_args, **_kwargs: [],
         )
 
-        context = main._audit_ai_context(
+        context = main._intelligence_route_bundle.service._audit_ai_context(
             {
                 "id": 8,
                 "camera_id": "gate",
@@ -798,7 +823,7 @@ class EventApiSerializationTest(unittest.TestCase):
             for_camera_range=lambda *_args, **_kwargs: [],
         )
 
-        context = main._audit_ai_context(
+        context = main._intelligence_route_bundle.service._audit_ai_context(
             {
                 "id": 9,
                 "camera_id": "back-middle",
@@ -862,7 +887,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "_begin_ai_operation"),
             patch.object(main.threading, "Thread", return_value=thread) as thread_factory,
         ):
-            review = main.start_motion_ai_review(main.MotionAiReviewRequest(camera_id="gate"))
+            review = main._intelligence_route_bundle.service.start_motion_ai_review(MotionAiReviewRequest(camera_id="gate"))
 
         self.assertEqual(review["id"], 17)
         limiter.acquire.assert_called_once_with(blocking=False)
@@ -870,7 +895,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(thread_factory.call_args.kwargs["name"], "camera-intelligence-gate")
         self.assertIs(
             thread_factory.call_args.kwargs["target"].__func__,
-            main._run_camera_intelligence_review.__func__,
+            main._intelligence_route_bundle.service._run_camera_intelligence_review.__func__,
         )
 
     def test_initial_event_stream_does_not_drop_change_racing_snapshot(self) -> None:
@@ -933,7 +958,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
             with patch.object(main, "manager", fake_manager):
                 first = main.event_thumbnail(1, width=320, quality=80)
-                with patch.object(main.cv2, "imread", side_effect=AssertionError("cache miss")):
+                with patch.object(cv2, "imread", side_effect=AssertionError("cache miss")):
                     second = main.event_thumbnail(1, width=320, quality=80)
 
             cached = cv2.imread(str(first.path))
@@ -982,7 +1007,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
             with patch.object(main, "manager", fake_manager):
                 first = main.face_crop(7, padding=0.2)
-                with patch.object(main.cv2, "imread", side_effect=AssertionError("cache miss")):
+                with patch.object(cv2, "imread", side_effect=AssertionError("cache miss")):
                     second = main.face_crop(7, padding=0.2)
 
             crop = cv2.imread(str(first.path))
@@ -1001,9 +1026,9 @@ class EventApiSerializationTest(unittest.TestCase):
         object_incident = {"id": 2, "has_objects": True}
         incidents = [motion, object_incident]
 
-        self.assertEqual(main._filter_incidents_by_event_type(incidents, "motion"), [motion])
-        self.assertEqual(main._filter_incidents_by_event_type(incidents, "object"), [object_incident])
-        self.assertEqual(main._filter_incidents_by_event_type(incidents, "all"), incidents)
+        self.assertEqual(_filter_incidents_by_event_type(incidents, "motion"), [motion])
+        self.assertEqual(_filter_incidents_by_event_type(incidents, "object"), [object_incident])
+        self.assertEqual(_filter_incidents_by_event_type(incidents, "all"), incidents)
 
     def test_recent_incident_feed_filters_before_applying_page_limit(self) -> None:
         rows = [
@@ -1062,7 +1087,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertFalse(second_has_more)
 
     def test_incident_list_payload_omits_investigation_only_data(self) -> None:
-        event = main._event_row({
+        event = _event_row({
             "id": 7,
             "camera_id": "gate",
             "kind": "object",
@@ -1087,11 +1112,11 @@ class EventApiSerializationTest(unittest.TestCase):
             ]),
             "created_at": "2026-07-30T14:00:00+00:00",
         })
-        incident = main._incident_row("gate", [event])
+        incident = _incident_row("gate", [event])
         incident["faces"] = [{"name": "Someone"}]
         incident["motion_observations"] = [{"id": 1}]
 
-        payload = main._incident_list_payload(incident)
+        payload = _incident_list_payload(incident)
 
         self.assertEqual(payload["object_tracking"], {
             "frame_width": 1920,
@@ -1114,7 +1139,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertNotIn("temporal_samples", payload["events"][0]["objects"][0])
 
     def test_incident_exposes_source_that_opened_incident(self) -> None:
-        ema_event = main._event_row({
+        ema_event = _event_row({
             "id": 7,
             "camera_id": "gate",
             "kind": "object",
@@ -1124,7 +1149,7 @@ class EventApiSerializationTest(unittest.TestCase):
             }, {"label": "car", "confidence": 0.8}]),
             "created_at": "2026-07-30T14:00:00+00:00",
         })
-        camera_event = main._event_row({
+        camera_event = _event_row({
             "id": 8,
             "camera_id": "gate",
             "kind": "object",
@@ -1135,8 +1160,8 @@ class EventApiSerializationTest(unittest.TestCase):
             "created_at": "2026-07-30T14:00:10+00:00",
         })
 
-        incident = main._incident_row("gate", [camera_event, ema_event])
-        payload = main._incident_list_payload(incident)
+        incident = _incident_row("gate", [camera_event, ema_event])
+        payload = _incident_list_payload(incident)
 
         self.assertEqual(ema_event["trigger_source"], "ema")
         self.assertEqual(camera_event["trigger_source"], "camera")
@@ -1187,7 +1212,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(invalid.exception.status_code, 422)
 
     def test_event_row_tolerates_malformed_legacy_object_entries(self) -> None:
-        row = main._event_row({
+        row = _event_row({
             "id": 1,
             "objects_json": json.dumps([
                 "legacy",
@@ -1202,11 +1227,11 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(row["zones"], ["driveway"])
         self.assertEqual(len(row["objects"]), 4)
 
-        selected = main._best_incident_event([row])
+        selected = _best_incident_event([row])
         self.assertEqual(selected["id"], 1)
 
     def test_linked_motion_observation_extends_incident_without_duplicate_event(self) -> None:
-        incident = main._incident_row("foyer", [{
+        incident = _incident_row("foyer", [{
             "id": 42,
             "camera_id": "foyer",
             "created_at": "2026-07-27T12:17:07+00:00",
@@ -1228,7 +1253,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(incident["motion_observations"][0]["id"], 3278)
 
     def test_object_tracking_extends_same_incident_and_exposes_track_ids(self) -> None:
-        event = main._event_row({
+        event = _event_row({
             "id": 43,
             "camera_id": "gate",
             "created_at": "2026-07-27T12:17:07+00:00",
@@ -1263,7 +1288,7 @@ class EventApiSerializationTest(unittest.TestCase):
             ]),
         })
 
-        incident = main._incident_row("gate", [event])
+        incident = _incident_row("gate", [event])
 
         self.assertEqual(incident["event_count"], 1)
         self.assertEqual(incident["duration_seconds"], 8.0)
@@ -1274,7 +1299,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(incident["zones"], ["driveway"])
 
     def test_capacity_skip_does_not_extend_incident_duration(self) -> None:
-        event = main._event_row({
+        event = _event_row({
             "id": 43,
             "camera_id": "gate",
             "created_at": "2026-07-27T12:17:07+00:00",
@@ -1292,7 +1317,7 @@ class EventApiSerializationTest(unittest.TestCase):
             }]),
         })
 
-        incident = main._incident_row("gate", [event])
+        incident = _incident_row("gate", [event])
 
         self.assertEqual(incident["duration_seconds"], 0.0)
         self.assertEqual(incident["end_at"], "2026-07-27T12:17:07+00:00")
@@ -1322,13 +1347,13 @@ class EventApiSerializationTest(unittest.TestCase):
             },
         }
 
-        incident = main._incident_row("foyer", [representative, later])
+        incident = _incident_row("foyer", [representative, later])
 
         self.assertEqual(incident["representative_event_id"], 43)
         self.assertEqual(len(incident["object_tracking"]["tracks"]), 1)
 
     def test_incident_payload_keeps_annotation_fields_without_detector_diagnostics(self) -> None:
-        payload = main._incident_event_payload({
+        payload = _incident_event_payload({
             "id": 42,
             "topic": "private/topic",
             "message": "large raw payload",
@@ -1377,7 +1402,7 @@ class EventApiSerializationTest(unittest.TestCase):
             outside_image = Path(outside) / "private.jpg"
             outside_image.write_bytes(b"image")
 
-            row = main._motion_audit_row(
+            row = _motion_audit_row(
                 {
                     "id": 1,
                     "features_json": "[]",

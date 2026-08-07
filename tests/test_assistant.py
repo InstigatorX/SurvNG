@@ -23,6 +23,7 @@ from survng.app.assistant import (
     sanitize_assistant_data,
 )
 from survng.app.audit_ai import AuditAiAdvisor, AuditAiChange, AuditAiError
+from survng.app.intelligence_routes import IncidentAiApplyRequest
 from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 
 
@@ -57,7 +58,7 @@ class AssistantModelsTest(unittest.TestCase):
             semantic_search=SimpleNamespace(search_text=Mock(return_value=[])),
             semantic_search_status=Mock(return_value={"state": "ready"}),
         )
-        evidence = main._assistant_semantic_search(
+        evidence = main._intelligence_route_bundle.service._assistant_semantic_search(
             AssistantToolCall(name="semantic_search_recordings", query="white truck"),
             "America/New_York",
             active_manager,
@@ -286,8 +287,12 @@ class AssistantApiTest(unittest.TestCase):
             "id": "job-1234567890", "status": "queued", "phase": "Queued", "progress": 0,
         }
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
-            evidence = main._assistant_media_export_evidence(call, request, active_config)
+        with patch.object(
+            main._recording_media_runtime,
+            "_media_export_manager",
+            return_value=export_manager,
+        ):
+            evidence = main._intelligence_route_bundle.service._assistant_media_export_evidence(call, request, active_config)
 
         self.assertEqual(evidence.kind, "media_export_job")
         self.assertEqual(evidence.client_data["media_export"]["id"], "job-1234567890")
@@ -316,8 +321,12 @@ class AssistantApiTest(unittest.TestCase):
         call = AssistantToolCall(name="create_media_export")
         export_manager = Mock()
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
-            evidence = main._assistant_media_export_evidence(call, request, active_config)
+        with patch.object(
+            main._recording_media_runtime,
+            "_media_export_manager",
+            return_value=export_manager,
+        ):
+            evidence = main._intelligence_route_bundle.service._assistant_media_export_evidence(call, request, active_config)
 
         self.assertEqual(evidence.kind, "media_export_clarification")
         self.assertIn("normal video clip or a timelapse", evidence.summary)
@@ -348,8 +357,12 @@ class AssistantApiTest(unittest.TestCase):
             "id": "job-page-camera", "status": "queued", "phase": "Queued", "progress": 0,
         }
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
-            evidence = main._assistant_media_export_evidence(call, request, active_config)
+        with patch.object(
+            main._recording_media_runtime,
+            "_media_export_manager",
+            return_value=export_manager,
+        ):
+            evidence = main._intelligence_route_bundle.service._assistant_media_export_evidence(call, request, active_config)
 
         self.assertEqual(evidence.data["camera_id"], "gate")
         self.assertEqual(evidence.data["source"], "live")
@@ -390,7 +403,7 @@ class AssistantApiTest(unittest.TestCase):
         with patch(
             "survng.app.intelligence_routes._incident_rows", return_value=summaries
         ):
-            evidence = main._assistant_recent_activity_summary(
+            evidence = main._intelligence_route_bundle.service._assistant_recent_activity_summary(
                 call, "America/New_York", active_manager
             )
 
@@ -401,7 +414,7 @@ class AssistantApiTest(unittest.TestCase):
         self.assertEqual(evidence.data["trigger_counts"], {"visual_backup": 1})
         self.assertNotIn("image_url", evidence.client_payload())
         self.assertEqual(
-            main._assistant_activity_followups(evidence),
+            main._intelligence_route_bundle.service._assistant_activity_followups(evidence),
             [
                 "What happened on gate in the last 2 hours?",
                 "Show me the object incidents from the last 2 hours",
@@ -412,7 +425,7 @@ class AssistantApiTest(unittest.TestCase):
     def test_assistant_catalog_includes_only_safe_face_identity_fields(self) -> None:
         from survng.app import main
 
-        catalog = main._assistant_catalog(
+        catalog = main._intelligence_route_bundle.service._assistant_catalog(
             AppConfig(),
             SimpleNamespace(
                 detector=SimpleNamespace(labels=["person"]),
@@ -482,7 +495,7 @@ class AssistantApiTest(unittest.TestCase):
             ),
             patch.object(IncidentVisualReviewer, "review", return_value=advice),
         ):
-            evidence = main._assistant_visual_incident_evidence(
+            evidence = main._intelligence_route_bundle.service._assistant_visual_incident_evidence(
                 42, active_config, active_manager
             )
 
@@ -521,7 +534,7 @@ class AssistantApiTest(unittest.TestCase):
             ),
         ]
 
-        normalized, previews = main._assistant_motion_change_previews(
+        normalized, previews = main._intelligence_route_bundle.service._assistant_motion_change_previews(
             active_config, camera, changes
         )
 
@@ -534,9 +547,9 @@ class AssistantApiTest(unittest.TestCase):
         from survng.app import main
 
         with self.assertRaises(HTTPException) as raised:
-            main.incident_ai_apply(
+            main._intelligence_route_bundle.service.incident_ai_apply(
                 42,
-                main.IncidentAiApplyRequest(changes=[], confirmed=False),
+                IncidentAiApplyRequest(changes=[], confirmed=False),
             )
 
         self.assertEqual(raised.exception.status_code, 400)
@@ -545,7 +558,7 @@ class AssistantApiTest(unittest.TestCase):
         from fastapi import HTTPException
         from survng.app import main
 
-        request = main.IncidentAiApplyRequest(
+        request = IncidentAiApplyRequest(
             confirmed=True,
             changes=[AuditAiChange(
                 scope="global",
@@ -555,7 +568,7 @@ class AssistantApiTest(unittest.TestCase):
             )],
         )
         with self.assertRaises(HTTPException) as raised:
-            main.incident_ai_apply(42, request)
+            main._intelligence_route_bundle.service.incident_ai_apply(42, request)
 
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("camera-scoped", raised.exception.detail)
@@ -571,7 +584,7 @@ class AssistantApiTest(unittest.TestCase):
         active_manager = SimpleNamespace(
             events=SimpleNamespace(get=lambda _event_id: {"camera_id": "gate"}),
         )
-        request = main.IncidentAiApplyRequest(
+        request = IncidentAiApplyRequest(
             confirmed=True,
             configuration_fingerprint="stale",
             changes=[AuditAiChange(
@@ -586,7 +599,7 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             self.assertRaises(HTTPException) as raised,
         ):
-            main.incident_ai_apply(42, request)
+            main._intelligence_route_bundle.service.incident_ai_apply(42, request)
 
         self.assertEqual(raised.exception.status_code, 409)
 
@@ -605,8 +618,8 @@ class AssistantApiTest(unittest.TestCase):
             value="high",
             reason="The reviewed image supports this camera adjustment.",
         )
-        fingerprint = main._assistant_motion_config_fingerprint(active_config, camera)
-        token = main._issue_ai_recommendation_token(
+        fingerprint = main._intelligence_route_bundle.service._assistant_motion_config_fingerprint(active_config, camera)
+        token = main._intelligence_route_bundle.service._issue_ai_recommendation_token(
             kind="incident_visual",
             record_id=42,
             camera_id="gate",
@@ -616,7 +629,7 @@ class AssistantApiTest(unittest.TestCase):
         active_manager = SimpleNamespace(
             events=SimpleNamespace(get=lambda _event_id: {"camera_id": "gate"}),
         )
-        request = main.IncidentAiApplyRequest(
+        request = IncidentAiApplyRequest(
             confirmed=True,
             configuration_fingerprint=fingerprint,
             recommendation_proof=token,
@@ -634,7 +647,7 @@ class AssistantApiTest(unittest.TestCase):
                 }),
             ) as apply_update,
         ):
-            response = main.incident_ai_apply(42, request)
+            response = main._intelligence_route_bundle.service.incident_ai_apply(42, request)
 
         self.assertTrue(response["ok"])
         apply_update.assert_called_once()
@@ -647,7 +660,7 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             self.assertRaises(HTTPException) as raised,
         ):
-            main.incident_ai_apply(42, altered)
+            main._intelligence_route_bundle.service.incident_ai_apply(42, altered)
         self.assertEqual(raised.exception.status_code, 409)
 
     def test_visual_tool_uses_current_incident_context(self) -> None:
@@ -663,7 +676,7 @@ class AssistantApiTest(unittest.TestCase):
             "_assistant_visual_incident_evidence",
             return_value=expected,
         ) as review:
-            evidence = main._assistant_execute_tool(
+            evidence = main._intelligence_route_bundle.service._assistant_execute_tool(
                 AssistantToolCall(name="analyze_incident_visual"),
                 request,
                 AppConfig(),
@@ -692,7 +705,7 @@ class AssistantApiTest(unittest.TestCase):
             "_assistant_trace_across_cameras",
             return_value=[expected],
         ) as trace:
-            evidence = main._assistant_execute_tool(
+            evidence = main._intelligence_route_bundle.service._assistant_execute_tool(
                 AssistantToolCall(name="trace_across_cameras"),
                 request,
                 AppConfig(),
@@ -720,7 +733,7 @@ class AssistantApiTest(unittest.TestCase):
             "visually_similar": True,
         }]
 
-        selected = main._assistant_prioritize_trace_candidates(
+        selected = main._intelligence_route_bundle.service._assistant_prioritize_trace_candidates(
             candidates,
             appearance,
             {601},
@@ -779,7 +792,7 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
-            evidence = main._assistant_trace_across_cameras(
+            evidence = main._intelligence_route_bundle.service._assistant_trace_across_cameras(
                 AssistantToolCall(
                     name="trace_across_cameras",
                     event_id=42,
@@ -842,7 +855,7 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
-            evidence = main._assistant_trace_across_cameras(
+            evidence = main._intelligence_route_bundle.service._assistant_trace_across_cameras(
                 AssistantToolCall(
                     name="trace_across_cameras",
                     event_id=42,
@@ -870,7 +883,7 @@ class AssistantApiTest(unittest.TestCase):
             assistant_reasoning_model="deep-model",
         ))
 
-        payload = main._assistant_configuration_evidence(active_config).prompt_payload()
+        payload = main._intelligence_route_bundle.service._assistant_configuration_evidence(active_config).prompt_payload()
         encoded = json.dumps(payload)
 
         self.assertEqual(payload["data"]["ai"]["analysis_and_fast_model"], "fast-model")
@@ -917,7 +930,7 @@ class AssistantApiTest(unittest.TestCase):
             ),
             patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
         ):
-            response = asyncio.run(main.assistant_chat(request))
+            response = asyncio.run(main._intelligence_route_bundle.service.assistant_chat(request))
 
         self.assertEqual(response["reasoning_tier"], "deep")
         self.assertEqual(response["model"], "deep-model")
@@ -963,7 +976,7 @@ class AssistantApiTest(unittest.TestCase):
             ),
             patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
         ):
-            response = asyncio.run(main.assistant_chat(request))
+            response = asyncio.run(main._intelligence_route_bundle.service.assistant_chat(request))
 
         self.assertIn("started the requested export", response["message"])
         self.assertEqual(response["citations"], ["E-export-job123"])
@@ -989,7 +1002,7 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
         ):
             with self.assertRaises(HTTPException) as raised:
-                asyncio.run(main.assistant_chat(request))
+                asyncio.run(main._intelligence_route_bundle.service.assistant_chat(request))
 
         self.assertEqual(raised.exception.status_code, 502)
         self.assertEqual(raised.exception.detail, "provider failed")

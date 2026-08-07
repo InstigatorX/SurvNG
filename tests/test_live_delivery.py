@@ -51,7 +51,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 "survng.app.main.asyncio.to_thread",
                 new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
             ) as to_thread,
-            patch("survng.app.main.websockets.connect", side_effect=OSError("offline")) as connect,
+            patch("survng.app.camera_api_routes.websockets.connect", side_effect=OSError("offline")) as connect,
         ):
             await relay_go2rtc_websocket(websocket, "gate", "MSE stream")
 
@@ -75,7 +75,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("survng.app.main.manager.camera", return_value=Mock()),
             patch("survng.app.main.manager.workers", {"gate": worker}),
-            patch("survng.app.main.websockets.connect") as connect,
+            patch("survng.app.camera_api_routes.websockets.connect") as connect,
         ):
             await relay_go2rtc_websocket(websocket, "gate", "MSE stream")
 
@@ -118,7 +118,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
                 "survng.app.main.asyncio.to_thread",
                 new=AsyncMock(return_value="ws://go2rtc.invalid/api/ws"),
             ),
-            patch("survng.app.main.websockets.connect", return_value=Connection()),
+            patch("survng.app.camera_api_routes.websockets.connect", return_value=Connection()),
         ):
             await relay_go2rtc_websocket(websocket, "gate", "MSE stream")
 

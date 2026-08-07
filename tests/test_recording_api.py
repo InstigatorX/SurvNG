@@ -11,6 +11,13 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
 from survng.app import main
+from survng.app.incident_presenter import _recording_grid_incident_payload
+from survng.app.recording_routes import (
+    MediaExportBatchRequest,
+    MediaExportMetadataRequest,
+    MediaExportProtectionRequest,
+    MediaExportRequest,
+)
 
 
 class RecordingApiTest(unittest.TestCase):
@@ -36,7 +43,7 @@ class RecordingApiTest(unittest.TestCase):
             init_path.write_bytes(init_data)
             media_path.write_bytes(media_data)
 
-            main._offset_fmp4_timestamps(init_path, media_path, 2.0)
+            main._recording_media_runtime._offset_fmp4_timestamps(init_path, media_path, 2.0)
             updated = media_path.read_bytes()
 
         tfdt_position = updated.index(b"tfdt") + 8
@@ -57,7 +64,7 @@ class RecordingApiTest(unittest.TestCase):
             main._recording_media_runtime, "_recording_day_rows"
         ) as recording_rows:
             with self.assertRaises(HTTPException) as invalid:
-                main._recording_day_fmp4_paths(
+                main._recording_media_runtime._recording_day_fmp4_paths(
                     "gate",
                     "segment.mp4",
                     100.0,
@@ -71,7 +78,7 @@ class RecordingApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SimpleNamespace(storage_dir=Path(tmpdir))
             with patch.object(main, "manager", manager):
-                path = main._event_clip_path(
+                path = main._recording_media_runtime._event_clip_path(
                     {"id": 42, "camera_id": "Front Door"},
                     before=0.0,
                     after=2.0,
@@ -170,7 +177,7 @@ class RecordingApiTest(unittest.TestCase):
         self.assertEqual(invalid.exception.status_code, 400)
 
     def test_recording_grid_incident_payload_omits_investigation_details(self) -> None:
-        payload = main._recording_grid_incident_payload({
+        payload = _recording_grid_incident_payload({
             "id": "incident-gate-1",
             "camera_id": "gate",
             "representative_event_id": 2,
@@ -236,7 +243,7 @@ class RecordingApiTest(unittest.TestCase):
             "download_url": "",
         }
         manager = SimpleNamespace(camera=lambda camera_id: object() if camera_id == "gate" else None)
-        request = main.MediaExportRequest(
+        request = MediaExportRequest(
             kind="timelapse",
             camera_id="gate",
             source="live",
@@ -248,7 +255,7 @@ class RecordingApiTest(unittest.TestCase):
             height=1080,
         )
 
-        with patch.object(main, "manager", manager), patch.object(main, "_media_export_manager", return_value=export_manager):
+        with patch.object(main, "manager", manager), patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             payload = main.create_media_export(request)
 
         self.assertEqual(payload["id"], "job-1")
@@ -270,14 +277,14 @@ class RecordingApiTest(unittest.TestCase):
     def test_media_export_rejects_overlong_clip_before_queueing(self) -> None:
         export_manager = Mock()
         manager = SimpleNamespace(camera=lambda _camera_id: object())
-        request = main.MediaExportRequest(
+        request = MediaExportRequest(
             kind="recording",
             camera_id="gate",
             start_epoch=100.0,
             end_epoch=100.0 + 24 * 60 * 60 + 1,
         )
 
-        with patch.object(main, "manager", manager), patch.object(main, "_media_export_manager", return_value=export_manager):
+        with patch.object(main, "manager", manager), patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             with self.assertRaises(HTTPException) as invalid:
                 main.create_media_export(request)
 
@@ -288,7 +295,7 @@ class RecordingApiTest(unittest.TestCase):
         export_manager = Mock()
         export_manager.create.return_value = {"id": "legacy-width", "status": "queued"}
         manager = SimpleNamespace(camera=lambda _camera_id: object())
-        request = main.MediaExportRequest(
+        request = MediaExportRequest(
             kind="timelapse",
             camera_id="gate",
             start_epoch=100.0,
@@ -297,7 +304,7 @@ class RecordingApiTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", manager), patch.object(
-            main, "_media_export_manager", return_value=export_manager
+            main._recording_media_runtime, "_media_export_manager", return_value=export_manager
         ):
             main.create_media_export(request)
 
@@ -322,7 +329,7 @@ class RecordingApiTest(unittest.TestCase):
         export_manager.list.return_value = [{"id": "job-1", "download_url": ""}]
         export_manager.count.return_value = 7
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
+        with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             payload = main.list_media_exports(
                 limit=25,
                 offset=5,
@@ -349,9 +356,9 @@ class RecordingApiTest(unittest.TestCase):
             "id": "job-1", "protected": True, "download_url": "",
         }
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
+        with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             payload = main.protect_media_export(
-                "job-1", main.MediaExportProtectionRequest(protected=True)
+                "job-1", MediaExportProtectionRequest(protected=True)
             )
 
         export_manager.set_protected.assert_called_once_with("job-1", True)
@@ -366,9 +373,9 @@ class RecordingApiTest(unittest.TestCase):
             "total": 3, "bytes": 1024, "protected": 1,
         }
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
+        with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             renamed = main.update_media_export_metadata(
-                "job-1", main.MediaExportMetadataRequest(label=" Gate delivery ")
+                "job-1", MediaExportMetadataRequest(label=" Gate delivery ")
             )
             summary = main.media_export_summary()
 
@@ -390,9 +397,9 @@ class RecordingApiTest(unittest.TestCase):
         }
 
         with patch.object(main.config, "base_path", "/survng"), patch.object(
-            main, "_media_export_manager", return_value=export_manager
+            main._recording_media_runtime, "_media_export_manager", return_value=export_manager
         ):
-            payload = main.batch_media_exports(main.MediaExportBatchRequest(
+            payload = main.batch_media_exports(MediaExportBatchRequest(
                 ids=["job-1"], action="protect"
             ))
 
@@ -406,7 +413,7 @@ class RecordingApiTest(unittest.TestCase):
         export_manager = Mock()
         export_manager.cancel_or_delete.side_effect = PermissionError("job-1")
 
-        with patch.object(main, "_media_export_manager", return_value=export_manager):
+        with patch.object(main._recording_media_runtime, "_media_export_manager", return_value=export_manager):
             with self.assertRaises(HTTPException) as protected:
                 main.delete_media_export("job-1")
 
@@ -493,8 +500,8 @@ class RecordingApiTest(unittest.TestCase):
                     "_maintain_recording_preview_cache",
                 ),
             ):
-                first = main._recording_preview_path(row, 107.9)
-                second = main._recording_preview_path(row, 109.8)
+                first = main._recording_media_runtime._recording_preview_path(row, 107.9)
+                second = main._recording_media_runtime._recording_preview_path(row, 109.8)
 
             self.assertEqual(first, second)
             self.assertEqual(first.read_bytes(), b"jpeg")
@@ -539,9 +546,9 @@ class RecordingApiTest(unittest.TestCase):
                 "recording_day_cache",
                 {cache_key: (100.0, stale)},
             ),
-            patch.object(main.time, "monotonic", return_value=101.0),
+            patch("survng.app.recording_media_runtime.time.monotonic", return_value=101.0),
         ):
-            rows = main._recording_day_rows(
+            rows = main._recording_media_runtime._recording_day_rows(
                 "gate",
                 100.0,
                 200.0,
@@ -575,10 +582,10 @@ class RecordingApiTest(unittest.TestCase):
                 "recording_day_cache",
                 {cache_key: (100.0, stale)},
             ),
-            patch.object(main.time, "monotonic", return_value=103.0),
-            patch.object(main.time, "time", return_value=190.0),
+            patch("survng.app.recording_media_runtime.time.monotonic", return_value=103.0),
+            patch("survng.app.recording_media_runtime.time.time", return_value=190.0),
         ):
-            rows = main._recording_day_rows("gate", 100.0, 200.0, "live")
+            rows = main._recording_media_runtime._recording_day_rows("gate", 100.0, 200.0, "live")
 
         self.assertEqual(rows, current)
         recorder.recording_rows_between.assert_called_once()
