@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .camera_capture import CameraCaptureService, FRAME_STALE_SECONDS
 from .config import CameraConfig, MotionQualificationConfig
@@ -17,24 +16,36 @@ from .motion_pipeline import (
 from .onvif_events import OnvifEventListener
 
 
-@dataclass(frozen=True, slots=True)
-class CameraStatusHooks:
-    runtime_state: Callable[[], tuple[bool, bool, str]]
-    motion_settings: Callable[[], tuple[str, str, int]]
-    stationary_object_tolerance: Callable[[], str]
-    rescue_settings: Callable[[], tuple[bool, float]]
-    visual_backup_settings: Callable[[], dict[str, float | int]]
-    illumination_filter_enabled: Callable[[], bool]
-    suppression_verification_rate: Callable[[], float]
-    motion_stats: Callable[[], dict[str, Any]]
-    object_tracking_status: Callable[[], dict[str, Any]]
-    incident_status: Callable[[], dict[str, Any]]
-    event_worker_running: Callable[[], bool]
-    event_queue_depth: Callable[[], int]
-    retry_queue_depth: Callable[[], int]
-    event_runtime: Callable[[], dict[str, int]]
-    lifecycle_runtime: Callable[[], dict[str, Any]]
-    monotonic: Callable[[], float] = time.monotonic
+class CameraStatusRuntimeState(Protocol):
+    lock: Any
+    enabled: bool
+    detection_enabled: bool
+
+
+class CameraStatusMotionState(Protocol):
+    def last_motion_at(self) -> str: ...
+    def stats_snapshot(self) -> dict[str, Any]: ...
+
+
+class CameraStatusQualification(Protocol):
+    def settings(self) -> tuple[str, str, int]: ...
+    def stationary_object_tolerance(self) -> str: ...
+    def rescue_settings(self) -> tuple[bool, float]: ...
+    def visual_backup_settings(self) -> dict[str, float | int]: ...
+    def illumination_filter_enabled(self) -> bool: ...
+    def suppression_verification_rate(self) -> float: ...
+
+
+class CameraStatusProvider(Protocol):
+    def status(self) -> dict[str, Any]: ...
+
+
+class CameraLifecycleStatusProvider(Protocol):
+    def runtime_status(self) -> dict[str, Any]: ...
+
+
+class MotionRuntimeStatusProvider(Protocol):
+    def runtime_status(self) -> dict[str, Any]: ...
 
 
 class CameraStatusService:
@@ -54,7 +65,14 @@ class CameraStatusService:
         fusion_pipeline: MotionPipeline,
         debug_store: MotionDebugSnapshotStore,
         pipeline_origins: dict[str, str],
-        hooks: CameraStatusHooks,
+        runtime_state: CameraStatusRuntimeState,
+        motion_state: CameraStatusMotionState,
+        qualification: CameraStatusQualification,
+        motion_runtime: MotionRuntimeStatusProvider,
+        object_tracking: CameraStatusProvider,
+        incidents: CameraStatusProvider,
+        lifecycle: CameraLifecycleStatusProvider,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.camera = camera
         self.motion_config = motion_config
@@ -67,32 +85,43 @@ class CameraStatusService:
         self.fusion_pipeline = fusion_pipeline
         self.debug_store = debug_store
         self.pipeline_origins = dict(pipeline_origins)
-        self.hooks = hooks
+        self.runtime_state = runtime_state
+        self.motion_state = motion_state
+        self.qualification = qualification
+        self.motion_runtime = motion_runtime
+        self.object_tracking = object_tracking
+        self.incidents = incidents
+        self.lifecycle = lifecycle
+        self.monotonic = monotonic
 
     def snapshot(self) -> dict[str, Any]:
-        enabled, detection_enabled, last_motion_at = self.hooks.runtime_state()
+        with self.runtime_state.lock:
+            enabled = self.runtime_state.enabled
+            detection_enabled = self.runtime_state.detection_enabled
+        last_motion_at = self.motion_state.last_motion_at()
         capture = self.capture.status()
         analysis = self.motion_analysis.status()
         evidence = self.motion_evidence.status()
         mog2 = evidence.get("mog2", {})
-        now = self.hooks.monotonic()
+        now = self.monotonic()
         live_age = self._age(capture["live_frame_monotonic"], now)
         main_age = self._age(capture["main_frame_monotonic"], now)
         connected = bool(
             enabled and live_age is not None and live_age <= FRAME_STALE_SECONDS
         )
-        mode, sensitivity, frame_width = self.hooks.motion_settings()
-        rescue_enabled, rescue_margin = self.hooks.rescue_settings()
-        visual = self.hooks.visual_backup_settings()
+        mode, sensitivity, frame_width = self.qualification.settings()
+        rescue_enabled, rescue_margin = self.qualification.rescue_settings()
+        visual = self.qualification.visual_backup_settings()
+        motion_runtime = self.motion_runtime.runtime_status()
         motion = {
-            **self.hooks.motion_stats(),
+            **self.motion_state.stats_snapshot(),
             "mode": mode,
             "sensitivity": sensitivity,
             "stationary_object_tolerance": (
-                self.hooks.stationary_object_tolerance()
+                self.qualification.stationary_object_tolerance()
             ),
             "illumination_filter_enabled": (
-                self.hooks.illumination_filter_enabled()
+                self.qualification.illumination_filter_enabled()
             ),
             "frame_width": frame_width,
             "camera_mode_background_fps": (
@@ -110,7 +139,7 @@ class CameraStatusService:
                 **self.motion_analysis.visual_backup_snapshot(),
             },
             "suppression_verification_rate": (
-                self.hooks.suppression_verification_rate()
+                self.qualification.suppression_verification_rate()
             ),
             "borderline_rescue_enabled": rescue_enabled,
             "borderline_margin": rescue_margin,
@@ -119,13 +148,14 @@ class CameraStatusService:
             "mog2_last": mog2.get("last"),
             "evidence_sources": evidence,
             "pipeline_origins": dict(self.pipeline_origins),
-            "queue_depth": self.hooks.event_queue_depth(),
-            "retry_queue_depth": self.hooks.retry_queue_depth(),
+            "queue_depth": motion_runtime["event_queue_depth"],
+            "retry_queue_depth": motion_runtime["retry_queue_depth"],
             "analysis_queue_depth": analysis["queue_depth"],
             "analysis_runtime": dict(analysis.get("telemetry") or {}),
             "analysis_worker_running": analysis["worker_running"],
-            "event_worker_running": self.hooks.event_worker_running(),
-            "event_runtime": self.hooks.event_runtime(),
+            "event_worker_running": motion_runtime["event_worker_running"],
+            "generation_clean": motion_runtime["generation_clean"],
+            "event_runtime": motion_runtime["events"],
             "continuous_last_result": analysis["continuous_last_result"],
             "buffered_frames": analysis["buffered_frames"],
             "frame_shape": analysis["frame_shape"],
@@ -163,12 +193,12 @@ class CameraStatusService:
             "last_motion_at": last_motion_at,
             "detection_enabled": detection_enabled,
             "object_tracking": {
-                **self.hooks.object_tracking_status(),
-                **self.hooks.incident_status(),
+                **self.object_tracking.status(),
+                **self.incidents.status(),
             },
             **self._onvif_diagnostics(),
             "motion_qualification": motion,
-            "lifecycle": self.hooks.lifecycle_runtime(),
+            "lifecycle": self.lifecycle.runtime_status(),
         }
 
     @staticmethod

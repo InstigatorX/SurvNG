@@ -6,13 +6,13 @@ from unittest.mock import Mock
 
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_decisions import (
-    MotionDecisionHooks,
     MotionDecisionOrchestrator,
     audit_features,
     is_borderline_candidate,
     priority_motion_topic,
     should_verify_suppression,
 )
+from survng.app.config import MotionQualificationConfig
 from survng.app.motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -61,37 +61,33 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
     stop_event = threading.Event()
     process_incident = Mock()
 
-    def process(*_args: object, **_kwargs: object) -> dict[str, object]:
+    def process(*_args: object, **_kwargs: object) -> Mock:
         stop_event.set()
-        return {"event_id": 42, "object_detected": True, "snapshot_path": ""}
+        return Mock(as_dict=Mock(return_value={
+            "event_id": 42,
+            "object_detected": True,
+            "snapshot_path": "",
+        }))
 
     process_incident.side_effect = process
-    publish_event = Mock()
-    record_stats = Mock()
-    complete_adaptive = Mock()
+    incidents = Mock()
+    incidents.process = process_incident
+    qualification = Mock()
+    qualification.settings.return_value = ("off", "default", 640)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    state = Mock()
+    state.active_incident_event_id.return_value = None
     orchestrator = MotionDecisionOrchestrator(
         camera_id="gate",
         events=events,
         audit_recorder=Mock(),
-        burst_quiet_seconds=lambda: 0.0,
-        hooks=MotionDecisionHooks(
-            motion_settings=lambda: ("off", "default", 640),
-            rescue_settings=lambda: (False, 0.0),
-            suppression_verification_rate=lambda: 0.0,
-            matches_recent_priority_motion=lambda _observed_at: False,
-            qualify_motion_burst=Mock(),
-            with_pipeline_telemetry=lambda result: result,
-            process_incident=process_incident,
-            sample_rejected_motion=lambda _event_at, _result: "",
-            related_incident_event_id=lambda _result: None,
-            reset_motion_fusion_runtime=Mock(),
-            record_visual_camera_match=lambda _observed_at: False,
-            complete_adaptive_trigger=complete_adaptive,
-            set_active_incident_event_id=Mock(),
-            publish_event=publish_event,
-            record_decision_stats=record_stats,
-            increment_stat=Mock(),
-        ),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification,
+        incidents=incidents,
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
     )
     now = datetime.now(timezone.utc)
     assert events.enqueue(
@@ -106,9 +102,8 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
     orchestrator.run_until_error(stop_event)
 
     process_incident.assert_called_once()
-    publish_event.assert_called_once()
-    record_stats.assert_called_once()
-    complete_adaptive.assert_called_once()
+    state.publish_event.assert_called_once()
+    state.record_decision.assert_called_once()
     assert events.active_triggers is None
 
 
@@ -125,39 +120,26 @@ def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> Non
     batch = MotionTriggerBatch((adaptive,))
     events.set_active(batch)
     events.adaptive_trigger_pending = True
-    qualify_motion_burst = Mock()
-    complete_adaptive = Mock(
-        side_effect=lambda triggers: events.complete_adaptive(triggers, 100.0)
-    )
-    hooks = MotionDecisionHooks(
-        motion_settings=lambda: ("camera", "default", 640),
-        rescue_settings=lambda: (False, 0.0),
-        suppression_verification_rate=lambda: 0.0,
-        matches_recent_priority_motion=lambda _observed_at: False,
-        qualify_motion_burst=qualify_motion_burst,
-        with_pipeline_telemetry=lambda result: result,
-        process_incident=Mock(),
-        sample_rejected_motion=lambda _event_at, _result: "",
-        related_incident_event_id=lambda _result: None,
-        reset_motion_fusion_runtime=Mock(),
-        record_visual_camera_match=lambda _observed_at: False,
-        complete_adaptive_trigger=complete_adaptive,
-        set_active_incident_event_id=Mock(),
-        publish_event=Mock(),
-        record_decision_stats=Mock(),
-        increment_stat=Mock(),
-    )
+    qualification = Mock()
+    qualification.settings.return_value = ("camera", "default", 640)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    state = Mock()
+    state.active_incident_event_id.return_value = None
     orchestrator = MotionDecisionOrchestrator(
         camera_id="gate",
         events=events,
         audit_recorder=Mock(),
-        hooks=hooks,
-        burst_quiet_seconds=lambda: 0.0,
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification,
+        incidents=Mock(),
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
     )
 
     orchestrator._process_batch(batch, stop_event)
 
-    qualify_motion_burst.assert_not_called()
-    complete_adaptive.assert_called_once_with(batch)
+    qualification.qualify_burst.assert_not_called()
     assert not events.adaptive_trigger_pending
     assert events.active_triggers is None

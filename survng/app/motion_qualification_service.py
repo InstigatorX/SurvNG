@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import numpy as np
 
@@ -26,10 +25,12 @@ LOGGER = logging.getLogger(__name__)
 FUSION_STALE_TOLERANCE_SECONDS = 5.0
 
 
-@dataclass(frozen=True, slots=True)
-class MotionQualificationHooks:
-    samples_since: Callable[[float], list[tuple[float, np.ndarray]]]
-    increment_stat: Callable[[str, int], None]
+class MotionQualificationState(Protocol):
+    def increment_stat(self, name: str, amount: int = 1) -> None: ...
+
+
+class MotionSampleSource(Protocol):
+    def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]: ...
 
 
 class MotionQualificationService:
@@ -46,7 +47,7 @@ class MotionQualificationService:
         pipeline_origins: dict[str, str],
         debug_store: MotionDebugSnapshotStore,
         stop_event: threading.Event,
-        hooks: MotionQualificationHooks,
+        state: MotionQualificationState,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -56,7 +57,7 @@ class MotionQualificationService:
         self.pipeline_origins = dict(pipeline_origins)
         self.debug_store = debug_store
         self.stop_event = stop_event
-        self.hooks = hooks
+        self.state = state
         self.analysis_lock = threading.Lock()
         self._observation_lock = threading.Lock()
         self._fusion_lock = threading.Lock()
@@ -295,7 +296,7 @@ class MotionQualificationService:
         with self._fusion_lock:
             stale_by = self._fusion_last_at - end_epoch
             if 0.0 < stale_by <= FUSION_STALE_TOLERANCE_SECONDS:
-                self.hooks.increment_stat("stale_fusion_samples", 1)
+                self.state.increment_stat("stale_fusion_samples", 1)
                 return MotionQualificationResult(
                     accepted=False,
                     score=0.0,
@@ -413,8 +414,8 @@ class MotionQualificationService:
         *,
         allow_detection: bool = True,
     ) -> MotionQualificationResult:
-        self.hooks.increment_stat("validation_failures", 1)
-        self.hooks.increment_stat("validation_fail_opens", int(allow_detection))
+        self.state.increment_stat("validation_failures", 1)
+        self.state.increment_stat("validation_fail_opens", int(allow_detection))
         LOGGER.error(
             "%s unavailable for %s; %s (%s)",
             component,
@@ -475,6 +476,7 @@ class MotionQualificationService:
         event_at: datetime,
         received_at: float,
         sensitivity: str,
+        sample_source: MotionSampleSource,
     ) -> tuple[MotionQualificationResult, dict[str, Any]]:
         event_epoch = event_at.timestamp()
         anchor = (
@@ -499,7 +501,9 @@ class MotionQualificationService:
         evaluated_windows: set[tuple[float, ...]] = set()
         samples: list[tuple[float, np.ndarray]] = []
         while not self.stop_event.is_set():
-            samples = self.hooks.samples_since(anchor - self.config.window_seconds)
+            samples = sample_source.samples_since(
+                anchor - self.config.window_seconds
+            )
             for end_index in range(3, len(samples)):
                 window_end = samples[end_index][0]
                 if window_end < received_at:

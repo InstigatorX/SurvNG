@@ -8,12 +8,13 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Protocol
 
 import cv2
 import numpy as np
 
 from .motion import MotionQualificationResult, preprocess_motion_frame
+from .config import MotionQualificationConfig
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_coordinator import (
     VisualBackupAction,
@@ -26,41 +27,43 @@ from .motion_decisions import (
     should_verify_suppression,
 )
 from .motion_events import MotionEventCoordinator, MotionTrigger
-from .motion_pipeline import MotionDebugSnapshotStore
+from .motion_pipeline import MotionDebugSnapshotStore, MotionEvidenceRepository
 
 LOGGER = logging.getLogger(__name__)
 CACHED_PREPROCESSOR_IMPLEMENTATION = "gray_blur"
 
 
-@dataclass(frozen=True, slots=True)
-class MotionAnalysisHooks:
-    frame_analysis_required: Callable[[], bool]
-    sample_fps: Callable[[], float]
-    frame_width: Callable[[], int]
-    preprocessor_implementation: Callable[[], str]
-    observe_frame: Callable[[np.ndarray, float], None]
-    motion_settings: Callable[[], tuple[str, str, int]]
-    continuous_primary_required: Callable[[], bool]
-    continuous_primary_due: Callable[[float, float], bool]
-    execute_continuous: Callable[[float], None]
-    execute_debug_capture: Callable[[float], None]
-    adaptive_rearm_seconds: Callable[[], float]
-    priority_dedup_seconds: Callable[[], float]
-    run_pipeline: Callable[..., MotionQualificationResult]
-    illumination_filter_enabled: Callable[[], bool]
-    trigger_mode: Callable[[], str]
-    detection_enabled: Callable[[], bool]
-    with_source_evidence: Callable[..., MotionQualificationResult]
-    visual_backup_settings: Callable[[], dict[str, float | int]]
-    visual_backup_policy: Callable[[], VisualBackupPolicy]
-    suppression_verification_rate: Callable[[], float]
-    visual_backup_warmup_seconds: Callable[[], float]
-    sample_rejected_motion: Callable[[datetime, MotionQualificationResult], str]
-    publish_event: Callable[[str, dict[str, Any]], None]
-    set_last_motion_at: Callable[[str], None]
-    increment_stat: Callable[[str, int], None]
-    record_analysis_wait: Callable[[float], None]
-    reset_temporal_runtime: Callable[[], None]
+class MotionAnalysisQualification(Protocol):
+    def frame_analysis_required(self) -> bool: ...
+    def settings(self) -> tuple[str, str, int]: ...
+    def preprocessor_implementation(self) -> str: ...
+    def observe_frame(self, frame: np.ndarray, captured_at: float) -> None: ...
+    def continuous_primary_required(self) -> bool: ...
+    def continuous_primary_due(self, captured_at: float, previous: float) -> bool: ...
+    def run_pipeline(self, *args: Any, **kwargs: Any) -> MotionQualificationResult: ...
+    def illumination_filter_enabled(self) -> bool: ...
+    def trigger_mode(self) -> str: ...
+    def with_source_evidence(
+        self, result: MotionQualificationResult, *args: Any, **kwargs: Any
+    ) -> MotionQualificationResult: ...
+    def visual_backup_settings(self) -> dict[str, float | int]: ...
+    def visual_backup_policy(self) -> VisualBackupPolicy: ...
+    def suppression_verification_rate(self) -> float: ...
+    def reset_runtime(self, **kwargs: Any) -> None: ...
+
+
+class MotionAnalysisState(Protocol):
+    def detection_enabled(self) -> bool: ...
+    def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
+    def set_last_motion_at(self, value: str) -> None: ...
+    def increment_stat(self, name: str, amount: int = 1) -> None: ...
+    def record_analysis_wait(self, wait_ms: float) -> None: ...
+
+
+class MotionAnalysisMedia(Protocol):
+    def sample_rejected_motion(
+        self, event_at: datetime, result: MotionQualificationResult
+    ) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,20 +97,28 @@ class MotionAnalysisService:
         queue_size: int,
         limiter: FairMotionAnalysisLimiter,
         events: MotionEventCoordinator,
+        evidence: MotionEvidenceRepository,
         visual_backup: VisualBackupCoordinator,
         audit_recorder: MotionAuditRecorder,
         debug_store: MotionDebugSnapshotStore,
-        hooks: MotionAnalysisHooks,
+        config: MotionQualificationConfig,
+        qualification: MotionAnalysisQualification,
+        media: MotionAnalysisMedia,
+        state: MotionAnalysisState,
     ) -> None:
         self.camera_id = camera_id
         self.frame_lock = frame_lock
         self.analysis_lock = analysis_lock
         self.limiter = limiter
         self.events = events
+        self.evidence = evidence
         self.visual_backup = visual_backup
         self.audit_recorder = audit_recorder
         self.debug_store = debug_store
-        self.hooks = hooks
+        self.config = config
+        self.qualification = qualification
+        self.media = media
+        self.state = state
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
         self.processed_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
@@ -220,6 +231,9 @@ class MotionAnalysisService:
         self.thread = None
         return True
 
+    def running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
     def clear_queue(self) -> None:
         while True:
             try:
@@ -310,7 +324,7 @@ class MotionAnalysisService:
                 dropped += 1
                 queued = False
         if dropped:
-            self.hooks.increment_stat("analysis_frames_dropped", dropped)
+            self.state.increment_stat("analysis_frames_dropped", dropped)
             with self._telemetry_lock:
                 self._telemetry["mailbox_replacements"] += dropped
         return queued
@@ -338,10 +352,10 @@ class MotionAnalysisService:
         if (
             stop_event.is_set()
             or not self._accepting_frames
-            or not self.hooks.frame_analysis_required()
+            or not self.qualification.frame_analysis_required()
         ):
             return False
-        interval = 1.0 / max(1.0, self.hooks.sample_fps())
+        interval = 1.0 / max(1.0, self.config.sample_fps)
         with self.frame_lock:
             if frame_clock - self.last_sample_clock < interval * 0.85:
                 return False
@@ -357,7 +371,7 @@ class MotionAnalysisService:
         preprocess_started = time.monotonic()
         try:
             height, width = frame.shape[:2]
-            frame_width = self.hooks.frame_width()
+            frame_width = self.qualification.settings()[2]
             target_height = max(90, round(height * frame_width / max(1, width)))
             resized = cv2.resize(
                 frame,
@@ -367,7 +381,7 @@ class MotionAnalysisService:
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
             processed = (
                 preprocess_motion_frame(gray)
-                if self.hooks.preprocessor_implementation()
+                if self.qualification.preprocessor_implementation()
                 == CACHED_PREPROCESSOR_IMPLEMENTATION
                 else None
             )
@@ -415,7 +429,9 @@ class MotionAnalysisService:
         self.events.reset_timebase()
         with self._telemetry_lock:
             self._telemetry["clock_discontinuity_resets"] += 1
-        self.hooks.reset_temporal_runtime()
+        self.qualification.reset_runtime(
+            clear_observation_evidence=self.evidence.clear,
+        )
 
     def samples(self) -> list[tuple[float, np.ndarray]]:
         with self.frame_lock:
@@ -578,7 +594,7 @@ class MotionAnalysisService:
             return self.visual_backup.readiness(
                 result,
                 captured_at,
-                self.hooks.visual_backup_policy(),
+                self.qualification.visual_backup_policy(),
             )
 
     @property
@@ -614,7 +630,7 @@ class MotionAnalysisService:
                 try:
                     self._try_execute_pending_analysis()
                 except Exception:
-                    self.hooks.increment_stat("analysis_worker_errors", 1)
+                    self.state.increment_stat("analysis_worker_errors", 1)
                     LOGGER.exception(
                         "deferred motion analysis cycle failed for %s",
                         self.camera_id,
@@ -626,7 +642,7 @@ class MotionAnalysisService:
                 try:
                     self._try_execute_pending_analysis()
                 except Exception:
-                    self.hooks.increment_stat("analysis_worker_errors", 1)
+                    self.state.increment_stat("analysis_worker_errors", 1)
                     LOGGER.exception(
                         "woken motion analysis cycle failed for %s",
                         self.camera_id,
@@ -673,9 +689,9 @@ class MotionAnalysisService:
                 elif captured_at <= self.last_processed_at:
                     continue
                 self.last_processed_at = captured_at
-                self.hooks.observe_frame(frame, captured_at)
-                if self.hooks.continuous_primary_required() and (
-                    self.hooks.continuous_primary_due(
+                self.qualification.observe_frame(frame, captured_at)
+                if self.qualification.continuous_primary_required() and (
+                    self.qualification.continuous_primary_due(
                         captured_at,
                         self.primary_last_processed_at,
                     )
@@ -687,9 +703,9 @@ class MotionAnalysisService:
                     and time.monotonic() - self.debug_last_run_clock >= 1.0
                 ):
                     self.debug_last_run_clock = time.monotonic()
-                    self.hooks.execute_debug_capture(captured_at)
+                    self.capture_debug(captured_at)
             except Exception:
-                self.hooks.increment_stat("analysis_worker_errors", 1)
+                self.state.increment_stat("analysis_worker_errors", 1)
                 LOGGER.exception("motion analysis cycle failed for %s", self.camera_id)
             finally:
                 self._record_timing(
@@ -701,7 +717,7 @@ class MotionAnalysisService:
         captured_at = self._pending_analysis_at
         if captured_at <= 0.0 or self._stopping():
             return False
-        if not self.hooks.continuous_primary_required():
+        if not self.qualification.continuous_primary_required():
             self._pending_analysis_at = 0.0
             self._analysis_request_deferred = False
             self.limiter.cancel(self.camera_id)
@@ -717,10 +733,10 @@ class MotionAnalysisService:
                     self._analysis_request_deferred = True
                 return False
             self._analysis_request_deferred = False
-            self.hooks.record_analysis_wait(max(0.0, wait_seconds * 1000.0))
+            self.state.record_analysis_wait(max(0.0, wait_seconds * 1000.0))
             qualification_started = time.monotonic()
             try:
-                self.hooks.execute_continuous(captured_at)
+                self.analyze_continuous(captured_at)
             except BaseException:
                 if self._pending_analysis_at == captured_at:
                     self._pending_analysis_at = 0.0
@@ -767,13 +783,13 @@ class MotionAnalysisService:
             work = candidate
             superseded += 1
         if superseded:
-            self.hooks.increment_stat("analysis_frames_dropped", superseded)
+            self.state.increment_stat("analysis_frames_dropped", superseded)
             with self._telemetry_lock:
                 self._telemetry["mailbox_replacements"] += superseded
         return work
 
     def analyze_continuous(self, captured_at: float) -> None:
-        _mode, sensitivity, _frame_width = self.hooks.motion_settings()
+        _mode, sensitivity, _frame_width = self.qualification.settings()
         with self.frame_lock:
             source_samples = (
                 self.color_frames
@@ -807,7 +823,7 @@ class MotionAnalysisService:
                 )
         try:
             with self.analysis_lock:
-                result = self.hooks.run_pipeline(
+                result = self.qualification.run_pipeline(
                     [frame for _timestamp, frame in samples],
                     sensitivity,
                     captured_at,
@@ -834,13 +850,13 @@ class MotionAnalysisService:
         self._record_continuous_stats(result)
         if self._stopping():
             return
-        trigger_mode = self.hooks.trigger_mode()
+        trigger_mode = self.qualification.trigger_mode()
         if trigger_mode == "camera_rescue":
             self.consider_visual_backup(result, samples, captured_at)
             return
-        if trigger_mode != "adaptive" or not self.hooks.detection_enabled():
+        if trigger_mode != "adaptive" or not self.state.detection_enabled():
             return
-        fused = self.hooks.with_source_evidence(
+        fused = self.qualification.with_source_evidence(
             result,
             samples[0][0],
             captured_at,
@@ -884,9 +900,9 @@ class MotionAnalysisService:
     ) -> None:
         if self._stopping():
             return
-        settings = self.hooks.visual_backup_settings()
+        settings = self.qualification.visual_backup_settings()
         illumination_probe_allowed = bool(
-            self.hooks.detection_enabled()
+            self.state.detection_enabled()
             and result.reason == "illumination_change"
             and result.features.get("illumination_would_reject")
             and should_verify_suppression(
@@ -894,25 +910,25 @@ class MotionAnalysisService:
                     f"illumination:{self.camera_id}:"
                     f"{int(captured_at // max(5.0, float(settings['cooldown_seconds'])))}"
                 ),
-                self.hooks.suppression_verification_rate(),
+                self.qualification.suppression_verification_rate(),
             )
         )
         with self._visual_lock:
             decision = self.visual_backup.evaluate(
                 result,
                 captured_at,
-                self.hooks.visual_backup_policy(),
-                detection_enabled=self.hooks.detection_enabled(),
+                self.qualification.visual_backup_policy(),
+                detection_enabled=self.state.detection_enabled(),
                 camera_motion_times=self.events.camera_motion_snapshot(),
                 illumination_probe_allowed=illumination_probe_allowed,
             )
         result = decision.result
         if decision.action in {VisualBackupAction.DISABLED, VisualBackupAction.IGNORED}:
             if decision.count_nonpromotion:
-                self.hooks.increment_stat("visual_backup_not_promoted", 1)
+                self.state.increment_stat("visual_backup_not_promoted", 1)
             return
         if decision.action == VisualBackupAction.NOT_READY:
-            self.hooks.increment_stat("visual_backup_not_ready", 1)
+            self.state.increment_stat("visual_backup_not_ready", 1)
             if decision.readiness_audit_needed:
                 self.record_visual_backup_readiness_audit(result, captured_at)
             return
@@ -921,17 +937,17 @@ class MotionAnalysisService:
             VisualBackupAction.CAMERA_NOTICE,
             VisualBackupAction.READY,
         }:
-            self.hooks.increment_stat("visual_backup_candidates", 1)
+            self.state.increment_stat("visual_backup_candidates", 1)
         if decision.action == VisualBackupAction.ACCUMULATING:
             return
         if decision.action == VisualBackupAction.CAMERA_NOTICE:
             if decision.new_camera_match:
-                self.hooks.increment_stat("visual_backup_onvif_matches", 1)
+                self.state.increment_stat("visual_backup_onvif_matches", 1)
             return
         if decision.action != VisualBackupAction.READY:
             return
         if not self._reserve_visual_backup_trigger(captured_at):
-            self.hooks.increment_stat("visual_backup_not_promoted", 1)
+            self.state.increment_stat("visual_backup_not_promoted", 1)
             self.reset_visual_backup_candidate()
             return
 
@@ -939,7 +955,7 @@ class MotionAnalysisService:
         try:
             if self._stopping():
                 return
-            fused = self.hooks.with_source_evidence(
+            fused = self.qualification.with_source_evidence(
                 result,
                 samples[0][0],
                 captured_at,
@@ -978,8 +994,8 @@ class MotionAnalysisService:
             )
             if not trigger_enqueued:
                 return
-            self.hooks.increment_stat("visual_backup_triggers", 1)
-            self.hooks.increment_stat(
+            self.state.increment_stat("visual_backup_triggers", 1)
+            self.state.increment_stat(
                 "illumination_verification_probes",
                 int(decision.illumination_probe),
             )
@@ -996,9 +1012,9 @@ class MotionAnalysisService:
         frames = [frame for _timestamp, frame in samples]
         if len(frames) < 2:
             return
-        _mode, sensitivity, _frame_width = self.hooks.motion_settings()
+        _mode, sensitivity, _frame_width = self.qualification.settings()
         try:
-            self.hooks.run_pipeline(
+            self.qualification.run_pipeline(
                 frames,
                 sensitivity,
                 captured_at,
@@ -1014,19 +1030,19 @@ class MotionAnalysisService:
             )
 
     def _record_continuous_stats(self, result: MotionQualificationResult) -> None:
-        self.hooks.increment_stat("continuous_frames", 1)
-        self.hooks.increment_stat("continuous_candidates", int(result.accepted))
+        self.state.increment_stat("continuous_frames", 1)
+        self.state.increment_stat("continuous_candidates", int(result.accepted))
         illumination_available = bool(
             result.features.get("illumination_evidence_available")
         )
         illumination_candidate = bool(result.features.get("illumination_would_reject"))
-        self.hooks.increment_stat("illumination_evaluations", int(illumination_available))
-        self.hooks.increment_stat("illumination_candidates", int(illumination_candidate))
-        self.hooks.increment_stat(
+        self.state.increment_stat("illumination_evaluations", int(illumination_available))
+        self.state.increment_stat("illumination_candidates", int(illumination_candidate))
+        self.state.increment_stat(
             "illumination_filtered",
             int(
                 illumination_candidate
-                and self.hooks.illumination_filter_enabled()
+                and self.qualification.illumination_filter_enabled()
                 and not result.accepted
             ),
         )
@@ -1035,32 +1051,47 @@ class MotionAnalysisService:
         return self.events.enqueue(
             trigger,
             evict_oldest=False,
-            on_trigger=lambda name: self.hooks.increment_stat(name, 1),
-            on_drop=lambda name: self.hooks.increment_stat(name, 1),
+            on_trigger=lambda name: self.state.increment_stat(name, 1),
+            on_drop=lambda name: self.state.increment_stat(name, 1),
         )
 
     def reserve_adaptive_trigger(self, captured_at: float) -> bool:
         allowed = self.events.reserve_adaptive(
             captured_at,
-            rearm_seconds=self.hooks.adaptive_rearm_seconds(),
-            priority_tolerance_seconds=self.hooks.priority_dedup_seconds(),
+            rearm_seconds=self._adaptive_rearm_seconds(),
+            priority_tolerance_seconds=self._priority_dedup_seconds(),
         )
         if not allowed:
-            self.hooks.increment_stat("adaptive_triggers_deferred", 1)
+            self.state.increment_stat("adaptive_triggers_deferred", 1)
         return allowed
+
+    def _adaptive_rearm_seconds(self) -> float:
+        return max(
+            5.0,
+            self.config.window_seconds
+            + self.config.post_trigger_seconds
+            + self.config.burst_quiet_seconds,
+        )
+
+    def _priority_dedup_seconds(self) -> float:
+        return max(
+            2.0,
+            self.config.post_trigger_seconds
+            + self.config.burst_quiet_seconds,
+        )
 
     def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
         with self._visual_lock:
             allowed = self.events.reserve_with(
                 lambda pending, last_completed_at: self.visual_backup.reserve_trigger(
                     captured_at,
-                    self.hooks.visual_backup_policy(),
+                    self.qualification.visual_backup_policy(),
                     trigger_pending=pending,
                     last_completed_at=last_completed_at,
                 )
             )
         if not allowed:
-            self.hooks.increment_stat("visual_backup_rate_limited", 1)
+            self.state.increment_stat("visual_backup_rate_limited", 1)
         return allowed
 
     def record_visual_backup_readiness_audit(
@@ -1071,10 +1102,10 @@ class MotionAnalysisService:
         event_at = datetime.fromtimestamp(captured_at, timezone.utc)
         try:
             self.audit_recorder.record_audit(
-                snapshot_path=self.hooks.sample_rejected_motion(event_at, result),
+                snapshot_path=self.media.sample_rejected_motion(event_at, result),
                 event_at=event_at,
                 mode="camera_rescue",
-                sensitivity=self.hooks.motion_settings()[1],
+                sensitivity=self.qualification.settings()[1],
                 score=result.score,
                 threshold=result.threshold,
                 reason="startup_not_ready",
@@ -1084,7 +1115,7 @@ class MotionAnalysisService:
                     **audit_features(result),
                     "visual_backup_scene_ready": False,
                     "visual_backup_warmup_seconds": (
-                        self.hooks.visual_backup_warmup_seconds()
+                        self.config.visual_backup_warmup_seconds
                     ),
                 },
                 category="visual_backup",
@@ -1097,8 +1128,8 @@ class MotionAnalysisService:
 
     def _publish_motion(self, event_at: datetime, source: str) -> None:
         timestamp = event_at.isoformat()
-        self.hooks.set_last_motion_at(timestamp)
-        self.hooks.publish_event(
+        self.state.set_last_motion_at(timestamp)
+        self.state.publish_event(
             "motion",
             {
                 "camera_id": self.camera_id,

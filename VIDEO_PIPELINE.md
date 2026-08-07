@@ -5,7 +5,7 @@ describes the implementation currently in the repository, not an aspirational
 design. Update it whenever ingest, recording, motion qualification, inference,
 incident generation, media storage, or browser playback behavior changes.
 
-Last reviewed: 2026-07-25
+Last reviewed: 2026-08-06
 
 ## Motion Pipeline Migration
 
@@ -52,8 +52,11 @@ and SSE remain outside the motion pipeline.
 `MotionDecisionHandler` owns downstream event persistence and notifications.
 It receives object evidence from an injected `RecordedMotionObjectDetector`,
 which owns recorded-frame selection, decode, zone-aware inference, and live
-fallback. `CameraWorker` coordinates these components but no longer implements
-their policies.
+fallback. `MotionRuntimeService` is the single lifecycle boundary for the
+analysis and decision workers, their queues, retry state, evidence repository,
+and pipeline generation. `CameraWorker` only assembles these typed
+collaborators and exposes the camera-facing API; it owns no motion policy or
+motion worker lifecycle.
 
 ## Pipeline At A Glance
 
@@ -153,7 +156,7 @@ paths.
 
 ## 2. Live Capture And Browser Delivery
 
-`CameraWorker` keeps the live source open through OpenCV/FFmpeg. A successful
+`CameraCaptureService` keeps the live source open through OpenCV/FFmpeg. A successful
 capture read transfers exclusive ownership of its NumPy buffer to the capture
 service, which publishes it as an immutable shared frame. Snapshot, MJPEG, and
 motion observers share that buffer; only consumers that explicitly request a
@@ -225,8 +228,9 @@ Each enabled camera has a long-running ONVIF PullPoint listener. It creates and
 renews subscriptions, polls in bounded batches, retries failed subscriptions
 with backoff, and reconnects after repeated polling failures.
 
-Topics or messages containing configured motion terms are forwarded to
-`CameraWorker.handle_motion_event`. The callback is intentionally lightweight:
+Topics or messages containing configured motion terms enter the camera's
+`MotionRuntimeService` through `CameraWorker.handle_motion_event`. The ingress
+path is intentionally lightweight:
 
 1. Normalize the camera timestamp to UTC.
 2. Publish the raw motion state through the realtime/MQTT path.
@@ -264,12 +268,13 @@ model. No additional stream or camera connection is opened. The model warms for
 approximately two seconds, separates foreground from its learned background,
 and applies morphology before extracting connected blobs.
 
-`CameraWorker` sends each sampled grayscale frame through the lightweight
-motion observation pipeline. The MOG2 stage retains its model in that
+`MotionAnalysisService` sends each sampled grayscale frame through the
+lightweight motion observation pipeline. The MOG2 stage retains its model in that
 pipeline's per-camera runtime and writes bounded evidence samples to the
 camera's injected repository. The event-time fusion pipeline reads only the
-requested time range. `CameraWorker` therefore owns neither the MOG2 model nor
-its sample history and has no direct dependency on its aggregation algorithm.
+requested time range. The composition root therefore owns neither the MOG2
+model nor its sample history and has no direct dependency on its aggregation
+algorithm.
 
 Blobs are associated across samples using normalized centroid distance and
 bounding-box overlap. Tracks survive short detection gaps and report

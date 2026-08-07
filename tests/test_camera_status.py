@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from survng.app.camera_status import CameraStatusHooks, CameraStatusService
+from survng.app.camera_status import CameraStatusService
 from survng.app.config import CameraConfig, MotionQualificationConfig
 
 
@@ -69,30 +70,41 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
         pipeline.status.return_value = {"pipeline": index}
     debug = Mock()
     debug.status.return_value = {"enabled": False}
-    hooks = CameraStatusHooks(
-        runtime_state=lambda: (enabled, True, "last-motion"),
-        motion_settings=lambda: ("camera_rescue", "balanced", 640),
-        stationary_object_tolerance=lambda: "balanced",
-        rescue_settings=lambda: (True, 0.03),
-        visual_backup_settings=lambda: {
+    runtime_state = SimpleNamespace(
+        lock=threading.Lock(),
+        enabled=enabled,
+        detection_enabled=True,
+    )
+    motion_state = Mock()
+    motion_state.last_motion_at.return_value = "last-motion"
+    motion_state.stats_snapshot.return_value = {"triggers": 4}
+    qualification = Mock()
+    qualification.settings.return_value = ("camera_rescue", "balanced", 640)
+    qualification.stationary_object_tolerance.return_value = "balanced"
+    qualification.rescue_settings.return_value = (True, 0.03)
+    qualification.visual_backup_settings.return_value = {
             "grace_seconds": 2.0,
             "minimum_score": 0.75,
             "minimum_consecutive": 4,
             "cooldown_seconds": 30.0,
             "maximum_triggers_5m": 2,
-        },
-        illumination_filter_enabled=lambda: False,
-        suppression_verification_rate=lambda: 0.05,
-        motion_stats=lambda: {"triggers": 4},
-        object_tracking_status=lambda: {"active": True},
-        incident_status=lambda: {"handoff_failures": 0},
-        event_worker_running=lambda: True,
-        event_queue_depth=lambda: 2,
-        retry_queue_depth=lambda: 1,
-        event_runtime=lambda: {"queue_high_water": 3},
-        lifecycle_runtime=lambda: {"active_worker_count": 4},
-        monotonic=lambda: 100.0,
-    )
+        }
+    qualification.illumination_filter_enabled.return_value = False
+    qualification.suppression_verification_rate.return_value = 0.05
+    motion_runtime = Mock()
+    motion_runtime.runtime_status.return_value = {
+        "event_worker_running": True,
+        "event_queue_depth": 2,
+        "retry_queue_depth": 1,
+        "generation_clean": True,
+        "events": {"queue_high_water": 3},
+    }
+    tracking = Mock()
+    tracking.status.return_value = {"active": True}
+    incidents = Mock()
+    incidents.status.return_value = {"handoff_failures": 0}
+    lifecycle = Mock()
+    lifecycle.runtime_status.return_value = {"active_worker_count": 4}
     service = CameraStatusService(
         camera=CameraConfig(
             id="gate",
@@ -109,7 +121,14 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
         fusion_pipeline=pipelines[2],
         debug_store=debug,
         pipeline_origins={"qualification": "default"},
-        hooks=hooks,
+        runtime_state=runtime_state,
+        motion_state=motion_state,
+        qualification=qualification,
+        motion_runtime=motion_runtime,
+        object_tracking=tracking,
+        incidents=incidents,
+        lifecycle=lifecycle,
+        monotonic=lambda: 100.0,
     )
     return service
 
@@ -130,6 +149,7 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
     assert motion["triggers"] == 4
     assert motion["analysis_worker_running"] is True
     assert motion["event_worker_running"] is True
+    assert motion["generation_clean"] is True
     assert motion["event_runtime"]["queue_high_water"] == 3
     assert motion["visual_backup"]["scene_ready"] is True
     assert motion["mog2_audit_enabled"] is True

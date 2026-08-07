@@ -14,16 +14,18 @@ def _service(
 ) -> tuple[MotionEventIngressService, Mock]:
     owned = Mock()
     owned.events.enqueue.return_value = True
+    owned.state.accepting_events.return_value = accepting
+    owned.state.detection_enabled.return_value = detection_enabled
+    owned.state.publish_event = owned.publish_event
+    owned.state.set_last_motion_at = owned.set_last_motion_at
+    owned.state.increment_stat = owned.increment_stat
+    owned.qualification.settings.return_value = (mode, "balanced", 320)
+    owned.qualification.observe_event = owned.observe_event
     service = MotionEventIngressService(
         camera_id="gate",
         events=owned.events,
-        accepting=lambda: accepting,
-        detection_enabled=lambda: detection_enabled,
-        configured_mode=lambda: mode,
-        observe_event=owned.observe_event,
-        publish_event=owned.publish_event,
-        set_last_motion_at=owned.set_last_motion_at,
-        increment_stat=owned.increment_stat,
+        qualification=owned.qualification,
+        state=owned.state,
         epoch_now=lambda: 1_700_000_000.0,
     )
     return service, owned

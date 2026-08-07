@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -12,7 +13,6 @@ from survng.app.motion import MotionQualificationResult
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_analysis_service import (
     ANALYSIS_SLOT_WAKEUP,
-    MotionAnalysisHooks,
     MotionAnalysisService,
     MotionFrameSubmission,
 )
@@ -24,6 +24,7 @@ from survng.app.motion_coordinator import (
 )
 from survng.app.motion_events import MotionEventCoordinator
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
+from survng.app.config import MotionQualificationConfig
 
 
 def _hooks(
@@ -37,33 +38,25 @@ def _hooks(
     execute_continuous: Mock | None = None,
     preprocessor_implementation: str = "gray_blur",
     reset_temporal_runtime: Mock | None = None,
-) -> MotionAnalysisHooks:
-    return MotionAnalysisHooks(
-        frame_analysis_required=lambda: True,
-        sample_fps=lambda: 5.0,
-        frame_width=lambda: 320,
-        preprocessor_implementation=lambda: preprocessor_implementation,
-        observe_frame=Mock(),
-        motion_settings=lambda: (trigger_mode, "balanced", 320),
-        continuous_primary_required=lambda: True,
-        continuous_primary_due=lambda _captured_at, _last_at: True,
-        execute_continuous=execute_continuous or Mock(),
-        execute_debug_capture=Mock(),
-        adaptive_rearm_seconds=lambda: 5.0,
-        priority_dedup_seconds=lambda: 2.0,
-        run_pipeline=run_pipeline or Mock(),
-        illumination_filter_enabled=lambda: False,
-        trigger_mode=lambda: trigger_mode,
-        detection_enabled=lambda: True,
-        with_source_evidence=with_source_evidence or Mock(),
-        visual_backup_settings=lambda: {
+) -> SimpleNamespace:
+    qualification = Mock()
+    qualification.frame_analysis_required.return_value = True
+    qualification.settings.return_value = (trigger_mode, "balanced", 320)
+    qualification.preprocessor_implementation.return_value = preprocessor_implementation
+    qualification.continuous_primary_required.return_value = True
+    qualification.continuous_primary_due.return_value = True
+    qualification.run_pipeline = run_pipeline or Mock()
+    qualification.illumination_filter_enabled.return_value = False
+    qualification.trigger_mode.return_value = trigger_mode
+    qualification.with_source_evidence = with_source_evidence or Mock()
+    qualification.visual_backup_settings.return_value = {
             "grace_seconds": 2.0,
             "minimum_score": 0.7,
             "minimum_consecutive": 3,
             "cooldown_seconds": 20.0,
             "maximum_triggers_5m": 3,
-        },
-        visual_backup_policy=lambda: VisualBackupPolicy(
+        }
+    qualification.visual_backup_policy.return_value = VisualBackupPolicy(
             warmup_seconds=10.0,
             grace_seconds=2.0,
             minimum_score=0.7,
@@ -73,20 +66,31 @@ def _hooks(
             maximum_triggers_5m=3,
             sample_fps=5.0,
             background_fps=2.0,
+        )
+    qualification.suppression_verification_rate.return_value = 0.0
+    qualification.reset_runtime = reset_temporal_runtime or Mock()
+    state = Mock()
+    state.detection_enabled.return_value = True
+    state.publish_event = publish_event or Mock()
+    state.set_last_motion_at = set_last_motion_at or Mock()
+    state.increment_stat = increment_stat or Mock()
+    media = Mock()
+    media.sample_rejected_motion.return_value = ""
+    return SimpleNamespace(
+        config=MotionQualificationConfig(
+            sample_fps=5.0,
+            frame_width=320,
+            visual_backup_warmup_seconds=10.0,
         ),
-        suppression_verification_rate=lambda: 0.0,
-        visual_backup_warmup_seconds=lambda: 10.0,
-        sample_rejected_motion=lambda _event_at, _result: "",
-        publish_event=publish_event or Mock(),
-        set_last_motion_at=set_last_motion_at or Mock(),
-        increment_stat=increment_stat or Mock(),
-        record_analysis_wait=Mock(),
-        reset_temporal_runtime=reset_temporal_runtime or Mock(),
+        qualification=qualification,
+        state=state,
+        media=media,
+        execute_continuous=execute_continuous,
     )
 
 
-def _service(hooks: MotionAnalysisHooks, queue_size: int = 1) -> MotionAnalysisService:
-    return MotionAnalysisService(
+def _service(dependencies: SimpleNamespace, queue_size: int = 1) -> MotionAnalysisService:
+    service = MotionAnalysisService(
         camera_id="gate",
         frame_lock=threading.Lock(),
         analysis_lock=threading.Lock(),
@@ -94,11 +98,18 @@ def _service(hooks: MotionAnalysisHooks, queue_size: int = 1) -> MotionAnalysisS
         queue_size=queue_size,
         limiter=FairMotionAnalysisLimiter(1),
         events=MotionEventCoordinator(queue_size=4, retry_limit=2),
+        evidence=Mock(),
         visual_backup=VisualBackupCoordinator(),
         audit_recorder=Mock(),
         debug_store=MotionDebugSnapshotStore(),
-        hooks=hooks,
+        config=dependencies.config,
+        qualification=dependencies.qualification,
+        media=dependencies.media,
+        state=dependencies.state,
     )
+    if dependencies.execute_continuous is not None:
+        service.analyze_continuous = dependencies.execute_continuous
+    return service
 
 
 def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
@@ -405,7 +416,8 @@ def test_backward_wall_clock_step_resets_runtime_without_suspending_frames() -> 
     assert service.last_processed_sequence == 2
     assert service.last_processed_at == 90.0
     assert [timestamp for timestamp, _frame in service.frames] == [90.0]
-    reset_runtime.assert_called_once_with()
+    reset_runtime.assert_called_once()
+    assert callable(reset_runtime.call_args.kwargs["clear_observation_evidence"])
     assert service.telemetry_snapshot()["clock_discontinuity_resets"] == 1
 
 

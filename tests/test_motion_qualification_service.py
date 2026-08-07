@@ -10,7 +10,6 @@ from survng.app.config import CameraConfig, MotionQualificationConfig
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
 from survng.app.motion_qualification_service import (
-    MotionQualificationHooks,
     MotionQualificationService,
 )
 
@@ -47,10 +46,7 @@ def _service(
         },
         debug_store=MotionDebugSnapshotStore(),
         stop_event=threading.Event(),
-        hooks=MotionQualificationHooks(
-            samples_since=lambda _captured_at: [],
-            increment_stat=increment_stat or Mock(),
-        ),
+        state=Mock(increment_stat=increment_stat or Mock()),
     )
 
 

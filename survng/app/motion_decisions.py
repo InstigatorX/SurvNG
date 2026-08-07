@@ -4,11 +4,12 @@ import hashlib
 import logging
 import queue
 import threading
+import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
+from .config import MotionQualificationConfig
 from .motion import MotionQualificationResult
 from .motion_events import (
     MotionEventCoordinator,
@@ -28,29 +29,43 @@ class MotionAuditRecorder(Protocol):
     def record_audit(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
-@dataclass(frozen=True, slots=True)
-class MotionDecisionHooks:
-    motion_settings: Callable[[], tuple[str, str, int]]
-    rescue_settings: Callable[[], tuple[bool, float]]
-    suppression_verification_rate: Callable[[], float]
-    matches_recent_priority_motion: Callable[[float], bool]
-    qualify_motion_burst: Callable[
-        [datetime, float, str],
-        tuple[MotionQualificationResult, dict[str, Any]],
-    ]
-    with_pipeline_telemetry: Callable[
-        [MotionQualificationResult], MotionQualificationResult
-    ]
-    process_incident: Callable[..., dict[str, Any]]
-    sample_rejected_motion: Callable[[datetime, MotionQualificationResult], str]
-    related_incident_event_id: Callable[[MotionQualificationResult], int | None]
-    reset_motion_fusion_runtime: Callable[[], None]
-    record_visual_camera_match: Callable[[float], bool]
-    complete_adaptive_trigger: Callable[[MotionTriggerBatch], None]
-    set_active_incident_event_id: Callable[[int], None]
-    publish_event: Callable[[str, dict[str, Any]], None]
-    record_decision_stats: Callable[..., None]
-    increment_stat: Callable[[str, int], None]
+class MotionDecisionQualification(Protocol):
+    def settings(self) -> tuple[str, str, int]: ...
+    def rescue_settings(self) -> tuple[bool, float]: ...
+    def suppression_verification_rate(self) -> float: ...
+    def qualify_burst(
+        self,
+        event_at: datetime,
+        received_at: float,
+        sensitivity: str,
+        sample_source: Any,
+    ) -> tuple[MotionQualificationResult, dict[str, Any]]: ...
+    def with_pipeline_telemetry(
+        self, result: MotionQualificationResult
+    ) -> MotionQualificationResult: ...
+    def reset_event_state_runtime(self) -> None: ...
+
+
+class MotionDecisionIncidents(Protocol):
+    def process(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+class MotionDecisionMedia(Protocol):
+    def sample_rejected_motion(
+        self, event_at: datetime, result: MotionQualificationResult
+    ) -> str: ...
+
+
+class MotionDecisionAnalysis(Protocol):
+    def record_visual_camera_match(self, observed_at: float) -> bool: ...
+
+
+class MotionDecisionState(Protocol):
+    def active_incident_event_id(self) -> int | None: ...
+    def set_active_incident_event_id(self, event_id: int | None) -> None: ...
+    def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
+    def record_decision(self, **kwargs: Any) -> None: ...
+    def increment_stat(self, name: str, amount: int = 1) -> None: ...
 
 
 def priority_motion_topic(topic: str) -> bool:
@@ -107,14 +122,56 @@ class MotionDecisionOrchestrator:
         camera_id: str,
         events: MotionEventCoordinator,
         audit_recorder: MotionAuditRecorder,
-        hooks: MotionDecisionHooks,
-        burst_quiet_seconds: Callable[[], float],
+        config: MotionQualificationConfig,
+        qualification: MotionDecisionQualification,
+        incidents: MotionDecisionIncidents,
+        media: MotionDecisionMedia,
+        analysis: MotionDecisionAnalysis,
+        state: MotionDecisionState,
     ) -> None:
         self._camera_id = camera_id
         self._events = events
         self._audit_recorder = audit_recorder
-        self._hooks = hooks
-        self._burst_quiet_seconds = burst_quiet_seconds
+        self._config = config
+        self._qualification = qualification
+        self._incidents = incidents
+        self._media = media
+        self._analysis = analysis
+        self._state = state
+        self._thread: threading.Thread | None = None
+
+    def start(self, stop_event: threading.Event) -> None:
+        """Start the sole decision worker owned by this orchestrator."""
+        if self.running():
+            return
+        thread = threading.Thread(
+            target=self.run,
+            args=(stop_event,),
+            name=f"motion-{self._camera_id}",
+            daemon=False,
+        )
+        self._thread = thread
+        try:
+            thread.start()
+        except BaseException:
+            self._thread = None
+            raise
+
+    def request_stop(self) -> None:
+        self._events.signal_stop()
+
+    def wait_stopped(self, timeout: float) -> bool:
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            return False
+        self._thread = None
+        return True
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def run(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -123,12 +180,12 @@ class MotionDecisionOrchestrator:
                 return
             except Exception:
                 failed_triggers = self._events.take_failed_active()
-                self._hooks.increment_stat("event_worker_errors", 1)
+                self._state.increment_stat("event_worker_errors", 1)
                 LOGGER.exception("motion event cycle failed for %s", self._camera_id)
                 if failed_triggers and not stop_event.is_set():
                     disposition = self.retry_batch(failed_triggers, stop_event)
                     if disposition == RetryDisposition.DROPPED:
-                        self._hooks.complete_adaptive_trigger(failed_triggers)
+                        self._complete_adaptive_trigger(failed_triggers)
 
     def retry_batch(
         self,
@@ -138,8 +195,8 @@ class MotionDecisionOrchestrator:
         return self._events.schedule_retry(
             triggers,
             stop_event=stop_event,
-            on_retry=lambda name: self._hooks.increment_stat(name, 1),
-            on_drop=lambda name: self._hooks.increment_stat(name, 1),
+            on_retry=lambda name: self._state.increment_stat(name, 1),
+            on_drop=lambda name: self._state.increment_stat(name, 1),
         )
 
     def run_until_error(self, stop_event: threading.Event) -> None:
@@ -152,7 +209,7 @@ class MotionDecisionOrchestrator:
                 return
             triggers = self._events.coalesce(
                 first,
-                quiet_seconds=self._burst_quiet_seconds(),
+                quiet_seconds=self._config.burst_quiet_seconds,
                 stop_event=stop_event,
             )
             if triggers is None:
@@ -166,7 +223,7 @@ class MotionDecisionOrchestrator:
         stop_event: threading.Event,
     ) -> None:
         if stop_event.is_set():
-            self._hooks.complete_adaptive_trigger(triggers)
+            self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
             return
         priority_triggers = [
@@ -185,8 +242,8 @@ class MotionDecisionOrchestrator:
         for item in triggers:
             item.decision_id = decision_id
 
-        mode, sensitivity, frame_width = self._hooks.motion_settings()
-        rescue_enabled, rescue_margin = self._hooks.rescue_settings()
+        mode, sensitivity, frame_width = self._qualification.settings()
+        rescue_enabled, rescue_margin = self._qualification.rescue_settings()
         priority = bool(priority_triggers)
         adaptive_only = all(item.topic.startswith("adaptive/") for item in triggers)
         visual_backup_queued = any(
@@ -195,8 +252,8 @@ class MotionDecisionOrchestrator:
         visual_backup = adaptive_only and visual_backup_queued
         if visual_backup_queued and not visual_backup:
             matched_camera_at = self._events.latest_camera_motion()
-            if self._hooks.record_visual_camera_match(matched_camera_at):
-                self._hooks.increment_stat("visual_backup_onvif_matches", 1)
+            if self._analysis.record_visual_camera_match(matched_camera_at):
+                self._state.increment_stat("visual_backup_onvif_matches", 1)
 
         result, diagnostics = self._qualification_result(
             triggers=triggers,
@@ -208,7 +265,7 @@ class MotionDecisionOrchestrator:
             adaptive_only=adaptive_only,
         )
         if stop_event.is_set():
-            self._hooks.complete_adaptive_trigger(triggers)
+            self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
             return
 
@@ -217,7 +274,7 @@ class MotionDecisionOrchestrator:
             rescue_enabled,
             rescue_margin,
         )
-        verification_rate = self._hooks.suppression_verification_rate()
+        verification_rate = self._qualification.suppression_verification_rate()
         suppression_verification_candidate = bool(
             mode in ENFORCING_MODES
             and not result.accepted
@@ -256,7 +313,7 @@ class MotionDecisionOrchestrator:
         for item in triggers:
             item.retry_qualification_result = result
             item.retry_diagnostics = dict(diagnostics)
-        self._hooks.record_decision_stats(
+        self._state.record_decision(
             result=result,
             qualification=qualification,
             retry_attempt=retry_attempt,
@@ -267,7 +324,7 @@ class MotionDecisionOrchestrator:
         )
 
         if not retry_attempt:
-            self._hooks.publish_event(
+            self._state.publish_event(
                 "motion_qualification",
                 {
                     "camera_id": self._camera_id,
@@ -284,7 +341,7 @@ class MotionDecisionOrchestrator:
                 sensitivity=sensitivity,
                 result=result,
             )
-            self._hooks.complete_adaptive_trigger(triggers)
+            self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
             return
 
@@ -335,7 +392,7 @@ class MotionDecisionOrchestrator:
             ),
             None,
         )
-        if adaptive_only and self._hooks.matches_recent_priority_motion(
+        if adaptive_only and self._matches_recent_priority_motion(
             event_at.timestamp()
         ):
             result = MotionQualificationResult(
@@ -362,12 +419,12 @@ class MotionDecisionOrchestrator:
             if retry_diagnostics is not None:
                 diagnostics = retry_diagnostics
         elif prequalified:
-            result = self._hooks.with_pipeline_telemetry(
+            result = self._qualification.with_pipeline_telemetry(
                 max(prequalified, key=lambda item: item.score)
             )
         else:
-            result, diagnostics = self._hooks.qualify_motion_burst(
-                event_at, received_at, sensitivity
+            result, diagnostics = self._qualification.qualify_burst(
+                event_at, received_at, sensitivity, self._analysis
             )
         return result, diagnostics
 
@@ -393,7 +450,7 @@ class MotionDecisionOrchestrator:
             snapshot_path = (
                 ""
                 if result.reason in INCIDENT_ACTIVITY_REASONS
-                else self._hooks.sample_rejected_motion(event_at, result)
+                else self._media.sample_rejected_motion(event_at, result)
             )
             for item in triggers:
                 item.audit_snapshot_path = snapshot_path
@@ -409,7 +466,7 @@ class MotionDecisionOrchestrator:
             object_detected=None,
             trigger_count=len(triggers),
             features=audit_features(result),
-            related_event_id=self._hooks.related_incident_event_id(result),
+            related_event_id=self._related_incident_event_id(result),
         )
 
     def _process_accepted(
@@ -429,7 +486,7 @@ class MotionDecisionOrchestrator:
     ) -> None:
         durable_incident = False
         try:
-            outcome = self._hooks.process_incident(
+            outcome = self._incidents.process(
                 representative.topic,
                 representative.message,
                 event_at,
@@ -440,28 +497,28 @@ class MotionDecisionOrchestrator:
                     or suppression_verification_candidate
                 ),
                 require_motion_correlation=visual_backup,
-            )
+            ).as_dict()
             event_id = outcome.get("event_id")
             if event_id is not None:
                 durable_incident = True
                 # A persisted incident is the idempotency boundary. Failures in
                 # later audits or notifications must never replay detection.
                 self._events.set_active(None)
-                self._hooks.set_active_incident_event_id(int(event_id))
+                self._state.set_active_incident_event_id(int(event_id))
             object_outcome = outcome.get("object_detected")
             found_object = object_outcome is True
             if borderline_candidate and found_object:
-                self._hooks.increment_stat("borderline_rescues", 1)
+                self._state.increment_stat("borderline_rescues", 1)
             elif mode in ENFORCING_MODES and borderline_candidate:
-                self._hooks.increment_stat("suppressed", 1)
+                self._state.increment_stat("suppressed", 1)
             if suppression_verification_candidate:
-                self._hooks.increment_stat("suppression_verification_checks", 1)
-                self._hooks.increment_stat(
+                self._state.increment_stat("suppression_verification_checks", 1)
+                self._state.increment_stat(
                     "suppression_verification_rescues" if found_object else "suppressed",
                     1,
                 )
             if mode == "audit" and not result.accepted and found_object:
-                self._hooks.increment_stat("audit_object_matches", 1)
+                self._state.increment_stat("audit_object_matches", 1)
             if visual_backup:
                 self._record_visual_backup_audit(
                     triggers=triggers,
@@ -478,7 +535,7 @@ class MotionDecisionOrchestrator:
             elif mode in AUDITED_MODES and not result.accepted:
                 audit_snapshot_path = str(outcome.get("snapshot_path") or "")
                 if not audit_snapshot_path and event_id is None:
-                    audit_snapshot_path = self._hooks.sample_rejected_motion(
+                    audit_snapshot_path = self._media.sample_rejected_motion(
                         event_at, result
                     )
                 self._audit_recorder.record_audit(
@@ -500,10 +557,10 @@ class MotionDecisionOrchestrator:
                 )
         except Exception:
             if durable_incident:
-                self._hooks.complete_adaptive_trigger(triggers)
+                self._complete_adaptive_trigger(triggers)
             raise
         else:
-            self._hooks.complete_adaptive_trigger(triggers)
+            self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
 
     def _record_visual_backup_audit(
@@ -521,18 +578,18 @@ class MotionDecisionOrchestrator:
         found_object: bool,
     ) -> None:
         if result.features.get("illumination_verification_probe") and found_object:
-            self._hooks.increment_stat("illumination_verification_rescues", 1)
+            self._state.increment_stat("illumination_verification_rescues", 1)
         correlation = outcome.get("motion_correlation")
         if (
             outcome.get("rejection_reason") == "object_not_motion_correlated"
             and isinstance(correlation, dict)
         ):
-            self._hooks.increment_stat(
+            self._state.increment_stat(
                 "visual_backup_uncorrelated_objects",
                 int(correlation.get("eligible_object_count") or 0),
             )
         if not found_object:
-            self._hooks.reset_motion_fusion_runtime()
+            self._qualification.reset_event_state_runtime()
         self._audit_recorder.record_audit(
             event_id=int(event_id) if event_id is not None else None,
             decision_id=decision_id if event_id is None else "",
@@ -552,3 +609,27 @@ class MotionDecisionOrchestrator:
             },
             category="visual_backup",
         )
+
+    def _priority_dedup_seconds(self) -> float:
+        return max(
+            2.0,
+            self._config.post_trigger_seconds
+            + self._config.burst_quiet_seconds,
+        )
+
+    def _matches_recent_priority_motion(self, event_at: float) -> bool:
+        return self._events.matches_recent_priority(
+            event_at,
+            rearm_seconds=self._priority_dedup_seconds(),
+        )
+
+    def _complete_adaptive_trigger(self, triggers: MotionTriggerBatch) -> None:
+        self._events.complete_adaptive(triggers, time.time())
+
+    def _related_incident_event_id(
+        self,
+        result: MotionQualificationResult,
+    ) -> int | None:
+        if result.reason not in INCIDENT_ACTIVITY_REASONS:
+            return None
+        return self._state.active_incident_event_id()

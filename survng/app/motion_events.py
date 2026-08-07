@@ -224,7 +224,6 @@ class MotionEventCoordinator:
             maxsize=queue_size
         )
         self.retry_batches: deque[MotionTrigger] = deque()
-        self.thread: threading.Thread | None = None
         self.active_triggers: MotionTriggerBatch | None = None
         self.adaptive_trigger_pending = False
         self.adaptive_last_completed_at = 0.0

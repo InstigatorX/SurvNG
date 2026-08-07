@@ -13,10 +13,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 import cv2
 
-from survng.app.camera import (
-    CAPTURE_STOP_TIMEOUT_SECONDS,
-    CameraWorker,
-)
+from survng.app.camera import CameraWorker
+from survng.app.camera_lifecycle import CAPTURE_STOP_TIMEOUT_SECONDS
 from survng.app.camera_capture import (
     CAPTURE_OPEN_CONCURRENCY,
     CAPTURE_OPEN_TIMEOUT_MS,
@@ -30,6 +28,10 @@ from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_events import MotionTrigger, MotionTriggerBatch
+from survng.app.motion_decisions import (
+    is_borderline_candidate,
+    should_verify_suppression,
+)
 from survng.app.object_tracking import ObjectTrackingSessionFactory
 from survng.app.motion_pipeline import (
     EVIDENCE_REPOSITORY_SERVICE,
@@ -41,6 +43,18 @@ from survng.app.motion_pipeline import (
     build_builtin_motion_registry,
     resolve_motion_pipeline_graphs,
 )
+
+
+class StubIncidentOutcome:
+    def __init__(self, values: dict[str, object]) -> None:
+        self.values = values
+
+    def as_dict(self) -> dict[str, object]:
+        return dict(self.values)
+
+
+def incident_outcome(**values: object) -> StubIncidentOutcome:
+    return StubIncidentOutcome(values)
 
 
 class DummyDetector:
@@ -142,7 +156,7 @@ def make_worker(
     # I/O. Production workers now begin in the explicit stopped/non-accepting
     # lifecycle phase, so opt this test fixture into ingress unless a test
     # deliberately disables it.
-    worker._accepting_motion_events = True
+    worker.runtime_state.accepting_motion_events = True
     return worker
 
 
@@ -157,8 +171,8 @@ def prime_visual_backup_scene(worker: CameraWorker, started_at: float) -> None:
     )
     warmup_end = started_at + worker.motion_config.visual_backup_warmup_seconds
     for captured_at in (started_at, warmup_end, warmup_end + 0.75, warmup_end + 1.5):
-        worker._visual_backup_readiness(stable, captured_at)
-    assert worker._visual_backup_scene_ready
+        worker.motion_analysis.visual_backup_readiness(stable, captured_at)
+    assert worker.motion_analysis.visual_backup_scene_ready
 
 
 def seed_capture_frame(
@@ -218,8 +232,8 @@ class CameraWorkerTest(unittest.TestCase):
                 ),
             )
 
-        self.assertTrue(inherited._illumination_filter_enabled())
-        self.assertFalse(overridden._illumination_filter_enabled())
+        self.assertTrue(inherited.motion_qualification.illumination_filter_enabled())
+        self.assertFalse(overridden.motion_qualification.illumination_filter_enabled())
 
     def test_visual_backup_settings_use_camera_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -239,7 +253,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
             )
 
-            self.assertEqual(worker._visual_backup_settings(), {
+            self.assertEqual(worker.motion_qualification.visual_backup_settings(), {
                 "grace_seconds": 2.0,
                 "minimum_score": 0.75,
                 "minimum_consecutive": 4,
@@ -255,7 +269,7 @@ class CameraWorkerTest(unittest.TestCase):
             )
             tracking = Mock()
             tracking.stop.return_value = True
-            worker.object_tracking = tracking
+            worker.tracking_lifecycle.bind_for_compatibility(tracking)
             worker._stop.clear()
 
             worker.pause_object_tracking_session()
@@ -279,7 +293,7 @@ class CameraWorkerTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "sync failed"):
                     worker.set_detection_enabled(False)
 
-            self.assertTrue(worker._detection_enabled)
+            self.assertTrue(worker.runtime_state.detection_enabled)
             self.assertEqual(sync.call_count, 2)
 
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
@@ -292,9 +306,9 @@ class CameraWorkerTest(unittest.TestCase):
             previous.stop.return_value = True
             replacement = Mock()
             replacement.config = ObjectTrackingConfig(sample_fps=3.0)
-            worker.object_tracking = previous
+            worker.tracking_lifecycle.bind_for_compatibility(previous)
             worker._stop.clear()
-            worker._tracking_frames.extend([
+            worker.tracking_frames.frames.extend([
                 (1.0, np.zeros((2, 2, 3), dtype=np.uint8)),
                 (2.0, np.zeros((2, 2, 3), dtype=np.uint8)),
             ])
@@ -302,11 +316,11 @@ class CameraWorkerTest(unittest.TestCase):
             returned = worker.replace_object_tracking_session(replacement)
 
             self.assertIs(returned, previous)
-            self.assertIs(worker.object_tracking, replacement)
+            self.assertIs(worker.tracking_lifecycle.current(), replacement)
             previous.stop.assert_called_once_with()
             replacement.set_accepting.assert_called_once_with(True)
-            self.assertEqual(worker._tracking_frames.maxlen, 32)
-            self.assertEqual(len(worker._tracking_frames), 2)
+            self.assertEqual(worker.tracking_frames.frames.maxlen, 32)
+            self.assertEqual(len(worker.tracking_frames.frames), 2)
             self.assertFalse(worker._stop.is_set())
 
     def test_tracking_session_swap_refuses_to_replace_busy_session(self) -> None:
@@ -318,12 +332,12 @@ class CameraWorkerTest(unittest.TestCase):
             previous = Mock()
             previous.stop.return_value = False
             replacement = Mock()
-            worker.object_tracking = previous
+            worker.tracking_lifecycle.bind_for_compatibility(previous)
 
             with self.assertRaisesRegex(RuntimeError, "did not stop"):
                 worker.replace_object_tracking_session(replacement)
 
-            self.assertIs(worker.object_tracking, previous)
+            self.assertIs(worker.tracking_lifecycle.current(), previous)
             replacement.set_accepting.assert_not_called()
 
     def test_tracking_session_swap_restores_pointer_when_replacement_cleanup_fails(self) -> None:
@@ -338,13 +352,13 @@ class CameraWorkerTest(unittest.TestCase):
             replacement.config = ObjectTrackingConfig(sample_fps=2.0)
             replacement.set_accepting.side_effect = RuntimeError("accept failed")
             replacement.stop.side_effect = RuntimeError("cleanup failed")
-            worker.object_tracking = previous
+            worker.tracking_lifecycle.bind_for_compatibility(previous)
             worker._stop.clear()
 
             with self.assertRaisesRegex(RuntimeError, "accept failed"):
                 worker.replace_object_tracking_session(replacement)
 
-            self.assertIs(worker.object_tracking, previous)
+            self.assertIs(worker.tracking_lifecycle.current(), previous)
             previous.set_accepting.assert_called_once_with(True)
 
     def test_status_advertises_stable_dimensions_for_each_captured_source(self) -> None:
@@ -376,7 +390,7 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            worker.object_tracking.config = ObjectTrackingConfig(sample_fps=2.0)
+            worker.tracking_lifecycle.current().config = ObjectTrackingConfig(sample_fps=2.0)
             first = np.full((900, 1600, 3), 1, dtype=np.uint8)
             second = np.full((900, 1600, 3), 2, dtype=np.uint8)
             worker._remember_tracking_frame(first, 100.0)
@@ -393,13 +407,13 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker.object_tracking.config = ObjectTrackingConfig(sample_fps=2.0)
+            worker.tracking_lifecycle.current().config = ObjectTrackingConfig(sample_fps=2.0)
             frame = np.zeros((90, 160, 3), dtype=np.uint8)
             worker._remember_tracking_frame(frame, 100.0)
             worker._remember_tracking_frame(frame, 100.1)
             worker._remember_tracking_frame(frame, 100.5)
 
-        self.assertEqual([sample[0] for sample in worker._tracking_frames], [100.0, 100.5])
+        self.assertEqual([sample[0] for sample in worker.tracking_frames.frames], [100.0, 100.5])
 
     def test_capture_observer_preserves_timestamp_for_motion_and_tracking(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -407,10 +421,7 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            analysis_thread = worker._motion_analysis_thread = threading.Thread(
-                target=worker._run_motion_analysis
-            )
-            analysis_thread.start()
+            worker.motion_runtime.start(worker._stop)
             live = CapturedFrame(
                 source="live",
                 image=np.zeros((90, 160, 3), dtype=np.uint8),
@@ -436,14 +447,19 @@ class CameraWorkerTest(unittest.TestCase):
             worker._capture_frame(main)
 
             deadline = time.monotonic() + 1
-            while not worker._motion_frames and time.monotonic() < deadline:
+            while not worker.motion_analysis.frames and time.monotonic() < deadline:
                 time.sleep(0.01)
+            motion_timestamp = worker.motion_analysis.frames[-1][0]
+            tracking_timestamp = worker.tracking_frames.frames[-1][0]
             worker._stop.set()
-            worker._signal_motion_analysis_stop()
-            analysis_thread.join(timeout=1)
+            worker.motion_runtime.request_stop()
+            self.assertTrue(worker.motion_runtime.wait_stopped(
+                analysis_timeout=1.0,
+                decision_timeout=1.0,
+            ))
 
-        self.assertEqual(worker._motion_frames[-1][0], 100.25)
-        self.assertEqual(worker._tracking_frames[-1][0], 100.5)
+        self.assertEqual(motion_timestamp, 100.25)
+        self.assertEqual(tracking_timestamp, 100.5)
 
     def test_tracking_frame_includes_capture_time_and_rejects_stale_cache(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -584,12 +600,12 @@ class CameraWorkerTest(unittest.TestCase):
                     return_value=np.zeros((20, 30, 3), dtype=np.uint8),
                 ),
                 patch.object(
-                    worker.image_writer,
+                    worker.media.image_writer,
                     "stored_images",
                     side_effect=OSError("concurrent cleanup"),
                 ),
             ):
-                stored = worker._sample_rejected_motion(
+                stored = worker.media.sample_rejected_motion(
                     datetime(2026, 8, 3, tzinfo=timezone.utc),
                     result,
                 )
@@ -606,7 +622,7 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
 
-            result = worker._run_motion_pipeline(
+            result = worker.motion_qualification.run_pipeline(
                 frames,
                 "balanced",
                 2.0,
@@ -710,7 +726,9 @@ class CameraWorkerTest(unittest.TestCase):
                 patch.object(worker, "_recorded_motion_frame", return_value=(frame, objects, "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
             ):
-                outcome = worker._process_motion_event("motion", "message", datetime.now(timezone.utc), qualification)
+                outcome = worker.motion_incidents.process(
+                    "motion", "message", datetime.now(timezone.utc), qualification
+                ).as_dict()
 
         self.assertTrue(outcome["object_detected"])
         self.assertTrue(qualification["rescued_by_object"])
@@ -726,7 +744,7 @@ class CameraWorkerTest(unittest.TestCase):
         objects = [{"label": "person", "confidence": 0.9, "incident_eligible": True}]
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), events=events)
-            worker.object_tracking.config = ObjectTrackingConfig(
+            worker.tracking_lifecycle.current().config = ObjectTrackingConfig(
                 enabled=True,
                 reid_enabled=False,
             )
@@ -739,9 +757,9 @@ class CameraWorkerTest(unittest.TestCase):
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
                 patch("survng.app.camera_media.cv2.imread", return_value=seed) as imread,
                 patch.object(worker, "_get_latest_tracking_frame", return_value=None) as prewarm,
-                patch.object(worker.object_tracking, "start", return_value=True) as start,
+                patch.object(worker.tracking_lifecycle.current(), "start", return_value=True) as start,
             ):
-                worker._process_motion_event(
+                worker.motion_incidents.process(
                     "motion",
                     "message",
                     datetime.now(timezone.utc),
@@ -768,7 +786,9 @@ class CameraWorkerTest(unittest.TestCase):
                 patch.object(worker, "_recorded_motion_frame", return_value=(frame, [], "recording.mp4")),
                 patch.object(worker, "_write_snapshot", return_value="snapshot.jpg"),
             ):
-                outcome = worker._process_motion_event("motion", "message", datetime.now(timezone.utc), qualification)
+                outcome = worker.motion_incidents.process(
+                    "motion", "message", datetime.now(timezone.utc), qualification
+                ).as_dict()
 
         self.assertFalse(outcome["object_detected"])
         self.assertFalse(qualification["rescued_by_object"])
@@ -786,28 +806,32 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            thread = worker._motion_analysis_thread = threading.Thread(
-                target=worker._run_motion_analysis
+            thread = worker.motion_analysis.thread = threading.Thread(
+                target=worker.motion_analysis.run, args=(worker._stop,)
             )
             thread.start()
-            worker._remember_motion_frame(np.zeros((720, 1280, 3), dtype=np.uint8), time.monotonic())
+            worker.motion_analysis.remember_frame(
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+                time.monotonic(),
+                worker._stop,
+            )
             deadline = time.monotonic() + 1
-            while worker._motion_stats["continuous_frames"] == 0 and time.monotonic() < deadline:
+            while worker.motion_state._stats["continuous_frames"] == 0 and time.monotonic() < deadline:
                 time.sleep(0.01)
 
-            self.assertEqual(worker._motion_settings(), ("camera", "balanced", 480))
+            self.assertEqual(worker.motion_qualification.settings(), ("camera", "balanced", 480))
             self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
             self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
             self.assertEqual(
                 worker.status()["motion_qualification"]["color_frame_shape"],
                 [270, 480, 3],
             )
-            self.assertEqual(worker._motion_frames[-1][1].ndim, 2)
-            self.assertEqual(worker._motion_color_frames[-1][1].ndim, 3)
+            self.assertEqual(worker.motion_analysis.frames[-1][1].ndim, 2)
+            self.assertEqual(worker.motion_analysis.color_frames[-1][1].ndim, 3)
             self.assertFalse(worker.status()["motion_qualification"]["mog2_audit_enabled"])
             self.assertIsNone(worker.status()["motion_qualification"]["mog2_last"])
             worker._stop.set()
-            worker._signal_motion_analysis_stop()
+            worker.motion_analysis.request_stop()
             thread.join(timeout=1)
 
     def test_no_visual_validators_skip_frame_motion_work(self) -> None:
@@ -829,13 +853,14 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
 
-            worker._remember_motion_frame(
+            worker.motion_analysis.remember_frame(
                 np.zeros((180, 320, 3), dtype=np.uint8),
                 time.monotonic(),
+                worker._stop,
             )
 
-            self.assertEqual(len(worker._motion_frames), 0)
-            self.assertTrue(worker._motion_analysis_queue.empty())
+            self.assertEqual(len(worker.motion_analysis.frames), 0)
+            self.assertTrue(worker.motion_analysis.queue.empty())
 
     def test_continuous_adaptive_transition_enqueues_prequalified_trigger(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -849,26 +874,30 @@ class CameraWorkerTest(unittest.TestCase):
                 motion_config=MotionQualificationConfig(mode="enforce"),
             )
             worker._stop.clear()
-            thread = worker._motion_analysis_thread = threading.Thread(
-                target=worker._run_motion_analysis
+            thread = worker.motion_analysis.thread = threading.Thread(
+                target=worker.motion_analysis.run, args=(worker._stop,)
             )
             thread.start()
             with (
-                patch.object(worker, "_run_motion_pipeline", return_value=accepted) as analyze,
-                patch.object(worker, "_with_source_evidence", return_value=accepted),
+                patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted) as analyze,
+                patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
             ):
-                worker._remember_motion_frame(np.zeros((180, 320, 3), dtype=np.uint8), 1.0)
-                worker._remember_motion_frame(np.zeros((180, 320, 3), dtype=np.uint8), 2.0)
+                worker.motion_analysis.remember_frame(
+                    np.zeros((180, 320, 3), dtype=np.uint8), 1.0, worker._stop
+                )
+                worker.motion_analysis.remember_frame(
+                    np.zeros((180, 320, 3), dtype=np.uint8), 2.0, worker._stop
+                )
                 deadline = time.monotonic() + 1
-                while worker._motion_queue.empty() and time.monotonic() < deadline:
+                while worker.motion_events.queue.empty() and time.monotonic() < deadline:
                     time.sleep(0.01)
 
             self.assertGreaterEqual(analyze.call_count, 1)
-            trigger = worker._motion_queue.get_nowait()
+            trigger = worker.motion_events.queue.get_nowait()
             self.assertEqual(trigger["topic"], "adaptive/motion")
             self.assertIs(trigger["prequalified"], accepted)
             worker._stop.set()
-            worker._signal_motion_analysis_stop()
+            worker.motion_analysis.request_stop()
             thread.join(timeout=1)
 
     def test_visual_backup_requires_persistent_strong_motion_without_onvif(self) -> None:
@@ -888,13 +917,13 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
-            with patch.object(worker, "_with_source_evidence", return_value=accepted):
-                worker._consider_visual_backup(accepted, samples, 100.0)
-                worker._consider_visual_backup(accepted, samples, 100.5)
-                self.assertTrue(worker._motion_queue.empty())
-                worker._consider_visual_backup(accepted, samples, 101.0)
+            with patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted):
+                worker.motion_analysis.consider_visual_backup(accepted, samples, 100.0)
+                worker.motion_analysis.consider_visual_backup(accepted, samples, 100.5)
+                self.assertTrue(worker.motion_events.queue.empty())
+                worker.motion_analysis.consider_visual_backup(accepted, samples, 101.0)
 
-            trigger = worker._motion_queue.get_nowait()
+            trigger = worker.motion_events.queue.get_nowait()
 
         self.assertEqual(trigger["topic"], "adaptive/visual_backup")
         self.assertTrue(trigger["prequalified"].features["visual_backup"])
@@ -913,10 +942,10 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
-            worker._adaptive_trigger_pending = True
-            worker._consider_visual_backup(accepted, samples, 100.0)
-            worker._consider_visual_backup(accepted, samples, 100.5)
-        self.assertEqual(worker._motion_stats["visual_backup_not_promoted"], 1)
+            worker.motion_events.adaptive_trigger_pending = True
+            worker.motion_analysis.consider_visual_backup(accepted, samples, 100.0)
+            worker.motion_analysis.consider_visual_backup(accepted, samples, 100.5)
+        self.assertEqual(worker.motion_state._stats["visual_backup_not_promoted"], 1)
 
     def test_visual_backup_yields_to_recent_onvif_notice(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -933,15 +962,15 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
-            worker._camera_motion_times.append(100.75)
+            worker.motion_events.camera_motion_times.append(100.75)
             for captured_at in (100.0, 100.5, 101.0):
-                worker._consider_visual_backup(accepted, samples, captured_at)
+                worker.motion_analysis.consider_visual_backup(accepted, samples, captured_at)
             for captured_at in (102.0, 102.5, 103.0):
-                worker._consider_visual_backup(accepted, samples, captured_at)
+                worker.motion_analysis.consider_visual_backup(accepted, samples, captured_at)
 
-        self.assertTrue(worker._motion_queue.empty())
-        self.assertEqual(worker._motion_stats["visual_backup_onvif_matches"], 1)
-        self.assertEqual(worker._motion_stats["visual_backup_candidates"], 6)
+        self.assertTrue(worker.motion_events.queue.empty())
+        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 1)
+        self.assertEqual(worker.motion_state._stats["visual_backup_candidates"], 6)
 
     def test_visual_backup_waits_for_background_learning_after_startup(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -956,17 +985,17 @@ class CameraWorkerTest(unittest.TestCase):
         samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            with patch.object(worker, "_with_source_evidence", return_value=accepted):
+            with patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted):
                 for captured_at in (100.0, 100.5, 109.5):
-                    worker._consider_visual_backup(accepted, samples, captured_at)
-                self.assertTrue(worker._motion_queue.empty())
+                    worker.motion_analysis.consider_visual_backup(accepted, samples, captured_at)
+                self.assertTrue(worker.motion_events.queue.empty())
                 stable = MotionQualificationResult(False, 0.0, 0.48, "no_motion_blobs", 4, {})
                 for captured_at in (110.0, 110.75, 111.5):
-                    worker._consider_visual_backup(stable, samples, captured_at)
-                worker._consider_visual_backup(accepted, samples, 112.0)
-                worker._consider_visual_backup(accepted, samples, 112.5)
+                    worker.motion_analysis.consider_visual_backup(stable, samples, captured_at)
+                worker.motion_analysis.consider_visual_backup(accepted, samples, 112.0)
+                worker.motion_analysis.consider_visual_backup(accepted, samples, 112.5)
 
-            trigger = worker._motion_queue.get_nowait()
+            trigger = worker.motion_events.queue.get_nowait()
 
         self.assertEqual(trigger["topic"], "adaptive/visual_backup")
 
@@ -982,13 +1011,13 @@ class CameraWorkerTest(unittest.TestCase):
         active = MotionQualificationResult(True, 0.82, 0.48, "qualified", 4, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            self.assertFalse(worker._visual_backup_readiness(stable, 100.0))
-            self.assertFalse(worker._visual_backup_readiness(stable, 109.5))
-            self.assertFalse(worker._visual_backup_readiness(stable, 110.0))
-            self.assertFalse(worker._visual_backup_readiness(active, 110.75))
-            self.assertFalse(worker._visual_backup_readiness(stable, 111.0))
-            self.assertFalse(worker._visual_backup_readiness(stable, 111.75))
-            self.assertTrue(worker._visual_backup_readiness(stable, 112.5))
+            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 100.0))
+            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 109.5))
+            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 110.0))
+            self.assertFalse(worker.motion_analysis.visual_backup_readiness(active, 110.75))
+            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 111.0))
+            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 111.75))
+            self.assertTrue(worker.motion_analysis.visual_backup_readiness(stable, 112.5))
 
     def test_visual_trigger_modes_run_replaceable_non_adaptive_qualifiers_continuously(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1025,9 +1054,9 @@ class CameraWorkerTest(unittest.TestCase):
             )
 
         self.assertFalse(rescue.motion_pipeline.continuous_analysis)
-        self.assertTrue(rescue._continuous_primary_analysis_required())
-        self.assertTrue(visual._continuous_primary_analysis_required())
-        self.assertFalse(camera_only._continuous_primary_analysis_required())
+        self.assertTrue(rescue.motion_qualification.continuous_primary_required())
+        self.assertTrue(visual.motion_qualification.continuous_primary_required())
+        self.assertFalse(camera_only.motion_qualification.continuous_primary_required())
 
     def test_visual_backup_never_promotes_weak_or_known_noise_motion(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1042,13 +1071,13 @@ class CameraWorkerTest(unittest.TestCase):
         samples = [(100.0, np.zeros((90, 160), dtype=np.uint8))]
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            worker._consider_visual_backup(weak, samples, 100.0)
-            worker._consider_visual_backup(weak, samples, 100.5)
-            worker._consider_visual_backup(noisy, samples, 101.0)
-            worker._consider_visual_backup(noisy, samples, 101.5)
+            worker.motion_analysis.consider_visual_backup(weak, samples, 100.0)
+            worker.motion_analysis.consider_visual_backup(weak, samples, 100.5)
+            worker.motion_analysis.consider_visual_backup(noisy, samples, 101.0)
+            worker.motion_analysis.consider_visual_backup(noisy, samples, 101.5)
 
-        self.assertTrue(worker._motion_queue.empty())
-        self.assertEqual(worker._motion_stats["visual_backup_triggers"], 0)
+        self.assertTrue(worker.motion_events.queue.empty())
+        self.assertEqual(worker.motion_state._stats["visual_backup_triggers"], 0)
 
     def test_visual_backup_periodically_verifies_filtered_illumination(self) -> None:
         camera = CameraConfig(
@@ -1078,14 +1107,14 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
             with patch.object(
-                worker,
-                "_with_source_evidence",
+                    worker.motion_qualification,
+                    "with_source_evidence",
                 side_effect=lambda result, *_args, **_kwargs: result,
             ):
-                worker._consider_visual_backup(filtered, samples, 100.0)
-                worker._consider_visual_backup(filtered, samples, 100.5)
+                worker.motion_analysis.consider_visual_backup(filtered, samples, 100.0)
+                worker.motion_analysis.consider_visual_backup(filtered, samples, 100.5)
 
-            trigger = worker._motion_queue.get_nowait()
+            trigger = worker.motion_events.queue.get_nowait()
 
         self.assertEqual(trigger["topic"], "adaptive/visual_backup")
         self.assertEqual(
@@ -1095,7 +1124,7 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertTrue(
             trigger["prequalified"].features["illumination_verification_probe"]
         )
-        self.assertEqual(worker._motion_stats["illumination_verification_probes"], 1)
+        self.assertEqual(worker.motion_state._stats["illumination_verification_probes"], 1)
 
     def test_visual_backup_detection_requires_eligible_object_and_is_audited(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1111,7 +1140,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             observed_at = time.time()
-            prequalified = worker._with_source_evidence(
+            prequalified = worker.motion_qualification.with_source_evidence(
                 accepted,
                 observed_at - 1.0,
                 observed_at,
@@ -1119,15 +1148,19 @@ class CameraWorkerTest(unittest.TestCase):
             )
             with (
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={"event_id": None, "snapshot_path": "checked.jpg", "object_detected": False},
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=None,
+                        snapshot_path="checked.jpg",
+                        object_detected=False,
+                    ),
                 ) as process_event,
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                thread = threading.Thread(target=worker._run_motion_events)
+                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
-                worker._enqueue_motion_trigger({
+                worker.motion_ingress.enqueue({
                     "topic": "adaptive/visual_backup",
                     "message": "backup",
                     "event_at": datetime.fromtimestamp(observed_at, timezone.utc),
@@ -1138,7 +1171,7 @@ class CameraWorkerTest(unittest.TestCase):
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
         process_event.assert_called_once()
@@ -1162,42 +1195,46 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            worker._camera_motion_times.append(event_at.timestamp())
+            worker.motion_events.camera_motion_times.append(event_at.timestamp())
             with (
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={"event_id": 42, "snapshot_path": "person.jpg", "object_detected": True},
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=42,
+                        snapshot_path="person.jpg",
+                        object_detected=True,
+                    ),
                 ) as process_event,
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                worker._enqueue_motion_trigger({
+                worker.motion_ingress.enqueue({
                     "topic": "adaptive/visual_backup",
                     "message": "backup",
                     "event_at": event_at,
                     "received_at": event_at.timestamp(),
                     "prequalified": accepted,
                 })
-                worker._enqueue_motion_trigger({
+                worker.motion_ingress.enqueue({
                     "topic": "onvif/motion",
                     "message": "camera notice",
                     "event_at": event_at,
                     "received_at": event_at.timestamp(),
                 })
-                thread = threading.Thread(target=worker._run_motion_events)
+                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 deadline = time.monotonic() + 2
                 while process_event.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
         process_event.assert_called_once()
         self.assertFalse(process_event.call_args.kwargs["require_eligible_object"])
         self.assertFalse(process_event.call_args.kwargs["require_motion_correlation"])
         record_audit.assert_not_called()
-        self.assertEqual(worker._motion_stats["visual_backup_onvif_matches"], 1)
+        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 1)
 
     def test_visual_backup_audits_uncorrelated_object_rejection(self) -> None:
         camera = CameraConfig(id="front-door", name="Front Door", stream_url="rtsp://example.invalid/main")
@@ -1220,37 +1257,37 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             with (
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={
-                        "event_id": None,
-                        "snapshot_path": "checked.jpg",
-                        "object_detected": False,
-                        "rejection_reason": "object_not_motion_correlated",
-                        "motion_correlation": correlation,
-                    },
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=None,
+                        snapshot_path="checked.jpg",
+                        object_detected=False,
+                        rejection_reason="object_not_motion_correlated",
+                        motion_correlation=correlation,
+                    ),
                 ),
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                worker._enqueue_motion_trigger({
+                worker.motion_ingress.enqueue({
                     "topic": "adaptive/visual_backup",
                     "message": "backup",
                     "event_at": event_at,
                     "received_at": event_at.timestamp(),
                     "prequalified": accepted,
                 })
-                thread = threading.Thread(target=worker._run_motion_events)
+                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 deadline = time.monotonic() + 2
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
         self.assertEqual(record_audit.call_args.kwargs["reason"], "object_not_motion_correlated")
         self.assertEqual(record_audit.call_args.kwargs["features"]["motion_correlation"], correlation)
-        self.assertEqual(worker._motion_stats["visual_backup_uncorrelated_objects"], 1)
+        self.assertEqual(worker.motion_state._stats["visual_backup_uncorrelated_objects"], 1)
 
     def test_audit_mode_learns_continuously_without_creating_events(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1258,16 +1295,16 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            with patch.object(worker, "_run_motion_pipeline", return_value=accepted):
+            with patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted):
                 with worker._frame_lock:
-                    worker._motion_frames.extend([
+                    worker.motion_analysis.frames.extend([
                         (1.0, np.zeros((90, 160), dtype=np.uint8)),
                         (2.0, np.zeros((90, 160), dtype=np.uint8)),
                     ])
-                worker._analyze_continuous_motion(2.0)
+                worker.motion_analysis.analyze_continuous(2.0)
 
-            self.assertTrue(worker._motion_queue.empty())
-            self.assertEqual(worker._motion_stats["continuous_candidates"], 1)
+            self.assertTrue(worker.motion_events.queue.empty())
+            self.assertEqual(worker.motion_state._stats["continuous_candidates"], 1)
 
     def test_adaptive_mode_records_onvif_without_enqueuing_detection(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1280,9 +1317,9 @@ class CameraWorkerTest(unittest.TestCase):
 
             worker.handle_motion_event("onvif/motion", "generic")
 
-            self.assertTrue(worker._motion_queue.empty())
+            self.assertTrue(worker.motion_events.queue.empty())
             self.assertIsNotNone(worker.motion_evidence.last("onvif"))
-            self.assertEqual(worker._motion_stats["triggers"], 0)
+            self.assertEqual(worker.motion_state._stats["triggers"], 0)
 
     def test_adaptive_mode_still_allows_manual_test_trigger(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1295,25 +1332,29 @@ class CameraWorkerTest(unittest.TestCase):
 
             worker.handle_motion_event("manual/test", "manual GUI trigger")
 
-            self.assertEqual(worker._motion_queue.get_nowait()["topic"], "manual/test")
+            self.assertEqual(worker.motion_events.queue.get_nowait()["topic"], "manual/test")
 
     def test_continuous_analysis_never_blocks_camera_frame_delivery(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            thread = worker._motion_analysis_thread = threading.Thread(
-                target=worker._run_motion_analysis
+            thread = worker.motion_analysis.thread = threading.Thread(
+                target=worker.motion_analysis.run, args=(worker._stop,)
             )
-            with patch.object(worker, "_analyze_continuous_motion", side_effect=lambda _at: time.sleep(0.2)):
+            with patch.object(worker.motion_analysis, "analyze_continuous", side_effect=lambda _at: time.sleep(0.2)):
                 thread.start()
                 started = time.perf_counter()
-                worker._remember_motion_frame(np.zeros((180, 320, 3), dtype=np.uint8), 1.0)
-                worker._remember_motion_frame(np.zeros((180, 320, 3), dtype=np.uint8), 2.0)
+                worker.motion_analysis.remember_frame(
+                    np.zeros((180, 320, 3), dtype=np.uint8), 1.0, worker._stop
+                )
+                worker.motion_analysis.remember_frame(
+                    np.zeros((180, 320, 3), dtype=np.uint8), 2.0, worker._stop
+                )
                 elapsed = time.perf_counter() - started
 
             worker._stop.set()
-            worker._signal_motion_analysis_stop()
+            worker.motion_analysis.request_stop()
             thread.join(timeout=1)
             self.assertLess(elapsed, 0.1)
 
@@ -1328,20 +1369,20 @@ class CameraWorkerTest(unittest.TestCase):
             )
             worker._stop.clear()
             with worker._frame_lock:
-                worker._motion_frames.extend([
+                worker.motion_analysis.frames.extend([
                     (1.0, np.zeros((90, 160), dtype=np.uint8)),
                     (2.0, np.zeros((90, 160), dtype=np.uint8)),
                 ])
             with (
-                patch.object(worker, "_run_motion_pipeline", return_value=accepted),
-                patch.object(worker, "_with_source_evidence", return_value=accepted),
+                patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted),
+                patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
             ):
                 for captured_at in range(10, 110, 5):
-                    worker._analyze_continuous_motion(float(captured_at))
+                    worker.motion_analysis.analyze_continuous(float(captured_at))
 
-            self.assertEqual(worker._motion_queue.qsize(), 1)
-            self.assertEqual(worker._motion_stats["triggers"], 1)
-            self.assertEqual(worker._motion_stats["adaptive_triggers_deferred"], 19)
+            self.assertEqual(worker.motion_events.queue.qsize(), 1)
+            self.assertEqual(worker.motion_state._stats["triggers"], 1)
+            self.assertEqual(worker.motion_state._stats["adaptive_triggers_deferred"], 19)
 
     def test_adaptive_trigger_queue_saturation_backs_off_without_publishing(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1356,30 +1397,30 @@ class CameraWorkerTest(unittest.TestCase):
             )
             worker._stop.clear()
             now = datetime.now(timezone.utc)
-            for index in range(worker._motion_queue.maxsize):
-                worker._motion_queue.put_nowait({
+            for index in range(worker.motion_events.queue.maxsize):
+                worker.motion_events.queue.put_nowait({
                     "topic": "onvif/motion",
                     "message": str(index),
                     "event_at": now,
                     "received_at": now.timestamp(),
                 })
             with worker._frame_lock:
-                worker._motion_frames.extend([
+                worker.motion_analysis.frames.extend([
                     (1.0, np.zeros((90, 160), dtype=np.uint8)),
                     (2.0, np.zeros((90, 160), dtype=np.uint8)),
                 ])
             with (
-                patch.object(worker, "_run_motion_pipeline", return_value=accepted),
-                patch.object(worker, "_with_source_evidence", return_value=accepted),
+                patch.object(worker.motion_qualification, "run_pipeline", return_value=accepted),
+                patch.object(worker.motion_qualification, "with_source_evidence", return_value=accepted),
             ):
-                worker._analyze_continuous_motion(10.0)
-                worker._analyze_continuous_motion(11.0)
+                worker.motion_analysis.analyze_continuous(10.0)
+                worker.motion_analysis.analyze_continuous(11.0)
 
-            self.assertEqual(worker._motion_queue.qsize(), worker._motion_queue.maxsize)
-            self.assertEqual(worker._motion_stats["triggers"], 1)
-            self.assertEqual(worker._motion_stats["dropped_triggers"], 1)
-            self.assertEqual(worker._motion_stats["adaptive_triggers_deferred"], 1)
-            self.assertFalse(worker._adaptive_trigger_pending)
+            self.assertEqual(worker.motion_events.queue.qsize(), worker.motion_events.queue.maxsize)
+            self.assertEqual(worker.motion_state._stats["triggers"], 1)
+            self.assertEqual(worker.motion_state._stats["dropped_triggers"], 1)
+            self.assertEqual(worker.motion_state._stats["adaptive_triggers_deferred"], 1)
+            self.assertFalse(worker.motion_events.adaptive_trigger_pending)
             self.assertEqual(published, [])
 
     def test_adaptive_rejection_updates_state_without_allowing_source_rescue(self) -> None:
@@ -1393,28 +1434,28 @@ class CameraWorkerTest(unittest.TestCase):
             )
             worker._stop.clear()
             with worker._frame_lock:
-                worker._motion_frames.extend([
+                worker.motion_analysis.frames.extend([
                     (1.0, np.zeros((90, 160), dtype=np.uint8)),
                     (2.0, np.zeros((90, 160), dtype=np.uint8)),
                 ])
             with (
-                patch.object(worker, "_run_motion_pipeline", return_value=rejected),
+                patch.object(worker.motion_qualification, "run_pipeline", return_value=rejected),
                 patch.object(
-                    worker,
-                    "_with_source_evidence",
-                    wraps=worker._with_source_evidence,
+                    worker.motion_qualification,
+                    "with_source_evidence",
+                    wraps=worker.motion_qualification.with_source_evidence,
                 ) as fuse,
             ):
-                worker._analyze_continuous_motion(2.0)
+                worker.motion_analysis.analyze_continuous(2.0)
 
             self.assertTrue(fuse.call_args.kwargs["require_primary_trigger"])
-            self.assertTrue(worker._motion_queue.empty())
+            self.assertTrue(worker.motion_events.queue.empty())
             self.assertEqual(
-                worker._motion_last_continuous_result.reason,
+                worker.motion_analysis.last_continuous_result.reason,
                 "primary_trigger_rejected",
             )
             self.assertEqual(
-                worker._motion_last_continuous_result.features["event_state_phase"],
+                worker.motion_analysis.last_continuous_result.features["event_state_phase"],
                 "rejected",
             )
 
@@ -1430,7 +1471,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             received_at = time.time() - 1.0
             for index in range(5):
-                worker._motion_frames.append((
+                worker.motion_analysis.frames.append((
                     received_at - 0.8 + index * 0.2,
                     np.zeros((90, 160), dtype=np.uint8),
                 ))
@@ -1439,17 +1480,18 @@ class CameraWorkerTest(unittest.TestCase):
                 "run_pipeline",
                 side_effect=RuntimeError("validator unavailable"),
             ):
-                result, diagnostics = worker._qualify_motion_burst(
+                result, diagnostics = worker.motion_qualification.qualify_burst(
                     datetime.fromtimestamp(received_at, timezone.utc),
                     received_at,
                     "balanced",
+                    worker.motion_analysis,
                 )
 
             self.assertTrue(result.accepted)
             self.assertEqual(result.reason, "validation_unavailable_fail_open")
             self.assertTrue(result.features["validation_fail_open"])
             self.assertEqual(diagnostics["windows_evaluated"], 1)
-            self.assertEqual(worker._motion_stats["validation_fail_opens"], 1)
+            self.assertEqual(worker.motion_state._stats["validation_fail_opens"], 1)
 
     def test_external_confirmation_uses_strongest_full_event_window(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1479,7 +1521,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             for index in range(7):
-                worker._motion_frames.append((
+                worker.motion_analysis.frames.append((
                     received_at - 0.8 + index * 0.2,
                     np.zeros((90, 160), dtype=np.uint8),
                 ))
@@ -1495,10 +1537,11 @@ class CameraWorkerTest(unittest.TestCase):
                     return_value=accepted,
                 ) as fuse,
             ):
-                result, _diagnostics = worker._qualify_motion_burst(
+                result, _diagnostics = worker.motion_qualification.qualify_burst(
                     datetime.fromtimestamp(received_at, timezone.utc),
                     received_at,
                     "balanced",
+                    worker.motion_analysis,
                 )
 
             self.assertTrue(result.accepted)
@@ -1538,10 +1581,11 @@ class CameraWorkerTest(unittest.TestCase):
                     return_value=accepted,
                 ) as fuse,
             ):
-                result, diagnostics = worker._qualify_motion_burst(
+                result, diagnostics = worker.motion_qualification.qualify_burst(
                     datetime.fromtimestamp(received_at, timezone.utc),
                     received_at,
                     "balanced",
+                    worker.motion_analysis,
                 )
 
             self.assertTrue(result.accepted)
@@ -1571,7 +1615,7 @@ class CameraWorkerTest(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            self.assertTrue(worker._external_confirmation_required())
+            self.assertTrue(worker.motion_qualification.external_confirmation_required())
 
     def test_blank_external_source_does_not_add_confirmation_delay(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1595,14 +1639,14 @@ class CameraWorkerTest(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            self.assertFalse(worker._external_confirmation_required())
+            self.assertFalse(worker.motion_qualification.external_confirmation_required())
 
     def test_shutdown_during_validation_does_not_start_object_detection(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             event_at = datetime.now(timezone.utc)
-            worker._motion_queue.put_nowait({
+            worker.motion_events.queue.put_nowait({
                 "topic": "onvif/motion",
                 "message": "motion",
                 "event_at": event_at,
@@ -1615,13 +1659,13 @@ class CameraWorkerTest(unittest.TestCase):
                 return MotionQualificationResult(True, 0.8, 0.5, "qualified", 4, {}), {}
 
             with (
-                patch.object(worker, "_qualify_motion_burst", side_effect=stop_during_validation),
-                patch.object(worker, "_process_motion_event") as process_event,
+                patch.object(worker.motion_qualification, "qualify_burst", side_effect=stop_during_validation),
+                patch.object(worker.motion_incidents, "process") as process_event,
             ):
-                worker._run_motion_events_until_error()
+                worker.motion_decisions.run_until_error(worker._stop)
 
             process_event.assert_not_called()
-            self.assertIsNone(worker._active_motion_triggers)
+            self.assertIsNone(worker.motion_events.active_triggers)
 
     def test_fusion_pipeline_failure_fails_open(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1633,11 +1677,11 @@ class CameraWorkerTest(unittest.TestCase):
                 "process",
                 side_effect=RuntimeError("fusion unavailable"),
             ):
-                result = worker._with_source_evidence(accepted, 1.0, 2.0)
+                result = worker.motion_qualification.with_source_evidence(accepted, 1.0, 2.0)
 
             self.assertTrue(result.accepted)
             self.assertEqual(result.reason, "validation_unavailable_fail_open")
-            self.assertEqual(worker._motion_stats["validation_fail_opens"], 1)
+            self.assertEqual(worker.motion_state._stats["validation_fail_opens"], 1)
 
     def test_explicit_fail_closed_result_cannot_be_borderline_rescued(self) -> None:
         result = MotionQualificationResult(
@@ -1649,7 +1693,7 @@ class CameraWorkerTest(unittest.TestCase):
             {},
         )
 
-        self.assertFalse(CameraWorker._is_borderline_candidate(result, True, 0.03))
+        self.assertFalse(is_borderline_candidate(result, True, 0.03))
 
     def test_categorical_nuisance_rejection_cannot_be_borderline_rescued(self) -> None:
         result = MotionQualificationResult(
@@ -1661,24 +1705,24 @@ class CameraWorkerTest(unittest.TestCase):
             {},
         )
 
-        self.assertFalse(CameraWorker._is_borderline_candidate(result, True, 0.03))
+        self.assertFalse(is_borderline_candidate(result, True, 0.03))
 
     def test_low_score_within_margin_can_be_borderline_rescued(self) -> None:
         result = MotionQualificationResult(False, 0.46, 0.48, "low_score", 4, {})
 
-        self.assertTrue(CameraWorker._is_borderline_candidate(result, True, 0.03))
+        self.assertTrue(is_borderline_candidate(result, True, 0.03))
 
     def test_suppression_verification_sampling_is_stable_per_decision(self) -> None:
         decision_id = "fixed-decision"
 
-        first = CameraWorker._should_verify_suppression(decision_id, 0.5)
+        first = should_verify_suppression(decision_id, 0.5)
 
         self.assertEqual(
             first,
-            CameraWorker._should_verify_suppression(decision_id, 0.5),
+            should_verify_suppression(decision_id, 0.5),
         )
-        self.assertFalse(CameraWorker._should_verify_suppression(decision_id, 0.0))
-        self.assertTrue(CameraWorker._should_verify_suppression(decision_id, 1.0))
+        self.assertFalse(should_verify_suppression(decision_id, 0.0))
+        self.assertTrue(should_verify_suppression(decision_id, 1.0))
 
     def test_camera_mode_reduces_background_upkeep_without_throttling_adaptive_mode(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1692,9 +1736,13 @@ class CameraWorkerTest(unittest.TestCase):
                     camera_mode_background_fps=2.0,
                 ),
             )
-            camera_mode._motion_primary_last_processed_at = 10.0
-            self.assertFalse(camera_mode._continuous_primary_analysis_due(10.2))
-            self.assertTrue(camera_mode._continuous_primary_analysis_due(10.5))
+            camera_mode.motion_analysis.primary_last_processed_at = 10.0
+            self.assertFalse(
+                camera_mode.motion_qualification.continuous_primary_due(10.2, 10.0)
+            )
+            self.assertTrue(
+                camera_mode.motion_qualification.continuous_primary_due(10.5, 10.0)
+            )
 
             adaptive_mode = make_worker(
                 camera,
@@ -1704,8 +1752,10 @@ class CameraWorkerTest(unittest.TestCase):
                     camera_mode_background_fps=0.5,
                 ),
             )
-            adaptive_mode._motion_primary_last_processed_at = 10.0
-            self.assertTrue(adaptive_mode._continuous_primary_analysis_due(10.01))
+            adaptive_mode.motion_analysis.primary_last_processed_at = 10.0
+            self.assertTrue(
+                adaptive_mode.motion_qualification.continuous_primary_due(10.01, 10.0)
+            )
 
     def test_sampled_visual_rejection_runs_detector_without_creating_empty_incident(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1719,22 +1769,26 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             with (
-                patch.object(worker, "_qualify_motion_burst", return_value=(rejected, {})),
+                patch.object(worker.motion_qualification, "qualify_burst", return_value=(rejected, {})),
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={"event_id": None, "snapshot_path": "checked.jpg", "object_detected": False},
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=None,
+                        snapshot_path="checked.jpg",
+                        object_detected=False,
+                    ),
                 ) as process_event,
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                thread = threading.Thread(target=worker._run_motion_events)
+                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "motion")
                 deadline = time.monotonic() + 2
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
             process_event.assert_called_once()
@@ -1742,9 +1796,9 @@ class CameraWorkerTest(unittest.TestCase):
             record_audit.assert_called_once()
             self.assertIsNone(record_audit.call_args.kwargs["event_id"])
             self.assertTrue(record_audit.call_args.kwargs["features"]["suppression_verification"])
-            self.assertEqual(worker._motion_stats["suppression_verification_checks"], 1)
-            self.assertEqual(worker._motion_stats["suppression_verification_rescues"], 0)
-            self.assertEqual(worker._motion_stats["suppressed"], 1)
+            self.assertEqual(worker.motion_state._stats["suppression_verification_checks"], 1)
+            self.assertEqual(worker.motion_state._stats["suppression_verification_rescues"], 0)
+            self.assertEqual(worker.motion_state._stats["suppressed"], 1)
 
     def test_sampled_visual_rejection_is_restored_when_detector_finds_object(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1758,28 +1812,32 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             with (
-                patch.object(worker, "_qualify_motion_burst", return_value=(rejected, {})),
+                patch.object(worker.motion_qualification, "qualify_burst", return_value=(rejected, {})),
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={"event_id": 9, "snapshot_path": "person.jpg", "object_detected": True},
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=9,
+                        snapshot_path="person.jpg",
+                        object_detected=True,
+                    ),
                 ),
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                thread = threading.Thread(target=worker._run_motion_events)
+                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "motion")
                 deadline = time.monotonic() + 2
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
             self.assertEqual(record_audit.call_args.kwargs["event_id"], 9)
-            self.assertEqual(worker._motion_stats["suppression_verification_checks"], 1)
-            self.assertEqual(worker._motion_stats["suppression_verification_rescues"], 1)
-            self.assertEqual(worker._motion_stats["suppressed"], 0)
+            self.assertEqual(worker.motion_state._stats["suppression_verification_checks"], 1)
+            self.assertEqual(worker.motion_state._stats["suppression_verification_rescues"], 1)
+            self.assertEqual(worker.motion_state._stats["suppressed"], 0)
 
     def test_fusion_failure_cannot_rescue_rejected_adaptive_trigger(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1795,7 +1853,7 @@ class CameraWorkerTest(unittest.TestCase):
                 "process",
                 side_effect=RuntimeError("fusion unavailable"),
             ):
-                result = worker._with_source_evidence(
+                result = worker.motion_qualification.with_source_evidence(
                     rejected,
                     1.0,
                     2.0,
@@ -1805,41 +1863,41 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertFalse(result.accepted)
             self.assertEqual(result.reason, "primary_trigger_rejected")
             self.assertFalse(result.features["validation_fail_open"])
-            self.assertEqual(worker._motion_stats["validation_failures"], 1)
-            self.assertEqual(worker._motion_stats["validation_fail_opens"], 0)
+            self.assertEqual(worker.motion_state._stats["validation_failures"], 1)
+            self.assertEqual(worker.motion_state._stats["validation_fail_opens"], 0)
 
     def test_analysis_worker_survives_a_transient_cycle_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
-            thread = worker._motion_analysis_thread = threading.Thread(
-                target=worker._run_motion_analysis
+            thread = worker.motion_analysis.thread = threading.Thread(
+                target=worker.motion_analysis.run, args=(worker._stop,)
             )
             with patch.object(
-                worker,
-                "_analyze_continuous_motion",
+                worker.motion_analysis,
+                "analyze_continuous",
                 side_effect=[RuntimeError("transient fusion failure"), None],
             ) as analyze:
                 thread.start()
                 with worker._frame_lock:
-                    worker._motion_frames.append((1.0, np.zeros((90, 160), dtype=np.uint8)))
-                worker._schedule_motion_analysis(1.0)
+                    worker.motion_analysis.frames.append((1.0, np.zeros((90, 160), dtype=np.uint8)))
+                worker.motion_analysis.schedule(1.0, worker._stop)
                 deadline = time.monotonic() + 1
-                while worker._motion_stats["analysis_worker_errors"] == 0 and time.monotonic() < deadline:
+                while worker.motion_state._stats["analysis_worker_errors"] == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 with worker._frame_lock:
-                    worker._motion_frames.append((2.0, np.zeros((90, 160), dtype=np.uint8)))
-                worker._schedule_motion_analysis(2.0)
+                    worker.motion_analysis.frames.append((2.0, np.zeros((90, 160), dtype=np.uint8)))
+                worker.motion_analysis.schedule(2.0, worker._stop)
                 deadline = time.monotonic() + 1
                 while analyze.call_count < 2 and time.monotonic() < deadline:
                     time.sleep(0.01)
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(analyze.call_count, 2)
-            self.assertEqual(worker._motion_stats["analysis_worker_errors"], 1)
+            self.assertEqual(worker.motion_state._stats["analysis_worker_errors"], 1)
             worker._stop.set()
-            worker._signal_motion_analysis_stop()
+            worker.motion_analysis.request_stop()
             thread.join(timeout=1)
 
     def test_event_worker_survives_a_transient_handler_failure(self) -> None:
@@ -1849,15 +1907,15 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             with patch.object(
-                worker,
-                "_process_motion_event",
+                    worker.motion_incidents,
+                    "process",
                 side_effect=[
                     RuntimeError("transient event failure"),
-                    {"event_id": 2, "snapshot_path": "", "object_detected": False},
-                    {"event_id": 3, "snapshot_path": "", "object_detected": False},
+                    incident_outcome(event_id=2, snapshot_path="", object_detected=False),
+                    incident_outcome(event_id=3, snapshot_path="", object_detected=False),
                 ],
             ) as process_event:
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "first")
                 deadline = time.monotonic() + 1
@@ -1870,12 +1928,12 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(process_event.call_count, 3)
-            self.assertEqual(worker._motion_stats["event_worker_errors"], 1)
-            self.assertEqual(worker._motion_stats["event_retries"], 1)
-            self.assertEqual(worker._motion_stats["bursts"], 2)
-            self.assertEqual(worker._motion_stats["passed"], 2)
+            self.assertEqual(worker.motion_state._stats["event_worker_errors"], 1)
+            self.assertEqual(worker.motion_state._stats["event_retries"], 1)
+            self.assertEqual(worker.motion_state._stats["bursts"], 2)
+            self.assertEqual(worker.motion_state._stats["passed"], 2)
             worker._stop.set()
-            worker._motion_queue.put_nowait(None)
+            worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
 
     def test_retry_batch_is_protected_from_normal_queue_eviction(self) -> None:
@@ -1884,33 +1942,33 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
             now = datetime.now(timezone.utc)
-            worker._retry_motion_trigger_batch([{
+            worker.motion_decisions.retry_batch([{
                 "topic": "onvif/motion",
                 "message": "retry me",
                 "event_at": now,
                 "received_at": now.timestamp(),
-            }])
-            for index in range(worker._motion_queue.maxsize):
-                worker._motion_queue.put_nowait({
+            }], worker._stop)
+            for index in range(worker.motion_events.queue.maxsize):
+                worker.motion_events.queue.put_nowait({
                     "topic": "onvif/motion",
                     "message": str(index),
                     "event_at": now,
                     "received_at": now.timestamp(),
                 })
 
-            worker._enqueue_motion_trigger({
+            worker.motion_ingress.enqueue({
                 "topic": "onvif/motion",
                 "message": "new priority event",
                 "event_at": now,
                 "received_at": now.timestamp(),
             })
 
-            self.assertEqual(len(worker._motion_retry_batches), 1)
+            self.assertEqual(len(worker.motion_events.retry_batches), 1)
             self.assertEqual(
-                worker._motion_retry_batches[0]["_retry_batch"][0]["message"],
+                worker.motion_events.retry_batches[0]["_retry_batch"][0]["message"],
                 "retry me",
             )
-            self.assertEqual(worker._motion_stats["event_retry_drops"], 0)
+            self.assertEqual(worker.motion_state._stats["event_retry_drops"], 0)
 
     def test_event_worker_bounds_retries_for_a_persistent_handler_failure(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1919,23 +1977,23 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             with patch.object(
-                worker,
-                "_process_motion_event",
+                    worker.motion_incidents,
+                    "process",
                 side_effect=RuntimeError("persistent event failure"),
             ) as process_event:
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "first")
                 deadline = time.monotonic() + 3
-                while worker._motion_stats["event_retry_drops"] == 0 and time.monotonic() < deadline:
+                while worker.motion_state._stats["event_retry_drops"] == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(process_event.call_count, 3)
-            self.assertEqual(worker._motion_stats["event_retries"], 2)
-            self.assertEqual(worker._motion_stats["event_retry_drops"], 1)
+            self.assertEqual(worker.motion_state._stats["event_retries"], 2)
+            self.assertEqual(worker.motion_state._stats["event_retry_drops"], 1)
             worker._stop.set()
-            worker._motion_queue.put_nowait(None)
+            worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
 
     def test_failed_adaptive_batch_stays_reserved_until_terminal_retry_drop(self) -> None:
@@ -1944,18 +2002,18 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            worker._adaptive_trigger_pending = True
+            worker.motion_events.adaptive_trigger_pending = True
             with patch.object(
-                worker,
-                "_process_motion_event",
+                    worker.motion_incidents,
+                    "process",
                 side_effect=RuntimeError("persistent event failure"),
             ):
-                thread = worker._motion_thread = threading.Thread(
-                    target=worker._run_motion_events
+                thread = worker.motion_decisions._thread = threading.Thread(
+                    target=worker.motion_decisions.run, args=(worker._stop,)
                 )
                 thread.start()
                 now = datetime.now(timezone.utc)
-                worker._enqueue_motion_trigger({
+                worker.motion_ingress.enqueue({
                     "topic": "adaptive/motion",
                     "message": "adaptive",
                     "event_at": now,
@@ -1963,18 +2021,18 @@ class CameraWorkerTest(unittest.TestCase):
                 })
                 deadline = time.monotonic() + 3
                 while (
-                    worker._motion_stats["event_retry_drops"] == 0
+                    worker.motion_state._stats["event_retry_drops"] == 0
                     and time.monotonic() < deadline
                 ):
-                    self.assertTrue(worker._adaptive_trigger_pending)
+                    self.assertTrue(worker.motion_events.adaptive_trigger_pending)
                     time.sleep(0.01)
-                while worker._adaptive_trigger_pending and time.monotonic() < deadline:
+                while worker.motion_events.adaptive_trigger_pending and time.monotonic() < deadline:
                     time.sleep(0.005)
 
-            self.assertEqual(worker._motion_stats["event_retry_drops"], 1)
-            self.assertFalse(worker._adaptive_trigger_pending)
+            self.assertEqual(worker.motion_state._stats["event_retry_drops"], 1)
+            self.assertFalse(worker.motion_events.adaptive_trigger_pending)
             worker._stop.set()
-            worker._motion_queue.put_nowait(None)
+            worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
 
     def test_enforce_retry_reuses_accepted_qualification_without_advancing_fusion(self) -> None:
@@ -1986,7 +2044,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
 
             def qualify(*_args):
-                return worker._with_source_evidence(
+                return worker.motion_qualification.with_source_evidence(
                     accepted,
                     time.time() - 1,
                     time.time(),
@@ -1996,17 +2054,21 @@ class CameraWorkerTest(unittest.TestCase):
                 }
 
             with (
-                patch.object(worker, "_qualify_motion_burst", side_effect=qualify),
+                patch.object(worker.motion_qualification, "qualify_burst", side_effect=qualify),
                 patch.object(
-                    worker,
-                    "_process_motion_event",
+                    worker.motion_incidents,
+                    "process",
                     side_effect=[
                         RuntimeError("transient event failure"),
-                        {"event_id": 2, "snapshot_path": "", "object_detected": False},
+                        incident_outcome(
+                            event_id=2,
+                            snapshot_path="",
+                            object_detected=False,
+                        ),
                     ],
                 ) as process_event,
             ):
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "generic")
                 deadline = time.monotonic() + 2
@@ -2015,11 +2077,11 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertTrue(thread.is_alive())
             self.assertEqual(process_event.call_count, 2)
-            self.assertEqual(worker._motion_stats["event_retries"], 1)
-            self.assertEqual(worker._motion_stats["suppressed"], 0)
-            self.assertTrue(worker._motion_stats["last_result"]["effective_accepted"])
+            self.assertEqual(worker.motion_state._stats["event_retries"], 1)
+            self.assertEqual(worker.motion_state._stats["suppressed"], 0)
+            self.assertTrue(worker.motion_state._stats["last_result"]["effective_accepted"])
             worker._stop.set()
-            worker._motion_queue.put_nowait(None)
+            worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
 
     def test_enforce_retry_reuses_rejected_qualification_without_advancing_fusion(self) -> None:
@@ -2058,7 +2120,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
 
             def qualify(*_args):
-                return worker._with_source_evidence(
+                return worker.motion_qualification.with_source_evidence(
                     accepted,
                     time.time() - 1,
                     time.time(),
@@ -2068,10 +2130,10 @@ class CameraWorkerTest(unittest.TestCase):
                 }
 
             with (
-                patch.object(worker, "_qualify_motion_burst", side_effect=qualify),
+                patch.object(worker.motion_qualification, "qualify_burst", side_effect=qualify),
                 patch.object(
-                    worker,
-                    "_sample_rejected_motion",
+                    worker.media,
+                    "sample_rejected_motion",
                     return_value="",
                 ) as sample_rejected,
                 patch.object(
@@ -2079,9 +2141,9 @@ class CameraWorkerTest(unittest.TestCase):
                     "record_audit",
                     side_effect=[RuntimeError("audit write failed"), {}],
                 ) as record_audit,
-                patch.object(worker, "_process_motion_event") as process_event,
+                patch.object(worker.motion_incidents, "process") as process_event,
             ):
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "generic")
                 deadline = time.monotonic() + 2
@@ -2097,14 +2159,14 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(first_audit["snapshot_path"], "")
             self.assertEqual(retry_audit["snapshot_path"], "")
             process_event.assert_not_called()
-            self.assertEqual(worker._motion_stats["event_retries"], 1)
-            self.assertEqual(worker._motion_stats["bursts"], 1)
-            self.assertEqual(worker._motion_stats["suppressed"], 1)
+            self.assertEqual(worker.motion_state._stats["event_retries"], 1)
+            self.assertEqual(worker.motion_state._stats["bursts"], 1)
+            self.assertEqual(worker.motion_state._stats["suppressed"], 1)
             self.assertEqual(
-                worker._motion_stats["last_result"]["reason"],
+                worker.motion_state._stats["last_result"]["reason"],
                 "event_state_candidate",
             )
-            self.assertFalse(worker._motion_stats["last_result"]["effective_accepted"])
+            self.assertFalse(worker.motion_state._stats["last_result"]["effective_accepted"])
             qualifications = [
                 payload
                 for event_type, payload in published
@@ -2112,7 +2174,7 @@ class CameraWorkerTest(unittest.TestCase):
             ]
             self.assertEqual(len(qualifications), 1)
             worker._stop.set()
-            worker._motion_queue.put_nowait(None)
+            worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
 
     def test_post_persistence_audit_failure_does_not_duplicate_incident(self) -> None:
@@ -2124,9 +2186,13 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             with (
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={"event_id": 1, "snapshot_path": "", "object_detected": False},
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=1,
+                        snapshot_path="",
+                        object_detected=False,
+                    ),
                 ) as process_event,
                 patch.object(
                     worker.motion_decision_handler,
@@ -2134,10 +2200,10 @@ class CameraWorkerTest(unittest.TestCase):
                     side_effect=RuntimeError("audit write failed"),
                 ),
             ):
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 now = datetime.now(timezone.utc)
-                worker._enqueue_motion_trigger({
+                worker.motion_ingress.enqueue({
                     "topic": "adaptive/motion",
                     "message": "adaptive",
                     "event_at": now,
@@ -2145,14 +2211,14 @@ class CameraWorkerTest(unittest.TestCase):
                     "prequalified": rejected,
                 })
                 deadline = time.monotonic() + 1
-                while worker._motion_stats["event_worker_errors"] == 0 and time.monotonic() < deadline:
+                while worker.motion_state._stats["event_worker_errors"] == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
 
             self.assertTrue(thread.is_alive())
             process_event.assert_called_once()
-            self.assertEqual(worker._motion_stats["event_retries"], 0)
+            self.assertEqual(worker.motion_state._stats["event_retries"], 0)
             worker._stop.set()
-            worker._motion_queue.put_nowait(None)
+            worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
 
     def test_fusion_pipeline_calls_are_serialized_across_workers(self) -> None:
@@ -2181,7 +2247,7 @@ class CameraWorkerTest(unittest.TestCase):
 
             def fuse(end_epoch: float) -> None:
                 try:
-                    worker._with_source_evidence(accepted, end_epoch - 1, end_epoch)
+                    worker.motion_qualification.with_source_evidence(accepted, end_epoch - 1, end_epoch)
                 except Exception as error:
                     errors.append(error)
 
@@ -2201,16 +2267,16 @@ class CameraWorkerTest(unittest.TestCase):
         rejected = MotionQualificationResult(False, 0.1, 0.5, "rejected", 2, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker._with_source_evidence(accepted, 19.0, 20.0)
+            worker.motion_qualification.with_source_evidence(accepted, 19.0, 20.0)
 
-            stale = worker._with_source_evidence(rejected, 18.0, 19.0)
-            still_active = worker._with_source_evidence(accepted, 19.5, 20.5)
-            clock_rollback = worker._with_source_evidence(rejected, 9.0, 10.0)
+            stale = worker.motion_qualification.with_source_evidence(rejected, 18.0, 19.0)
+            still_active = worker.motion_qualification.with_source_evidence(accepted, 19.5, 20.5)
+            clock_rollback = worker.motion_qualification.with_source_evidence(rejected, 9.0, 10.0)
 
             self.assertEqual(stale.reason, "stale_fusion_evidence")
             self.assertEqual(stale.score, 0.0)
             self.assertEqual(stale.threshold, 1.0)
-            self.assertEqual(worker._motion_stats["stale_fusion_samples"], 1)
+            self.assertEqual(worker.motion_state._stats["stale_fusion_samples"], 1)
             self.assertEqual(still_active.features["event_state_phase"], "active")
             self.assertEqual(clock_rollback.features["event_state_phase"], "rejected")
 
@@ -2220,15 +2286,19 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             active = MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {})
-            self.assertTrue(worker._with_source_evidence(active, 1.0, 2.0).accepted)
+            self.assertTrue(worker.motion_qualification.with_source_evidence(active, 1.0, 2.0).accepted)
             worker._stop.clear()
             with patch.object(
-                worker,
-                "_process_motion_event",
-                return_value={"event_id": 1, "snapshot_path": "", "object_detected": False},
+                    worker.motion_incidents,
+                    "process",
+                return_value=incident_outcome(
+                    event_id=1,
+                    snapshot_path="",
+                    object_detected=False,
+                ),
             ) as process_event:
-                thread = worker._motion_thread = threading.Thread(
-                    target=worker._run_motion_events
+                thread = worker.motion_decisions._thread = threading.Thread(
+                    target=worker.motion_decisions.run, args=(worker._stop,)
                 )
                 thread.start()
                 worker.handle_motion_event("onvif/person", "person")
@@ -2236,7 +2306,7 @@ class CameraWorkerTest(unittest.TestCase):
                 while process_event.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=1)
 
             process_event.assert_called_once()
@@ -2251,26 +2321,30 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             with patch.object(
-                worker,
-                "_process_motion_event",
-                return_value={"event_id": 1, "snapshot_path": "", "object_detected": True},
+                    worker.motion_incidents,
+                    "process",
+                return_value=incident_outcome(
+                    event_id=1,
+                    snapshot_path="",
+                    object_detected=True,
+                ),
             ) as process_event:
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/person", "person")
                 deadline = time.monotonic() + 1
                 while process_event.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
 
-                self.assertFalse(worker._reserve_adaptive_trigger(time.time()))
-                distinct_event_at = time.time() + worker._priority_dedup_seconds() + 0.1
-                self.assertTrue(worker._reserve_adaptive_trigger(distinct_event_at))
+                self.assertFalse(worker.motion_analysis.reserve_adaptive_trigger(time.time()))
+                distinct_event_at = time.time() + worker.motion_analysis._priority_dedup_seconds() + 0.1
+                self.assertTrue(worker.motion_analysis.reserve_adaptive_trigger(distinct_event_at))
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=1)
 
             process_event.assert_called_once()
-            self.assertGreater(worker._motion_stats["adaptive_triggers_deferred"], 0)
+            self.assertGreater(worker.motion_state._stats["adaptive_triggers_deferred"], 0)
 
     def test_priority_results_still_use_event_state_deduplication(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -2280,8 +2354,8 @@ class CameraWorkerTest(unittest.TestCase):
                 True, 1.0, 0.0, "priority_topic", 0, {"primary_motion_source": "onvif_priority"}
             )
 
-            first = worker._with_source_evidence(priority, 10.0, 11.0)
-            second = worker._with_source_evidence(priority, 11.0, 12.0)
+            first = worker.motion_qualification.with_source_evidence(priority, 10.0, 11.0)
+            second = worker.motion_qualification.with_source_evidence(priority, 11.0, 12.0)
 
             self.assertTrue(first.accepted)
             self.assertFalse(second.accepted)
@@ -2291,15 +2365,15 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker._active_incident_event_id = 42
+            worker.runtime_state.active_incident_event_id = 42
 
             active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
             cooldown = MotionQualificationResult(False, 0.7, 0.5, "event_state_cooldown", 2, {})
             unrelated = MotionQualificationResult(False, 0.2, 0.5, "low_score", 2, {})
 
-            self.assertEqual(worker._related_incident_event_id(active), 42)
-            self.assertEqual(worker._related_incident_event_id(cooldown), 42)
-            self.assertIsNone(worker._related_incident_event_id(unrelated))
+            self.assertEqual(worker.motion_decisions._related_incident_event_id(active), 42)
+            self.assertEqual(worker.motion_decisions._related_incident_event_id(cooldown), 42)
+            self.assertIsNone(worker.motion_decisions._related_incident_event_id(unrelated))
 
     def test_active_incident_activity_is_linked_without_saving_duplicate_image(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -2311,22 +2385,22 @@ class CameraWorkerTest(unittest.TestCase):
         active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            worker._active_incident_event_id = 42
+            worker.runtime_state.active_incident_event_id = 42
             worker._stop.clear()
             with (
-                patch.object(worker, "_qualify_motion_burst", return_value=(active, {})),
-                patch.object(worker, "_sample_rejected_motion") as sample_rejected,
+                patch.object(worker.motion_qualification, "qualify_burst", return_value=(active, {})),
+                patch.object(worker.media, "sample_rejected_motion") as sample_rejected,
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
-                patch.object(worker, "_process_motion_event") as process_event,
+                patch.object(worker.motion_incidents, "process") as process_event,
             ):
-                thread = threading.Thread(target=worker._run_motion_events)
+                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "continued activity")
                 deadline = time.monotonic() + 2
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
             record_audit.assert_called_once()
@@ -2362,7 +2436,7 @@ class CameraWorkerTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker._enabled = True
+            worker.runtime_state.enabled = True
             worker._stop.clear()
             seed_capture_frame(
                 worker,
@@ -2468,8 +2542,8 @@ class CameraWorkerTest(unittest.TestCase):
                     worker.start()
 
             self.assertFalse(worker.status()["running"])
-            self.assertIsNone(worker._motion_analysis_thread)
-            self.assertIsNone(worker._motion_thread)
+            self.assertIsNone(worker.motion_analysis.thread)
+            self.assertIsNone(worker.motion_decisions._thread)
 
     def test_start_clears_stale_events_before_starting_producers(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -2517,8 +2591,8 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertFalse(worker.status()["running"])
             self.assertTrue(worker._stop.is_set())
-            self.assertIsNone(worker._motion_analysis_thread)
-            self.assertIsNone(worker._motion_thread)
+            self.assertIsNone(worker.motion_analysis.thread)
+            self.assertIsNone(worker.motion_decisions._thread)
 
     def test_start_preserves_original_error_when_rollback_raises_base_exception(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -2557,7 +2631,7 @@ class CameraWorkerTest(unittest.TestCase):
                     side_effect=lambda: order.append("onvif"),
                 ),
                 patch.object(
-                    worker.object_tracking,
+                    worker.tracking_lifecycle.current(),
                     "stop",
                     side_effect=lambda: order.append("tracking") or True,
                 ),
@@ -2630,7 +2704,7 @@ class CameraWorkerTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker._motion_frames.append(
+            worker.motion_analysis.frames.append(
                 (100.0, np.zeros((90, 160), dtype=np.uint8))
             )
             active = MotionTriggerBatch((MotionTrigger(
@@ -2642,7 +2716,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker.motion_events.set_active(active)
             stuck_event_worker = Mock()
             stuck_event_worker.is_alive.return_value = True
-            worker._motion_thread = stuck_event_worker
+            worker.motion_decisions._thread = stuck_event_worker
 
             with (
                 patch.object(worker.motion_analysis, "wait_stopped", return_value=False),
@@ -2655,7 +2729,7 @@ class CameraWorkerTest(unittest.TestCase):
 
             reset_analysis.assert_not_called()
             clear_evidence.assert_not_called()
-            self.assertEqual(len(worker._motion_frames), 1)
+            self.assertEqual(len(worker.motion_analysis.frames), 1)
             self.assertIs(worker.motion_events.active_triggers, active)
             with self.assertRaisesRegex(RuntimeError, "stale workers"):
                 worker.start()
@@ -2665,7 +2739,7 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker._motion_thread = Mock(is_alive=lambda: True)
+            worker.motion_decisions._thread = Mock(is_alive=lambda: True)
 
             with self.assertRaisesRegex(RuntimeError, "motion events"):
                 worker.close()
@@ -2677,7 +2751,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker.motion_pipeline = Mock()
             worker.motion_observation_pipeline = Mock()
             worker.motion_fusion_pipeline = Mock()
-            worker.lifecycle.motion_pipelines = (
+            worker.motion_runtime.pipelines = (
                 ("qualification", worker.motion_pipeline),
                 ("observation", worker.motion_observation_pipeline),
                 ("fusion", worker.motion_fusion_pipeline),
@@ -2703,7 +2777,7 @@ class CameraWorkerTest(unittest.TestCase):
             worker.set_detection_enabled(False)
             worker.handle_motion_event("onvif/motion", "motion")
 
-        self.assertEqual(worker.last_motion_at, "")
+        self.assertEqual(worker.motion_state.last_motion_at(), "")
         self.assertEqual(detector.calls, 0)
         self.assertIsNone(worker.motion_evidence.last("onvif"))
 
@@ -2720,13 +2794,13 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 event_callback=lambda *args: published.append(args),
             )
-            worker._accepting_motion_events = False
+            worker.runtime_state.accepting_motion_events = False
 
             worker.handle_motion_event("onvif/motion", "late callback")
 
-        self.assertEqual(worker.last_motion_at, "")
+        self.assertEqual(worker.motion_state.last_motion_at(), "")
         self.assertIsNone(worker.motion_evidence.last("onvif"))
-        self.assertTrue(worker._motion_queue.empty())
+        self.assertTrue(worker.motion_events.queue.empty())
         self.assertEqual(published, [])
 
     def test_motion_handler_enqueues_without_running_detection_inline(self) -> None:
@@ -2736,7 +2810,7 @@ class CameraWorkerTest(unittest.TestCase):
             with patch.object(worker, "_recorded_motion_frame") as recorded_frame:
                 worker.handle_motion_event("onvif/motion", "motion")
 
-            self.assertEqual(worker._motion_queue.qsize(), 1)
+            self.assertEqual(worker.motion_events.queue.qsize(), 1)
             evidence = worker.motion_evidence.last("onvif")
             self.assertIsNotNone(evidence)
             self.assertEqual(evidence.values["event_source"], "onvif")
@@ -2756,11 +2830,15 @@ class CameraWorkerTest(unittest.TestCase):
             )
             worker._stop.clear()
             with patch.object(
-                worker,
-                "_process_motion_event",
-                return_value={"event_id": 1, "snapshot_path": "", "object_detected": False},
+                    worker.motion_incidents,
+                    "process",
+                return_value=incident_outcome(
+                    event_id=1,
+                    snapshot_path="",
+                    object_detected=False,
+                ),
             ) as process_event:
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 now = datetime.now(timezone.utc)
                 worker.handle_motion_event("onvif/motion", "first", now)
@@ -2769,7 +2847,7 @@ class CameraWorkerTest(unittest.TestCase):
                 while process_event.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.02)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
             self.assertEqual(process_event.call_count, 1)
@@ -2785,22 +2863,26 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
             with (
-                patch.object(worker, "_qualify_motion_burst", return_value=(rejected, {})),
+                patch.object(worker.motion_qualification, "qualify_burst", return_value=(rejected, {})),
                 patch.object(
-                    worker,
-                    "_process_motion_event",
-                    return_value={"event_id": 5, "snapshot_path": "snapshot.jpg", "object_detected": None},
+                    worker.motion_incidents,
+                    "process",
+                    return_value=incident_outcome(
+                        event_id=5,
+                        snapshot_path="snapshot.jpg",
+                        object_detected=None,
+                    ),
                 ),
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                thread = worker._motion_thread = threading.Thread(target=worker._run_motion_events)
+                thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 worker.handle_motion_event("onvif/motion", "motion")
                 deadline = time.monotonic() + 2
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 worker._stop.set()
-                worker._motion_queue.put_nowait(None)
+                worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=2)
 
             record_audit.assert_called_once()
@@ -2814,12 +2896,13 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             received_at = time.time() - 1.0
             for index in range(5):
-                worker._motion_frames.append((received_at - 0.8 + index * 0.2, np.zeros((90, 160), dtype=np.uint8)))
+                worker.motion_analysis.frames.append((received_at - 0.8 + index * 0.2, np.zeros((90, 160), dtype=np.uint8)))
 
-            result, diagnostics = worker._qualify_motion_burst(
+            result, diagnostics = worker.motion_qualification.qualify_burst(
                 datetime.fromtimestamp(received_at, timezone.utc),
                 received_at,
                 "balanced",
+                worker.motion_analysis,
             )
 
             self.assertTrue(result.accepted)
@@ -2865,8 +2948,8 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
 
-            candidate = worker._with_source_evidence(score, 9.0, 10.0)
-            active = worker._with_source_evidence(score, 10.0, 11.0)
+            candidate = worker.motion_qualification.with_source_evidence(score, 9.0, 10.0)
+            active = worker.motion_qualification.with_source_evidence(score, 10.0, 11.0)
 
         self.assertFalse(candidate.accepted)
         self.assertEqual(candidate.reason, "event_state_candidate")

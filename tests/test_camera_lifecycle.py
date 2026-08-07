@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import traceback
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -25,42 +25,26 @@ def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
     tracking = Mock()
     tracking.stop.return_value = True
     tracking.running.return_value = False
-    motion_analysis = Mock()
-    motion_analysis.thread = None
-    motion_analysis.wait_stopped.return_value = True
-    motion_events = Mock()
-    motion_events.thread = None
+    motion_runtime = Mock()
+    motion_runtime.active_workers.return_value = []
+    motion_runtime.wait_stopped.return_value = True
     tracking_frames = Mock()
-    motion_evidence = Mock()
-    motion_qualification = Mock()
-    pipelines = (("qualification", Mock()), ("fusion", Mock()))
-    run_motion_events = Mock()
     service = CameraLifecycleService(
         camera_id="gate",
         state=state,
         capture=capture,
         onvif=onvif,
         tracking=tracking,
-        motion_analysis=motion_analysis,
-        motion_events=motion_events,
+        motion_runtime=motion_runtime,
         tracking_frames=tracking_frames,
-        motion_evidence=motion_evidence,
-        motion_qualification=motion_qualification,
-        motion_pipelines=pipelines,
-        run_motion_events=run_motion_events,
     )
     return service, SimpleNamespace(
         state=state,
         capture=capture,
         onvif=onvif,
         tracking=tracking,
-        motion_analysis=motion_analysis,
-        motion_events=motion_events,
+        motion_runtime=motion_runtime,
         tracking_frames=tracking_frames,
-        motion_evidence=motion_evidence,
-        motion_qualification=motion_qualification,
-        pipelines=pipelines,
-        run_motion_events=run_motion_events,
     )
 
 
@@ -72,26 +56,16 @@ def test_start_orders_state_cleanup_before_producers() -> None:
     assert owned.state.stop_event.is_set()
     order: list[str] = []
     owned.tracking.sync_accepting.side_effect = lambda: order.append("tracking")
-    owned.motion_events.clear.side_effect = lambda: order.append("clear")
-    owned.motion_analysis.start.side_effect = lambda _stop: order.append("analysis")
+    owned.motion_runtime.start.side_effect = lambda _stop: order.append("motion")
     owned.capture.start.side_effect = lambda: order.append("capture") or True
-    motion_thread = Mock()
-    motion_thread.is_alive.return_value = False
+    service.start()
 
-    with patch(
-        "survng.app.camera_lifecycle.threading.Thread",
-        return_value=motion_thread,
-    ):
-        service.start()
-
-    assert order == ["tracking", "clear", "analysis", "capture"]
+    assert order == ["tracking", "motion", "capture"]
     assert owned.state.enabled is True
     assert owned.state.accepting_motion_events is True
     assert owned.state.phase is CameraLifecyclePhase.RUNNING
     assert owned.state.generation == 1
     assert not owned.state.stop_event.is_set()
-    assert owned.motion_events.thread is motion_thread
-    motion_thread.start.assert_called_once_with()
     owned.onvif.start.assert_called_once_with()
 
 
@@ -135,10 +109,12 @@ def test_stop_attempts_later_cleanup_after_early_failure() -> None:
 
     owned.onvif.stop.assert_called_once_with()
     owned.tracking.stop.assert_called_once_with()
-    owned.motion_analysis.request_stop.assert_called_once_with()
-    owned.motion_events.signal_stop.assert_called_once_with()
+    owned.motion_runtime.request_stop.assert_called_once_with()
     owned.tracking_frames.clear.assert_called_once_with()
-    owned.motion_events.reset.assert_called_once_with()
+    owned.motion_runtime.wait_stopped.assert_called_once_with(
+        analysis_timeout=8.0,
+        decision_timeout=22.0,
+    )
     assert owned.state.phase is CameraLifecyclePhase.FAILED
 
 
@@ -169,8 +145,7 @@ def test_runtime_status_reports_authoritative_state_and_active_workers() -> None
     service, owned = _service()
     owned.state.enabled = True
     owned.state.phase = CameraLifecyclePhase.RUNNING
-    owned.motion_analysis.thread = Mock()
-    owned.motion_analysis.thread.is_alive.return_value = True
+    owned.motion_runtime.active_workers.return_value = ["motion analysis"]
 
     status = service.runtime_status()
 
@@ -183,12 +158,12 @@ def test_runtime_status_reports_authoritative_state_and_active_workers() -> None
 
 def test_close_attempts_all_owned_resources() -> None:
     service, owned = _service()
-    owned.pipelines[0][1].close.side_effect = RuntimeError("pipeline failed")
+    owned.motion_runtime.close.side_effect = RuntimeError("pipeline failed")
 
     with pytest.raises(RuntimeError, match="failed to close"):
         service.close()
 
-    owned.pipelines[1][1].close.assert_called_once_with()
+    owned.motion_runtime.close.assert_called_once_with()
     owned.capture.close.assert_called_once_with()
     assert owned.state.phase is CameraLifecyclePhase.FAILED
 
@@ -196,7 +171,7 @@ def test_close_attempts_all_owned_resources() -> None:
 def test_close_failure_does_not_chain_unredacted_credentials() -> None:
     service, owned = _service()
     secret = "rtsp://admin:supersecret@192.0.2.10/live"
-    owned.pipelines[0][1].close.side_effect = RuntimeError(f"failed {secret}")
+    owned.motion_runtime.close.side_effect = RuntimeError(f"failed {secret}")
 
     with pytest.raises(RuntimeError) as raised:
         service.close()
@@ -216,21 +191,15 @@ def test_starting_camera_does_not_block_runtime_status() -> None:
         return True
 
     owned.capture.start.side_effect = blocking_capture_start
-    motion_thread = Mock()
-    motion_thread.is_alive.return_value = False
     runner = threading.Thread(target=service.start)
 
-    with patch(
-        "survng.app.camera_lifecycle.threading.Thread",
-        return_value=motion_thread,
-    ):
-        runner.start()
-        assert capture_entered.wait(1.0)
-        status = service.runtime_status()
-        assert status["phase"] == "starting"
-        assert status["enabled"] is True
-        release_capture.set()
-        runner.join(timeout=1.0)
+    runner.start()
+    assert capture_entered.wait(1.0)
+    status = service.runtime_status()
+    assert status["phase"] == "starting"
+    assert status["enabled"] is True
+    release_capture.set()
+    runner.join(timeout=1.0)
 
     assert not runner.is_alive()
     assert service.runtime_status()["phase"] == "running"
@@ -304,6 +273,5 @@ def test_close_never_marks_camera_closed_with_residual_worker(
         service.close()
 
     assert owned.state.phase is CameraLifecyclePhase.FAILED
-    for _label, pipeline in owned.pipelines:
-        pipeline.close.assert_not_called()
+    owned.motion_runtime.close.assert_not_called()
     owned.capture.close.assert_not_called()

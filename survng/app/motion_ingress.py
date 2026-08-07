@@ -4,10 +4,29 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol
 
 from .motion_decisions import priority_motion_topic
 from .motion_events import MotionEventCoordinator, MotionTrigger
+
+
+class MotionIngressQualification(Protocol):
+    def settings(self) -> tuple[str, str, int]: ...
+    def observe_event(
+        self,
+        topic: str,
+        message: str,
+        event_at: datetime,
+        received_at: float,
+    ) -> None: ...
+
+
+class MotionIngressState(Protocol):
+    def accepting_events(self) -> bool: ...
+    def detection_enabled(self) -> bool: ...
+    def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
+    def set_last_motion_at(self, value: str) -> None: ...
+    def increment_stat(self, name: str, amount: int = 1) -> None: ...
 
 
 class MotionEventIngressService:
@@ -18,24 +37,14 @@ class MotionEventIngressService:
         *,
         camera_id: str,
         events: MotionEventCoordinator,
-        accepting: Callable[[], bool],
-        detection_enabled: Callable[[], bool],
-        configured_mode: Callable[[], str],
-        observe_event: Callable[[str, str, datetime, float], None],
-        publish_event: Callable[[str, dict[str, Any]], None],
-        set_last_motion_at: Callable[[str], None],
-        increment_stat: Callable[[str, int], None],
+        qualification: MotionIngressQualification,
+        state: MotionIngressState,
         epoch_now: Callable[[], float] = time.time,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
-        self.accepting = accepting
-        self.detection_enabled = detection_enabled
-        self.configured_mode = configured_mode
-        self.observe_event = observe_event
-        self.publish_event = publish_event
-        self.set_last_motion_at = set_last_motion_at
-        self.increment_stat = increment_stat
+        self.qualification = qualification
+        self.state = state
         self.epoch_now = epoch_now
 
     def handle(
@@ -44,17 +53,19 @@ class MotionEventIngressService:
         message: str = "",
         event_at: datetime | None = None,
     ) -> None:
-        if not self.accepting() or not self.detection_enabled():
+        if not self.state.accepting_events() or not self.state.detection_enabled():
             return
         received_at = self.epoch_now()
         receipt_time = datetime.fromtimestamp(received_at, timezone.utc)
-        self.set_last_motion_at(receipt_time.isoformat())
+        self.state.set_last_motion_at(receipt_time.isoformat())
         normalized_event_at = self._utc(event_at or receipt_time)
         normalized_topic = topic.lower()
         manual = normalized_topic.startswith("manual")
 
-        self.observe_event(topic, message, normalized_event_at, received_at)
-        if self.configured_mode() == "adaptive" and not manual:
+        self.qualification.observe_event(
+            topic, message, normalized_event_at, received_at
+        )
+        if self.qualification.settings()[0] == "adaptive" and not manual:
             # Camera notices remain diagnostic evidence in visual-trigger mode,
             # but cannot create object-detection jobs.
             return
@@ -63,7 +74,7 @@ class MotionEventIngressService:
         if not manual:
             self.events.remember_camera_motion(received_at)
 
-        self.publish_event("motion", {
+        self.state.publish_event("motion", {
             "camera_id": self.camera_id,
             "timestamp": normalized_event_at.isoformat(),
             "source": "manual" if manual else "onvif",
@@ -84,8 +95,8 @@ class MotionEventIngressService:
         return self.events.enqueue(
             trigger,
             evict_oldest=evict_oldest,
-            on_trigger=lambda name: self.increment_stat(name, 1),
-            on_drop=lambda name: self.increment_stat(name, 1),
+            on_trigger=lambda name: self.state.increment_stat(name, 1),
+            on_drop=lambda name: self.state.increment_stat(name, 1),
         )
 
     @staticmethod
