@@ -12,7 +12,6 @@ recording processes:
 
 - web base path and incident-thumbnail display;
 - event-clip before/after windows;
-- camera startup pacing (saved immediately and used on the next process start);
 - playback-cache size, age, and finalized-recording prewarming;
 - AI motion-review provider settings; and
 - recording-retention policy and per-camera retention overrides.
@@ -35,11 +34,14 @@ selection, camera membership, or the media/database/index storage locations.
 These dependencies are constructed into camera workers or shared services and
 cannot be safely replaced as a standalone value.
 
-The replacement manager uses the same bounded camera startup coordinator as a
-normal process start. The web process starts serving during normal progressive
-startup. A configuration cutover commits after core service construction and
-atomic persistence succeed, then exposes progressive camera admission instead
-of blocking the save on unavailable feeds.
+The replacement manager constructs a dedicated `CameraFleetLifecycle`, which
+owns bounded camera admission, live power-state changes, early ONVIF release,
+and parallel stop/close deadlines. The web process starts serving during normal
+progressive startup. A configuration cutover commits after core service
+construction and atomic persistence succeed, then exposes progressive camera
+admission instead of blocking the save on unavailable feeds. MQTT replacement
+also updates the fleet's typed state-publisher dependency, so an admission task
+never publishes through a retired MQTT generation.
 
 The configuration file is written atomically before a targeted runtime update.
 If runtime application fails, SurvNG restores both the previous runtime settings

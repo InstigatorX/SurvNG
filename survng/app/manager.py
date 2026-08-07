@@ -11,12 +11,12 @@ from pathlib import Path
 
 from .camera import CameraWorker
 from .camera_capture import CaptureOpenLimiter, OpenCvFfmpegCaptureBackend
+from .camera_fleet import CameraFleetLifecycle, CameraFleetOperationError
 from .camera_startup import (
     CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
     CAMERA_STARTUP_MAX_CONCURRENCY,
     CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
     CameraStartupCoordinator,
-    CameraStartupTask,
 )
 from .appearance_index import AppearanceIndex
 from .appearance_backfill import DeferredAppearanceBackfill
@@ -67,10 +67,6 @@ from .state_events import StateEventBroker
 
 
 LOGGER = logging.getLogger("uvicorn.error")
-ONVIF_RELEASE_TIMEOUT_SECONDS = 15.0
-CAMERA_SHUTDOWN_TIMEOUT_SECONDS = 30.0
-
-
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
     registry = build_builtin_motion_registry()
     targets = [("global", CameraMotionQualificationConfig())] + [
@@ -214,7 +210,7 @@ class AppManager:
         self._closed = False
         self._startup_services_ready = False
         self._startup_timings: dict[str, float] = {}
-        self.camera_startup = CameraStartupCoordinator(
+        camera_startup = CameraStartupCoordinator(
             max_concurrency=CAMERA_STARTUP_MAX_CONCURRENCY,
             readiness_timeout_seconds=CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
             recorder_settle_seconds=CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
@@ -249,6 +245,13 @@ class AppManager:
                     LOGGER.exception("%s cleanup failed during manager construction", label)
             raise
         self.workers = workers
+        self.camera_fleet = CameraFleetLifecycle(
+            cameras=tuple(self._unique_cameras()),
+            workers=self.workers,
+            recorder=self.recorder,
+            startup=camera_startup,
+            state_publisher=self.mqtt,
+        )
 
     def _tracking_burst_available(self) -> bool:
         """Allow the optional extra tracker only while inference and memory are healthy."""
@@ -527,43 +530,19 @@ class AppManager:
                     "inference_seconds": round(time.monotonic() - phase_started, 3),
                 }
                 cameras = list(self._unique_cameras())
-                recorder_keys = set()
-                for camera in cameras:
-                    if camera.record:
-                        recorder_keys.add((camera.id, "main"))
-                    if camera.record_sub and camera.live_stream_url:
-                        recorder_keys.add((camera.id, "live"))
                 phase_started = time.monotonic()
-                self.recorder.cleanup_stale_recorders(recorder_keys)
+                self.recorder.cleanup_stale_recorders(
+                    self.camera_fleet.recorder_keys()
+                )
                 self._startup_timings["recorder_cleanup_seconds"] = round(
                     time.monotonic() - phase_started,
                     3,
                 )
-                startup_tasks: list[CameraStartupTask] = []
-                for camera in cameras:
-                    camera_enabled = self._camera_enabled.get(camera.id, True)
-                    self.recorder.set_camera_enabled(
-                        camera.id,
-                        camera_enabled and self.recording_enabled(camera.id),
-                    )
-                    self.workers[camera.id].set_detection_enabled(self.detection_enabled(camera.id))
-                    worker = self.workers[camera.id]
-                    startup_tasks.append(CameraStartupTask(
-                        camera_id=camera.id,
-                        is_enabled=lambda camera_id=camera.id: self._camera_enabled.get(
-                            camera_id,
-                            True,
-                        ),
-                        start_camera=worker.start,
-                        capture_ready=worker.live_capture_ready,
-                        start_recorders=lambda camera=camera: self._start_camera_recorders_if_enabled(
-                            camera
-                        ),
-                        publish_state=lambda camera_id=camera.id: self.mqtt.publish_camera_state(
-                            camera_id,
-                            self._camera_enabled.get(camera_id, True),
-                        ),
-                    ))
+                startup_tasks = self.camera_fleet.prepare_startup(
+                    camera_enabled=self._camera_enabled,
+                    recording_enabled=self._recording_enabled,
+                    detection_enabled=self._detection_enabled,
+                )
                 phase_started = time.monotonic()
                 self.recorder.start_indexer(cameras)
                 self.recorder.start_watchdog(cameras)
@@ -582,7 +561,7 @@ class AppManager:
                     3,
                 )
                 self._started = True
-                self.camera_startup.start(
+                self.camera_fleet.start_admission(
                     startup_tasks,
                     on_complete=self._camera_startup_completed,
                 )
@@ -617,10 +596,6 @@ class AppManager:
                 self._closed = True
                 raise
 
-    def _start_camera_recorders_if_enabled(self, camera: CameraConfig) -> None:
-        if self._recorder_should_run(camera.id):
-            self._start_configured_recorders(camera)
-
     def _camera_startup_completed(self) -> None:
         self._mark_running_if_startup_complete()
 
@@ -630,23 +605,19 @@ class AppManager:
             or self._closed
             or not self._started
             or not self._startup_services_ready
-            or not self.camera_startup.status().get("complete")
+            or not self.camera_fleet.status().get("complete")
         ):
             return
         self.mqtt.set_server_lifecycle("running")
 
     def wait_for_camera_startup(self, timeout: float | None = None) -> bool:
-        return self.camera_startup.wait(timeout)
+        return self.camera_fleet.wait(timeout)
 
     def camera_startup_status(self) -> dict[str, object]:
         return {
-            **self.camera_startup.status(),
+            **self.camera_fleet.status(),
             "application_startup": dict(self._startup_timings),
         }
-
-    def _cancel_camera_startup(self) -> None:
-        if not self.camera_startup.cancel():
-            raise RuntimeError("camera startup coordinator did not stop")
 
     def stop_all(self) -> None:
         self.stop_all_with_runtime_preferences()
@@ -669,47 +640,7 @@ class AppManager:
         with self._lifecycle_lock:
             if self._closed:
                 return
-            failures: list[tuple[str, Exception]] = []
-            failures_lock = threading.Lock()
-
-            def release(camera_id: str, worker: CameraWorker) -> None:
-                try:
-                    worker.stop_onvif_events()
-                except Exception as exc:
-                    with failures_lock:
-                        failures.append((camera_id, exc))
-                    LOGGER.exception(
-                        "early ONVIF subscription release failed for %s",
-                        camera_id,
-                    )
-
-            releases = [
-                (camera_id, threading.Thread(
-                    target=release,
-                    args=(camera_id, worker),
-                    name=f"release-onvif-{camera_id}",
-                    daemon=True,
-                ))
-                for camera_id, worker in self.workers.items()
-            ]
-            for _camera_id, thread in releases:
-                thread.start()
-            deadline = time.monotonic() + ONVIF_RELEASE_TIMEOUT_SECONDS
-            for _camera_id, thread in releases:
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            with failures_lock:
-                for camera_id, thread in releases:
-                    if thread.is_alive():
-                        failures.append((
-                            camera_id,
-                            RuntimeError("ONVIF subscription release timed out"),
-                        ))
-                failure_snapshot = list(failures)
-            if failure_snapshot:
-                cameras = ", ".join(camera_id for camera_id, _exc in failure_snapshot)
-                raise RuntimeError(
-                    f"failed to release ONVIF subscriptions for: {cameras}"
-                ) from failure_snapshot[0][1]
+            self.camera_fleet.quiesce_onvif()
 
     def _shutdown_components(self) -> None:
         errors: list[tuple[str, Exception]] = []
@@ -723,53 +654,21 @@ class AppManager:
 
         started = time.monotonic()
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
-        LOGGER.info("SurvNG shutdown: cancelling camera startup admission")
-        attempt("camera startup", self._cancel_camera_startup)
-        LOGGER.info("SurvNG shutdown: releasing ONVIF subscriptions")
-        attempt("ONVIF subscriptions", self.release_onvif_subscriptions)
+        LOGGER.info(
+            "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
+        )
+        attempt("camera fleet ONVIF quiescence", self.release_onvif_subscriptions)
         attempt("state monitor", self._stop_state_monitor)
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
         attempt("MQTT", self.mqtt.stop)
         LOGGER.info("SurvNG shutdown: stopping camera and ONVIF workers")
-        camera_errors: list[tuple[str, Exception]] = []
-        camera_errors_lock = threading.Lock()
-
-        def stop_worker(camera_id: str, worker: CameraWorker) -> None:
-            try:
-                worker.stop()
-            except Exception as exc:
-                with camera_errors_lock:
-                    camera_errors.append((camera_id, exc))
-                LOGGER.exception("camera shutdown failed for %s", camera_id)
-
-        camera_shutdowns = [
-            (camera_id, threading.Thread(
-                target=stop_worker,
-                args=(camera_id, worker),
-                name=f"stop-camera-{camera_id}",
-                daemon=True,
-            ))
-            for camera_id, worker in self.workers.items()
-        ]
-        for _camera_id, thread in camera_shutdowns:
-            thread.start()
-        deadline = time.monotonic() + CAMERA_SHUTDOWN_TIMEOUT_SECONDS
-        for _camera_id, thread in camera_shutdowns:
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        timed_out_cameras = {
-            camera_id for camera_id, thread in camera_shutdowns if thread.is_alive()
-        }
-        with camera_errors_lock:
-            for camera_id in sorted(timed_out_cameras):
-                camera_errors.append((camera_id, RuntimeError("camera shutdown timed out")))
-            camera_error_snapshot = list(camera_errors)
-        errors.extend((f"camera {camera_id}", exc) for camera_id, exc in camera_error_snapshot)
-        for camera_id, worker in self.workers.items():
-            # close() is the final idempotent resource sweep and must still run
-            # when stop() reports a partial teardown failure. Do not race a
-            # stop() call that exceeded the manager-level deadline.
-            if camera_id not in timed_out_cameras:
-                attempt(f"camera {camera_id} resources", worker.close)
+        try:
+            self.camera_fleet.stop_workers()
+        except CameraFleetOperationError as error:
+            errors.extend(
+                (f"camera {failure.label}", failure.error)
+                for failure in error.failures
+            )
 
         LOGGER.info("SurvNG shutdown: stopping face recognition")
         attempt("face recognition", self.faces.close)
@@ -797,24 +696,31 @@ class AppManager:
 
 
     def camera(self, camera_id: str):
-        return next((camera for camera in self.config.cameras if camera.id == camera_id), None)
+        return self.camera_fleet.camera(camera_id)
 
     def start_camera(self, camera_id: str) -> bool:
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 return False
             camera = self.camera(camera_id)
-            worker = self.workers.get(camera_id)
-            if camera is None or worker is None:
+            if camera is None or camera_id not in self.workers:
                 return False
             previous = self._camera_enabled.get(camera_id, True)
             self._camera_enabled[camera_id] = True
             try:
                 self._save_runtime_state()
-                self.recorder.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
-                worker.start()
             except Exception:
                 self._camera_enabled[camera_id] = previous
+                raise
+            try:
+                if not self.camera_fleet.set_camera_enabled(camera_id, True):
+                    raise RuntimeError(f"camera {camera_id} is not in the fleet")
+                self.recorder.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
+                if not self.camera_fleet.start_camera(camera_id):
+                    raise RuntimeError(f"camera {camera_id} could not start")
+            except Exception:
+                self._camera_enabled[camera_id] = previous
+                self.camera_fleet.set_camera_enabled(camera_id, previous)
                 try:
                     self._save_runtime_state()
                 except Exception:
@@ -834,8 +740,7 @@ class AppManager:
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 return False
-            worker = self.workers.get(camera_id)
-            if worker is None:
+            if camera_id not in self.workers:
                 return False
             previous = self._camera_enabled.get(camera_id, True)
             self._camera_enabled[camera_id] = False
@@ -844,8 +749,27 @@ class AppManager:
             except Exception:
                 self._camera_enabled[camera_id] = previous
                 raise
-            self.recorder.set_camera_enabled(camera_id, False)
-            worker.stop()
+            try:
+                if not self.camera_fleet.set_camera_enabled(camera_id, False):
+                    raise RuntimeError(f"camera {camera_id} is not in the fleet")
+                self.recorder.set_camera_enabled(camera_id, False)
+                if not self.camera_fleet.stop_camera(camera_id):
+                    raise RuntimeError(f"camera {camera_id} could not stop")
+            except Exception:
+                self._camera_enabled[camera_id] = previous
+                self.camera_fleet.set_camera_enabled(camera_id, previous)
+                try:
+                    self._save_runtime_state()
+                except Exception:
+                    LOGGER.exception(
+                        "failed to roll back camera power state for %s",
+                        camera_id,
+                    )
+                self.recorder.set_camera_enabled(
+                    camera_id,
+                    previous and self.recording_enabled(camera_id),
+                )
+                raise
             self.mqtt.publish_camera_state(camera_id, False)
             self._publish_camera_status(camera_id)
             return True
@@ -890,6 +814,7 @@ class AppManager:
                 replacement.start()
                 if self._started:
                     replacement.set_server_lifecycle("running")
+                self.camera_fleet.replace_state_publisher(replacement)
             except BaseException:
                 self.mqtt = previous
                 try:
@@ -946,7 +871,7 @@ class AppManager:
     def _mqtt_server_status(self) -> dict[str, dict[str, object]]:
         """Build a bounded MQTT snapshot without scanning recording storage."""
         statuses = self.statuses()
-        startup = self.camera_startup.status()
+        startup = self.camera_fleet.status()
         startup_counts = dict(startup.get("counts") or {})
         startup_active = bool(startup.get("active"))
         enabled_ids = {
@@ -1494,7 +1419,7 @@ class AppManager:
                 recording_keys.add((camera.id, "live"))
         recordings = self.recorder.status(recording_keys)
         timestamp_health = self.recorder.timestamp_health()
-        startup_cameras = dict(self.camera_startup.status().get("cameras") or {})
+        startup_cameras = dict(self.camera_fleet.status().get("cameras") or {})
         return [
             {
                 **worker.status(),

@@ -49,6 +49,14 @@ factory validates stage IDs and required context artifacts before a camera
 pipeline starts. Object inference, recording lookup, event persistence, MQTT,
 and SSE remain outside the motion pipeline.
 
+Process-wide camera admission and teardown are owned by
+`CameraFleetLifecycle`. It snapshots startup recording/detection preferences,
+tracks live camera power changes during progressive admission, releases ONVIF
+subscriptions early, and applies one bounded parallel stop/close policy to the
+fleet. `AppManager` sequences this camera boundary with inference, recorder,
+MQTT, and auxiliary-service lifecycles but does not create or join per-camera
+shutdown threads itself.
+
 `MotionDecisionHandler` owns downstream event persistence and notifications.
 It receives object evidence from an injected `RecordedMotionObjectDetector`,
 which owns recorded-frame selection, decode, zone-aware inference, and live

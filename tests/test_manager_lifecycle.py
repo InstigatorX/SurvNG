@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig
+from survng.app.camera_fleet import CameraFleetLifecycle
 from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
 
@@ -23,7 +24,7 @@ def manager_with_mocks() -> AppManager:
     manager._closed = False
     manager._startup_services_ready = False
     manager._startup_timings = {}
-    manager.camera_startup = CameraStartupCoordinator(
+    camera_startup = CameraStartupCoordinator(
         readiness_timeout_seconds=0.01,
         recorder_settle_seconds=0.0,
         poll_interval_seconds=0.01,
@@ -41,6 +42,13 @@ def manager_with_mocks() -> AppManager:
     manager._start_state_monitor = Mock()
     manager._stop_state_monitor = Mock()
     manager._save_runtime_state = Mock()
+    manager.camera_fleet = CameraFleetLifecycle(
+        cameras=[camera],
+        workers=manager.workers,
+        recorder=manager.recorder,
+        startup=camera_startup,
+        state_publisher=manager.mqtt,
+    )
     return manager
 
 
@@ -90,12 +98,20 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager = manager_with_mocks()
         previous = manager.mqtt
         replacement = Mock()
+        startup_task = manager.camera_fleet.prepare_startup(
+            camera_enabled={"gate": True},
+            recording_enabled={},
+            detection_enabled={},
+        )[0]
 
         with patch("survng.app.manager.MqttService", return_value=replacement) as service:
             manager.reconfigure_mqtt(manager.config.mqtt)
 
         previous.stop.assert_called_once_with(lifecycle="restarting")
         replacement.start.assert_called_once_with()
+        startup_task.publish_state()
+        replacement.publish_camera_state.assert_called_once_with("gate", True)
+        previous.publish_camera_state.assert_not_called()
         service.assert_called_once()
         manager.workers["gate"].stop.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
@@ -105,6 +121,11 @@ class ManagerLifecycleTest(unittest.TestCase):
         previous = manager.mqtt
         replacement = Mock()
         replacement.start.side_effect = RuntimeError("mqtt start failed")
+        startup_task = manager.camera_fleet.prepare_startup(
+            camera_enabled={"gate": True},
+            recording_enabled={},
+            detection_enabled={},
+        )[0]
 
         with patch("survng.app.manager.MqttService", return_value=replacement):
             with self.assertRaisesRegex(RuntimeError, "mqtt start failed"):
@@ -113,6 +134,9 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertIs(manager.mqtt, previous)
         replacement.stop.assert_called_once_with(lifecycle="restarting")
         previous.start.assert_called_once_with()
+        startup_task.publish_state()
+        previous.publish_camera_state.assert_called_once_with("gate", True)
+        replacement.publish_camera_state.assert_not_called()
         manager.workers["gate"].stop.assert_not_called()
 
     def test_recorder_reconfiguration_keeps_camera_capture_running(self) -> None:
@@ -359,9 +383,15 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(manager.database_dir, Path(database))
             self.assertEqual(manager.workers["gate"].onvif._cache_dir, Path(database) / "onvif")
             self.assertEqual(manager._capture_open_limiter.capacity, 2)
-            self.assertEqual(manager.camera_startup.max_concurrency, 2)
-            self.assertEqual(manager.camera_startup.readiness_timeout_seconds, 5.0)
-            self.assertEqual(manager.camera_startup.recorder_settle_seconds, 0.5)
+            self.assertEqual(manager.camera_fleet.startup.max_concurrency, 2)
+            self.assertEqual(
+                manager.camera_fleet.startup.readiness_timeout_seconds,
+                5.0,
+            )
+            self.assertEqual(
+                manager.camera_fleet.startup.recorder_settle_seconds,
+                0.5,
+            )
 
             manager.stop_all()
 
@@ -394,7 +424,7 @@ class ManagerLifecycleTest(unittest.TestCase):
     def test_manager_returns_while_admitted_camera_warms_with_recorder(self) -> None:
         manager = manager_with_mocks()
         frame_ready = threading.Event()
-        manager.camera_startup = CameraStartupCoordinator(
+        manager.camera_fleet.startup = CameraStartupCoordinator(
             readiness_timeout_seconds=1.0,
             recorder_settle_seconds=0.0,
             poll_interval_seconds=0.01,
@@ -459,7 +489,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         try:
             with (
-                patch("survng.app.manager.CAMERA_SHUTDOWN_TIMEOUT_SECONDS", 0.02),
+                patch("survng.app.camera_fleet.CAMERA_SHUTDOWN_TIMEOUT_SECONDS", 0.02),
                 self.assertRaisesRegex(RuntimeError, "camera gate"),
             ):
                 manager.stop_all()
@@ -479,7 +509,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         try:
             with (
-                patch("survng.app.manager.ONVIF_RELEASE_TIMEOUT_SECONDS", 0.02),
+                patch("survng.app.camera_fleet.ONVIF_RELEASE_TIMEOUT_SECONDS", 0.02),
                 self.assertRaisesRegex(RuntimeError, "gate"),
             ):
                 manager.release_onvif_subscriptions()
@@ -509,6 +539,33 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.workers["gate"].stop_onvif_events.assert_called_once_with()
         manager.workers["gate"].stop.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
+
+    def test_failed_camera_stop_rolls_back_power_and_recording_state(self) -> None:
+        manager = manager_with_mocks()
+        manager.workers["gate"].stop.side_effect = RuntimeError("stop failed")
+
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            manager.stop_camera("gate")
+
+        self.assertTrue(manager._camera_enabled["gate"])
+        self.assertTrue(manager.camera_fleet.camera_enabled("gate"))
+        self.assertEqual(
+            manager.recorder.set_camera_enabled.call_args_list,
+            [unittest.mock.call("gate", False), unittest.mock.call("gate", True)],
+        )
+        self.assertEqual(manager._save_runtime_state.call_count, 2)
+
+    def test_camera_power_persistence_failure_does_not_touch_runtime(self) -> None:
+        manager = manager_with_mocks()
+        manager._save_runtime_state.side_effect = OSError("disk full")
+
+        with self.assertRaisesRegex(OSError, "disk full"):
+            manager.stop_camera("gate")
+
+        self.assertTrue(manager._camera_enabled["gate"])
+        self.assertTrue(manager.camera_fleet.camera_enabled("gate"))
+        manager.recorder.set_camera_enabled.assert_not_called()
+        manager.workers["gate"].stop.assert_not_called()
 
     def test_start_is_idempotent_and_stop_is_terminal(self) -> None:
         manager = manager_with_mocks()
