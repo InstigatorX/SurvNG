@@ -92,8 +92,9 @@ import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } 
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
-import { describePlaybackError, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
+import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
+import { liveCustomGridMetrics, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera } from "./liveCustomLayout.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -1694,7 +1695,7 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -1852,9 +1853,9 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
 
   return (
     <article
-      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`}
+      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
-      style={layout ? {
+      style={customLayout ? customStyle : layout ? {
         left: `${layout.x}px`,
         top: `${layout.y}px`,
         width: `${layout.width}px`,
@@ -1916,15 +1917,15 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
             <h2>{camera.name}</h2>
           </div>
           <div className="tile-controls" aria-label={`${camera.name} controls`}>
-            <button
+            {dragHandleProps.draggable ? <button
               type="button"
               className="tile-control-button icon-only camera-drag-handle"
-              title="Drag to reorder camera"
-              aria-label={`Reorder ${camera.name}`}
+              title="Drag to move camera"
+              aria-label={`Move ${camera.name}`}
               {...dragHandleProps}
             >
               <GripVertical size={16} />
-            </button>
+            </button> : null}
             <span className={`status-pill hud-status ${cameraConnected ? "ok" : "bad"}`} title={!camera.running ? "Powered off" : cameraConnected ? "Connected" : "Waiting for a fresh frame"}>
               <CircleDot size={13} /> <span className="hud-full-label">{cameraConnected ? "online" : "offline"}</span>
             </span>
@@ -1979,6 +1980,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
           </div>
         </div>
       </div>
+      {customLayout ? <button
+        type="button"
+        className="camera-resize-handle"
+        title="Drag to resize camera"
+        aria-label={`Resize ${camera.name}`}
+        {...resizeHandleProps}
+      /> : null}
     </article>
   );
 }
@@ -4549,9 +4557,15 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
   const [incidentZoneFilter, setIncidentZoneFilter] = useState("all");
-  const [cameraOrder, setCameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
+  const [cameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
+  const [liveLayoutMode, setLiveLayoutMode] = useStoredState("survng.liveLayoutMode.v1", "auto");
+  const [customLayoutValue, setCustomLayoutValue] = useStoredState("survng.liveCustomLayout.v1", "{}");
+  const [customOrderPreview, setCustomOrderPreview] = useState(null);
+  const [customSizePreview, setCustomSizePreview] = useState({});
   const [dragCameraId, setDragCameraId] = useState("");
   const [dragOverCameraId, setDragOverCameraId] = useState("");
+  const customOrderPreviewRef = useRef(null);
+  const customDragCommittedRef = useRef(false);
   const liveCameraGridRef = useRef(null);
   const [liveCameraGridSize, setLiveCameraGridSize] = useState({ width: 0, height: 0 });
   const [liveCameraAspects, setLiveCameraAspects] = useState({});
@@ -4606,6 +4620,17 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     const seen = new Set(sorted.map((camera) => camera.id));
     return [...sorted, ...cameras.filter((camera) => !seen.has(camera.id))];
   }, [cameras, cameraOrder]);
+  const normalizedLayoutMode = liveLayoutMode === "custom" ? "custom" : "auto";
+  const customLayout = useMemo(
+    () => readLiveCustomLayout(customLayoutValue, cameras, liveCameraAspects),
+    [cameras, customLayoutValue, liveCameraAspects],
+  );
+  const customOrder = customOrderPreview || customLayout.order;
+  const customCameras = useMemo(() => {
+    const camerasById = new Map(cameras.map((camera) => [String(camera.id), camera]));
+    return customOrder.map((id) => camerasById.get(String(id))).filter(Boolean);
+  }, [cameras, customOrder]);
+  const displayedCameras = normalizedLayoutMode === "custom" ? customCameras : orderedCameras;
   const liveCameraLayout = useMemo(
     () => recordingGridLayout(
       orderedCameras,
@@ -4623,6 +4648,10 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     [liveCameraLayout],
   );
   const liveCameraLayoutReady = liveCameraLayout.length === orderedCameras.length && orderedCameras.length > 0;
+  const customGridMetrics = useMemo(
+    () => liveCustomGridMetrics(liveCameraGridSize.width, liveCameraGridSize.height),
+    [liveCameraGridSize.height, liveCameraGridSize.width],
+  );
   const updateLiveCameraAspect = React.useCallback((cameraId, aspect) => {
     const normalized = Number(aspect);
     if (!(normalized > 0)) return;
@@ -4751,14 +4780,45 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     return () => observer.disconnect();
   }, []);
 
-  function moveCameraBefore(sourceId, targetId) {
-    if (!sourceId || !targetId || sourceId === targetId) return;
-    const ids = orderedCameras.map((camera) => camera.id);
-    const withoutSource = ids.filter((id) => id !== sourceId);
-    const targetIndex = withoutSource.indexOf(targetId);
-    if (targetIndex < 0) return;
-    withoutSource.splice(targetIndex, 0, sourceId);
-    setCameraOrder(JSON.stringify(withoutSource));
+  function saveCustomLayout(order, sizes) {
+    setCustomLayoutValue(JSON.stringify({ version: 1, order, sizes }));
+  }
+
+  function previewCustomMove(sourceId, targetId) {
+    setCustomOrderPreview((current) => {
+      const next = moveLiveCamera(current || customLayout.order, sourceId, targetId);
+      customOrderPreviewRef.current = next;
+      return next;
+    });
+  }
+
+  function beginCustomResize(event, cameraId) {
+    event.preventDefault();
+    event.stopPropagation();
+    const start = customSizePreview[cameraId] || customLayout.sizes[cameraId];
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let latest = start;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const onMove = (moveEvent) => {
+      latest = resizeLiveCamera(
+        start,
+        Math.round((moveEvent.clientX - startX) / customGridMetrics.columnWidth),
+        Math.round((moveEvent.clientY - startY) / customGridMetrics.rowHeight),
+      );
+      setCustomSizePreview((current) => ({ ...current, [cameraId]: latest }));
+    };
+    const onEnd = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      const sizes = { ...customLayout.sizes, ...customSizePreview, [cameraId]: latest };
+      saveCustomLayout(customOrderPreviewRef.current || customLayout.order, sizes);
+      setCustomSizePreview({});
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd, { once: true });
+    window.addEventListener("pointercancel", onEnd, { once: true });
   }
 
   useEffect(() => {
@@ -4921,8 +4981,28 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   return (
     <main className="bento-grid live-grid">
       <section className="bento-card camera-zone live-camera-zone">
-        <div ref={liveCameraGridRef} className={`camera-grid live-camera-grid${liveCameraLayoutReady ? " viewport-layout" : ""}`}>
-          {liveDefaultsReady ? orderedCameras.map((camera, index) => (
+        <div className="live-layout-switch" aria-label="Live camera layout">
+          <button
+            type="button"
+            className={normalizedLayoutMode === "auto" ? "active" : ""}
+            onClick={() => setLiveLayoutMode("auto")}
+            title="Automatic layout"
+            aria-label="Use automatic live layout"
+          ><Grid2X2 size={16} /></button>
+          <button
+            type="button"
+            className={normalizedLayoutMode === "custom" ? "active" : ""}
+            onClick={() => setLiveLayoutMode("custom")}
+            title="Custom layout"
+            aria-label="Use custom live layout"
+          ><GripVertical size={16} /></button>
+        </div>
+        <div
+          ref={liveCameraGridRef}
+          className={`camera-grid live-camera-grid${normalizedLayoutMode === "custom" ? " custom-layout" : liveCameraLayoutReady ? " viewport-layout" : ""}`}
+          style={normalizedLayoutMode === "custom" ? { "--custom-row-height": `${customGridMetrics.rowHeight}px` } : undefined}
+        >
+          {liveDefaultsReady ? displayedCameras.map((camera, index) => (
             <CameraTile
               key={`${camera.id}:${liveDefaultsInstance}`}
               camera={camera}
@@ -4930,28 +5010,49 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               refresh={refreshBase}
               onOpen={setExpandedCamera}
               onAspectChange={updateLiveCameraAspect}
-              layout={liveCameraLayoutById.get(camera.id)}
+              layout={normalizedLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
+              customLayout={normalizedLayoutMode === "custom"}
+              customStyle={normalizedLayoutMode === "custom" ? {
+                gridColumn: `span ${(customSizePreview[camera.id] || customLayout.sizes[camera.id]).columns}`,
+                gridRow: `span ${(customSizePreview[camera.id] || customLayout.sizes[camera.id]).rows}`,
+              } : undefined}
               startDelayMs={index * 450}
               dragging={dragCameraId === camera.id}
               dragOver={dragOverCameraId === camera.id && dragCameraId !== camera.id}
-              dragHandleProps={{
+              dragHandleProps={normalizedLayoutMode === "custom" ? {
                 draggable: true,
                 onDragStart: (event) => {
                   setDragCameraId(camera.id);
+                  customDragCommittedRef.current = false;
+                  customOrderPreviewRef.current = customLayout.order;
+                  setCustomOrderPreview(customLayout.order);
                   event.dataTransfer.effectAllowed = "move";
                   event.dataTransfer.setData("text/plain", camera.id);
+                  const tile = event.currentTarget.closest(".camera-tile");
+                  if (tile) event.dataTransfer.setDragImage(tile, tile.clientWidth / 2, 28);
                 },
                 onDragEnd: () => {
+                  if (!customDragCommittedRef.current) setCustomOrderPreview(null);
+                  customDragCommittedRef.current = false;
+                  customOrderPreviewRef.current = null;
                   setDragCameraId("");
                   setDragOverCameraId("");
                 },
-              }}
-              dropProps={{
+              } : {}}
+              resizeHandleProps={normalizedLayoutMode === "custom" ? {
+                onPointerDown: (event) => beginCustomResize(event, camera.id),
+              } : {}}
+              dropProps={normalizedLayoutMode === "custom" ? {
                 onDragOver: (event) => {
                   if (!dragCameraId || dragCameraId === camera.id) return;
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "move";
                   setDragOverCameraId(camera.id);
+                },
+                onDragEnter: (event) => {
+                  if (!dragCameraId || dragCameraId === camera.id) return;
+                  event.preventDefault();
+                  previewCustomMove(dragCameraId, camera.id);
                 },
                 onDragLeave: (event) => {
                   if (!event.currentTarget.contains(event.relatedTarget)) setDragOverCameraId("");
@@ -4959,11 +5060,14 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
                 onDrop: (event) => {
                   event.preventDefault();
                   const sourceId = event.dataTransfer.getData("text/plain") || dragCameraId;
-                  moveCameraBefore(sourceId, camera.id);
+                  const order = moveLiveCamera(customOrderPreviewRef.current || customLayout.order, sourceId, camera.id);
+                  customDragCommittedRef.current = true;
+                  saveCustomLayout(order, { ...customLayout.sizes, ...customSizePreview });
+                  setCustomOrderPreview(null);
                   setDragCameraId("");
                   setDragOverCameraId("");
                 },
-              }}
+              } : {}}
             />
           )) : null}
         </div>
@@ -5213,6 +5317,7 @@ function recordingPlaybackTimeline(rows) {
 
 function RecordingGridTile({ camera, source, epoch, playing, focused, layout, onAspectChange, onFocus, onSelect }) {
   const videoRef = useRef(null);
+  const previousEpochRef = useRef(null);
   const [playback, setPlayback] = useState(null);
   const [error, setError] = useState("");
   const bucket = Math.floor(Math.max(0, Number(epoch) || 0) / (15 * 60)) * 15 * 60;
@@ -5223,7 +5328,11 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
     () => recordingPlaybackTimeline(playback?.rows || []),
     [playback?.rows],
   );
-  const mediaTime = playbackMediaTimeForEpoch(timeline, epoch);
+  const exactMediaTime = playbackMediaTimeForEpoch(timeline, epoch);
+  const mediaTime = Number.isFinite(exactMediaTime)
+    ? exactMediaTime
+    : playbackMediaTimeForEpoch(timeline, epoch, 1.25);
+  const briefGap = !Number.isFinite(exactMediaTime) && Number.isFinite(mediaTime);
   const hasCoverage = Number.isFinite(mediaTime);
 
   useEffect(() => {
@@ -5276,19 +5385,30 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
 
   useEffect(() => {
     const video = videoRef.current;
+    const previousEpoch = previousEpochRef.current;
+    previousEpochRef.current = epoch;
     if (!video || !Number.isFinite(mediaTime)) {
       video?.pause();
       return;
     }
-    if (Math.abs(video.currentTime - mediaTime) > 1.1) video.currentTime = mediaTime;
+    if (briefGap) {
+      video.pause();
+      return;
+    }
+    if (gridPlaybackNeedsSeek({
+      currentTime: video.currentTime,
+      targetTime: mediaTime,
+      playing,
+      epochDelta: Number.isFinite(previousEpoch) ? epoch - previousEpoch : null,
+    })) video.currentTime = mediaTime;
     if (playing) video.play().catch(() => {});
     else video.pause();
-  }, [mediaTime, playing]);
+  }, [briefGap, mediaTime, playing]);
 
   const manifestUrl = playback
     ? recordingDayHlsUrl(camera.id, playback.start, playback.end, playback.source)
     : "";
-  const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch);
+  const initialMediaTime = playbackMediaTimeForEpoch(timeline, playback?.targetEpoch, 1.25);
   const displayedSource = playback?.source || source;
   const aspect = recordingCameraAspect(camera, displayedSource);
   useEffect(() => {
@@ -5312,10 +5432,10 @@ function RecordingGridTile({ camera, source, epoch, playing, focused, layout, on
         src={manifestUrl}
         mimeType="application/vnd.apple.mpegurl"
         startTime={Number.isFinite(initialMediaTime) ? initialMediaTime : 0}
-        bufferingGoal={4}
+        bufferingGoal={20}
         muted
         playsInline
-        preload="metadata"
+        preload="auto"
         onReady={(_player, video) => {
           setError("");
           if (Number.isFinite(mediaTime)) video.currentTime = mediaTime;

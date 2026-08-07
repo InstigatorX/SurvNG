@@ -1541,6 +1541,7 @@ p {
   }
 
   .live-camera-zone {
+    position: relative;
     height: 100%;
     min-height: 0;
     overflow: hidden;
@@ -1574,6 +1575,69 @@ p {
     aspect-ratio: auto;
     border-radius: 7px;
   }
+
+  .live-camera-grid.custom-layout {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-auto-flow: dense;
+    grid-auto-rows: var(--custom-row-height, 150px);
+    gap: 8px;
+    padding: 0;
+    overflow: auto;
+    column-width: auto;
+  }
+
+  .live-camera-grid.custom-layout .camera-tile.custom-layout-tile {
+    position: relative;
+    display: block;
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    transition: border-color 140ms ease, opacity 140ms ease, transform 140ms ease;
+  }
+
+  .live-camera-grid.custom-layout .camera-tile.custom-layout-tile .video-frame {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: auto;
+    border-radius: 7px;
+  }
+}
+
+.live-layout-switch {
+  position: absolute;
+  z-index: 12;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 7px;
+  background: rgba(3, 10, 11, .82);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .28);
+  backdrop-filter: blur(8px);
+}
+
+.live-layout-switch button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, .72);
+}
+
+.live-layout-switch button.active {
+  border-color: rgba(65, 214, 190, .5);
+  background: rgba(23, 124, 111, .48);
+  color: #fff;
 }
 
 .camera-tile {
@@ -1609,6 +1673,22 @@ p {
 
 .camera-drag-handle:active {
   cursor: grabbing;
+}
+
+.camera-resize-handle {
+  position: absolute;
+  z-index: 9;
+  right: 2px;
+  bottom: 2px;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: linear-gradient(135deg, transparent 48%, rgba(255, 255, 255, .42) 50%, rgba(255, 255, 255, .42) 57%, transparent 59%, transparent 68%, rgba(255, 255, 255, .78) 70%, rgba(255, 255, 255, .78) 77%, transparent 79%);
+  cursor: nwse-resize;
+  touch-action: none;
 }
 
 .tile-header {
@@ -8615,6 +8695,10 @@ section.detection-settings-card {
 
 
 @media (max-width: 1050px) {
+  .live-layout-switch { display: none; }
+  .live-camera-grid.custom-layout .camera-drag-handle,
+  .live-camera-grid.custom-layout .camera-resize-handle { display: none; }
+
   .live-camera-grid .camera-tile.viewport-layout {
     position: static;
     width: 100% !important;

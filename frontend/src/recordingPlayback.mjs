@@ -7,12 +7,19 @@ export function playbackRowsCoverEpoch(rows, epoch) {
   });
 }
 
-export function playbackMediaTimeForEpoch(rows, epoch) {
+export function playbackMediaTimeForEpoch(rows, epoch, boundaryTolerance = 0) {
   if (!Number.isFinite(epoch) || !Array.isArray(rows)) return null;
-  const row = rows.find((candidate) => {
+  const tolerance = Math.max(0, Number(boundaryTolerance) || 0);
+  const exactRow = rows.find((candidate) => {
     const start = Number(candidate?.start_epoch);
     const end = Number(candidate?.end_epoch);
     return Number.isFinite(start) && Number.isFinite(end) && start <= epoch && epoch < end;
+  });
+  const row = exactRow || rows.find((candidate) => {
+    const start = Number(candidate?.start_epoch);
+    const end = Number(candidate?.end_epoch);
+    return Number.isFinite(start) && Number.isFinite(end)
+      && start - tolerance <= epoch && epoch < end + tolerance;
   });
   if (!row) return null;
   const start = Number(row.start_epoch);
@@ -24,6 +31,14 @@ export function playbackMediaTimeForEpoch(rows, epoch) {
     ? Math.max(mediaStart, mediaEnd - 0.01)
     : mediaStart + Math.max(0, end - start - 0.01);
   return Math.max(mediaStart, Math.min(maximum, mediaStart + epoch - start));
+}
+
+export function gridPlaybackNeedsSeek({ currentTime, targetTime, playing, epochDelta }) {
+  if (!Number.isFinite(currentTime) || !Number.isFinite(targetTime)) return false;
+  const drift = Math.abs(currentTime - targetTime);
+  if (!playing) return drift > 0.08;
+  const continuousClock = Number.isFinite(epochDelta) && epochDelta >= 0 && epochDelta <= 2.5;
+  return continuousClock ? false : drift > 0.2;
 }
 
 export function mergeRecordingAvailability(current, updates) {

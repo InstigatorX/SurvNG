@@ -7,6 +7,7 @@
     "test:live-transport": "node tests/live-transport.mjs",
     "test:live-aspect": "node tests/live-aspect.mjs",
     "test:live-grid-layout": "node tests/live-grid-layout.mjs",
+    "test:live-custom-layout": "node tests/live-custom-layout.mjs",
     "test:live-defaults": "node tests/live-defaults.mjs",
     "test:storage": "node tests/storage.mjs",
     "test:assistant-storage": "node tests/assistant-storage.mjs",
