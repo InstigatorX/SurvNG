@@ -72,3 +72,11 @@ The configuration file is written atomically before a targeted runtime update.
 If runtime application fails, SurvNG restores both the previous runtime settings
 and the previous persisted configuration. Full manager reloads retain their
 existing replacement-manager rollback behavior.
+
+Configuration transactions now have explicit owners outside the HTTP module.
+`TargetedConfigApplication` classifies non-camera changes, applies subsystems in
+dependency order, and compensates every attempted step in reverse order.
+`ManagerGenerationLifecycle` owns full replacement admission, candidate cleanup,
+runtime-preference transfer, persistence, atomic publication, and recovery-manager
+construction. The API layer supplies process cache hooks but no longer implements
+either transaction itself.

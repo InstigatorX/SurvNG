@@ -87,6 +87,7 @@ from .manager import (
     ManagerShutdownIncompleteError,
     validate_motion_pipeline_configuration,
 )
+from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .motion_pipeline import (
     analysis_preset_selections,
     guided_fusion_settings,
@@ -665,92 +666,49 @@ def reload_manager(
     assign_ids: bool = False,
     persist: bool = True,
 ) -> AppConfig:
-    global config, manager, FACE_OBSERVATIONS_SYNCED
-    effective_config = normalize_config(
+    """Replace the active manager through the generation lifecycle owner."""
+    effective = normalize_config(
         next_config.model_copy(deep=True),
         assign_ids=assign_ids,
     )
-    with MANAGER_RELOAD_LOCK:
-        if APPLICATION_STOPPING.is_set():
-            raise RuntimeError("configuration reload refused while SurvNG is shutting down")
-        previous_config = config
-        previous_manager = manager
-        active_storage_tasks = _active_storage_tasks(previous_manager)
-        if active_storage_tasks:
-            raise StorageTasksActiveError(active_storage_tasks)
-        active_ai_operations = _active_ai_operations()
-        if active_ai_operations:
-            raise AiOperationsActiveError(active_ai_operations)
-        prewarmer_was_running = bool(
-            RECORDING_PREWARM_THREAD is not None
-            and RECORDING_PREWARM_THREAD.is_alive()
-        )
-        candidate = AppManager(effective_config)
-        previous_stop_attempted = False
-        runtime_preferences = previous_manager.runtime_preferences()
-        try:
-            _stop_recording_prewarmer()
-            previous_stop_attempted = True
-            previous_manager.stop_all_with_runtime_preferences()
-            candidate.apply_runtime_preferences(runtime_preferences)
-            candidate.start_all()
-            candidate.apply_runtime_preferences(runtime_preferences, persist=True)
-            if persist:
-                save_config(effective_config, assign_ids=False)
-        except BaseException as reload_error:
-            try:
-                candidate.stop_all()
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "failed to clean up replacement manager after reload failure"
-                )
-            if isinstance(reload_error, ManagerShutdownIncompleteError):
-                # The previous manager still owns live camera work. Starting a
-                # recovery generation would overlap its inference/recording
-                # dependencies and camera connections.
-                config = previous_config
-                manager = previous_manager
-                raise RuntimeError(
-                    "configuration reload aborted because camera shutdown is "
-                    "still active; restart SurvNG through its supervisor"
-                ) from None
-            if not previous_stop_attempted:
-                if prewarmer_was_running:
-                    _start_recording_prewarmer()
-                raise RuntimeError(
-                    "configuration reload failed before the active manager was stopped"
-                ) from reload_error
-            try:
-                recovery = AppManager(previous_config)
-                recovery.apply_runtime_preferences(runtime_preferences, persist=True)
-                recovery.start_all()
-            except BaseException as recovery_error:
-                raise RuntimeError(
-                    "configuration reload failed and the previous manager could not be restored"
-                ) from recovery_error
-            config = previous_config
-            manager = recovery
-            FACE_OBSERVATIONS_SYNCED = False
-            _start_face_observation_sync()
-            if prewarmer_was_running:
-                _start_recording_prewarmer()
-            if not isinstance(reload_error, Exception):
-                raise
-            raise RuntimeError(
-                "configuration reload failed; the previous configuration was restored"
-            ) from reload_error
 
-        config = effective_config
-        manager = candidate
+    def publish_runtime(next_value: AppConfig, next_manager: AppManager) -> None:
+        global config, manager
+        config = next_value
+        manager = next_manager
+
+    def refresh_runtime_caches() -> None:
+        global FACE_OBSERVATIONS_SYNCED
         FACE_OBSERVATIONS_SYNCED = False
         _start_face_observation_sync()
         with RECORDING_DAY_CACHE_LOCK:
             RECORDING_DAY_CACHE.clear()
         _ffmpeg_qsv_info.cache_clear()
         _ffmpeg_vaapi_info.cache_clear()
-        if prewarmer_was_running:
-            _start_recording_prewarmer()
-        return effective_config
+
+    lifecycle = ManagerGenerationLifecycle(
+        lock=MANAGER_RELOAD_LOCK,
+        stopping=APPLICATION_STOPPING,
+        manager_factory=AppManager,
+        hooks=ManagerReloadHooks(
+            active_storage_tasks=_active_storage_tasks,
+            active_ai_operations=_active_ai_operations,
+            prewarmer_running=lambda: bool(
+                RECORDING_PREWARM_THREAD is not None
+                and RECORDING_PREWARM_THREAD.is_alive()
+            ),
+            stop_prewarmer=_stop_recording_prewarmer,
+            start_prewarmer=_start_recording_prewarmer,
+            save_config=save_config,
+            publish_runtime=publish_runtime,
+            refresh_runtime_caches=refresh_runtime_caches,
+            storage_error=StorageTasksActiveError,
+            ai_error=AiOperationsActiveError,
+        ),
+    )
+    lifecycle.reload(config, manager, effective, persist=persist)
+    return effective
+
 
 
 def _manager_owned_config(config_value: AppConfig) -> dict:
