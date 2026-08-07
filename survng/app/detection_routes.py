@@ -23,12 +23,7 @@ from .domain_events import ObjectDetected
 from .incident_presenter import _event_row
 from .incident_utils import event_epoch, event_snapshot_path
 from .manager import AppManager
-from .object_tracking import ultralytics_deepocsort_dependency_status
-from .tracking_comparison import (
-    TRACKING_COMPARISON_IMPLEMENTATIONS,
-    TrackingComparisonRunner,
-    sampled_video_frames,
-)
+from .tracking_comparison import TRACKING_COMPARISON_IMPLEMENTATIONS
 from .zones import apply_detection_zones, detection_threshold
 
 LOGGER = logging.getLogger(__name__)

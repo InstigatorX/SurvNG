@@ -4,8 +4,8 @@ import json
 import logging
 import asyncio
 import signal
-import secrets
 import threading
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -96,9 +96,9 @@ CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
 ASSISTANT_LIMITER = threading.BoundedSemaphore(2)
 AI_ACTIVITY_LOCK = threading.Lock()
+AI_ACTIVITY_CONDITION = threading.Condition(AI_ACTIVITY_LOCK)
 AI_ACTIVE_OPERATIONS: dict[str, int] = {}
-AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
-AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
+AI_SHUTDOWN_DRAIN_SECONDS = 30.0
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
@@ -107,21 +107,33 @@ STORAGE_MAINTENANCE = StorageMaintenanceRunner()
 
 
 def _begin_ai_operation(kind: str) -> None:
-    with AI_ACTIVITY_LOCK:
+    with AI_ACTIVITY_CONDITION:
         AI_ACTIVE_OPERATIONS[kind] = AI_ACTIVE_OPERATIONS.get(kind, 0) + 1
 
 
 def _end_ai_operation(kind: str) -> None:
-    with AI_ACTIVITY_LOCK:
+    with AI_ACTIVITY_CONDITION:
         remaining = AI_ACTIVE_OPERATIONS.get(kind, 0) - 1
         if remaining > 0:
             AI_ACTIVE_OPERATIONS[kind] = remaining
         else:
             AI_ACTIVE_OPERATIONS.pop(kind, None)
+        AI_ACTIVITY_CONDITION.notify_all()
 
 
 def _active_ai_operations() -> dict[str, int]:
     with AI_ACTIVITY_LOCK:
+        return dict(AI_ACTIVE_OPERATIONS)
+
+
+def _wait_for_ai_operations(timeout: float) -> dict[str, int]:
+    deadline = time.monotonic() + max(0.0, timeout)
+    with AI_ACTIVITY_CONDITION:
+        while AI_ACTIVE_OPERATIONS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            AI_ACTIVITY_CONDITION.wait(timeout=remaining)
         return dict(AI_ACTIVE_OPERATIONS)
 
 
@@ -374,6 +386,7 @@ def reload_manager(
         global FACE_OBSERVATIONS_SYNCED
         FACE_OBSERVATIONS_SYNCED = False
         _start_face_observation_sync()
+        _recording_media_runtime.rebind_media_exports()
         _recording_media_runtime.clear_runtime_caches()
 
     lifecycle = ManagerGenerationLifecycle(
@@ -424,6 +437,7 @@ def apply_config_update(
             "camera_workers_restarted": True,
             "subsystems_restarted": ["manager"],
         }
+    previous_ffmpeg_path = config.ffmpeg_path
     effective, result = application.apply(
         config,
         effective,
@@ -431,6 +445,8 @@ def apply_config_update(
         persist=persist,
     )
     config = effective
+    if effective.ffmpeg_path != previous_ffmpeg_path:
+        _recording_media_runtime.clear_hardware_probe_caches()
     return effective, result
 
 
@@ -510,6 +526,12 @@ async def lifespan(app: FastAPI):
                 await calibration_monitor_task
             except asyncio.CancelledError:
                 pass
+        remaining_ai = _wait_for_ai_operations(AI_SHUTDOWN_DRAIN_SECONDS)
+        if remaining_ai:
+            logging.getLogger("uvicorn.error").warning(
+                "AI work did not drain before shutdown: %s",
+                remaining_ai,
+            )
         if early_signal_installed:
             loop.remove_signal_handler(signal.SIGUSR1)
         try:

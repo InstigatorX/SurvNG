@@ -1,13 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from survng.app import main
 
 
+def test_ai_shutdown_drain_waits_for_registered_work() -> None:
+    main._begin_ai_operation("test-drain")
+    release = threading.Timer(0.02, main._end_ai_operation, args=("test-drain",))
+    release.start()
+    try:
+        assert main._wait_for_ai_operations(1.0) == {}
+    finally:
+        release.join(timeout=1)
+        main._end_ai_operation("test-drain")
+    assert main._active_ai_operations() == {}
+
+
+def test_ai_shutdown_drain_reports_work_that_exceeds_deadline() -> None:
+    main._begin_ai_operation("test-timeout")
+    try:
+        assert main._wait_for_ai_operations(0.0) == {"test-timeout": 1}
+    finally:
+        main._end_ai_operation("test-timeout")
+    assert main._active_ai_operations() == {}
+
+
 def test_lifespan_starts_calibration_monitor_through_intelligence_owner() -> None:
+    assert main._active_ai_operations() == {}
     async def exercise() -> None:
         async def monitor_forever() -> None:
             await asyncio.Event().wait()

@@ -313,11 +313,12 @@ class MediaExportManager:
         max_storage_bytes: int = 20 * 1024 * 1024 * 1024,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
+        self.database_dir = database_dir.resolve()
         self.exports_dir = self.storage_dir / "exports"
         self.recording_dir = self.exports_dir / "recording"
         self.timelapse_dir = self.exports_dir / "timelapse"
         self.manifest_dir = self.exports_dir / "manifests"
-        self.work_dir = database_dir.resolve() / "export-work"
+        self.work_dir = self.database_dir / "export-work"
         for directory in (self.recording_dir, self.timelapse_dir, self.manifest_dir, self.work_dir):
             directory.mkdir(parents=True, exist_ok=True)
         self._recorder = recorder
@@ -326,7 +327,7 @@ class MediaExportManager:
         self._hardware_device = hardware_device or (lambda _backend: "")
         self.retention_hours = max(1, min(int(retention_hours), 720))
         self.max_storage_bytes = max(1024 * 1024, int(max_storage_bytes))
-        self.store = MediaExportStore(database_dir.resolve())
+        self.store = MediaExportStore(self.database_dir)
         default_expiry = (datetime.now(timezone.utc) + timedelta(hours=self.retention_hours)).isoformat()
         for job in self.store.terminal_without_expiry():
             self.store.update(str(job["id"]), expires_at=default_expiry)
@@ -350,6 +351,9 @@ class MediaExportManager:
         for job_id in self.store.queued_ids():
             self._enqueue(job_id)
         self.cleanup()
+
+    def is_running(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive())
 
     def stop(self, timeout: float = 10.0) -> bool:
         self._stop.set()

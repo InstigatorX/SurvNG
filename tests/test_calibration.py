@@ -372,6 +372,26 @@ def test_calibration_run_records_worker_start_failure() -> None:
 
     assert raised.value.status_code == 503
     assert events.update_calibration_run.call_args.kwargs["status"] == "failed"
+    assert "calibration" not in main._active_ai_operations()
+
+
+def test_registered_calibration_worker_holds_reload_lease_for_entire_run() -> None:
+    observed: list[dict[str, int]] = []
+
+    def worker() -> None:
+        observed.append(main._active_ai_operations())
+
+    thread = main._intelligence_route_bundle.service._start_registered_ai_thread(
+        "calibration",
+        worker,
+        (),
+        name="test-calibration-lease",
+    )
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert observed == [{"calibration": 1}]
+    assert "calibration" not in main._active_ai_operations()
 
 
 def test_calibration_rollback_reports_newer_value_conflict() -> None:

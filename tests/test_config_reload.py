@@ -159,6 +159,54 @@ class ConfigReloadTest(unittest.TestCase):
         active.reconfigure_recorders.assert_not_called()
         self.assertEqual(main.config.ffmpeg_path, "/old/ffmpeg")
 
+    def test_ffmpeg_hot_reconfiguration_invalidates_hardware_probe_cache(self) -> None:
+        active = Mock()
+        current = AppConfig(ffmpeg_path="/old/ffmpeg")
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(update={"ffmpeg_path": "/new/ffmpeg"})
+
+        with (
+            patch("survng.app.main.save_config"),
+            patch.object(
+                main._recording_media_runtime,
+                "clear_hardware_probe_caches",
+            ) as clear,
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        clear.assert_called_once_with()
+        active.reconfigure_recorders.assert_called_once_with(effective)
+        self.assertEqual(result["subsystems_restarted"], ["recorders"])
+
+    def test_hardware_probe_cache_is_keyed_by_ffmpeg_path(self) -> None:
+        runtime = main._recording_media_runtime
+        previous_qsv = runtime._qsv_cache
+        current = AppConfig(ffmpeg_path="/first/ffmpeg")
+        main.config = current
+        try:
+            runtime._qsv_cache = None
+            with (
+                patch.object(runtime, "_dri_render_devices", return_value=[]),
+                patch.object(runtime, "_run_ffmpeg_list", return_value="") as probe,
+            ):
+                runtime._ffmpeg_qsv_info()
+                main.config = current.model_copy(update={"ffmpeg_path": "/second/ffmpeg"})
+                runtime._ffmpeg_qsv_info()
+
+            self.assertEqual(probe.call_count, 6)
+            self.assertTrue(all(
+                call.kwargs.get("ffmpeg_path") == "/first/ffmpeg"
+                for call in probe.call_args_list[:3]
+            ))
+            self.assertTrue(all(
+                call.kwargs.get("ffmpeg_path") == "/second/ffmpeg"
+                for call in probe.call_args_list[3:]
+            ))
+        finally:
+            runtime._qsv_cache = previous_qsv
+
     def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {
@@ -718,6 +766,50 @@ class ConfigReloadTest(unittest.TestCase):
                 runtime.recording_prewarm_stop.set()
             else:
                 runtime.recording_prewarm_stop.clear()
+
+    def test_media_exports_rebind_to_replacement_manager_generation(self) -> None:
+        runtime = main._recording_media_runtime
+        previous_value = runtime.media_exports
+        previous = Mock()
+        previous.is_running.return_value = True
+        previous.stop.return_value = True
+        replacement = Mock()
+        try:
+            runtime.media_exports = previous
+            with patch.object(
+                runtime,
+                "_new_media_export_manager",
+                return_value=replacement,
+            ):
+                rebound = runtime.rebind_media_exports()
+
+            self.assertTrue(rebound)
+            previous.stop.assert_called_once_with(timeout=10.0)
+            replacement.start.assert_called_once_with()
+            self.assertIs(runtime.media_exports, replacement)
+        finally:
+            runtime.media_exports = previous_value
+
+    def test_failed_media_export_rebind_restores_previous_worker(self) -> None:
+        runtime = main._recording_media_runtime
+        previous_value = runtime.media_exports
+        previous = Mock()
+        previous.is_running.return_value = True
+        previous.stop.return_value = True
+        try:
+            runtime.media_exports = previous
+            with patch.object(
+                runtime,
+                "_new_media_export_manager",
+                side_effect=OSError("storage unavailable"),
+            ):
+                rebound = runtime.rebind_media_exports()
+
+            self.assertFalse(rebound)
+            previous.start.assert_called_once_with()
+            self.assertIs(runtime.media_exports, previous)
+        finally:
+            runtime.media_exports = previous_value
 
     def test_stop_reports_a_prewarmer_that_cannot_be_reaped(self) -> None:
         runtime = main._recording_media_runtime

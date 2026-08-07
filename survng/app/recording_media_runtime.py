@@ -28,6 +28,8 @@ from .recording_media import concatenated_clip_timing, event_clip_window, playba
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
+LOGGER = logging.getLogger(__name__)
+
 
 class RecordingPrewarmCancelled(RuntimeError):
     pass
@@ -79,8 +81,8 @@ class RecordingMediaRuntime:
         self.event_clip_build_limiter = threading.BoundedSemaphore(2)
         self.media_exports_lock = threading.Lock()
         self.media_exports: MediaExportManager | None = None
-        self._qsv_cache: dict | None = None
-        self._vaapi_cache: dict | None = None
+        self._qsv_cache: tuple[tuple[str, tuple[str, ...]], dict] | None = None
+        self._vaapi_cache: tuple[tuple[str, tuple[str, ...]], dict] | None = None
         self._hardware_probe_lock = threading.Lock()
 
     @property
@@ -94,6 +96,9 @@ class RecordingMediaRuntime:
     def clear_runtime_caches(self) -> None:
         with self.recording_day_cache_lock:
             self.recording_day_cache.clear()
+        self.clear_hardware_probe_caches()
+
+    def clear_hardware_probe_caches(self) -> None:
         with self._hardware_probe_lock:
             self._qsv_cache = None
             self._vaapi_cache = None
@@ -132,9 +137,15 @@ class RecordingMediaRuntime:
         }
 
 
-    def _run_ffmpeg_list(self, args: list[str], timeout: float=5.0) -> str:
+    def _run_ffmpeg_list(
+        self,
+        args: list[str],
+        timeout: float = 5.0,
+        *,
+        ffmpeg_path: str | None = None,
+    ) -> str:
         try:
-            result = subprocess.run([self.config.ffmpeg_path, '-hide_banner', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+            result = subprocess.run([ffmpeg_path or self.config.ffmpeg_path, '-hide_banner', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
             return result.stdout or ''
         except Exception:
             return ''
@@ -143,57 +154,65 @@ class RecordingMediaRuntime:
         return sorted((str(path) for path in Path('/dev/dri').glob('renderD*'))) if Path('/dev/dri').exists() else []
 
     def _ffmpeg_qsv_info(self) -> dict:
-        if self._qsv_cache is not None:
-            return self._qsv_cache
-        hwaccels = self._run_ffmpeg_list(['-hwaccels'])
-        encoders = self._run_ffmpeg_list(['-encoders'])
-        decoders = self._run_ffmpeg_list(['-decoders'])
         render_devices = self._dri_render_devices()
-        qsv_encoders = sorted({name for name in ('h264_qsv', 'hevc_qsv', 'av1_qsv', 'mjpeg_qsv') if name in encoders})
-        qsv_decoders = sorted({name for name in ('h264_qsv', 'hevc_qsv', 'av1_qsv', 'mjpeg_qsv') if name in decoders})
-        listed = 'qsv' in hwaccels and 'h264_qsv' in encoders
-        runtime_usable = False
-        runtime_error = ''
-        if listed:
-            probe_args = [self.config.ffmpeg_path, '-hide_banner', '-v', 'error']
-            if render_devices:
-                probe_args.extend(['-qsv_device', render_devices[0]])
-            probe_args.extend(['-f', 'lavfi', '-i', 'color=size=64x64:rate=1', '-frames:v', '1', '-c:v', 'h264_qsv', '-f', 'null', '-'])
-            try:
-                probe = subprocess.run(probe_args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=8)
-                runtime_usable = probe.returncode == 0
-                runtime_error = '' if runtime_usable else (probe.stderr or 'QSV runtime probe failed').strip()[-500:]
-            except Exception as exc:
-                runtime_error = str(exc) or 'QSV runtime probe failed'
-        self._qsv_cache = {'available': bool(listed and runtime_usable), 'listed': bool(listed), 'runtime_usable': runtime_usable, 'runtime_error': runtime_error, 'hwaccel_listed': 'qsv' in hwaccels, 'encoders': qsv_encoders, 'decoders': qsv_decoders, 'render_devices': render_devices}
-        return self._qsv_cache
+        ffmpeg_path = self.config.ffmpeg_path
+        cache_key = (ffmpeg_path, tuple(render_devices))
+        with self._hardware_probe_lock:
+            if self._qsv_cache is not None and self._qsv_cache[0] == cache_key:
+                return self._qsv_cache[1]
+            hwaccels = self._run_ffmpeg_list(['-hwaccels'], ffmpeg_path=ffmpeg_path)
+            encoders = self._run_ffmpeg_list(['-encoders'], ffmpeg_path=ffmpeg_path)
+            decoders = self._run_ffmpeg_list(['-decoders'], ffmpeg_path=ffmpeg_path)
+            qsv_encoders = sorted({name for name in ('h264_qsv', 'hevc_qsv', 'av1_qsv', 'mjpeg_qsv') if name in encoders})
+            qsv_decoders = sorted({name for name in ('h264_qsv', 'hevc_qsv', 'av1_qsv', 'mjpeg_qsv') if name in decoders})
+            listed = 'qsv' in hwaccels and 'h264_qsv' in encoders
+            runtime_usable = False
+            runtime_error = ''
+            if listed:
+                probe_args = [ffmpeg_path, '-hide_banner', '-v', 'error']
+                if render_devices:
+                    probe_args.extend(['-qsv_device', render_devices[0]])
+                probe_args.extend(['-f', 'lavfi', '-i', 'color=size=64x64:rate=1', '-frames:v', '1', '-c:v', 'h264_qsv', '-f', 'null', '-'])
+                try:
+                    probe = subprocess.run(probe_args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=8)
+                    runtime_usable = probe.returncode == 0
+                    runtime_error = '' if runtime_usable else (probe.stderr or 'QSV runtime probe failed').strip()[-500:]
+                except Exception as exc:
+                    runtime_error = str(exc) or 'QSV runtime probe failed'
+            result = {'available': bool(listed and runtime_usable), 'listed': bool(listed), 'runtime_usable': runtime_usable, 'runtime_error': runtime_error, 'hwaccel_listed': 'qsv' in hwaccels, 'encoders': qsv_encoders, 'decoders': qsv_decoders, 'render_devices': render_devices}
+            self._qsv_cache = (cache_key, result)
+            return result
 
     def _ffmpeg_vaapi_info(self) -> dict:
-        if self._vaapi_cache is not None:
-            return self._vaapi_cache
-        hwaccels = self._run_ffmpeg_list(['-hwaccels'])
-        encoders = self._run_ffmpeg_list(['-encoders'])
-        decoders = self._run_ffmpeg_list(['-decoders'])
-        filters = self._run_ffmpeg_list(['-filters'])
         render_devices = self._dri_render_devices()
-        vaapi_encoders = sorted({name for name in ('h264_vaapi', 'hevc_vaapi', 'av1_vaapi', 'mjpeg_vaapi', 'mpeg2_vaapi', 'vp8_vaapi', 'vp9_vaapi') if name in encoders})
-        vaapi_decoders = sorted({name for name in ('h264_vaapi', 'hevc_vaapi', 'av1_vaapi', 'mjpeg_vaapi', 'mpeg2_vaapi', 'vp8_vaapi', 'vp9_vaapi') if name in decoders})
-        vaapi_filters = sorted({name for name in ('hwupload', 'scale_vaapi') if name in filters})
-        listed = 'vaapi' in hwaccels and 'h264_vaapi' in encoders and ('hwupload' in filters)
-        runtime_usable = False
-        runtime_error = ''
-        if listed and render_devices:
-            probe_args = [self.config.ffmpeg_path, '-hide_banner', '-v', 'error', '-vaapi_device', render_devices[0], '-f', 'lavfi', '-i', 'color=size=64x64:rate=1', '-frames:v', '1', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-f', 'null', '-']
-            try:
-                probe = subprocess.run(probe_args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=8)
-                runtime_usable = probe.returncode == 0
-                runtime_error = '' if runtime_usable else (probe.stderr or 'VAAPI runtime probe failed').strip()[-500:]
-            except Exception as exc:
-                runtime_error = str(exc) or 'VAAPI runtime probe failed'
-        elif listed:
-            runtime_error = 'No /dev/dri/renderD* render device found'
-        self._vaapi_cache = {'available': bool(listed and runtime_usable), 'listed': bool(listed), 'runtime_usable': runtime_usable, 'runtime_error': runtime_error, 'hwaccel_listed': 'vaapi' in hwaccels, 'encoders': vaapi_encoders, 'decoders': vaapi_decoders, 'filters': vaapi_filters, 'render_devices': render_devices, 'device': render_devices[0] if render_devices else ''}
-        return self._vaapi_cache
+        ffmpeg_path = self.config.ffmpeg_path
+        cache_key = (ffmpeg_path, tuple(render_devices))
+        with self._hardware_probe_lock:
+            if self._vaapi_cache is not None and self._vaapi_cache[0] == cache_key:
+                return self._vaapi_cache[1]
+            hwaccels = self._run_ffmpeg_list(['-hwaccels'], ffmpeg_path=ffmpeg_path)
+            encoders = self._run_ffmpeg_list(['-encoders'], ffmpeg_path=ffmpeg_path)
+            decoders = self._run_ffmpeg_list(['-decoders'], ffmpeg_path=ffmpeg_path)
+            filters = self._run_ffmpeg_list(['-filters'], ffmpeg_path=ffmpeg_path)
+            vaapi_encoders = sorted({name for name in ('h264_vaapi', 'hevc_vaapi', 'av1_vaapi', 'mjpeg_vaapi', 'mpeg2_vaapi', 'vp8_vaapi', 'vp9_vaapi') if name in encoders})
+            vaapi_decoders = sorted({name for name in ('h264_vaapi', 'hevc_vaapi', 'av1_vaapi', 'mjpeg_vaapi', 'mpeg2_vaapi', 'vp8_vaapi', 'vp9_vaapi') if name in decoders})
+            vaapi_filters = sorted({name for name in ('hwupload', 'scale_vaapi') if name in filters})
+            listed = 'vaapi' in hwaccels and 'h264_vaapi' in encoders and ('hwupload' in filters)
+            runtime_usable = False
+            runtime_error = ''
+            if listed and render_devices:
+                probe_args = [ffmpeg_path, '-hide_banner', '-v', 'error', '-vaapi_device', render_devices[0], '-f', 'lavfi', '-i', 'color=size=64x64:rate=1', '-frames:v', '1', '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-f', 'null', '-']
+                try:
+                    probe = subprocess.run(probe_args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=8)
+                    runtime_usable = probe.returncode == 0
+                    runtime_error = '' if runtime_usable else (probe.stderr or 'VAAPI runtime probe failed').strip()[-500:]
+                except Exception as exc:
+                    runtime_error = str(exc) or 'VAAPI runtime probe failed'
+            elif listed:
+                runtime_error = 'No /dev/dri/renderD* render device found'
+            result = {'available': bool(listed and runtime_usable), 'listed': bool(listed), 'runtime_usable': runtime_usable, 'runtime_error': runtime_error, 'hwaccel_listed': 'vaapi' in hwaccels, 'encoders': vaapi_encoders, 'decoders': vaapi_decoders, 'filters': vaapi_filters, 'render_devices': render_devices, 'device': render_devices[0] if render_devices else ''}
+            self._vaapi_cache = (cache_key, result)
+            return result
 
     def _hardware_acceleration_mode(self) -> str:
         mode = str(getattr(self.config, 'hardware_acceleration', 'auto') or 'auto').lower()
@@ -224,8 +243,66 @@ class RecordingMediaRuntime:
     def _media_export_manager(self) -> MediaExportManager:
         with self.media_exports_lock:
             if self.media_exports is None:
-                self.media_exports = MediaExportManager(storage_dir=self.manager.storage_dir, database_dir=self.manager.database_dir, recorder=lambda: self.manager.recorder, ffmpeg_path=lambda: self.config.ffmpeg_path, hardware_backend=self._media_export_hardware_backend, hardware_device=self._media_export_hardware_device)
-            return self.media_exports
+                self.media_exports = self._new_media_export_manager()
+            selected = self.media_exports
+            correctly_bound = (
+                selected.storage_dir == self.manager.storage_dir.resolve()
+                and selected.database_dir == self.manager.database_dir.resolve()
+            )
+        if not correctly_bound:
+            if not self.rebind_media_exports():
+                raise HTTPException(
+                    status_code=503,
+                    detail='media exports are unavailable while storage is being reconfigured',
+                )
+            with self.media_exports_lock:
+                selected = self.media_exports
+        return selected
+
+    def _new_media_export_manager(self) -> MediaExportManager:
+        return MediaExportManager(
+            storage_dir=self.manager.storage_dir,
+            database_dir=self.manager.database_dir,
+            recorder=lambda: self.manager.recorder,
+            ffmpeg_path=lambda: self.config.ffmpeg_path,
+            hardware_backend=self._media_export_hardware_backend,
+            hardware_device=self._media_export_hardware_device,
+        )
+
+    def rebind_media_exports(self) -> bool:
+        """Move the export worker to the current manager's storage generation."""
+        with self.media_exports_lock:
+            previous = self.media_exports
+            if previous is None:
+                return True
+            if (
+                previous.storage_dir == self.manager.storage_dir.resolve()
+                and previous.database_dir == self.manager.database_dir.resolve()
+            ):
+                return True
+            was_running = previous.is_running()
+            if was_running and not previous.stop(timeout=10.0):
+                LOGGER.error(
+                    'media export worker could not stop during manager cutover; '
+                    'retaining its existing storage binding'
+                )
+                return False
+            try:
+                replacement = self._new_media_export_manager()
+                if was_running:
+                    replacement.start()
+            except Exception:
+                LOGGER.exception(
+                    'media export worker could not bind to the replacement manager'
+                )
+                if was_running:
+                    try:
+                        previous.start()
+                    except Exception:
+                        LOGGER.exception('previous media export worker could not restart')
+                return False
+            self.media_exports = replacement
+            return True
 
     def _probe_video_codec(self, path: Path) -> str:
         try:

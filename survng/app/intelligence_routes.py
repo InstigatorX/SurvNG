@@ -39,6 +39,11 @@ from .security import redact_secret_text
 LOGGER = logging.getLogger(__name__)
 AI_RECOMMENDATION_SECRET = secrets.token_bytes(32)
 AI_RECOMMENDATION_MAX_AGE_SECONDS = 60 * 60
+CALIBRATION_MODE_LIMITS = {
+    "quick": (24.0, 100, 12),
+    "standard": (168.0, 100, 20),
+    "deep": (720.0, 100, 40),
+}
 
 class AuditAiApplyRequest(BaseModel):
     changes: list[AuditAiChange] = Field(default_factory=list, max_length=8)
@@ -108,6 +113,40 @@ class IntelligenceService:
 
     def __init__(self, deps: IntelligenceDependencies) -> None:
         self.deps = deps
+
+    def _run_registered_ai_worker(
+        self,
+        operation: str,
+        target: Callable[..., None],
+        args: tuple[Any, ...],
+    ) -> None:
+        try:
+            target(*args)
+        finally:
+            self.deps.end_ai_operation(operation)
+
+    def _start_registered_ai_thread(
+        self,
+        operation: str,
+        target: Callable[..., None],
+        args: tuple[Any, ...],
+        *,
+        name: str,
+    ) -> threading.Thread:
+        """Register manager-bound work before its thread can race a reload."""
+        self.deps.begin_ai_operation(operation)
+        thread = threading.Thread(
+            target=self._run_registered_ai_worker,
+            args=(operation, target, args),
+            name=name,
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except BaseException:
+            self.deps.end_ai_operation(operation)
+            raise
+        return thread
 
     def _audit_ai_context(self, audit: dict, active_config: AppConfig, active_manager: AppManager) -> dict:
         camera_id = str(audit.get('camera_id') or '')
@@ -700,9 +739,13 @@ class IntelligenceService:
             if not camera_ids:
                 raise HTTPException(status_code=400, detail='no cameras are configured')
             run = active_manager.events.create_calibration_run(mode=request.mode, camera_ids=camera_ids, configuration_fingerprint=calibration_configuration_fingerprint(active_config))
-        thread = threading.Thread(target=self._run_system_calibration, args=(int(run['id']), camera_ids, request.mode, active_config, active_manager), name=f'survng-calibration-{run['id']}', daemon=True)
         try:
-            thread.start()
+            self._start_registered_ai_thread(
+                'calibration',
+                self._run_system_calibration,
+                (int(run['id']), camera_ids, request.mode, active_config, active_manager),
+                name=f'survng-calibration-{run['id']}',
+            )
         except BaseException as exc:
             active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'Calibration worker could not start: {redact_secret_text(exc)}')
             raise HTTPException(status_code=503, detail='calibration worker could not start') from exc
@@ -871,9 +914,13 @@ class IntelligenceService:
                     break
             if selected is not None:
                 change_set_id, active_config, active_manager = selected
-                thread = threading.Thread(target=self._run_calibration_evaluation, args=(change_set_id, active_config, active_manager), name=f'survng-calibration-evaluation-{change_set_id}', daemon=True)
                 try:
-                    thread.start()
+                    self._start_registered_ai_thread(
+                        'calibration_evaluation',
+                        self._run_calibration_evaluation,
+                        (change_set_id, active_config, active_manager),
+                        name=f'survng-calibration-evaluation-{change_set_id}',
+                    )
                 except BaseException as exc:
                     LOGGER.exception('calibration evaluation worker could not start')
                     active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
@@ -899,9 +946,13 @@ class IntelligenceService:
             if datetime.now(timezone.utc) < ready_at:
                 raise HTTPException(status_code=409, detail=f'follow-up evidence is still being collected until {ready_at.isoformat()}')
             active_manager.events.update_calibration_change_set_status(change_set_id, 'reviewing')
-        thread = threading.Thread(target=self._run_calibration_evaluation, args=(change_set_id, active_config, active_manager), name=f'survng-calibration-evaluation-{change_set_id}', daemon=True)
         try:
-            thread.start()
+            self._start_registered_ai_thread(
+                'calibration_evaluation',
+                self._run_calibration_evaluation,
+                (change_set_id, active_config, active_manager),
+                name=f'survng-calibration-evaluation-{change_set_id}',
+            )
         except BaseException as exc:
             active_manager.events.update_calibration_evaluation(change_set_id, {'outcome': 'failed', 'error': f'Evaluation worker could not start: {redact_secret_text(exc)}'}, status='evaluation_failed')
             raise HTTPException(status_code=503, detail='calibration evaluation worker could not start') from exc
@@ -1630,5 +1681,3 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
         'start_motion_ai_review': service.start_motion_ai_review,
     }
     return IntelligenceRouteBundle(router=router, service=service, handlers=handlers)
-
-
