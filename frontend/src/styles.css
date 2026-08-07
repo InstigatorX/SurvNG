@@ -5838,6 +5838,11 @@ section.detection-settings-card {
   touch-action: pan-y;
 }
 
+.telemetry-trend-chart:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: -2px;
+}
+
 .telemetry-trend-chart svg {
   display: block;
   width: 100%;

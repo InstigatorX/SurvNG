@@ -7651,8 +7651,16 @@ function TelemetryTrend({ title, description, history, series, timeZone, interru
     const endX = xForTime(item.end_at);
     const actualStartX = Math.min(startX ?? 0, endX ?? 0);
     const actualWidth = Math.abs((endX ?? 0) - (startX ?? 0));
-    const displayWidth = Math.max(0.4, actualWidth);
-    const displayStartX = Math.max(0, Math.min(width - displayWidth, (markerX ?? actualStartX) - (displayWidth / 2)));
+    const displayWidth = Math.max(0.18, actualWidth);
+    const displayStartX = Math.max(
+      0,
+      Math.min(
+        width - displayWidth,
+        actualWidth >= 0.18
+          ? actualStartX
+          : (markerX ?? actualStartX) - (displayWidth / 2),
+      ),
+    );
     return {
       ...item,
       startX,
@@ -7660,8 +7668,6 @@ function TelemetryTrend({ title, description, history, series, timeZone, interru
       endX,
       displayStartX,
       displayWidth,
-      hitStartX: Math.max(0, (markerX ?? actualStartX) - 1.5),
-      hitEndX: Math.min(width, (markerX ?? actualStartX) + 1.5),
     };
   }).filter((item) => item.startX != null && item.endX != null && new Date(item.end_at).getTime() >= firstAt && new Date(item.start_at).getTime() <= lastAt);
   const coordinatesFor = (key, index) => {
@@ -7693,14 +7699,27 @@ function TelemetryTrend({ title, description, history, series, timeZone, interru
     ? 0
     : xForIndex(selectedIndex);
   const hoverX = hoverState?.x ?? selectedPointX;
-  const hoverInterruption = visibleInterruptions.find((item) => hoverX >= item.hitStartX && hoverX <= item.hitEndX) || null;
+  const interruptionHitTolerance = hoverState?.hitToleranceX ?? 0.25;
+  const hoverInterruption = visibleInterruptions.find((item) => (
+    hoverX >= item.displayStartX - interruptionHitTolerance
+    && hoverX <= item.displayStartX + item.displayWidth + interruptionHitTolerance
+  )) || null;
   const tooltipAlignment = hoverX < 25 ? "start" : hoverX > 75 ? "end" : "center";
+  const selectHoverIndex = (index) => {
+    if (!history.length) return;
+    const boundedIndex = Math.max(0, Math.min(history.length - 1, index));
+    setHoverState({ index: boundedIndex, x: xForIndex(boundedIndex), hitToleranceX: 0.25 });
+  };
   const updateHover = (event) => {
     if (!history.length) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
     if (timeSpan <= 0) {
-      setHoverState({ index: Math.round(ratio * Math.max(0, history.length - 1)), x: ratio * width });
+      setHoverState({
+        index: Math.round(ratio * Math.max(0, history.length - 1)),
+        x: ratio * width,
+        hitToleranceX: (6 / Math.max(1, bounds.width)) * width,
+      });
       return;
     }
     const targetTime = firstAt + ratio * timeSpan;
@@ -7710,15 +7729,40 @@ function TelemetryTrend({ title, description, history, series, timeZone, interru
         nearestIndex = index;
       }
     }
-    setHoverState({ index: nearestIndex, x: ratio * width });
+    setHoverState({
+      index: nearestIndex,
+      x: ratio * width,
+      hitToleranceX: (6 / Math.max(1, bounds.width)) * width,
+    });
+  };
+  const handleChartKeyDown = (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Home") selectHoverIndex(0);
+    else if (event.key === "End") selectHoverIndex(history.length - 1);
+    else {
+      const currentIndex = Number.isInteger(hoverState?.index)
+        ? hoverState.index
+        : history.length - 1;
+      selectHoverIndex(currentIndex + (event.key === "ArrowLeft" ? -1 : 1));
+    }
   };
   return (
     <article className={`telemetry-trend${selectedPoint ? " has-tooltip" : ""}`}>
-      <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values" aria-label="Chart lines">{series.map((item) => <span className={item.className || ""} key={item.key}><i /><b>{item.label}</b><em>{latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</em></span>)}</div></header>
+      <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values" aria-label="Chart lines">{series.map((item) => <span className={item.className || ""} key={item.key}><i /><b>{item.label}</b><em>Latest {latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</em></span>)}</div></header>
       <div
         className="telemetry-trend-chart"
+        tabIndex={history.length ? 0 : -1}
+        aria-label={`${title}. Point, tap, or use the arrow keys to inspect values.`}
         onPointerMove={updateHover}
         onPointerDown={updateHover}
+        onFocus={(event) => {
+          if (hoverState == null && event.currentTarget.matches(":focus-visible")) {
+            selectHoverIndex(history.length - 1);
+          }
+        }}
+        onBlur={() => setHoverState(null)}
+        onKeyDown={handleChartKeyDown}
         onPointerLeave={(event) => {
           if (event.pointerType === "mouse") setHoverState(null);
         }}
@@ -7737,7 +7781,7 @@ function TelemetryTrend({ title, description, history, series, timeZone, interru
         </svg>
         {selectedPoint ? (
           <div className={`telemetry-trend-tooltip ${tooltipAlignment}`} style={{ left: `${hoverX}%` }} role="status">
-            <time>{formatDateTime(selectedPoint.sampled_at, timeZone)}</time>
+            <time>{hoverInterruption ? `Restarted ${formatDateTime(hoverInterruption.marker_at, timeZone)}` : formatDateTime(selectedPoint.sampled_at, timeZone)}</time>
             {hoverInterruption ? <div className={`telemetry-trend-interruption-detail ${hoverInterruption.kind}`}><strong>{hoverInterruption.title}</strong><small>{formatDuration(hoverInterruption.duration_seconds || 0)} · {hoverInterruption.description}</small></div> : null}
             {series.map((item) => {
               const value = numericValue(selectedPoint[item.key]);
@@ -7841,7 +7885,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
     interruptionSummary.unknown ? `${interruptionSummary.unknown} unexplained gap${interruptionSummary.unknown === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
   return (
-    <TelemetryInterruptionsContext.Provider value={data.interruptions || []}>
+    <TelemetryInterruptionsContext.Provider value={selected ? [] : (data.interruptions || [])}>
     <div className="telemetry-viewer">
       <div className="telemetry-summary-grid">
         <article><span>Events · last hour</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
@@ -7861,10 +7905,10 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         </>}
       </div>
 
-      <div className={`telemetry-interruption-summary ${interruptionSummary.unexpected ? "danger" : interruptionSummary.unknown ? "warning" : "healthy"}`}>
+      {!selected ? <div className={`telemetry-interruption-summary ${interruptionSummary.unexpected ? "danger" : interruptionSummary.unknown ? "warning" : "healthy"}`}>
         <Clock3 size={16} />
-        <span><strong>Service continuity · last 24 hours</strong>{interruptionParts.length ? `${interruptionParts.join(" · ")} · ${formatDuration(interruptionSummary.duration_seconds || 0)} without telemetry` : "No recorded service interruptions."}<small><i /> Shaded chart bands mark service restarts; point at any graph to see its values.</small></span>
-      </div>
+        <span><strong>Service continuity · last 24 hours</strong>{interruptionParts.length ? `${interruptionParts.join(" · ")} · ${formatDuration(interruptionSummary.duration_seconds || 0)} without telemetry` : "No recorded service interruptions."}<small><i /> Shaded chart bands mark service restarts; point at or tap any graph to see its values.</small></span>
+      </div> : null}
 
       <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>Events by hour{selected ? ` · ${selected.name}` : ""}</h3><p>Persisted events {selected ? "for this camera" : "across all cameras"}; times use your configured zone.</p></div></div>

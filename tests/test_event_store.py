@@ -20,6 +20,11 @@ class EventStoreTest(unittest.TestCase):
             store = EventStore(root)
             now = datetime(2026, 8, 7, 12, tzinfo=timezone.utc)
             store.record_lifecycle_event(
+                "stale-instance",
+                "startup_started",
+                occurred_at=now - timedelta(days=9),
+            )
+            store.record_lifecycle_event(
                 "instance-a",
                 "startup_started",
                 occurred_at=now - timedelta(minutes=2),
@@ -32,12 +37,24 @@ class EventStoreTest(unittest.TestCase):
             )
 
             events = EventStore(root).lifecycle_events(hours=1, now=now)
+            with sqlite3.connect(store.db_path) as conn:
+                stored_count = conn.execute(
+                    "select count(*) from system_lifecycle_events"
+                ).fetchone()[0]
 
         self.assertEqual([event["kind"] for event in events], [
             "startup_started",
             "startup_ready",
         ])
         self.assertEqual(events[-1]["details"], {"cameras": 13})
+        self.assertEqual(stored_count, 2)
+
+    def test_process_lifecycle_rejects_unknown_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+
+            with self.assertRaisesRegex(ValueError, "unsupported lifecycle event"):
+                store.record_lifecycle_event("instance-a", "restarting")
 
     def test_camera_intelligence_effectiveness_lifecycle_is_durable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

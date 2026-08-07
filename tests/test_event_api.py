@@ -412,6 +412,47 @@ class EventApiSerializationTest(unittest.TestCase):
             for call in fake_manager.events.tracking_capacity_activity.call_args_list:
                 self.assertEqual(call.kwargs["camera_id"], "gate")
 
+    def test_telemetry_history_survives_interruption_annotation_failure(self) -> None:
+        events = SimpleNamespace(
+            runtime_telemetry_sample_times=Mock(side_effect=RuntimeError("database busy")),
+            lifecycle_events=Mock(return_value=[]),
+            runtime_telemetry_history=Mock(return_value=[{"sampled_at": "2026-08-07T10:00:00+00:00"}]),
+            tracking_capacity_activity=Mock(return_value=[]),
+            process_memory_history=Mock(return_value=[]),
+        )
+        fake_manager = SimpleNamespace(events=events)
+
+        with (
+            patch.object(main, "manager", fake_manager),
+            patch.object(main.time, "monotonic", return_value=1234.0),
+        ):
+            history = main._persisted_telemetry_history("")
+
+        self.assertEqual(history["interruptions"], [])
+        self.assertEqual(history["interruption_summary"]["total"], 0)
+        self.assertEqual(len(history["runtime"]["short"]), 1)
+        self.assertEqual(events.runtime_telemetry_history.call_count, 2)
+
+    def test_camera_telemetry_omits_system_interruption_annotations(self) -> None:
+        events = SimpleNamespace(
+            runtime_telemetry_sample_times=Mock(return_value=["2026-08-07T10:00:00+00:00"]),
+            lifecycle_events=Mock(return_value=[]),
+            runtime_telemetry_history=Mock(return_value=[]),
+            tracking_capacity_activity=Mock(return_value=[]),
+        )
+        fake_manager = SimpleNamespace(events=events)
+
+        with (
+            patch.object(main, "manager", fake_manager),
+            patch.object(main.time, "monotonic", return_value=2345.0),
+        ):
+            history = main._persisted_telemetry_history("gate")
+
+        self.assertEqual(history["interruptions"], [])
+        self.assertEqual(history["interruption_summary"]["total"], 0)
+        events.runtime_telemetry_sample_times.assert_not_called()
+        events.lifecycle_events.assert_not_called()
+
     def test_object_tracking_catalog_exposes_only_safe_production_backend(self) -> None:
         catalog = main.object_tracking_catalog()
         implementations = {

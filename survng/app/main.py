@@ -1811,16 +1811,24 @@ def _persisted_telemetry_history(camera_id: str) -> dict[str, Any]:
         cached = TELEMETRY_PERSISTED_CACHE.get(cache_key)
         if cached is not None and now - float(cached["at"]) < 55.0:
             return cached["value"]
-    sample_times_reader = getattr(
-        manager.events,
-        "runtime_telemetry_sample_times",
-        None,
-    )
-    lifecycle_reader = getattr(manager.events, "lifecycle_events", None)
-    interruptions = classify_telemetry_interruptions(
-        sample_times_reader(hours=168) if callable(sample_times_reader) else [],
-        lifecycle_reader(hours=168) if callable(lifecycle_reader) else [],
-    )
+    interruptions: list[dict[str, Any]] = []
+    if not camera_id:
+        sample_times_reader = getattr(
+            manager.events,
+            "runtime_telemetry_sample_times",
+            None,
+        )
+        lifecycle_reader = getattr(manager.events, "lifecycle_events", None)
+        try:
+            interruptions = classify_telemetry_interruptions(
+                sample_times_reader(hours=168) if callable(sample_times_reader) else [],
+                lifecycle_reader(hours=168) if callable(lifecycle_reader) else [],
+                observed_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "could not load telemetry interruption annotations"
+            )
     value = {
         "runtime": {
             "short": manager.events.runtime_telemetry_history(
