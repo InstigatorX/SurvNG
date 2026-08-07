@@ -1895,7 +1895,7 @@ button.status-pill.hud-toggle:disabled {
   z-index: 80;
   display: grid;
   place-items: center;
-  padding: 22px;
+  padding: 8px;
 }
 
 .live-overlay-backdrop {
@@ -1911,23 +1911,33 @@ button.status-pill.hud-toggle:disabled {
 .live-overlay-panel {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
-  width: min(96vw, 1440px, calc((94vh - 76px) * var(--media-ratio, 1.777778) + 24px));
-  max-height: 94vh;
+  display: block;
+  width: min(
+    calc(100vw - 16px),
+    calc((100dvh - 16px) * var(--media-ratio, 1.777778))
+  );
+  max-height: calc(100dvh - 16px);
+  overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   background: var(--panel-solid);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
-  padding: 12px;
+  padding: 0;
 }
 
 .live-overlay-head {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  border-radius: 7px 7px 0 0;
+  background: linear-gradient(to bottom, rgba(3, 10, 12, 0.88), rgba(3, 10, 12, 0.48), transparent);
+  padding: 10px 12px 24px;
 }
 
 .live-overlay-head h2 {
@@ -1971,7 +1981,7 @@ button.status-pill.hud-toggle:disabled {
   justify-content: center;
   overflow: hidden;
   width: 100%;
-  max-height: calc(94vh - 76px);
+  max-height: calc(100dvh - 16px);
   aspect-ratio: var(--media-aspect, 16 / 9);
   border-radius: 8px;
   background: var(--video-bg);
@@ -8964,12 +8974,12 @@ section.detection-settings-card {
 
   .live-overlay-panel {
     width: 100%;
-    max-height: 96vh;
-    padding: 8px;
+    max-height: calc(100dvh - 16px);
+    padding: 0;
   }
 
   .live-overlay-media {
-    max-height: calc(96vh - 68px);
+    max-height: calc(100dvh - 16px);
   }
 
   .actions {
