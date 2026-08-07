@@ -39,6 +39,14 @@ targeted cutover requires the prior command and telemetry workers to quiesce,
 uses strict setup validation for the replacement, and restores the prior
 generation if replacement startup fails.
 
+Runtime camera power, recording, and detection preferences are owned by one
+`CameraControlService`. It atomically persists desired state before applying a
+command, rolls memory state back when persistence fails, serializes recorder
+cutovers against API and MQTT commands, and rejects new commands once shutdown
+begins. Full-manager replacement transfers one immutable preference snapshot to
+the candidate generation; a fresh process intentionally starts all controls on
+instead of loading stale automation state from the prior process.
+
 ## Full manager reload
 
 A transactional manager reload remains necessary when a setting changes object

@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig
 from survng.app.camera_fleet import CameraFleetLifecycle
+from survng.app.camera_control import CameraControlService
 from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
 from survng.app.mqtt_lifecycle import MqttLifecycle
@@ -32,9 +33,6 @@ def manager_with_mocks() -> AppManager:
         recorder_settle_seconds=0.0,
         poll_interval_seconds=0.01,
     )
-    manager._camera_enabled = {"gate": True}
-    manager._recording_enabled = {}
-    manager._detection_enabled = {}
     manager.detector = Mock()
     manager.faces = Mock()
     manager.inference = Mock()
@@ -65,7 +63,6 @@ def manager_with_mocks() -> AppManager:
     manager.workers["gate"].wait_onvif_stopped.return_value = True
     manager.workers["gate"].active_workers.return_value = []
     manager.runtime_monitor = Mock()
-    manager._save_runtime_state = Mock()
     manager.camera_fleet = CameraFleetLifecycle(
         cameras=[camera],
         workers=manager.workers,
@@ -73,6 +70,16 @@ def manager_with_mocks() -> AppManager:
         startup=camera_startup,
         state_publisher=manager.mqtt,
     )
+    manager.camera_controls = CameraControlService(
+        cameras=[camera],
+        workers=manager.workers,
+        recording=manager.recording,
+        fleet=manager.camera_fleet,
+        mqtt=manager.mqtt,
+        runtime_monitor=manager.runtime_monitor,
+        state_path=Path("runtime_state.json"),
+    )
+    manager.camera_controls._persist_locked = Mock()
     return manager
 
 
@@ -428,15 +435,13 @@ class ManagerLifecycleTest(unittest.TestCase):
 
             manager.stop_all()
 
-    def test_shutdown_state_prevents_late_startup_recorder_launch(self) -> None:
+    def test_quiesced_controls_prevent_late_recorder_launch(self) -> None:
         manager = manager_with_mocks()
-        camera = manager.config.cameras[0]
-        camera.record_sub = True
-        camera.live_stream_url = "rtsp://camera/live"
-        manager._stopping = True
+        manager.camera_controls.quiesce()
 
-        manager._start_configured_recorders(camera)
+        accepted = manager.set_recording("gate", True)
 
+        self.assertFalse(accepted)
         manager.recorder.start.assert_not_called()
 
     def test_camera_startup_failure_is_isolated_and_reported(self) -> None:
@@ -618,23 +623,23 @@ class ManagerLifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "stop failed"):
             manager.stop_camera("gate")
 
-        self.assertFalse(manager._camera_enabled["gate"])
+        self.assertFalse(manager.camera_controls.camera_enabled("gate"))
         self.assertFalse(manager.camera_fleet.camera_enabled("gate"))
         self.assertEqual(
             manager.recorder.set_camera_enabled.call_args_list,
             [unittest.mock.call("gate", False), unittest.mock.call("gate", False)],
         )
-        self.assertEqual(manager._save_runtime_state.call_count, 1)
+        self.assertEqual(manager.camera_controls._persist_locked.call_count, 1)
         manager.mqtt.publish_camera_state.assert_called_once_with("gate", False)
 
     def test_camera_power_persistence_failure_does_not_touch_runtime(self) -> None:
         manager = manager_with_mocks()
-        manager._save_runtime_state.side_effect = OSError("disk full")
+        manager.camera_controls._persist_locked.side_effect = OSError("disk full")
 
         with self.assertRaisesRegex(OSError, "disk full"):
             manager.stop_camera("gate")
 
-        self.assertTrue(manager._camera_enabled["gate"])
+        self.assertTrue(manager.camera_controls.camera_enabled("gate"))
         self.assertTrue(manager.camera_fleet.camera_enabled("gate"))
         manager.recorder.set_camera_enabled.assert_not_called()
         manager.workers["gate"].stop.assert_not_called()
@@ -676,7 +681,7 @@ class ManagerLifecycleTest(unittest.TestCase):
     def test_persisted_runtime_preferences_roll_back_on_write_failure(self) -> None:
         manager = manager_with_mocks()
         previous = manager.runtime_preferences()
-        manager._save_runtime_state.side_effect = OSError("disk full")
+        manager.camera_controls._persist_locked.side_effect = OSError("disk full")
 
         with self.assertRaisesRegex(OSError, "disk full"):
             manager.apply_runtime_preferences(
@@ -724,25 +729,30 @@ class ManagerLifecycleTest(unittest.TestCase):
 
     def test_runtime_preference_write_failure_rolls_back_memory(self) -> None:
         manager = manager_with_mocks()
-        manager._recording_enabled = {"gate": True}
-        manager._save_runtime_state.side_effect = OSError("disk full")
+        manager.camera_controls.apply({"recording_enabled": {"gate": True}})
+        manager.camera_controls._persist_locked.side_effect = OSError("disk full")
 
         with self.assertRaisesRegex(OSError, "disk full"):
             manager.set_recording("gate", False)
 
-        self.assertEqual(manager._recording_enabled, {"gate": True})
+        self.assertEqual(
+            manager.camera_controls.snapshot()["recording_enabled"],
+            {"gate": True},
+        )
         manager.recorder.set_camera_enabled.assert_not_called()
 
     def test_runtime_state_write_is_atomic_and_cleans_failed_temporary_file(self) -> None:
         manager = manager_with_mocks()
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager._runtime_state_lock = threading.Lock()
-            manager._runtime_state_path = Path(tmpdir) / "runtime_state.json"
-            manager._runtime_state_path.write_text('{"original": true}\n', encoding="utf-8")
-            with patch("survng.app.manager.json.dump", side_effect=OSError("disk full")):
+            manager.camera_controls._state_path = Path(tmpdir) / "runtime_state.json"
+            manager.camera_controls._state_path.write_text('{"original": true}\n', encoding="utf-8")
+            manager.camera_controls._persist_locked = (
+                CameraControlService._persist_locked.__get__(manager.camera_controls)
+            )
+            with patch("survng.app.camera_control.json.dump", side_effect=OSError("disk full")):
                 with self.assertRaisesRegex(OSError, "disk full"):
-                    AppManager._save_runtime_state(manager)
-            contents = manager._runtime_state_path.read_text(encoding="utf-8")
+                    manager.camera_controls.persist()
+            contents = manager.camera_controls._state_path.read_text(encoding="utf-8")
             temporary_files = list(Path(tmpdir).glob(".runtime_state.json.*.tmp"))
 
         self.assertEqual(contents, '{"original": true}\n')
@@ -750,12 +760,12 @@ class ManagerLifecycleTest(unittest.TestCase):
 
     def test_disabled_camera_remains_stopped_during_manager_start(self) -> None:
         manager = manager_with_mocks()
-        manager._camera_enabled["gate"] = False
+        manager.camera_controls.apply({"camera_enabled": {"gate": False}})
 
         manager.start_all()
         self.assertTrue(manager.wait_for_camera_startup(timeout=1))
 
-        manager._save_runtime_state.assert_called_once_with()
+        self.assertEqual(manager.camera_controls._persist_locked.call_count, 1)
         manager.workers["gate"].start.assert_not_called()
         manager.recorder.set_camera_enabled.assert_called_with("gate", False)
         manager.mqtt.publish_camera_state.assert_called_with("gate", False)
@@ -768,7 +778,7 @@ class ManagerLifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "capture failed"):
             manager.start_camera("gate")
 
-        self.assertTrue(manager._camera_enabled["gate"])
+        self.assertTrue(manager.camera_controls.camera_enabled("gate"))
         self.assertEqual(
             manager.recorder.set_camera_enabled.call_args_list[-1].args,
             ("gate", True),
