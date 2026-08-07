@@ -12,6 +12,7 @@ from survng.app.config import AppConfig, CameraConfig
 from survng.app.camera_fleet import CameraFleetLifecycle
 from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
+from survng.app.recording_lifecycle import RecordingLifecycle
 
 
 def manager_with_mocks() -> AppManager:
@@ -45,6 +46,15 @@ def manager_with_mocks() -> AppManager:
     manager.inference.tracking_factory = Mock()
     manager.inference.status.return_value = {}
     manager.recorder = Mock()
+    manager.recorder.ffmpeg_path = manager.config.ffmpeg_path
+    manager.recorder.hardware_acceleration = manager.config.hardware_acceleration
+    manager.recorder.segment_seconds = manager.config.recording_segment_seconds
+    manager.recording = RecordingLifecycle(
+        config=manager.config,
+        storage_dir=Path("."),
+        protected_recording_paths=set,
+        recorder=manager.recorder,
+    )
     manager.mqtt = Mock()
     manager.state_events = Mock()
     manager.workers = {"gate": Mock()}
@@ -357,12 +367,14 @@ class ManagerLifecycleTest(unittest.TestCase):
         inference.person_reidentifier = Mock()
         inference.tracking_factory = Mock()
         recorder = Mock()
+        recording = Mock()
+        recording.recorder = recorder
         state_events = Mock()
         mqtt = Mock()
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch("survng.app.manager.InferenceLifecycle", return_value=inference),
-            patch("survng.app.manager.Recorder", return_value=recorder),
+            patch("survng.app.manager.RecordingLifecycle", return_value=recording),
             patch("survng.app.manager.StateEventBroker", return_value=state_events),
             patch("survng.app.manager.MqttService", return_value=mqtt),
             patch.object(AppManager, "_create_camera_worker", side_effect=RuntimeError("worker failed")),
@@ -375,15 +387,17 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         mqtt.stop.assert_called_once_with()
         inference.close.assert_called_once_with()
-        recorder.stop_all.assert_called_once_with()
+        recording.close.assert_called_once_with()
         state_events.close.assert_called_once_with()
 
     def test_inference_construction_failure_closes_recorder_and_state_broker(self) -> None:
         recorder = Mock()
+        recording = Mock()
+        recording.recorder = recorder
         state_events = Mock()
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            patch("survng.app.manager.Recorder", return_value=recorder),
+            patch("survng.app.manager.RecordingLifecycle", return_value=recording),
             patch("survng.app.manager.StateEventBroker", return_value=state_events),
             patch(
                 "survng.app.manager.InferenceLifecycle",
@@ -393,7 +407,7 @@ class ManagerLifecycleTest(unittest.TestCase):
         ):
             AppManager(AppConfig(storage_dir=tmpdir, cameras=[]))
 
-        recorder.stop_all.assert_called_once_with()
+        recording.close.assert_called_once_with()
         state_events.close.assert_called_once_with()
 
     def test_manager_keeps_databases_and_onvif_caches_outside_media_storage(self) -> None:

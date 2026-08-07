@@ -997,10 +997,7 @@ def apply_config_update(
                 manager.reconfigure_mqtt(effective_config.mqtt)
             if retention_changed:
                 retention_attempted = True
-                manager.recorder.reconfigure_retention(
-                    effective_config.retention,
-                    effective_config.cameras,
-                )
+                manager.reconfigure_recording_retention(effective_config)
             if image_storage_changed:
                 image_storage_attempted = True
                 manager.reconfigure_image_storage(effective_config.image_storage)
@@ -1063,10 +1060,7 @@ def apply_config_update(
                     )
             if retention_attempted:
                 try:
-                    manager.recorder.reconfigure_retention(
-                        previous_config.retention,
-                        previous_config.cameras,
-                    )
+                    manager.reconfigure_recording_retention(previous_config)
                 except Exception:
                     logging.getLogger(__name__).exception(
                         "failed to roll back recording retention configuration"
@@ -1443,12 +1437,12 @@ class MediaExportBatchRequest(BaseModel):
 
 @app.get("/api/retention/status")
 def recording_retention_status() -> dict:
-    return manager.recorder.retention_status()
+    return manager.recording.retention_status()
 
 
 @app.post("/api/retention/run", status_code=202)
 def run_recording_retention(request: RecordingRetentionRequest) -> dict:
-    return manager.recorder.request_retention_run(apply=request.apply)
+    return manager.recording.request_retention_run(apply=request.apply)
 
 
 @app.get("/api/maintenance/storage")

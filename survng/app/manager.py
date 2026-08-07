@@ -56,7 +56,7 @@ from .motion_pipeline import (
     resolve_motion_pipeline_graphs,
 )
 from .motion_analysis import FairMotionAnalysisLimiter
-from .recorder import Recorder
+from .recording_lifecycle import RecordingLifecycle
 from .state_events import StateEventBroker
 from .security import redact_secret_text
 
@@ -131,16 +131,14 @@ class AppManager:
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.semantic_index = SemanticIndex(self.events.db_path)
-        recording_index_dir = Path(config.recording_index_dir) if config.recording_index_dir else None
-        self.recorder = Recorder(
-            config.ffmpeg_path,
-            self.storage_dir,
-            config.recording_segment_seconds,
-            config.hardware_acceleration,
-            index_dir=recording_index_dir,
-            retention_config=config.retention,
+        self.recording = RecordingLifecycle(
+            config=config,
+            storage_dir=self.storage_dir,
             protected_recording_paths=self.events.protected_recording_paths,
         )
+        # Compatibility handle for media APIs and camera dependencies. Shared
+        # lifecycle/reconfiguration ownership lives in ``self.recording``.
+        self.recorder = self.recording.recorder
         self.go2rtc = Go2RtcAdapter()
         # Camera startup pacing is an internal safety policy. Keep native
         # OpenCV admission and the startup coordinator on the same fixed cap.
@@ -165,7 +163,7 @@ class AppManager:
             )
         except BaseException:
             for label, operation in (
-                ("recorder", self.recorder.stop_all),
+                ("recording lifecycle", self.recording.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -198,7 +196,7 @@ class AppManager:
         except BaseException:
             for label, operation in (
                 ("inference lifecycle", self.inference.close),
-                ("recorder", self.recorder.stop_all),
+                ("recording lifecycle", self.recording.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -259,7 +257,7 @@ class AppManager:
             for label, callback in (
                 ("MQTT", self.mqtt.stop),
                 ("inference lifecycle", self.inference.close),
-                ("recorder", self.recorder.stop_all),
+                ("recording lifecycle", self.recording.close),
                 ("state event broker", self.state_events.close),
             ):
                 try:
@@ -437,15 +435,7 @@ class AppManager:
     def _start_configured_recorders(self, camera) -> None:
         if self._stopping or self._closed:
             return
-        if camera.record:
-            self.recorder.start(camera, "main")
-        if (
-            not self._stopping
-            and not self._closed
-            and camera.record_sub
-            and camera.live_stream_url
-        ):
-            self.recorder.start(camera, "live")
+        self.recording.start_camera(camera)
 
     def set_recording(self, camera_id: str, enabled: bool) -> bool:
         with self._lifecycle_lock:
@@ -466,7 +456,7 @@ class AppManager:
                     self._recording_enabled.pop(camera_id, None)
                 raise
             should_run = self._recorder_should_run(camera_id)
-            self.recorder.set_camera_enabled(camera_id, should_run)
+            self.recording.set_camera_enabled(camera_id, should_run)
             if should_run:
                 self._start_configured_recorders(camera)
             self.mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
@@ -563,13 +553,12 @@ class AppManager:
                     "inference_seconds": round(time.monotonic() - phase_started, 3),
                 }
                 cameras = list(self._unique_cameras())
-                phase_started = time.monotonic()
-                self.recorder.cleanup_stale_recorders(
-                    self.camera_fleet.recorder_keys()
+                recording_timings = self.recording.start_services(
+                    cameras,
+                    self.camera_fleet.recorder_keys(),
                 )
                 self._startup_timings["recorder_cleanup_seconds"] = round(
-                    time.monotonic() - phase_started,
-                    3,
+                    recording_timings.cleanup_seconds, 3
                 )
                 startup_tasks = self.camera_fleet.prepare_startup(
                     camera_enabled=self._camera_enabled,
@@ -577,12 +566,8 @@ class AppManager:
                     detection_enabled=self._detection_enabled,
                     recording_is_enabled=self.recording_enabled,
                 )
-                phase_started = time.monotonic()
-                self.recorder.start_indexer(cameras)
-                self.recorder.start_watchdog(cameras)
                 self._startup_timings["recorder_services_seconds"] = round(
-                    time.monotonic() - phase_started,
-                    3,
+                    recording_timings.services_seconds, 3
                 )
                 # Publish discovery only after persisted recording/detection preferences
                 # have been applied to every worker.
@@ -722,7 +707,7 @@ class AppManager:
         attempt("inference lifecycle", self.inference.close)
 
         LOGGER.info("SurvNG shutdown: stopping recorder processes")
-        attempt("recorders", self.recorder.stop_all)
+        attempt("recording lifecycle", self.recording.close)
         attempt("state event broker", self.state_events.close)
         LOGGER.info("SurvNG shutdown complete in %.2fs", time.monotonic() - started)
         if errors:
@@ -752,7 +737,7 @@ class AppManager:
             try:
                 if not self.camera_fleet.set_camera_enabled(camera_id, True):
                     raise RuntimeError(f"camera {camera_id} is not in the fleet")
-                self.recorder.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
+                self.recording.set_camera_enabled(camera_id, self.recording_enabled(camera_id))
                 if not self.camera_fleet.start_camera(camera_id):
                     raise RuntimeError(f"camera {camera_id} could not start")
             except Exception:
@@ -762,7 +747,7 @@ class AppManager:
                     self._save_runtime_state()
                 except Exception:
                     LOGGER.exception("failed to roll back camera power state for %s", camera_id)
-                self.recorder.set_camera_enabled(
+                self.recording.set_camera_enabled(
                     camera_id,
                     previous and self.recording_enabled(camera_id),
                 )
@@ -789,7 +774,7 @@ class AppManager:
             try:
                 if not self.camera_fleet.set_camera_enabled(camera_id, False):
                     raise RuntimeError(f"camera {camera_id} is not in the fleet")
-                self.recorder.set_camera_enabled(camera_id, False)
+                self.recording.set_camera_enabled(camera_id, False)
                 if not self.camera_fleet.stop_camera(camera_id):
                     raise RuntimeError(f"camera {camera_id} could not stop")
             except Exception:
@@ -798,7 +783,7 @@ class AppManager:
                 # verified compensating start; leave it explicitly off/FAILED.
                 self._camera_enabled[camera_id] = False
                 self.camera_fleet.set_camera_enabled(camera_id, False)
-                self.recorder.set_camera_enabled(camera_id, False)
+                self.recording.set_camera_enabled(camera_id, False)
                 self.mqtt.publish_camera_state(camera_id, False)
                 self._publish_camera_status(camera_id)
                 raise
@@ -1026,25 +1011,18 @@ class AppManager:
                 )
                 for camera in cameras
             }
-            for camera in cameras:
-                self.recorder.set_camera_enabled(camera.id, False)
-            try:
-                self.recorder.reconfigure_runtime(
-                    ffmpeg_path=next_config.ffmpeg_path,
-                    hardware_acceleration=next_config.hardware_acceleration,
-                    segment_seconds=next_config.recording_segment_seconds,
-                )
-            finally:
-                for camera in cameras:
-                    self.recorder.set_camera_enabled(
-                        camera.id,
-                        desired_enabled[camera.id],
-                    )
-            if not self._started:
-                return
-            for camera in cameras:
-                if desired_enabled[camera.id]:
-                    self._start_configured_recorders(camera)
+            self.recording.reconfigure(
+                next_config,
+                cameras,
+                desired_enabled,
+                restart_recorders=self._started,
+            )
+
+    def reconfigure_recording_retention(self, next_config: AppConfig) -> None:
+        self.recording.reconfigure_retention(
+            next_config.retention,
+            list(self._unique_cameras()),
+        )
 
     def reconfigure_image_storage(self, config: ImageStorageConfig) -> None:
         self.image_writer.reconfigure(config)

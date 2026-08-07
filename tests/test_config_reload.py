@@ -309,7 +309,7 @@ class ConfigReloadTest(unittest.TestCase):
         reload.assert_not_called()
         save.assert_called_once_with(effective, assign_ids=False)
         active.reconfigure_mqtt.assert_not_called()
-        active.recorder.reconfigure_retention.assert_not_called()
+        active.reconfigure_recording_retention.assert_not_called()
         active.reconfigure_image_storage.assert_not_called()
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
@@ -334,7 +334,7 @@ class ConfigReloadTest(unittest.TestCase):
         reload.assert_not_called()
         active.reconfigure_image_storage.assert_called_once_with(effective.image_storage)
         active.reconfigure_mqtt.assert_not_called()
-        active.recorder.reconfigure_retention.assert_not_called()
+        active.reconfigure_recording_retention.assert_not_called()
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
@@ -558,7 +558,7 @@ class ConfigReloadTest(unittest.TestCase):
 
         reload.assert_not_called()
         active.reconfigure_mqtt.assert_called_once_with(incoming.mqtt)
-        active.recorder.reconfigure_retention.assert_not_called()
+        active.reconfigure_recording_retention.assert_not_called()
         self.assertEqual(result["subsystems_restarted"], ["mqtt"])
         self.assertFalse(result["camera_workers_restarted"])
 
@@ -603,10 +603,7 @@ class ConfigReloadTest(unittest.TestCase):
 
         reload.assert_not_called()
         active.reconfigure_mqtt.assert_not_called()
-        active.recorder.reconfigure_retention.assert_called_once_with(
-            effective.retention,
-            effective.cameras,
-        )
+        active.reconfigure_recording_retention.assert_called_once_with(effective)
         self.assertIn("retention", result["hot_updated"])
         self.assertFalse(result["camera_workers_restarted"])
 
@@ -666,7 +663,7 @@ class ConfigReloadTest(unittest.TestCase):
             unittest.mock.call(incoming.mqtt),
             unittest.mock.call(current.mqtt),
         ])
-        active.recorder.reconfigure_retention.assert_not_called()
+        active.reconfigure_recording_retention.assert_not_called()
         self.assertEqual(save.call_count, 2)
         self.assertEqual(save.call_args_list[0].args[0], incoming)
         self.assertIs(save.call_args_list[1].args[0], current)
@@ -687,7 +684,7 @@ class ConfigReloadTest(unittest.TestCase):
                 main.apply_config_update(incoming)
 
         active.reconfigure_mqtt.assert_not_called()
-        active.recorder.reconfigure_retention.assert_not_called()
+        active.reconfigure_recording_retention.assert_not_called()
         self.assertIs(main.config, current)
         self.assertIs(active.config, current)
 

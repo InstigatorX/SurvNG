@@ -26,6 +26,12 @@ Recorder engine changes (`ffmpeg_path`, hardware acceleration, and segment
 duration) fence the recorder watchdog and restart only FFmpeg recorder
 processes. Camera capture and ONVIF workers remain active.
 
+A dedicated `RecordingLifecycle` owns stale-process cleanup, indexer/watchdog
+startup, terminal teardown, and recorder-engine cutover. A failed targeted
+cutover restores the prior FFmpeg settings and desired per-camera recorder
+state before surfacing the error, so configuration persistence cannot leave a
+partially replaced recording generation behind.
+
 ## Full manager reload
 
 A transactional manager reload remains necessary when a setting changes object
