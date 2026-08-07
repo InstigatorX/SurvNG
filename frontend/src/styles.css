@@ -4250,14 +4250,44 @@ section.detection-settings-card {
 
 .zone-fields {
   display: grid;
-  grid-template-columns: repeat(6, minmax(110px, 1fr)) auto;
+  grid-template-columns: minmax(150px, 1.1fr) 56px minmax(120px, .75fr) minmax(160px, 1fr) 76px max-content auto;
   align-items: end;
   gap: 8px;
 }
 
 .zone-color-input {
-  min-width: 48px;
+  width: 56px;
+  min-width: 0;
   padding: 3px !important;
+}
+
+.zone-fields > label > select {
+  height: 38px;
+  min-height: 38px;
+}
+
+.zone-toggle-stack {
+  display: grid;
+  align-self: end;
+  min-height: 38px;
+  gap: 2px;
+}
+
+.zone-toggle-stack label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.zone-toggle-stack input {
+  width: auto;
+  min-height: auto;
+  margin: 0;
 }
 
 .zone-class-field {
@@ -4275,6 +4305,11 @@ section.detection-settings-card {
 
 .zone-class-dropdown {
   position: relative;
+}
+
+.zone-class-dropdown.disabled {
+  opacity: .58;
+  pointer-events: none;
 }
 
 .zone-class-dropdown summary {

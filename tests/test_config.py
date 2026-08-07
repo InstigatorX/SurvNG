@@ -13,6 +13,7 @@ from survng.app.config import (
     AppConfig,
     CameraConfig,
     CameraTransitionRoute,
+    DetectionZone,
     MqttConfig,
     ObjectTrackingConfig,
     load_config,
@@ -22,6 +23,12 @@ from survng.app.config import (
 
 
 class AppConfigTest(unittest.TestCase):
+    def test_detection_zone_can_exclude_ema_without_ignoring_objects(self) -> None:
+        zone = DetectionZone(name="Road", exclude_from_ema=True, behavior="none")
+
+        self.assertTrue(zone.exclude_from_ema)
+        self.assertEqual(zone.behavior, "none")
+
     def test_camera_transition_routes_validate_topology_and_timing(self) -> None:
         config = AppConfig.model_validate({
             "cameras": [

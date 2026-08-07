@@ -43,7 +43,8 @@ class DetectionZone(BaseModel):
     points: list[ZonePoint] = Field(default_factory=list)
     object_classes: list[str] = Field(default_factory=list)
     confidence_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
-    behavior: Literal["incident", "ignore"] = "incident"
+    behavior: Literal["incident", "ignore", "none"] = "incident"
+    exclude_from_ema: bool = False
     trigger: Literal["bottom_center"] = "bottom_center"
 
 

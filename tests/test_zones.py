@@ -153,6 +153,22 @@ class DetectionZoneTest(unittest.TestCase):
         self.assertEqual(objects[0]["zones"], ["Lower Driveway"])
         self.assertFalse(objects[0]["incident_eligible"])
 
+    def test_no_object_effect_zone_does_not_change_incident_eligibility(self) -> None:
+        self.camera.zones[0].behavior = "none"
+        self.camera.zones[0].confidence_threshold = 0.2
+        objects = [{
+            "label": "car",
+            "confidence": 0.4,
+            "box": {"x1": 438, "y1": 897, "x2": 1914, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.45)
+
+        self.assertEqual(objects[0]["zones"], [])
+        self.assertFalse(objects[0]["confidence_eligible"])
+        self.assertFalse(objects[0]["incident_eligible"])
+        self.assertEqual(detection_threshold(self.camera, 0.45), 0.45)
+
     def test_reapplication_clears_stale_zone_metadata(self) -> None:
         detected = {
             "label": "car",

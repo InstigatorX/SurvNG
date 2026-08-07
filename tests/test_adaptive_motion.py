@@ -86,6 +86,91 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertIn("adaptive_thresholds", result.debug.values)
         self.assertIn("scene_noise", result.scoring.features)
 
+    def test_ema_exclusion_zone_removes_motion_before_blob_extraction(self) -> None:
+        result = self.process(
+            moving_subject_frames(),
+            configuration={
+                "motion_zones": [{
+                    "name": "Road traffic",
+                    "enabled": True,
+                    "exclude_from_ema": True,
+                    "behavior": "none",
+                    "points": [
+                        {"x": 0.0, "y": 0.0},
+                        {"x": 0.58, "y": 0.0},
+                        {"x": 0.58, "y": 1.0},
+                        {"x": 0.0, "y": 1.0},
+                    ],
+                }],
+            },
+        )
+
+        self.assertFalse(result.scoring.accepted)
+        self.assertEqual(result.blobs, [])
+        self.assertEqual(result.debug.values["ema_exclusion_zones"], ["Road traffic"])
+        self.assertIn("ema_exclusion_mask", result.debug.images)
+        self.assertAlmostEqual(
+            result.debug.values["ema_excluded_pixel_ratio"],
+            0.58,
+            delta=0.02,
+        )
+
+    def test_ema_exclusion_mask_cache_updates_when_zone_geometry_changes(self) -> None:
+        pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
+            "cached-zone-mask",
+            [MotionStageConfig("zone_exclusion", "ema_zone_exclusion")],
+            initial_artifacts={"threshold_mask_history"},
+        )
+        mask = np.full((20, 40), 255, dtype=np.uint8)
+
+        def apply(points: list[dict[str, float]], *, exclude: bool = True) -> MotionContext:
+            return pipeline.process(MotionContext(
+                camera_id="cached-zone-mask",
+                captured_at=100.0,
+                original_frame=None,
+                configuration={"motion_zones": [{
+                    "name": "Nuisance",
+                    "enabled": True,
+                    "exclude_from_ema": exclude,
+                    "behavior": "ignore",
+                    "points": points,
+                }]},
+                runtime=pipeline.runtime,
+                threshold_mask_history=(mask,),
+            ))
+
+        try:
+            left = apply([
+                {"x": 0.0, "y": 0.0}, {"x": 0.5, "y": 0.0},
+                {"x": 0.5, "y": 1.0}, {"x": 0.0, "y": 1.0},
+            ])
+            self.assertEqual(int(left.binary_motion_mask[:, 0].max()), 0)
+            self.assertEqual(int(left.binary_motion_mask[:, -1].min()), 255)
+
+            right = apply([
+                {"x": 0.5, "y": 0.0}, {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0}, {"x": 0.5, "y": 1.0},
+            ])
+            self.assertEqual(int(right.binary_motion_mask[:, 0].min()), 255)
+            self.assertEqual(int(right.binary_motion_mask[:, -1].max()), 0)
+
+            ordinary_ignore = apply([
+                {"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0}, {"x": 0.0, "y": 1.0},
+            ], exclude=False)
+            self.assertEqual(int(ordinary_ignore.binary_motion_mask.min()), 255)
+            self.assertEqual(ordinary_ignore.debug.values["ema_exclusion_zones"], [])
+            self.assertIsNone(ordinary_ignore.motion_exclusion_mask)
+        finally:
+            pipeline.close()
+
+    def test_ema_exclusion_runs_after_learning_and_before_morphology(self) -> None:
+        stages = adaptive_motion_stage_configs()
+        stage_ids = [stage.stage_id for stage in stages]
+
+        self.assertLess(stage_ids.index("background"), stage_ids.index("zone_exclusion"))
+        self.assertLess(stage_ids.index("zone_exclusion"), stage_ids.index("morphology"))
+
     def test_global_illumination_change_is_rejected_and_learned_quickly(self) -> None:
         frames = [
             np.full((180, 320), 20 + index * 15, dtype=np.uint8)

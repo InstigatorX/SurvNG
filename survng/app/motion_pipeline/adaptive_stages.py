@@ -60,6 +60,28 @@ class _ThresholdRuntime:
 
 
 @dataclass(slots=True)
+class _ZoneExclusionRuntime:
+    signature: tuple[Any, ...] = ()
+    exclusion_mask: np.ndarray | None = None
+    keep_mask: np.ndarray | None = None
+    zone_names: tuple[str, ...] = ()
+    excluded_pixel_ratio: float = 0.0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def snapshot(self) -> "_ZoneExclusionRuntime":
+        with self.lock:
+            return _ZoneExclusionRuntime(
+                signature=self.signature,
+                exclusion_mask=(
+                    None if self.exclusion_mask is None else self.exclusion_mask.copy()
+                ),
+                keep_mask=None if self.keep_mask is None else self.keep_mask.copy(),
+                zone_names=self.zone_names,
+                excluded_pixel_ratio=self.excluded_pixel_ratio,
+            )
+
+
+@dataclass(slots=True)
 class _TrackedBlob:
     track_id: int
     first_seen: float
@@ -385,6 +407,115 @@ class AdaptiveStatisticalThresholdStage:
         return context
 
 
+def _ema_exclusion_signature(
+    configuration: Mapping[str, Any],
+    width: int,
+    height: int,
+) -> tuple[Any, ...]:
+    zones: list[tuple[Any, ...]] = []
+    raw_zones = configuration.get("motion_zones", [])
+    if isinstance(raw_zones, list):
+        for raw in raw_zones:
+            if (
+                not isinstance(raw, Mapping)
+                or not raw.get("enabled", True)
+                or not raw.get("exclude_from_ema", False)
+            ):
+                continue
+            points = raw.get("points", [])
+            if not isinstance(points, list) or len(points) < 3:
+                continue
+            normalized_points = tuple(
+                (round(float(point.get("x", 0.0)), 7), round(float(point.get("y", 0.0)), 7))
+                for point in points
+                if isinstance(point, Mapping)
+            )
+            if len(normalized_points) >= 3:
+                zones.append((str(raw.get("name") or "zone"), normalized_points))
+    return (width, height, *zones)
+
+
+def _rasterize_ema_exclusions(
+    signature: tuple[Any, ...],
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    width = int(signature[0])
+    height = int(signature[1])
+    excluded = np.zeros((height, width), dtype=np.uint8)
+    names: list[str] = []
+    for name, points in signature[2:]:
+        polygon = np.asarray(
+            [
+                [round(float(x) * (width - 1)), round(float(y) * (height - 1))]
+                for x, y in points
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(excluded, [polygon], 255)
+        names.append(str(name))
+    return excluded, cv2.bitwise_not(excluded), tuple(names)
+
+
+class EmaZoneExclusionStage:
+    """Remove configured nuisance regions after thresholding, without affecting learning."""
+
+    def __init__(self, stage_id: str) -> None:
+        self._stage_id = stage_id
+
+    @property
+    def stage_id(self) -> str:
+        return self._stage_id
+
+    def process(self, context: MotionContext) -> MotionContext:
+        if not context.threshold_mask_history:
+            context.motion_exclusion_mask = None
+            context.motion_inclusion_mask = None
+            return context
+        height, width = context.threshold_mask_history[0].shape[:2]
+        signature = _ema_exclusion_signature(context.configuration, width, height)
+        state = context.runtime.state_for(self.stage_id, _ZoneExclusionRuntime)
+        with state.lock:
+            if (
+                state.signature != signature
+                or state.exclusion_mask is None
+                or state.keep_mask is None
+            ):
+                excluded, keep, names = _rasterize_ema_exclusions(signature)
+                state.signature = signature
+                state.exclusion_mask = excluded
+                state.keep_mask = keep
+                state.zone_names = names
+                state.excluded_pixel_ratio = float(cv2.countNonZero(excluded)) / max(
+                    1, width * height
+                )
+            exclusion_mask = state.exclusion_mask
+            keep_mask = state.keep_mask
+            zone_names = state.zone_names
+            excluded_pixel_ratio = state.excluded_pixel_ratio
+
+        context.debug.values["ema_exclusion_zones"] = list(zone_names)
+        context.debug.values["ema_excluded_pixel_ratio"] = round(
+            excluded_pixel_ratio,
+            6,
+        )
+        if not zone_names:
+            context.binary_motion_mask = context.threshold_mask_history[-1]
+            context.motion_exclusion_mask = None
+            context.motion_inclusion_mask = None
+            return context
+
+        original_masks = context.threshold_mask_history
+        masks = tuple(
+            cv2.bitwise_and(mask, keep_mask)
+            for mask in original_masks
+        )
+        context.threshold_mask_history = masks
+        context.binary_motion_mask = masks[-1] if masks else None
+        context.motion_exclusion_mask = exclusion_mask
+        context.motion_inclusion_mask = keep_mask
+        context.debug.images["ema_exclusion_mask"] = exclusion_mask
+        return context
+
+
 def _motion_zones(
     configuration: Mapping[str, Any], width: int, height: int
 ) -> tuple[np.ndarray, np.ndarray, tuple[tuple[str, np.ndarray], ...]]:
@@ -413,7 +544,10 @@ def _motion_zones(
         )
         if len(polygon) < 3:
             continue
-        is_ignored = raw.get("behavior") == "ignore"
+        behavior = raw.get("behavior")
+        if behavior == "none":
+            continue
+        is_ignored = behavior == "ignore"
         target = ignored if is_ignored else included
         cv2.fillPoly(target, [polygon], 255)
         if not is_ignored:
@@ -441,11 +575,16 @@ class ConnectedComponentBlobStage:
         included_zone, ignored_zone, named_zones = _motion_zones(context.configuration, width, height)
         history: list[MotionFrameBlobs] = []
         for index, mask in enumerate(context.motion_mask_history):
-            count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+            effective_mask = (
+                cv2.bitwise_and(mask, context.motion_inclusion_mask)
+                if context.motion_inclusion_mask is not None
+                else mask
+            )
+            count, labels, stats, centroids = cv2.connectedComponentsWithStats(effective_mask, 8)
             intensity = (
                 context.difference_history[index]
                 if index < len(context.difference_history)
-                else mask
+                else effective_mask
             )
             blobs: list[MotionBlob] = []
             for label in range(1, count):
@@ -486,7 +625,7 @@ class ConnectedComponentBlobStage:
                     ignored_zone_overlap=ignored_overlap,
                     zone_names=overlapping_zone_names,
                 ))
-            changed = int(cv2.countNonZero(mask))
+            changed = int(cv2.countNonZero(effective_mask))
             history.append(MotionFrameBlobs(
                 frame_area=frame_area,
                 changed_pixels=changed,
@@ -1477,6 +1616,15 @@ def _build_threshold(stage_id: str, options: Mapping[str, Any], dependencies: Mo
     )
 
 
+def _build_zone_exclusion(
+    stage_id: str,
+    options: Mapping[str, Any],
+    dependencies: MotionStageDependencies,
+) -> EmaZoneExclusionStage:
+    del options, dependencies
+    return EmaZoneExclusionStage(stage_id)
+
+
 def _build_components(stage_id: str, options: Mapping[str, Any], dependencies: MotionStageDependencies) -> ConnectedComponentBlobStage:
     del dependencies
     return ConnectedComponentBlobStage(stage_id, float(options.get("edge_margin_ratio", 0.06)))
@@ -1574,6 +1722,16 @@ def register_adaptive_motion_stages(registry: MotionStageRegistry) -> None:
             MotionStageOption("maximum", "Maximum threshold", "number", 72.0, minimum=1, maximum=255, advanced=True),
             MotionStageOption("smoothing", "Adaptation speed", "number", 0.25, minimum=0.01, maximum=1, advanced=True),
         ),
+    ))
+    registry.register(MotionStageRegistration(
+        implementation="ema_zone_exclusion",
+        builder=_build_zone_exclusion,
+        requires=frozenset({"threshold_mask_history", "configuration", "runtime"}),
+        provides=frozenset({"threshold_mask_history", "binary_motion_mask", "motion_exclusion_mask", "motion_inclusion_mask", "debug"}),
+        graph="qualification",
+        category="threshold",
+        display_name="EMA exclusion zones",
+        description="Removes configured nuisance regions before mask cleanup and motion-region extraction.",
     ))
     registry.register(MotionStageRegistration(
         implementation="connected_component_blobs",

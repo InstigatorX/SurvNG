@@ -24,6 +24,10 @@ def adaptive_motion_stage_configs() -> list[MotionStageConfig]:
             options={"sigma": 4.0, "minimum": 7.0, "maximum": 72.0, "smoothing": 0.25},
         ),
         MotionStageConfig(
+            stage_id="zone_exclusion",
+            implementation="ema_zone_exclusion",
+        ),
+        MotionStageConfig(
             stage_id="morphology",
             implementation="open_close",
             options={"kernel_size": 3, "close_iterations": 2},

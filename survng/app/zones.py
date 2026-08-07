@@ -158,7 +158,11 @@ def apply_detection_zones(
         x1, _y1, x2, y2 = coordinates
         x = ((x1 + x2) / 2.0) / width
         y = y2 / height
-        relevant = [zone for zone in zones if _class_applies(zone, label)]
+        relevant = [
+            zone
+            for zone in zones
+            if zone.behavior != "none" and _class_applies(zone, label)
+        ]
         matches = []
         for zone in relevant:
             threshold = zone.confidence_threshold if zone.confidence_threshold is not None else label_threshold

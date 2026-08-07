@@ -73,7 +73,18 @@ class MotionDebugSnapshotTest(unittest.TestCase):
             captured_at=100.0,
             original_frame=frames[-1],
             frame_history=tuple(frames),
-            configuration={"sensitivity": "balanced", "sample_fps": 5.0},
+            configuration={
+                "sensitivity": "balanced",
+                "sample_fps": 5.0,
+                "motion_zones": [{
+                    "name": "Trees",
+                    "exclude_from_ema": True,
+                    "points": [
+                        {"x": 0.0, "y": 0.0}, {"x": 0.25, "y": 0.0},
+                        {"x": 0.25, "y": 1.0}, {"x": 0.0, "y": 1.0},
+                    ],
+                }],
+            },
             runtime=pipeline.runtime,
         ))
         store = MotionDebugSnapshotStore()
@@ -81,7 +92,9 @@ class MotionDebugSnapshotTest(unittest.TestCase):
         store.capture(context)
 
         status = store.status()["snapshot"]
-        self.assertIn("background", {layer["id"] for layer in status["layers"]})
+        layers = {layer["id"] for layer in status["layers"]}
+        self.assertIn("background", layers)
+        self.assertIn("ema_exclusion", layers)
         self.assertEqual(status["event_state"], "idle")
         pipeline.close()
 

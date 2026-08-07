@@ -19,6 +19,7 @@ DEBUG_LAYER_LABELS = {
     "difference": "Frame difference",
     "threshold": "Threshold mask",
     "motion_mask": "Clean motion mask",
+    "ema_exclusion": "EMA excluded area",
 }
 
 
@@ -127,6 +128,7 @@ class MotionDebugSnapshot:
                 else None
             ),
             "motion_mask": context.binary_motion_mask,
+            "ema_exclusion": context.motion_exclusion_mask,
             "overlay": _overlay(context),
         }
         images = {

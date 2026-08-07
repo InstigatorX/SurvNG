@@ -64,6 +64,12 @@ Adaptive analysis reads the camera's live capture source:
 
 The frame is downscaled to `motion_qualification.frame_width` and converted to grayscale. The default is 320 pixels wide at 5 samples per second. Continuous recording remains stream-copy based and object detection uses high-resolution frames from the main recording after a trigger.
 
+## EMA exclusion zones
+
+Each detection zone can independently enable **Exclude from EMA**. Motion inside that polygon is removed after scene learning and adaptive thresholding but before morphology, connected-component extraction, tracking, and scoring. Background learning still covers the complete frame, so resizing or disabling the exclusion does not reveal a stale scene model.
+
+EMA exclusion does not change the zone's object behavior. An Incident zone can exclude nuisance motion while continuing to admit matching objects, and an Ignore zone suppresses matching object incidents without excluding EMA unless both settings are selected. For a dedicated EMA-only polygon, select **No object effect** and enable **Exclude from EMA**. Motion crossing out of an excluded polygon becomes eligible at the boundary. The rasterized mask is cached per camera and resolution and rebuilt automatically when zone geometry changes.
+
 ## CPU and queue behavior
 
 Only enabled visual processors consume analysis time. Camera + visual backup and Visual-triggered modes continuously run the selected qualification pipeline; the adaptive processor remains the recommended default. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded scheduling queues replace stale pending requests with the newest request.

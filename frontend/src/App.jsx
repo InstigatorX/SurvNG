@@ -9435,6 +9435,7 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
       object_classes: [],
       confidence_threshold: null,
       behavior: "incident",
+      exclude_from_ema: false,
       trigger: "bottom_center",
     }];
     onChange(next);
@@ -9533,7 +9534,7 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
             <button type="button" key={`${zone.name}-${index}`} className={index === selectedIndex ? "active" : ""} onClick={() => setSelectedIndex(index)}>
               <span className="zone-swatch" style={{ background: zone.color || "#22c55e" }} />
               <span>{zone.name || `Zone ${index + 1}`}</span>
-              <small>{zone.behavior}</small>
+              <small>{zone.behavior === "none" ? "no object effect" : zone.behavior}{zone.exclude_from_ema ? " · EMA excluded" : ""}</small>
             </button>
           ))}
           {!zones.length ? <div className="empty-state compact">No zones configured.</div> : null}
@@ -9543,11 +9544,11 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
         <div className="zone-fields">
           <label>Name<input value={selectedZone.name || ""} onChange={(event) => replaceZone(selectedIndex, { name: event.target.value })} /></label>
           <label>Color<input className="zone-color-input" type="color" value={selectedZone.color || "#22c55e"} onChange={(event) => replaceZone(selectedIndex, { color: event.target.value })} /></label>
-          <label>Behavior<select value={selectedZone.behavior || "incident"} onChange={(event) => replaceZone(selectedIndex, { behavior: event.target.value })}><option value="incident">Incident</option><option value="ignore">Ignore</option></select></label>
+          <label>Behavior<select value={selectedZone.behavior || "incident"} onChange={(event) => replaceZone(selectedIndex, { behavior: event.target.value })}><option value="incident">Incident</option><option value="ignore">Ignore</option><option value="none">No object effect</option></select></label>
           <div className="zone-class-field">
             <span>Object Classes</span>
-            <details className="zone-class-dropdown">
-              <summary>{selectedZone.object_classes?.length ? selectedZone.object_classes.join(", ") : "All classes"}</summary>
+            <details className={`zone-class-dropdown${selectedZone.behavior === "none" ? " disabled" : ""}`}>
+              <summary>{selectedZone.behavior === "none" ? "Not used" : selectedZone.object_classes?.length ? selectedZone.object_classes.join(", ") : "All classes"}</summary>
               <div className="zone-class-menu">
                 <label>
                   <input type="checkbox" checked={!selectedZone.object_classes?.length} onChange={() => replaceZone(selectedIndex, { object_classes: [] })} />
@@ -9575,8 +9576,11 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
               </div>
             </details>
           </div>
-          <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder="Global" value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
-          <label className="check-field"><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
+          <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={selectedZone.behavior === "none" ? "N/A" : "Global"} disabled={selectedZone.behavior === "none"} value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
+          <div className="zone-toggle-stack">
+            <label title="Motion inside this zone will not validate or trigger EMA activity. Object incident rules remain unchanged."><input type="checkbox" checked={selectedZone.exclude_from_ema === true} onChange={(event) => replaceZone(selectedIndex, { exclude_from_ema: event.target.checked })} /> Exclude from EMA</label>
+            <label><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
+          </div>
           <button type="button" className="danger" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
         </div>
       ) : null}

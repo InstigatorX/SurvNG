@@ -88,6 +88,8 @@ class MotionContext:
     background_image: Frame | None = None
     difference_image: Frame | None = None
     binary_motion_mask: Frame | None = None
+    motion_exclusion_mask: Frame | None = None
+    motion_inclusion_mask: Frame | None = None
     blobs: list[MotionBlob] = field(default_factory=list)
     tracked_objects: list[MotionTrack] = field(default_factory=list)
     scoring: MotionScoring = field(default_factory=MotionScoring)
