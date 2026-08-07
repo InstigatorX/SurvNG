@@ -14,6 +14,31 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_process_lifecycle_events_are_durable_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            now = datetime(2026, 8, 7, 12, tzinfo=timezone.utc)
+            store.record_lifecycle_event(
+                "instance-a",
+                "startup_started",
+                occurred_at=now - timedelta(minutes=2),
+            )
+            store.record_lifecycle_event(
+                "instance-a",
+                "startup_ready",
+                occurred_at=now - timedelta(minutes=1),
+                details={"cameras": 13},
+            )
+
+            events = EventStore(root).lifecycle_events(hours=1, now=now)
+
+        self.assertEqual([event["kind"] for event in events], [
+            "startup_started",
+            "startup_ready",
+        ])
+        self.assertEqual(events[-1]["details"], {"cameras": 13})
+
     def test_camera_intelligence_effectiveness_lifecycle_is_durable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

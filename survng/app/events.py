@@ -78,6 +78,21 @@ class EventStore:
             )
             conn.execute(
                 """
+                create table if not exists system_lifecycle_events (
+                    id integer primary key autoincrement,
+                    instance_id text not null,
+                    kind text not null,
+                    occurred_at text not null,
+                    details_json text not null default '{}'
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_system_lifecycle_occurred_at "
+                "on system_lifecycle_events(occurred_at)"
+            )
+            conn.execute(
+                """
                 create table if not exists motion_audits (
                     id integer primary key autoincrement,
                     event_id integer,
@@ -1070,6 +1085,93 @@ class EventStore:
                 "delete from runtime_telemetry_samples where sampled_at < ?",
                 (cutoff.isoformat(),),
             )
+
+    def record_lifecycle_event(
+        self,
+        instance_id: str,
+        kind: str,
+        *,
+        occurred_at: datetime | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a process lifecycle transition used to explain telemetry gaps."""
+        allowed = {
+            "startup_started",
+            "startup_ready",
+            "shutdown_requested",
+            "shutdown_completed",
+        }
+        if kind not in allowed:
+            raise ValueError(f"unsupported lifecycle event: {kind}")
+        current = occurred_at or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        payload = json.dumps(details or {}, separators=(",", ":"), allow_nan=False)
+        cutoff = current - timedelta(days=8)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "insert into system_lifecycle_events "
+                "(instance_id, kind, occurred_at, details_json) values (?, ?, ?, ?)",
+                (str(instance_id), kind, current.isoformat(), payload),
+            )
+            conn.execute(
+                "delete from system_lifecycle_events where occurred_at < ?",
+                (cutoff.isoformat(),),
+            )
+
+    def lifecycle_events(
+        self,
+        *,
+        hours: int = 168,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        start = current - timedelta(hours=max(1, min(int(hours), 24 * 8)))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "select instance_id, kind, occurred_at, details_json "
+                "from system_lifecycle_events where occurred_at >= ? "
+                "order by occurred_at, id",
+                (start.isoformat(),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                details = json.loads(str(row["details_json"] or "{}"))
+            except json.JSONDecodeError:
+                details = {}
+            result.append(
+                {
+                    "instance_id": str(row["instance_id"]),
+                    "kind": str(row["kind"]),
+                    "occurred_at": str(row["occurred_at"]),
+                    "details": details if isinstance(details, dict) else {},
+                }
+            )
+        return result
+
+    def runtime_telemetry_sample_times(
+        self,
+        *,
+        hours: int = 168,
+        now: datetime | None = None,
+    ) -> list[str]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        start = current - timedelta(hours=max(1, min(int(hours), 24 * 8)))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "select sampled_at from runtime_telemetry_samples "
+                "where sampled_at >= ? order by sampled_at",
+                (start.isoformat(),),
+            ).fetchall()
+        return [str(row["sampled_at"]) for row in rows]
 
     def process_memory_history(
         self,

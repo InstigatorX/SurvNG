@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -7596,8 +7596,12 @@ function MotionDecisionEditor({
   );
 }
 
-function TelemetryTrend({ title, description, history, series, timeZone, maximum = null, valueFormatter = (value) => `${value}` }) {
-  const [hoverIndex, setHoverIndex] = useState(null);
+const TelemetryInterruptionsContext = React.createContext([]);
+
+function TelemetryTrend({ title, description, history, series, timeZone, interruptions = null, maximum = null, valueFormatter = (value) => `${value}` }) {
+  const [hoverState, setHoverState] = useState(null);
+  const sharedInterruptions = useContext(TelemetryInterruptionsContext);
+  const chartInterruptions = interruptions || sharedInterruptions;
   const numericValue = (raw) => {
     if (raw == null || raw === "") return null;
     const value = Number(raw);
@@ -7618,13 +7622,48 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
       ? ((sampledAt - firstAt) / timeSpan) * width
       : (index / (history.length - 1)) * width;
   };
-  const pointsFor = (key) => history.map((point, index) => {
-    const value = numericValue(point[key]);
-    if (value == null) return null;
-    const x = xForIndex(index);
-    const y = height - Math.min(height, (Math.max(0, value) / top) * height);
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).filter(Boolean).join(" ");
+  const segmentsFor = (key) => {
+    const segments = [];
+    let segment = [];
+    history.forEach((point, index) => {
+      const value = numericValue(point[key]);
+      if (value == null) {
+        if (segment.length) segments.push(segment);
+        segment = [];
+      }
+      if (value != null) {
+        const x = xForIndex(index);
+        const y = height - Math.min(height, (Math.max(0, value) / top) * height);
+        segment.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+      }
+    });
+    if (segment.length) segments.push(segment);
+    return segments;
+  };
+  const xForTime = (value) => {
+    const timestamp = new Date(value || 0).getTime();
+    if (!Number.isFinite(timestamp) || timeSpan <= 0) return null;
+    return Math.max(0, Math.min(width, ((timestamp - firstAt) / timeSpan) * width));
+  };
+  const visibleInterruptions = chartInterruptions.map((item) => {
+    const startX = xForTime(item.start_at);
+    const markerX = xForTime(item.marker_at || item.start_at);
+    const endX = xForTime(item.end_at);
+    const actualStartX = Math.min(startX ?? 0, endX ?? 0);
+    const actualWidth = Math.abs((endX ?? 0) - (startX ?? 0));
+    const displayWidth = Math.max(0.4, actualWidth);
+    const displayStartX = Math.max(0, Math.min(width - displayWidth, (markerX ?? actualStartX) - (displayWidth / 2)));
+    return {
+      ...item,
+      startX,
+      markerX,
+      endX,
+      displayStartX,
+      displayWidth,
+      hitStartX: Math.max(0, (markerX ?? actualStartX) - 1.5),
+      hitEndX: Math.min(width, (markerX ?? actualStartX) + 1.5),
+    };
+  }).filter((item) => item.startX != null && item.endX != null && new Date(item.end_at).getTime() >= firstAt && new Date(item.start_at).getTime() <= lastAt);
   const coordinatesFor = (key, index) => {
     const value = numericValue(history[index]?.[key]);
     if (value == null) return null;
@@ -7646,20 +7685,22 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
       ? formatDateTime(value, timeZone)
       : formatTimeOnly(value, timeZone)
   );
-  const selectedIndex = Number.isInteger(hoverIndex) && hoverIndex >= 0 && hoverIndex < history.length
-    ? hoverIndex
+  const selectedIndex = Number.isInteger(hoverState?.index) && hoverState.index >= 0 && hoverState.index < history.length
+    ? hoverState.index
     : null;
   const selectedPoint = selectedIndex == null ? null : history[selectedIndex];
-  const selectedX = selectedIndex == null
+  const selectedPointX = selectedIndex == null
     ? 0
     : xForIndex(selectedIndex);
-  const tooltipAlignment = selectedX < 25 ? "start" : selectedX > 75 ? "end" : "center";
+  const hoverX = hoverState?.x ?? selectedPointX;
+  const hoverInterruption = visibleInterruptions.find((item) => hoverX >= item.hitStartX && hoverX <= item.hitEndX) || null;
+  const tooltipAlignment = hoverX < 25 ? "start" : hoverX > 75 ? "end" : "center";
   const updateHover = (event) => {
     if (!history.length) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
     if (timeSpan <= 0) {
-      setHoverIndex(Math.round(ratio * Math.max(0, history.length - 1)));
+      setHoverState({ index: Math.round(ratio * Math.max(0, history.length - 1)), x: ratio * width });
       return;
     }
     const targetTime = firstAt + ratio * timeSpan;
@@ -7669,31 +7710,35 @@ function TelemetryTrend({ title, description, history, series, timeZone, maximum
         nearestIndex = index;
       }
     }
-    setHoverIndex(nearestIndex);
+    setHoverState({ index: nearestIndex, x: ratio * width });
   };
   return (
     <article className={`telemetry-trend${selectedPoint ? " has-tooltip" : ""}`}>
-      <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values">{series.map((item) => <span className={item.className || ""} key={item.key}><i />{item.label} {latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</span>)}</div></header>
+      <header><div><strong>{title}</strong><small>{description}</small></div><div className="telemetry-trend-values" aria-label="Chart lines">{series.map((item) => <span className={item.className || ""} key={item.key}><i /><b>{item.label}</b><em>{latestValue(item.key) == null ? "--" : valueFormatter(latestValue(item.key), item.key)}</em></span>)}</div></header>
       <div
         className="telemetry-trend-chart"
         onPointerMove={updateHover}
         onPointerDown={updateHover}
         onPointerLeave={(event) => {
-          if (event.pointerType === "mouse") setHoverIndex(null);
+          if (event.pointerType === "mouse") setHoverState(null);
         }}
       >
         <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${title} trend`}>
           <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
-          {series.map((item) => <polyline className={item.className || ""} key={item.key} points={pointsFor(item.key)} />)}
-          {selectedPoint ? <line className="telemetry-trend-cursor" x1={selectedX} y1="0" x2={selectedX} y2={height} /> : null}
+          {visibleInterruptions.map((item, index) => <g className={`telemetry-interruption ${item.kind}`} key={`${item.start_at}-${index}`}>
+            <rect x={item.displayStartX} y="0" width={item.displayWidth} height={height} />
+          </g>)}
+          {series.flatMap((item) => segmentsFor(item.key).map((points, index) => <polyline className={item.className || ""} key={`${item.key}-${index}`} points={points.join(" ")} />))}
+          {selectedPoint ? <line className="telemetry-trend-cursor" x1={hoverX} y1="0" x2={hoverX} y2={height} /> : null}
           {selectedPoint ? series.map((item) => {
             const coordinates = coordinatesFor(item.key, selectedIndex);
             return coordinates ? <ellipse className={`telemetry-trend-point ${item.className || ""}`} key={item.key} cx={coordinates.x} cy={coordinates.y} rx="0.75" ry="1.4" /> : null;
           }) : null}
         </svg>
         {selectedPoint ? (
-          <div className={`telemetry-trend-tooltip ${tooltipAlignment}`} style={{ left: `${selectedX}%` }} role="status">
+          <div className={`telemetry-trend-tooltip ${tooltipAlignment}`} style={{ left: `${hoverX}%` }} role="status">
             <time>{formatDateTime(selectedPoint.sampled_at, timeZone)}</time>
+            {hoverInterruption ? <div className={`telemetry-trend-interruption-detail ${hoverInterruption.kind}`}><strong>{hoverInterruption.title}</strong><small>{formatDuration(hoverInterruption.duration_seconds || 0)} · {hoverInterruption.description}</small></div> : null}
             {series.map((item) => {
               const value = numericValue(selectedPoint[item.key]);
               return <span className={item.className || ""} key={item.key}><i />{item.label}<strong>{value == null ? "--" : valueFormatter(value, item.key)}</strong></span>;
@@ -7789,7 +7834,14 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const formatCoverage = (value) => value == null
     ? "--"
     : `${Number(value).toFixed(Number(value) >= 99.95 ? 2 : 1)}%`;
+  const interruptionSummary = data.interruption_summary || {};
+  const interruptionParts = [
+    interruptionSummary.controlled ? `${interruptionSummary.controlled} controlled restart${interruptionSummary.controlled === 1 ? "" : "s"}` : "",
+    interruptionSummary.unexpected ? `${interruptionSummary.unexpected} unexpected restart${interruptionSummary.unexpected === 1 ? "" : "s"}` : "",
+    interruptionSummary.unknown ? `${interruptionSummary.unknown} unexplained gap${interruptionSummary.unknown === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
   return (
+    <TelemetryInterruptionsContext.Provider value={data.interruptions || []}>
     <div className="telemetry-viewer">
       <div className="telemetry-summary-grid">
         <article><span>Events · last hour</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
@@ -7807,6 +7859,11 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} baseline · burst to {trackingCapacity.burst_limit || trackingCapacity.limit || 0} · {capacityTotals.waited} waited</small></article>
           <article><span>Delayed tracking recovery</span><strong>{Number(backfillCounts.completed || 0).toLocaleString()} recovered</strong><small>{Number(backfillCounts.queued || 0).toLocaleString()} waiting · {Number(backfillCounts.failed || 0).toLocaleString()} failed</small></article>
         </>}
+      </div>
+
+      <div className={`telemetry-interruption-summary ${interruptionSummary.unexpected ? "danger" : interruptionSummary.unknown ? "warning" : "healthy"}`}>
+        <Clock3 size={16} />
+        <span><strong>Service continuity · last 24 hours</strong>{interruptionParts.length ? `${interruptionParts.join(" · ")} · ${formatDuration(interruptionSummary.duration_seconds || 0)} without telemetry` : "No recorded service interruptions."}<small><i /> Shaded chart bands mark service restarts; point at any graph to see its values.</small></span>
       </div>
 
       <section className="telemetry-section">
@@ -7981,6 +8038,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
       </section>
       <p className="telemetry-footnote">Availability, interruptions, EMA coverage, event delivery, and tracking capacity are the primary health signals. “Stale skipped” means a newer frame replaced an older pending sample so analysis stayed current; it matters only when coverage drops persistently. Camera-health samples are retained for eight days.</p>
     </div>
+    </TelemetryInterruptionsContext.Provider>
   );
 }
 

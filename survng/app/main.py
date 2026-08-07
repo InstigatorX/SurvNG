@@ -155,6 +155,10 @@ from .tracking_comparison import (
     TrackingComparisonRunner,
     sampled_video_frames,
 )
+from .telemetry_interruptions import (
+    classify_telemetry_interruptions,
+    summarize_interruptions,
+)
 from .zones import apply_detection_zones, detection_threshold
 from .security import redact_secret_text
 from .storage_maintenance import StorageMaintenanceRunner, StorageReconciler
@@ -582,6 +586,17 @@ def apply_config_update(
     return effective, result
 
 
+def _record_process_lifecycle(kind: str) -> None:
+    """Record restart evidence without making telemetry a lifecycle dependency."""
+    try:
+        manager.events.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "could not persist process lifecycle event %s",
+            kind,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APPLICATION_STOPPING.clear()
@@ -625,6 +640,7 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning(
             "early ONVIF shutdown signal is unavailable on this platform"
         )
+    _record_process_lifecycle("startup_started")
     manager.start_all()
     try:
         media_exports = _media_export_manager()
@@ -635,8 +651,10 @@ async def lifespan(app: FastAPI):
             _calibration_followup_monitor(),
             name="survng-calibration-followup-monitor",
         )
+        _record_process_lifecycle("startup_ready")
         yield
     finally:
+        _record_process_lifecycle("shutdown_requested")
         APPLICATION_STOPPING.set()
         if calibration_monitor_task is not None:
             calibration_monitor_task.cancel()
@@ -673,6 +691,7 @@ async def lifespan(app: FastAPI):
                             logging.getLogger("uvicorn.error").exception(
                                 "final multiprocessing resource tracker cleanup failed"
                             )
+        _record_process_lifecycle("shutdown_completed")
 
 
 app = FastAPI(title="SurvNG", lifespan=lifespan)
@@ -1792,6 +1811,16 @@ def _persisted_telemetry_history(camera_id: str) -> dict[str, Any]:
         cached = TELEMETRY_PERSISTED_CACHE.get(cache_key)
         if cached is not None and now - float(cached["at"]) < 55.0:
             return cached["value"]
+    sample_times_reader = getattr(
+        manager.events,
+        "runtime_telemetry_sample_times",
+        None,
+    )
+    lifecycle_reader = getattr(manager.events, "lifecycle_events", None)
+    interruptions = classify_telemetry_interruptions(
+        sample_times_reader(hours=168) if callable(sample_times_reader) else [],
+        lifecycle_reader(hours=168) if callable(lifecycle_reader) else [],
+    )
     value = {
         "runtime": {
             "short": manager.events.runtime_telemetry_history(
@@ -1821,6 +1850,8 @@ def _persisted_telemetry_history(camera_id: str) -> dict[str, Any]:
             if not camera_id
             else {"short": [], "long": []}
         ),
+        "interruptions": interruptions,
+        "interruption_summary": summarize_interruptions(interruptions, hours=24),
     }
     with TELEMETRY_PERSISTED_CACHE_LOCK:
         if len(TELEMETRY_PERSISTED_CACHE) >= 32:
@@ -1845,6 +1876,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
     runtime_history = persisted_history["runtime"]
     tracking_capacity_history = persisted_history["tracking"]
     process_memory_history = persisted_history["memory"]
+    interruptions = persisted_history["interruptions"]
+    interruption_summary = persisted_history["interruption_summary"]
     per_camera_activity = activity.get("by_camera", {})
     load_1m, load_5m, load_15m = os.getloadavg()
     memory = _linux_memory_status()
@@ -2002,6 +2035,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
         "runtime_history": runtime_history,
         "tracking_capacity_history": tracking_capacity_history,
         "process_memory_history": process_memory_history,
+        "interruptions": interruptions,
+        "interruption_summary": interruption_summary,
         "tracking_capacity": {
             "limit": int(config.detector.tracking.max_active_cameras),
             "burst_limit": int(config.detector.tracking.burst_max_active_cameras),

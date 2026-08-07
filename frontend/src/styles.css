@@ -5805,10 +5805,21 @@ section.detection-settings-card {
 }
 
 .telemetry-trend-values i {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
+  width: 14px;
+  height: 2px;
+  border-radius: 2px;
   background: var(--accent);
+}
+
+.telemetry-trend-values b {
+  color: var(--text);
+  font-weight: 760;
+}
+
+.telemetry-trend-values em {
+  color: var(--muted);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
 }
 
 .telemetry-trend-values .memory i { background: #38bdf8; }
@@ -5823,6 +5834,7 @@ section.detection-settings-card {
 
 .telemetry-trend-chart {
   position: relative;
+  cursor: crosshair;
   touch-action: pan-y;
 }
 
@@ -5858,10 +5870,27 @@ section.detection-settings-card {
 .telemetry-trend svg polyline.warning { stroke: #f59e0b; }
 .telemetry-trend svg polyline.danger { stroke: #ef4444; }
 
+.telemetry-trend svg .telemetry-interruption rect {
+  fill: color-mix(in srgb, var(--muted) 8%, transparent);
+  stroke: none;
+}
+
+.telemetry-trend svg .telemetry-interruption.controlled_restart rect {
+  fill: color-mix(in srgb, #2dd4bf 18%, transparent);
+}
+
+.telemetry-trend svg .telemetry-interruption.unexpected_restart rect {
+  fill: color-mix(in srgb, #ef4444 18%, transparent);
+}
+
+.telemetry-trend svg .telemetry-interruption.unknown_restart rect,
+.telemetry-trend svg .telemetry-interruption.unknown_gap rect {
+  fill: color-mix(in srgb, #f59e0b 16%, transparent);
+}
+
 .telemetry-trend svg .telemetry-trend-cursor {
   stroke: color-mix(in srgb, var(--text) 45%, transparent);
   stroke-width: 1;
-  stroke-dasharray: 3 3;
 }
 
 .telemetry-trend-point {
@@ -5901,6 +5930,61 @@ section.detection-settings-card {
 .telemetry-trend-tooltip.start { transform: none; }
 .telemetry-trend-tooltip.end { transform: translateX(-100%); }
 
+.telemetry-interruption-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--ok-ink) 26%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ok-bg) 42%, var(--panel));
+  color: var(--muted);
+  padding: 8px 10px;
+}
+
+.telemetry-interruption-summary svg {
+  flex: 0 0 auto;
+  color: var(--ok-ink);
+}
+
+.telemetry-interruption-summary span {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.telemetry-interruption-summary strong {
+  color: var(--ink);
+}
+
+.telemetry-interruption-summary small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.telemetry-interruption-summary small i {
+  width: 10px;
+  height: 8px;
+  border-radius: 2px;
+  background: color-mix(in srgb, #2dd4bf 22%, transparent);
+}
+
+.telemetry-interruption-summary.warning {
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
+  background: color-mix(in srgb, var(--warn-bg) 45%, var(--panel));
+}
+
+.telemetry-interruption-summary.warning svg { color: var(--warn); }
+
+.telemetry-interruption-summary.danger {
+  border-color: color-mix(in srgb, var(--hot) 32%, var(--line));
+  background: color-mix(in srgb, var(--hot-bg) 42%, var(--panel));
+}
+
+.telemetry-interruption-summary.danger svg { color: var(--hot); }
+
 .telemetry-trend-tooltip time {
   color: var(--muted);
   font-size: 9px;
@@ -5935,6 +6019,38 @@ section.detection-settings-card {
 .telemetry-trend-tooltip span.secondary i { background: #60a5fa; }
 .telemetry-trend-tooltip span.warning i { background: #f59e0b; }
 .telemetry-trend-tooltip span.danger i { background: #ef4444; }
+
+.telemetry-trend-interruption-detail {
+  display: grid;
+  gap: 2px;
+  border-left: 3px solid #2dd4bf;
+  border-radius: 2px;
+  background: color-mix(in srgb, #2dd4bf 9%, transparent);
+  padding: 4px 6px;
+}
+
+.telemetry-trend-interruption-detail.unexpected_restart {
+  border-left-color: #ef4444;
+  background: color-mix(in srgb, #ef4444 9%, transparent);
+}
+
+.telemetry-trend-interruption-detail.unknown_restart,
+.telemetry-trend-interruption-detail.unknown_gap {
+  border-left-color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 9%, transparent);
+}
+
+.telemetry-trend-interruption-detail strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.telemetry-trend-interruption-detail small {
+  max-width: 260px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.25;
+}
 
 .telemetry-trend footer {
   display: flex;
