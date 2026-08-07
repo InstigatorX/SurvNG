@@ -38,6 +38,19 @@ import cv2
 import numpy as np
 
 from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, normalize_config, save_config, slugify_camera_id
+from .config_application import (
+    DETECTOR_FACE_ENGINE_FIELDS,
+    DETECTOR_HOT_POLICY_FIELDS,
+    DETECTOR_OBJECT_ENGINE_FIELDS,
+    DETECTOR_OBJECT_TRACKING_RESET_FIELDS,
+    DETECTOR_SHARED_ENGINE_FIELDS,
+    HOT_CONFIG_FIELDS,
+    RECORDER_CONFIG_FIELDS,
+    TRACKING_REID_ENGINE_FIELDS,
+    TRACKING_SESSION_FIELDS,
+    TargetedConfigApplication,
+    manager_owned_config,
+)
 from .audit_ai import (
     AuditAiAdvisor,
     AuditAiChange,
@@ -740,149 +753,9 @@ def reload_manager(
         return effective_config
 
 
-HOT_CONFIG_FIELDS = frozenset({
-    "base_path",
-    "event_clip_before_seconds",
-    "event_clip_after_seconds",
-    "incident_thumbnail_annotations",
-    "image_storage",
-    "recording_cache_max_gb",
-    "recording_cache_max_days",
-    "recording_cache_prewarm",
-    "audit_ai",
-    "mqtt",
-    "retention",
-    "semantic_search",
-})
-RECORDER_CONFIG_FIELDS = frozenset({
-    "ffmpeg_path",
-    "hardware_acceleration",
-    "recording_segment_seconds",
-})
-DETECTOR_HOT_POLICY_FIELDS = frozenset({
-    "confidence_threshold",
-    "event_confirmation_frames",
-    "event_class_confirmation_frames",
-    "event_class_confidence_thresholds",
-    "require_incident_zone",
-    "face_max_observations",
-    "face_match_threshold",
-    "face_min_size",
-    "face_max_references",
-})
-TRACKING_SESSION_FIELDS = frozenset({
-    "enabled",
-    "implementation",
-    "excluded_labels",
-    "sample_fps",
-    "max_session_seconds",
-    "lost_timeout_seconds",
-    "min_confirmations",
-    "low_confidence_threshold",
-    "match_iou_threshold",
-    "match_center_distance_ratio",
-    "max_active_cameras",
-    "adaptive_burst_enabled",
-    "burst_max_active_cameras",
-    "capacity_wait_seconds",
-    "deferred_reid_enabled",
-    "deferred_reid_delay_seconds",
-    "deferred_reid_min_crop_pixels",
-    "deferred_reid_rate_per_minute",
-    "related_sequence_window_seconds",
-    "camera_transition_routes",
-    "max_tracks_per_session",
-    "reid_max_age_seconds",
-    "reid_max_embeddings_per_frame",
-    "reid_refresh_interval_frames",
-    "reid_match_threshold",
-    "vehicle_reid_match_threshold",
-    "vehicle_reid_labels",
-})
-DETECTOR_OBJECT_ENGINE_FIELDS = frozenset({
-    "enabled",
-    "backend",
-    "model_path",
-    "model_xml",
-    "coreml_model_path",
-    "labels_path",
-    "device",
-    "nms_threshold",
-    "warmup_enabled",
-    "labels",
-})
-DETECTOR_OBJECT_TRACKING_RESET_FIELDS = frozenset({
-    "enabled",
-    "backend",
-    "model_path",
-    "model_xml",
-    "coreml_model_path",
-    "labels_path",
-    "nms_threshold",
-    "labels",
-})
-DETECTOR_FACE_ENGINE_FIELDS = frozenset({
-    "face_recognition_enabled",
-    "face_embedding_model_path",
-    "face_landmark_model_path",
-    "face_recognition_device",
-})
-DETECTOR_SHARED_ENGINE_FIELDS = frozenset({
-    "cache_enabled",
-    "cache_dir",
-})
-TRACKING_REID_ENGINE_FIELDS = frozenset({
-    "reid_enabled",
-    "reid_model_path",
-    "reid_device",
-    "vehicle_reid_enabled",
-    "vehicle_reid_model_path",
-    "vehicle_reid_device",
-})
-
-
-def _detector_without_fields(detector: dict, fields: frozenset[str]) -> dict:
-    return {
-        key: value
-        for key, value in detector.items()
-        if key not in fields
-    }
-
-
 def _manager_owned_config(config_value: AppConfig) -> dict:
-    """Return only settings that require rebuilding camera-owned services."""
-    payload = config_value.model_dump(mode="json")
-    for field_name in HOT_CONFIG_FIELDS | RECORDER_CONFIG_FIELDS:
-        payload.pop(field_name, None)
-    for camera in payload.get("cameras", []):
-        camera.pop("retention", None)
-    payload["detector"] = _detector_without_fields(
-        payload.get("detector", {}),
-        DETECTOR_HOT_POLICY_FIELDS
-        | DETECTOR_OBJECT_ENGINE_FIELDS
-        | DETECTOR_FACE_ENGINE_FIELDS
-        | DETECTOR_SHARED_ENGINE_FIELDS,
-    )
-    tracking = payload["detector"].get("tracking")
-    if isinstance(tracking, dict):
-        payload["detector"]["tracking"] = _detector_without_fields(
-            tracking,
-            TRACKING_SESSION_FIELDS | TRACKING_REID_ENGINE_FIELDS,
-        )
-    return payload
-
-
-def _hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
-    changed = [
-        field_name
-        for field_name in sorted(HOT_CONFIG_FIELDS)
-        if getattr(current, field_name) != getattr(incoming, field_name)
-    ]
-    current_retention = {camera.id: camera.retention for camera in current.cameras}
-    incoming_retention = {camera.id: camera.retention for camera in incoming.cameras}
-    if current_retention != incoming_retention and "retention" not in changed:
-        changed.append("retention")
-    return changed
+    """Compatibility name for configuration ownership tests."""
+    return manager_owned_config(config_value)
 
 
 def apply_config_update(
@@ -891,227 +764,32 @@ def apply_config_update(
     assign_ids: bool = False,
     persist: bool = True,
 ) -> tuple[AppConfig, dict[str, object]]:
-    """Apply configuration at the narrowest safe runtime boundary."""
+    """Apply configuration through the dedicated transaction owner."""
     global config
-    effective_config = normalize_config(
-        next_config.model_copy(deep=True),
-        assign_ids=assign_ids,
+    application = TargetedConfigApplication(
+        lock=MANAGER_RELOAD_LOCK,
+        save=save_config,
+        active_exports=lambda: (
+            MEDIA_EXPORTS.active_jobs() if MEDIA_EXPORTS is not None else []
+        ),
+        storage_error=StorageTasksActiveError,
     )
-    if _manager_owned_config(config) != _manager_owned_config(effective_config):
-        effective = reload_manager(
-            effective_config,
-            assign_ids=False,
-            persist=persist,
-        )
-        return effective, {
+    effective = application.normalize(next_config, assign_ids=assign_ids)
+    if manager_owned_config(config) != manager_owned_config(effective):
+        applied = reload_manager(effective, assign_ids=False, persist=persist)
+        return applied, {
             "apply_mode": "manager_reload",
             "camera_workers_restarted": True,
             "subsystems_restarted": ["manager"],
         }
-
-    with MANAGER_RELOAD_LOCK:
-        previous_config = config
-        changes = _hot_config_changes(previous_config, effective_config)
-        mqtt_changed = previous_config.mqtt != effective_config.mqtt
-        retention_changed = "retention" in changes
-        image_storage_changed = "image_storage" in changes
-        semantic_search_changed = "semantic_search" in changes
-        detector_policy_changed = any(
-            getattr(previous_config.detector, field_name)
-            != getattr(effective_config.detector, field_name)
-            for field_name in DETECTOR_HOT_POLICY_FIELDS
-        )
-        tracking_session_changed = any(
-            getattr(previous_config.detector.tracking, field_name)
-            != getattr(effective_config.detector.tracking, field_name)
-            for field_name in TRACKING_SESSION_FIELDS
-        )
-        inference_roles: set[str] = set()
-        object_engine_changed = any(
-            getattr(previous_config.detector, field_name)
-            != getattr(effective_config.detector, field_name)
-            for field_name in DETECTOR_OBJECT_ENGINE_FIELDS
-        )
-        if object_engine_changed:
-            inference_roles.add("object")
-        if any(
-            getattr(previous_config.detector, field_name)
-            != getattr(effective_config.detector, field_name)
-            for field_name in DETECTOR_FACE_ENGINE_FIELDS
-        ):
-            inference_roles.add("face")
-        if any(
-            getattr(previous_config.detector, field_name)
-            != getattr(effective_config.detector, field_name)
-            for field_name in DETECTOR_SHARED_ENGINE_FIELDS
-        ):
-            inference_roles.update({"object", "face", "reid"})
-        if any(
-            getattr(previous_config.detector.tracking, field_name)
-            != getattr(effective_config.detector.tracking, field_name)
-            for field_name in TRACKING_REID_ENGINE_FIELDS
-        ):
-            inference_roles.add("reid")
-        reid_tracking_refresh = (
-            "reid" in inference_roles
-            and previous_config.detector.tracking
-            != effective_config.detector.tracking
-        )
-        object_tracking_refresh = any(
-            getattr(previous_config.detector, field_name)
-            != getattr(effective_config.detector, field_name)
-            for field_name in DETECTOR_OBJECT_TRACKING_RESET_FIELDS
-        )
-        inference_tracking_refresh = (
-            reid_tracking_refresh
-            or object_tracking_refresh
-            or (tracking_session_changed and bool(inference_roles))
-        )
-        recorder_changes = [
-            field_name
-            for field_name in sorted(RECORDER_CONFIG_FIELDS)
-            if getattr(previous_config, field_name) != getattr(effective_config, field_name)
-        ]
-        if recorder_changes and MEDIA_EXPORTS is not None:
-            active_exports = MEDIA_EXPORTS.active_jobs()
-            if active_exports:
-                kinds = sorted({str(job.get("kind") or "media") for job in active_exports})
-                raise StorageTasksActiveError([f"media {'/'.join(kinds)} export"])
-        if persist:
-            save_config(effective_config, assign_ids=False)
-        manager.config = effective_config
-        recorder_attempted = False
-        mqtt_attempted = False
-        retention_attempted = False
-        image_storage_attempted = False
-        detector_policy_attempted = False
-        tracking_session_applied = False
-        inference_applied = False
-        semantic_search_attempted = False
-        try:
-            if recorder_changes:
-                recorder_attempted = True
-                manager.reconfigure_recorders(effective_config)
-            if mqtt_changed:
-                mqtt_attempted = True
-                manager.reconfigure_mqtt(effective_config.mqtt)
-            if retention_changed:
-                retention_attempted = True
-                manager.reconfigure_recording_retention(effective_config)
-            if image_storage_changed:
-                image_storage_attempted = True
-                manager.reconfigure_image_storage(effective_config.image_storage)
-            if semantic_search_changed:
-                semantic_search_attempted = True
-                manager.reconfigure_semantic_search(effective_config.semantic_search)
-            if inference_roles:
-                manager.reconfigure_inference(
-                    effective_config.detector,
-                    inference_roles,
-                    refresh_tracking=inference_tracking_refresh,
-                )
-                inference_applied = True
-            if tracking_session_changed and not inference_tracking_refresh:
-                manager.reconfigure_object_tracking(effective_config.detector)
-                tracking_session_applied = True
-            if detector_policy_changed:
-                detector_policy_attempted = True
-                manager.reconfigure_detector_policy(effective_config.detector)
-        except BaseException:
-            manager.config = previous_config
-            if semantic_search_attempted:
-                try:
-                    manager.reconfigure_semantic_search(previous_config.semantic_search)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back semantic search configuration"
-                    )
-            if detector_policy_attempted:
-                try:
-                    manager.reconfigure_detector_policy(previous_config.detector)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back detector policy configuration"
-                    )
-            if tracking_session_applied:
-                try:
-                    manager.reconfigure_object_tracking(previous_config.detector)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back object tracking configuration"
-                    )
-            if inference_applied:
-                try:
-                    manager.reconfigure_inference(
-                        previous_config.detector,
-                        inference_roles,
-                        refresh_tracking=inference_tracking_refresh,
-                    )
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back inference configuration"
-                    )
-            if image_storage_attempted:
-                try:
-                    manager.reconfigure_image_storage(previous_config.image_storage)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back image storage configuration"
-                    )
-            if retention_attempted:
-                try:
-                    manager.reconfigure_recording_retention(previous_config)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back recording retention configuration"
-                    )
-            if mqtt_attempted:
-                try:
-                    manager.reconfigure_mqtt(previous_config.mqtt)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back MQTT configuration"
-                    )
-            if recorder_attempted:
-                try:
-                    manager.reconfigure_recorders(previous_config)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to roll back recorder configuration"
-                    )
-            if persist:
-                try:
-                    save_config(previous_config, assign_ids=False)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "failed to restore persisted configuration after hot-apply failure"
-                    )
-            raise
-        config = effective_config
-        restarted = [
-            name
-            for name, changed
-            in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed))
-            if changed
-        ]
-        if semantic_search_changed:
-            restarted.append("semantic_search")
-        if tracking_session_changed or inference_tracking_refresh:
-            restarted.append("tracking_sessions")
-        restarted.extend(
-            f"{role}_inference"
-            for role in ("object", "face", "reid")
-            if role in inference_roles
-        )
-        hot_updated = changes + recorder_changes
-        if detector_policy_changed:
-            hot_updated.append("detector_policy")
-        return effective_config, {
-            "apply_mode": "targeted" if restarted else "hot" if hot_updated else "unchanged",
-            "camera_workers_restarted": False,
-            "subsystems_restarted": restarted,
-            "hot_updated": hot_updated,
-        }
+    effective, result = application.apply(
+        config,
+        effective,
+        manager,
+        persist=persist,
+    )
+    config = effective
+    return effective, result
 
 
 @asynccontextmanager

@@ -513,7 +513,10 @@ class ConfigReloadTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "tracking failed"):
                 main.apply_config_update(incoming)
 
-        active.reconfigure_object_tracking.assert_called_once_with(incoming.detector)
+        self.assertEqual(active.reconfigure_object_tracking.call_args_list, [
+            unittest.mock.call(incoming.detector),
+            unittest.mock.call(current.detector),
+        ])
         self.assertEqual(save.call_count, 2)
         self.assertIs(main.config, current)
         self.assertIs(active.config, current)
