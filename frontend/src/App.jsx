@@ -3920,7 +3920,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 
 function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
-  const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
+  const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
@@ -4521,7 +4521,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
 
 function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
   const { cameras, appConfig, refresh: refreshBase } = usePollingData();
-  const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? true;
+  const thumbnailAnnotations = appConfig?.incident_thumbnail_annotations ?? false;
   const [eventFilter, setEventFilter] = useState("object");
   const [incidentCameraFilter, setIncidentCameraFilter] = useState("all");
   const [incidentObjectFilter, setIncidentObjectFilter] = useState("all");
@@ -7291,8 +7291,8 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
 
 const MOTION_DECISION_POLICIES = {
   audit: {
-    label: "Adaptive validation",
-    description: "SurvNG's adaptive scene analysis must confirm the motion.",
+    label: "EMA validation",
+    description: "SurvNG's Enhanced Motion Analysis (EMA) must confirm the motion.",
   },
   bypass: {
     label: "No visual validation",
@@ -7300,11 +7300,11 @@ const MOTION_DECISION_POLICIES = {
   },
   any: {
     label: "Either validator may confirm",
-    description: "Adaptive analysis or MOG2 may confirm motion. This is more sensitive.",
+    description: "EMA or MOG2 may confirm motion. This is more sensitive.",
   },
   all: {
     label: "Require both validators",
-    description: "Adaptive analysis and MOG2 must agree. This is stricter and may miss subtle motion.",
+    description: "EMA and MOG2 must agree. This is stricter and may miss subtle motion.",
   },
   weighted: {
     label: "Blend signals by importance",
@@ -7312,61 +7312,20 @@ const MOTION_DECISION_POLICIES = {
   },
 };
 
-function efficientMotionFusion() {
-  return buildMotionDecisionFusion({
-    ...defaultMotionDecisionSettings(),
-    policy: "audit",
-    sources: [],
-    includePrimary: true,
-    failOpen: true,
-  });
-}
-
-function isEfficientMotionSetup({ mode, qualification, fusion, catalog }) {
-  const analysis = readMotionAnalysisPreset(qualification, catalog);
-  const decision = readMotionDecisionFusion(fusion);
-  return mode === "camera"
-    && analysis.preset?.id === "adaptive"
-    && !analysis.custom
-    && decision.settings.policy === "audit"
-    && decision.settings.includePrimary
-    && !decision.settings.sources.includes("mog2");
-}
-
-function EfficientMotionSetup({ active, inherited = false, disabled = false, onApply }) {
-  return (
-    <div className={`efficient-motion-setup ${active ? "active" : ""}`}>
-      <div>
-        <strong>Camera-triggered with adaptive validation</strong>
-        <span>Recommended: ONVIF is the only automatic trigger. SurvNG validates ordinary camera motion before object detection runs and fails open if validation is unavailable.</span>
-      </div>
-      {active ? <span className="efficient-motion-status">{inherited ? "Using global setup" : "Currently selected"}</span> : (
-        <button type="button" className="primary" disabled={disabled} onClick={onApply}>Use this setup</button>
-      )}
-    </div>
-  );
-}
-
 function MotionAnalysisPresetEditor({
   qualification,
   inherited = false,
-  inheritedQualification,
   catalog,
   onSetInherited,
   onChange,
 }) {
   const presets = availableQualificationPresets(catalog);
   const parsed = readMotionAnalysisPreset(qualification, catalog);
-  const inheritedParsed = readMotionAnalysisPreset(inheritedQualification, catalog);
-  const effective = inherited ? inheritedParsed : parsed;
   const selectedValue = inherited
     ? "inherit"
     : parsed.custom
       ? "custom"
       : parsed.preset?.id || "";
-  const stageNames = new Map(
-    (catalog?.stages || []).map((stage) => [stage.implementation, stage.name]),
-  );
 
   function selectPreset(value) {
     if (value === "inherit") {
@@ -7387,16 +7346,6 @@ function MotionAnalysisPresetEditor({
           <option key={preset.id} value={preset.id}>{preset.label}{preset.recommended ? " (Recommended)" : ""}</option>
         ))}
       </select></label>
-      {effective.preset ? (
-        <div className="motion-analysis-description">
-          <strong>{inherited ? `Global: ${effective.preset.label}` : effective.preset.label}</strong>
-          <span>{effective.preset.description}</span>
-          <details>
-            <summary>{effective.preset.stages.length} processing {effective.preset.stages.length === 1 ? "step" : "steps"}</summary>
-            <span>{effective.preset.stages.map((stage) => stageNames.get(stage.implementation) || stage.implementation).join(" → ")}</span>
-          </details>
-        </div>
-      ) : null}
       {parsed.custom && !inherited ? <div className="motion-analysis-warning">This advanced pipeline is protected. Selecting another method will replace only the motion-analysis stages.</div> : null}
     </div>
   );
@@ -7449,13 +7398,6 @@ function MotionDecisionEditor({
       <span>{modeInfo.description}</span>
     </>
   );
-  const processingNote = (
-    <div className="motion-processing-note">
-      <span><strong>Analysis feed:</strong> each camera&apos;s live feed—its substream when configured, otherwise its main URL—sampled at the configured width and FPS.</span>
-      <span><strong>CPU control:</strong> all cameras remain enabled, but at most two run visual analysis simultaneously. A bounded latest-frame queue replaces stale pending work instead of building a backlog.</span>
-      <span><strong>After a trigger:</strong> object detection samples the high-resolution main recording; continuous recording and live view are not limited to two cameras.</span>
-    </div>
-  );
 
   function updateSettings(patch) {
     onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
@@ -7490,7 +7432,6 @@ function MotionDecisionEditor({
         </div>
         {modeControl}
         <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-        {processingNote}
       </div>
     );
   }
@@ -7510,7 +7451,6 @@ function MotionDecisionEditor({
         </div>
         {modeControl}
         <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-        {processingNote}
         <button type="button" onClick={() => {
           onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
           onMog2Change?.(false);
@@ -7556,7 +7496,6 @@ function MotionDecisionEditor({
 
       {modeControl}
       <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-      {processingNote}
 
       <div className="motion-decision-options-body">
       <fieldset className="motion-decision-sources">
@@ -7566,7 +7505,7 @@ function MotionDecisionEditor({
           checked={adaptiveValidator}
           disabled={["adaptive", "camera_rescue"].includes(effectiveMode)}
           onChange={(event) => setValidators(event.target.checked, mog2Validator)}
-        /> Adaptive scene analysis{effectiveMode === "adaptive" ? " (required trigger)" : effectiveMode === "camera_rescue" ? " (required backup)" : ""}</label>
+        /> Enhanced Motion Analysis (EMA){effectiveMode === "adaptive" ? " (required trigger)" : effectiveMode === "camera_rescue" ? " (required backup)" : ""}</label>
         <label className="check-field"><input
           type="checkbox"
           checked={mog2Validator}
@@ -9055,40 +8994,18 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                 <div className="sub-panel">
                   <h3>ONVIF</h3>
                   <label className="check-field"><input type="checkbox" checked={selectedCamera.onvif?.enabled || false} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "enabled"], event.target.checked)} /> Enabled</label>
-                  <label>Host<input value={selectedCamera.onvif?.host || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "host"], event.target.value)} /></label>
-                  <label>Port<input type="number" value={selectedCamera.onvif?.port || 8000} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "port"], Number(event.target.value))} /></label>
-                  <label>Username<input value={selectedCamera.onvif?.username || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "username"], event.target.value)} /></label>
-                  <label>Password<input type="password" value={secretInputValue(selectedCamera.onvif?.password)} placeholder={secretInputHint(selectedCamera.onvif?.password)} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
+                  <div className="onvif-field-grid">
+                    <label>Host<input value={selectedCamera.onvif?.host || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "host"], event.target.value)} /></label>
+                    <label>Port<input type="number" value={selectedCamera.onvif?.port || 8000} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "port"], Number(event.target.value))} /></label>
+                    <label>Username<input value={selectedCamera.onvif?.username || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "username"], event.target.value)} /></label>
+                    <label>Password<input type="password" value={secretInputValue(selectedCamera.onvif?.password)} placeholder={secretInputHint(selectedCamera.onvif?.password)} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
+                  </div>
                 </div>
                 <div className="sub-panel">
                   <h3>Motion Triggers &amp; Filtering</h3>
-                  <EfficientMotionSetup
-                    active={isEfficientMotionSetup({
-                      mode: selectedCamera.motion_qualification?.mode === "inherit" ? config.motion_qualification?.mode : selectedCamera.motion_qualification?.mode,
-                      qualification: selectedCamera.motion_qualification?.pipeline?.qualification ?? config.motion_qualification?.pipeline?.qualification,
-                      fusion: selectedCamera.motion_qualification?.pipeline?.fusion ?? config.motion_qualification?.pipeline?.fusion,
-                      catalog: motionCatalog,
-                    })}
-                    inherited={selectedCamera.motion_qualification?.mode === "inherit"
-                      && selectedCamera.motion_qualification?.mog2_audit_enabled == null
-                      && selectedCamera.motion_qualification?.pipeline?.qualification == null
-                      && selectedCamera.motion_qualification?.pipeline?.fusion == null}
-                    disabled={!availableQualificationPresets(motionCatalog).length}
-                    onApply={() => {
-                      const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.recommended) || availableQualificationPresets(motionCatalog)[0];
-                      updateCamera(selectedCamera.id, ["motion_qualification", "mode"], "camera");
-                      updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], false);
-                      updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], {
-                        ...(selectedCamera.motion_qualification?.pipeline || {}),
-                        qualification: presetQualificationGraph(modular),
-                        fusion: efficientMotionFusion(),
-                      });
-                    }}
-                  />
                   <MotionAnalysisPresetEditor
                     qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
                     inherited={selectedCamera.motion_qualification?.pipeline?.qualification == null}
-                    inheritedQualification={config.motion_qualification?.pipeline?.qualification}
                     catalog={motionCatalog}
                     onSetInherited={() => updateCamera(
                       selectedCamera.id,
@@ -9492,7 +9409,7 @@ const motionAiSettingLabels = {
 };
 
 function formatMotionAiValue(setting, value) {
-  if (setting === "analysis_preset") return ({ adaptive: "Adaptive motion analysis", modular: "Fixed-threshold modular analysis", classic: "Classic compatibility" })[value] || String(value);
+  if (setting === "analysis_preset") return ({ adaptive: "Enhanced Motion Analysis (EMA)", modular: "Fixed-threshold modular analysis", classic: "Classic compatibility" })[value] || String(value);
   if (setting === "stationary_object_tolerance") return ({ low: "Light", balanced: "Standard", high: "Strong", inherit: "Use global setting" })[value] || String(value);
   return String(value);
 }
@@ -9934,7 +9851,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
               {!isCameraIntelligence && report.review_context?.motion_paradigm ? (
                 <div className="probe-result">
                   <strong>Configuration analyzed</strong>
-                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "camera_triggered_with_visual_backup" ? "ONVIF + visual backup" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "Adaptive visual-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} visual analysis</span>
+                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "camera_triggered_with_visual_backup" ? "ONVIF + EMA backup" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "EMA-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} motion analysis</span>
                 </div>
               ) : null}
               <div className="motion-ai-review-stats">
@@ -10137,16 +10054,6 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
           <label>Web Base Path<input value={config.base_path ?? "/survng"} onChange={(event) => updateConfig(["base_path"], event.target.value)} placeholder="/survng" /></label>
-          <label className="check-field"><input type="checkbox" checked={config.incident_thumbnail_annotations ?? true} onChange={(event) => updateConfig(["incident_thumbnail_annotations"], event.target.checked)} /> Show boxes on incident thumbnails</label>
-          <div className="prewarm-setting">
-            <h4>Camera startup pacing</h4>
-            <div className="field-row">
-              <label>Concurrent cameras<input type="number" min="1" max="8" step="1" value={config.camera_startup?.max_concurrent_cameras ?? 2} onChange={(event) => updateConfig(["camera_startup", "max_concurrent_cameras"], Number(event.target.value))} /></label>
-              <label>First-frame wait<input type="number" min="1" max="30" step="0.5" value={config.camera_startup?.first_frame_timeout_seconds ?? 5} onChange={(event) => updateConfig(["camera_startup", "first_frame_timeout_seconds"], Number(event.target.value))} /></label>
-              <label>Minimum camera spacing<input type="number" min="0" max="5" step="0.1" value={config.camera_startup?.recorder_settle_seconds ?? 0.5} onChange={(event) => updateConfig(["camera_startup", "recorder_settle_seconds"], Number(event.target.value))} /></label>
-            </div>
-            <p>Limits camera connection bursts after a SurvNG restart. Minimum camera spacing keeps each admitted camera slot occupied briefly after its recorders start. Cameras that do not deliver a frame in time keep reconnecting without delaying the rest. Changes take effect on the next server start.</p>
-          </div>
           <div className="preference-action">
             <strong>Live Camera Order</strong>
             <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
@@ -10158,9 +10065,11 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         {section === "storage" ? (
         <div className="sub-panel">
           <h3>Storage</h3>
-          <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
-          <label>Metadata Database Directory<input value={config.database_dir || ""} onChange={(event) => updateConfig(["database_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
-          <label>Recording Index Directory<input value={config.recording_index_dir || ""} onChange={(event) => updateConfig(["recording_index_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
+          <div className="admin-field-grid">
+            <label>Storage Directory<input value={config.storage_dir || ""} onChange={(event) => updateConfig(["storage_dir"], event.target.value)} /></label>
+            <label>Metadata Database Directory<input value={config.database_dir || ""} onChange={(event) => updateConfig(["database_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
+            <label>Recording Index Directory<input value={config.recording_index_dir || ""} onChange={(event) => updateConfig(["recording_index_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
+          </div>
           <div className="prewarm-setting">
             <h4>Evidence image storage</h4>
             <div className="field-row">
@@ -10169,18 +10078,20 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             </div>
             <p>Controls newly saved incident and motion-audit images. Higher quality preserves more forensic detail but uses more space. Existing images are left unchanged, and live snapshots remain JPEG for compatibility.</p>
           </div>
-          <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
-          <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
-            <option value="auto">Auto (VAAPI preferred)</option>
-            <option value="vaapi">VAAPI</option>
-            <option value="qsv">Intel QSV</option>
-            <option value="off">Off</option>
-          </select></label>
-          <label>Event Clip Before<input type="number" min="0" max="30" step="1" value={config.event_clip_before_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_before_seconds"], Number(event.target.value))} /></label>
-          <label>Event Clip After<input type="number" min="0" max="30" step="1" value={config.event_clip_after_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_after_seconds"], Number(event.target.value))} /></label>
-          <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
-          <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
-          <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
+          <div className="admin-field-grid">
+            <label>FFmpeg Path<input value={config.ffmpeg_path || ""} onChange={(event) => updateConfig(["ffmpeg_path"], event.target.value)} /></label>
+            <label>Hardware Acceleration<select value={config.hardware_acceleration || "auto"} onChange={(event) => updateConfig(["hardware_acceleration"], event.target.value)}>
+              <option value="auto">Auto (VAAPI preferred)</option>
+              <option value="vaapi">VAAPI</option>
+              <option value="qsv">Intel QSV</option>
+              <option value="off">Off</option>
+            </select></label>
+            <label>Recording Segment Seconds<input type="number" min="2" max="300" step="1" value={config.recording_segment_seconds ?? 10} onChange={(event) => updateConfig(["recording_segment_seconds"], Number(event.target.value))} /></label>
+            <label>Event Clip Before<input type="number" min="0" max="30" step="1" value={config.event_clip_before_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_before_seconds"], Number(event.target.value))} /></label>
+            <label>Event Clip After<input type="number" min="0" max="30" step="1" value={config.event_clip_after_seconds ?? 5} onChange={(event) => updateConfig(["event_clip_after_seconds"], Number(event.target.value))} /></label>
+            <label>Playback Cache GB<input type="number" min="0.5" max="100" step="0.5" value={config.recording_cache_max_gb ?? 5} onChange={(event) => updateConfig(["recording_cache_max_gb"], Number(event.target.value))} /></label>
+            <label>Playback Cache Days<input type="number" min="1" max="90" step="1" value={config.recording_cache_max_days ?? 7} onChange={(event) => updateConfig(["recording_cache_max_days"], Number(event.target.value))} /></label>
+          </div>
           <div className="prewarm-setting">
             <label className="check-field"><input type="checkbox" checked={config.recording_cache_prewarm ?? true} onChange={(event) => updateConfig(["recording_cache_prewarm"], event.target.checked)} /> Prewarm finalized recordings</label>
             <p>Prepares each completed recording in the background so it opens faster on iPhone and in browsers. It trades additional remux work and playback-cache space for a shorter initial loading delay.</p>
@@ -10215,21 +10126,23 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         {section === "mqtt" ? (
         <div className="sub-panel">
           <h3>MQTT</h3>
-          <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>
-          <label>Broker Host<input value={config.mqtt?.host || ""} onChange={(event) => updateConfig(["mqtt", "host"], event.target.value)} placeholder="mqtt.local" /></label>
-          <label>Port<input type="number" min="1" max="65535" value={config.mqtt?.port || 1883} onChange={(event) => updateConfig(["mqtt", "port"], Number(event.target.value))} /></label>
-          <label>Username<input value={config.mqtt?.username || ""} onChange={(event) => updateConfig(["mqtt", "username"], event.target.value)} /></label>
-          <label>Password<input type="password" value={secretInputValue(config.mqtt?.password)} placeholder={secretInputHint(config.mqtt?.password)} onChange={(event) => updateConfig(["mqtt", "password"], event.target.value)} /></label>
-          <label>Client ID<input value={config.mqtt?.client_id || "survng"} onChange={(event) => updateConfig(["mqtt", "client_id"], event.target.value)} /></label>
-          <label>Topic Prefix<input value={config.mqtt?.topic_prefix || "survng"} onChange={(event) => updateConfig(["mqtt", "topic_prefix"], event.target.value)} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.mqtt?.incident_events_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "incident_events_enabled"], event.target.checked)} /> Publish incident events</label>
-          <label className="check-field"><input type="checkbox" checked={config.mqtt?.discovery_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "discovery_enabled"], event.target.checked)} /> Home Assistant Discovery</label>
-          <label>Discovery Prefix<input value={config.mqtt?.discovery_prefix || "homeassistant"} onChange={(event) => updateConfig(["mqtt", "discovery_prefix"], event.target.value)} disabled={config.mqtt?.discovery_enabled === false} /></label>
-          <label className="check-field"><input type="checkbox" checked={config.mqtt?.server_status_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "server_status_enabled"], event.target.checked)} /> Publish SurvNG server status</label>
-          <label>Server Device Name<input value={config.mqtt?.server_name || "SurvNG Server"} onChange={(event) => updateConfig(["mqtt", "server_name"], event.target.value)} disabled={config.mqtt?.server_status_enabled === false} /></label>
-          <label>Server Metrics Interval<input type="number" min="10" max="3600" step="5" value={config.mqtt?.server_metrics_interval_seconds ?? 30} onChange={(event) => updateConfig(["mqtt", "server_metrics_interval_seconds"], Number(event.target.value))} disabled={config.mqtt?.server_status_enabled === false} /><small>Seconds between retained system, camera, detector, and storage updates.</small></label>
-          <label>QoS<select value={config.mqtt?.qos ?? 0} onChange={(event) => updateConfig(["mqtt", "qos"], Number(event.target.value))}><option value={0}>0</option><option value={1}>1</option><option value={2}>2</option></select></label>
-          <label className="check-field"><input type="checkbox" checked={config.mqtt?.tls || false} onChange={(event) => updateConfig(["mqtt", "tls"], event.target.checked)} /> TLS</label>
+          <div className="admin-field-grid">
+            <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>
+            <label>Broker Host<input value={config.mqtt?.host || ""} onChange={(event) => updateConfig(["mqtt", "host"], event.target.value)} placeholder="mqtt.local" /></label>
+            <label>Port<input type="number" min="1" max="65535" value={config.mqtt?.port || 1883} onChange={(event) => updateConfig(["mqtt", "port"], Number(event.target.value))} /></label>
+            <label>Username<input value={config.mqtt?.username || ""} onChange={(event) => updateConfig(["mqtt", "username"], event.target.value)} /></label>
+            <label>Password<input type="password" value={secretInputValue(config.mqtt?.password)} placeholder={secretInputHint(config.mqtt?.password)} onChange={(event) => updateConfig(["mqtt", "password"], event.target.value)} /></label>
+            <label>Client ID<input value={config.mqtt?.client_id || "survng"} onChange={(event) => updateConfig(["mqtt", "client_id"], event.target.value)} /></label>
+            <label>Topic Prefix<input value={config.mqtt?.topic_prefix || "survng"} onChange={(event) => updateConfig(["mqtt", "topic_prefix"], event.target.value)} /></label>
+            <label className="check-field"><input type="checkbox" checked={config.mqtt?.incident_events_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "incident_events_enabled"], event.target.checked)} /> Publish incident events</label>
+            <label className="check-field"><input type="checkbox" checked={config.mqtt?.discovery_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "discovery_enabled"], event.target.checked)} /> Home Assistant Discovery</label>
+            <label>Discovery Prefix<input value={config.mqtt?.discovery_prefix || "homeassistant"} onChange={(event) => updateConfig(["mqtt", "discovery_prefix"], event.target.value)} disabled={config.mqtt?.discovery_enabled === false} /></label>
+            <label className="check-field"><input type="checkbox" checked={config.mqtt?.server_status_enabled ?? true} onChange={(event) => updateConfig(["mqtt", "server_status_enabled"], event.target.checked)} /> Publish SurvNG server status</label>
+            <label>Server Device Name<input value={config.mqtt?.server_name || "SurvNG Server"} onChange={(event) => updateConfig(["mqtt", "server_name"], event.target.value)} disabled={config.mqtt?.server_status_enabled === false} /></label>
+            <label>Server Metrics Interval<input type="number" min="10" max="3600" step="5" value={config.mqtt?.server_metrics_interval_seconds ?? 30} onChange={(event) => updateConfig(["mqtt", "server_metrics_interval_seconds"], Number(event.target.value))} disabled={config.mqtt?.server_status_enabled === false} /><small>Seconds between retained system, camera, detector, and storage updates.</small></label>
+            <label>QoS<select value={config.mqtt?.qos ?? 0} onChange={(event) => updateConfig(["mqtt", "qos"], Number(event.target.value))}><option value={0}>0</option><option value={1}>1</option><option value={2}>2</option></select></label>
+            <label className="check-field"><input type="checkbox" checked={config.mqtt?.tls || false} onChange={(event) => updateConfig(["mqtt", "tls"], event.target.checked)} /> TLS</label>
+          </div>
           {mqttStatus ? <div className={`probe-result ${mqttStatus.connected ? "ok" : ""}`}><strong>{mqttStatus.connected ? "Connected" : mqttStatus.enabled ? "Disconnected" : "Disabled"}</strong><span>{mqttStatus.host || "No broker"}:{mqttStatus.port || 1883}</span><span>{mqttStatus.messages_published || 0} published · {mqttStatus.publish_failures || 0} publish failures</span><span>Commands: {mqttStatus.command_subscriptions_active ? "ready" : mqttStatus.connected ? "not subscribed" : "offline"} · {mqttStatus.commands_received || 0} accepted · {mqttStatus.commands_rejected || 0} rejected · {mqttStatus.command_errors || 0} failed · {mqttStatus.command_queue_depth || 0} queued</span>{mqttStatus.server_status_enabled ? <span>Server: {mqttStatus.server_lifecycle || "starting"} · {mqttStatus.server_state?.health || "pending"} · {mqttStatus.server_state?.activity || "idle"} · every {mqttStatus.server_metrics_interval_seconds || 30}s · {mqttStatus.server_state_topic}</span> : null}{mqttStatus.incident_events_enabled ? <span>Incidents: {mqttStatus.incident_topic} ({mqttStatus.pending_incidents || 0} pending)</span> : null}{mqttStatus.server_status_error ? <span>Server metrics: {mqttStatus.server_status_error}</span> : null}{mqttStatus.last_error ? <span>{mqttStatus.last_error}</span> : null}</div> : null}
         </div>
         ) : null}
@@ -10394,32 +10307,12 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_full_frame ?? true} onChange={(event) => updateConfig(["semantic_search", "index_full_frame"], event.target.checked)} /><span>Index whole incident image</span></label>
             <label className="compact-toggle"><input type="checkbox" checked={config.semantic_search?.index_object_crops ?? true} onChange={(event) => updateConfig(["semantic_search", "index_object_crops"], event.target.checked)} /><span>Index detected object crops</span></label>
             <label>Object crops per incident<input type="number" min="1" max="100" step="1" value={config.semantic_search?.max_object_crops_per_event ?? 24} onChange={(event) => updateConfig(["semantic_search", "max_object_crops_per_event"], Number(event.target.value))} /><small>Caps crop inference and memory for unusually busy incidents; highest-confidence detections are indexed first.</small></label>
-            <div className="probe-result"><strong>Model upgrades are non-destructive</strong><span>SurvNG keeps each model generation separate, builds the new index in the background, and never mixes incompatible similarity scores.</span></div>
           </div>
         </details>
 
         <details className="detection-settings-card detection-feature-card wide-card">
           <summary><span className="detection-settings-card-icon"><Gauge size={18} /></span><span><strong>Motion validation</strong><small>How camera and visual motion decide when object detection runs.</small></span></summary>
           <div className="detection-feature-body">
-        <EfficientMotionSetup
-          active={isEfficientMotionSetup({
-            mode: config.motion_qualification?.mode,
-            qualification: config.motion_qualification?.pipeline?.qualification,
-            fusion: config.motion_qualification?.pipeline?.fusion,
-            catalog: motionCatalog,
-          })}
-          disabled={!availableQualificationPresets(motionCatalog).length}
-          onApply={() => {
-            const modular = availableQualificationPresets(motionCatalog).find((preset) => preset.recommended) || availableQualificationPresets(motionCatalog)[0];
-            updateConfig(["motion_qualification", "mode"], "camera");
-            updateConfig(["motion_qualification", "mog2_audit_enabled"], false);
-            updateConfig(["motion_qualification", "pipeline"], {
-              ...(config.motion_qualification?.pipeline || {}),
-              qualification: presetQualificationGraph(modular),
-              fusion: efficientMotionFusion(),
-            });
-          }}
-        />
         <MotionAnalysisPresetEditor
           qualification={config.motion_qualification?.pipeline?.qualification || []}
           catalog={motionCatalog}

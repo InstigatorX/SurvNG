@@ -351,7 +351,6 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager = AppManager(AppConfig(
                 storage_dir=storage,
                 database_dir=database,
-                camera_startup={"max_concurrent_cameras": 4},
                 cameras=[camera],
             ))
 
@@ -359,7 +358,10 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(manager.faces.db_path, Path(database) / "survng.sqlite3")
             self.assertEqual(manager.database_dir, Path(database))
             self.assertEqual(manager.workers["gate"].onvif._cache_dir, Path(database) / "onvif")
-            self.assertEqual(manager._capture_open_limiter.capacity, 4)
+            self.assertEqual(manager._capture_open_limiter.capacity, 2)
+            self.assertEqual(manager.camera_startup.max_concurrency, 2)
+            self.assertEqual(manager.camera_startup.readiness_timeout_seconds, 5.0)
+            self.assertEqual(manager.camera_startup.recorder_settle_seconds, 0.5)
 
             manager.stop_all()
 

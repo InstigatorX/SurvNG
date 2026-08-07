@@ -13,6 +13,9 @@ from .security import redact_secret_text
 
 
 LOGGER = logging.getLogger("uvicorn.error")
+CAMERA_STARTUP_MAX_CONCURRENCY = 2
+CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS = 5.0
+CAMERA_STARTUP_RECORDER_SETTLE_SECONDS = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +69,9 @@ class CameraStartupCoordinator:
     def __init__(
         self,
         *,
-        max_concurrency: int = 2,
-        readiness_timeout_seconds: float = 5.0,
-        recorder_settle_seconds: float = 0.5,
+        max_concurrency: int = CAMERA_STARTUP_MAX_CONCURRENCY,
+        readiness_timeout_seconds: float = CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
+        recorder_settle_seconds: float = CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
         poll_interval_seconds: float = 0.1,
         monotonic_clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),

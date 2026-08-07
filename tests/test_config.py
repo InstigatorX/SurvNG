@@ -114,14 +114,23 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(AppConfig().base_path, "/survng")
         self.assertEqual(AppConfig().database_dir, "")
         self.assertEqual(AppConfig().recording_index_dir, "")
-        self.assertEqual(AppConfig().camera_startup.max_concurrent_cameras, 2)
-        self.assertEqual(AppConfig().camera_startup.first_frame_timeout_seconds, 5.0)
-        self.assertEqual(AppConfig().camera_startup.recorder_settle_seconds, 0.5)
+        self.assertFalse(AppConfig().incident_thumbnail_annotations)
 
     def test_base_path_is_normalized(self) -> None:
         self.assertEqual(AppConfig(base_path=" cameras/ ").base_path, "/cameras")
         self.assertEqual(AppConfig(base_path="/").base_path, "")
         self.assertEqual(AppConfig(base_path="").base_path, "")
+
+    def test_legacy_camera_startup_tuning_is_ignored(self) -> None:
+        config = AppConfig.model_validate({
+            "camera_startup": {
+                "max_concurrent_cameras": 8,
+                "first_frame_timeout_seconds": 30,
+                "recorder_settle_seconds": 5,
+            }
+        })
+
+        self.assertNotIn("camera_startup", config.model_dump())
 
     def test_base_path_rejects_query_or_fragment(self) -> None:
         with self.assertRaises(ValidationError):

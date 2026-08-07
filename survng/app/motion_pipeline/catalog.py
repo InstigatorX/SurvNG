@@ -52,7 +52,7 @@ def builtin_motion_pipeline_presets() -> tuple[MotionPipelinePreset, ...]:
     return (
         MotionPipelinePreset(
             preset_id="adaptive",
-            label="Adaptive motion analysis",
+            label="Enhanced Motion Analysis (EMA)",
             description=(
                 "Learns each camera scene and automatically adjusts for lighting, "
                 "sensor noise, nuisance regions, and insect-like motion."

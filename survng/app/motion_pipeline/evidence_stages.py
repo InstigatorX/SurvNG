@@ -492,7 +492,7 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
                 MotionStageOption("weighted_threshold", "Combined confidence", "number", 0.5, minimum=0, maximum=1, advanced=True),
                 MotionStageOption("minimum_sources", "Minimum available sources", "integer", 1, minimum=0, advanced=True),
                 MotionStageOption("require_warmed", "Require learned background", "boolean", True, advanced=True),
-                MotionStageOption("include_primary", "Include adaptive analysis", "boolean", True, advanced=True),
+                MotionStageOption("include_primary", "Include EMA", "boolean", True, advanced=True),
                 MotionStageOption("fail_open", "Run detection when validation is unavailable", "boolean", True, advanced=True),
             ),
         )

@@ -21,15 +21,15 @@ export const MOTION_MODE_OPTIONS = Object.freeze([
   }),
   Object.freeze({
     value: "camera_rescue",
-    label: "Camera + visual backup",
-    status: "Camera primary · SurvNG visual backup",
-    description: "Camera ONVIF notices remain primary. Exceptionally strong, persistent visual motion can start object detection when the camera stays silent; an eligible object must overlap that motion or move across detector samples.",
+    label: "Camera + EMA backup",
+    status: "Camera primary · EMA backup",
+    description: "Camera ONVIF notices remain primary. Exceptionally strong, persistent Enhanced Motion Analysis (EMA) can start object detection when the camera stays silent; an eligible object must overlap that motion or move across detector samples.",
   }),
   Object.freeze({
     value: "adaptive",
-    label: "Visual-triggered",
-    status: "SurvNG adaptive triggers",
-    description: "Adaptive visual motion starts object detection. Ordinary ONVIF notices are recorded as diagnostics but cannot trigger detection; MOG2 can optionally be required as confirmation.",
+    label: "EMA-triggered",
+    status: "SurvNG EMA triggers",
+    description: "Enhanced Motion Analysis (EMA) starts object detection. Ordinary ONVIF notices are recorded as diagnostics but cannot trigger detection; MOG2 can optionally be required as confirmation.",
   }),
 ]);
 
@@ -38,7 +38,7 @@ const LEGACY_MODE_INFO = Object.freeze({
     value: "audit",
     label: "Legacy decision preview",
     status: "Legacy camera triggers · preview only",
-    description: "Camera notices always run object detection; adaptive decisions are recorded but never enforced. Select a current mode to migrate this configuration.",
+    description: "Camera notices always run object detection; EMA decisions are recorded but never enforced. Select a current mode to migrate this configuration.",
   }),
   off: Object.freeze({
     value: "off",
@@ -50,7 +50,7 @@ const LEGACY_MODE_INFO = Object.freeze({
     value: "enforce",
     label: "Legacy hybrid mode",
     status: "Legacy camera + visual triggers",
-    description: "Both ordinary ONVIF and adaptive visual motion may trigger detection. Select a current mode to remove this ambiguous hybrid behavior.",
+    description: "Both ordinary ONVIF and EMA may trigger detection. Select a current mode to remove this ambiguous hybrid behavior.",
   }),
 });
 

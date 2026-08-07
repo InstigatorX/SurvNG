@@ -282,28 +282,6 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertIs(main.config, effective)
         self.assertIs(active.config, effective)
 
-    def test_camera_startup_policy_saves_without_restarting_running_cameras(self) -> None:
-        active = Mock()
-        current = AppConfig()
-        active.config = current
-        main.config = current
-        main.manager = active
-        incoming = current.model_copy(deep=True)
-        incoming.camera_startup.max_concurrent_cameras = 3
-
-        with (
-            patch("survng.app.main.reload_manager") as reload,
-            patch("survng.app.main.save_config") as save,
-        ):
-            effective, result = main.apply_config_update(incoming)
-
-        reload.assert_not_called()
-        save.assert_called_once_with(effective, assign_ids=False)
-        active.workers.values.assert_not_called()
-        self.assertEqual(result["apply_mode"], "hot")
-        self.assertIn("camera_startup", result["hot_updated"])
-        self.assertEqual(active.config.camera_startup.max_concurrent_cameras, 3)
-
     def test_image_storage_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
         current = AppConfig()

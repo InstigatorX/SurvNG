@@ -11,7 +11,13 @@ from pathlib import Path
 
 from .camera import CameraWorker
 from .camera_capture import CaptureOpenLimiter, OpenCvFfmpegCaptureBackend
-from .camera_startup import CameraStartupCoordinator, CameraStartupTask
+from .camera_startup import (
+    CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
+    CAMERA_STARTUP_MAX_CONCURRENCY,
+    CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
+    CameraStartupCoordinator,
+    CameraStartupTask,
+)
 from .appearance_index import AppearanceIndex
 from .appearance_backfill import DeferredAppearanceBackfill
 from .config import (
@@ -145,11 +151,10 @@ class AppManager:
             protected_recording_paths=self.events.protected_recording_paths,
         )
         self.go2rtc = Go2RtcAdapter()
-        # Keep native OpenCV admission aligned with the camera-level startup
-        # policy.  Otherwise increasing the configured coordinator capacity
-        # leaves an undocumented second ceiling at the old hard-coded value.
+        # Camera startup pacing is an internal safety policy. Keep native
+        # OpenCV admission and the startup coordinator on the same fixed cap.
         self._capture_open_limiter = CaptureOpenLimiter(
-            config.camera_startup.max_concurrent_cameras
+            CAMERA_STARTUP_MAX_CONCURRENCY
         )
         self.capture_backend = OpenCvFfmpegCaptureBackend(
             self._capture_open_limiter
@@ -210,9 +215,9 @@ class AppManager:
         self._startup_services_ready = False
         self._startup_timings: dict[str, float] = {}
         self.camera_startup = CameraStartupCoordinator(
-            max_concurrency=config.camera_startup.max_concurrent_cameras,
-            readiness_timeout_seconds=config.camera_startup.first_frame_timeout_seconds,
-            recorder_settle_seconds=config.camera_startup.recorder_settle_seconds,
+            max_concurrency=CAMERA_STARTUP_MAX_CONCURRENCY,
+            readiness_timeout_seconds=CAMERA_STARTUP_FIRST_FRAME_TIMEOUT_SECONDS,
+            recorder_settle_seconds=CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
         )
         self._state_monitor_stop = threading.Event()
         self._state_monitor_thread: threading.Thread | None = None

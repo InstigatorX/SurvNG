@@ -728,7 +728,6 @@ def reload_manager(
 
 HOT_CONFIG_FIELDS = frozenset({
     "base_path",
-    "camera_startup",
     "event_clip_before_seconds",
     "event_clip_after_seconds",
     "incident_thumbnail_annotations",

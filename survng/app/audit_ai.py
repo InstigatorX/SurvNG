@@ -200,13 +200,13 @@ versioned motion_paradigm summary, and any object-detection result. Motion proce
 whether the expensive object detector should run; it does not classify subjects.
 
 SurvNG has three current trigger models:
-1. camera_triggered: ONVIF camera notices are the only automatic trigger. Adaptive scene analysis
+1. camera_triggered: ONVIF camera notices are the only automatic trigger. Enhanced Motion Analysis (EMA)
    and MOG2 are optional validators. Manual and semantic ONVIF notices bypass ordinary validation.
 2. camera_triggered_with_visual_backup: ONVIF remains primary, but exceptionally strong,
    persistent adaptive motion may start object detection when no recent camera notice arrived.
    A backup object must overlap credible EMA motion or move across detector samples before creating
    an incident; a stationary object elsewhere in the frame is diagnostic evidence only.
-3. visual_triggered: adaptive scene analysis is the only automatic trigger. MOG2 may validate it.
+3. visual_triggered: Enhanced Motion Analysis (EMA) is the only automatic trigger. MOG2 may validate it.
    ONVIF notices are diagnostic only and cannot start object detection.
 Selected validators fail open while unavailable or warming so real events are not silently lost.
 
