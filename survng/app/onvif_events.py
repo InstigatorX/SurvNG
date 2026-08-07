@@ -106,17 +106,32 @@ class OnvifEventListener:
                 raise
 
     def stop(self) -> None:
+        self.request_stop()
+        self.wait_stopped(STOP_GRACE_SECONDS + STOP_FORCE_SECONDS)
+
+    def request_stop(self) -> None:
+        """Signal the listener without waiting for camera I/O to return."""
         self._stop.set()
+
+    def wait_stopped(self, timeout: float) -> bool:
+        """Wait within one caller-owned budget, forcing transport closure once."""
+        deadline = time.monotonic() + max(0.0, timeout)
         with self._lifecycle_lock:
             thread = self._thread
         if thread is not None:
             # PullMessages has a short bounded timeout. Let the owning worker
             # return from it and send Unsubscribe while its transport is still
             # usable before resorting to forcibly closing the session.
-            thread.join(timeout=STOP_GRACE_SECONDS)
+            thread.join(timeout=min(
+                STOP_GRACE_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            ))
             if thread.is_alive():
                 self._close_transport()
-                thread.join(timeout=STOP_FORCE_SECONDS)
+                thread.join(timeout=min(
+                    STOP_FORCE_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                ))
                 if thread.is_alive():
                     LOGGER.error("ONVIF worker did not stop for %s", self.camera.id)
         self.connected = False
@@ -125,6 +140,7 @@ class OnvifEventListener:
                 self._thread = None
         if thread is None or not thread.is_alive():
             self._transport = None
+        return thread is None or not thread.is_alive()
 
     def _run(self) -> None:
         try:

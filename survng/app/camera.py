@@ -259,9 +259,24 @@ class CameraWorker:
     def stop(self) -> None:
         self.lifecycle.stop()
 
+    def request_stop(self) -> None:
+        self.lifecycle.request_stop()
+
+    def wait_stopped(self, deadline: float) -> bool:
+        return self.lifecycle.wait_stopped(deadline)
+
+    def active_workers(self) -> list[str]:
+        return self.lifecycle.active_workers()
+
     def stop_onvif_events(self) -> None:
         """Release the camera's ONVIF subscription without stopping video."""
         self.lifecycle.stop_onvif_events()
+
+    def request_onvif_stop(self) -> None:
+        self.lifecycle.request_onvif_stop()
+
+    def wait_onvif_stopped(self, deadline: float) -> bool:
+        return self.lifecycle.wait_onvif_stopped(deadline)
 
     def close(self) -> None:
         self.lifecycle.close()

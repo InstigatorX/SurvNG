@@ -1150,13 +1150,21 @@ class ObjectTrackingSession:
             self.stop()
 
     def stop(self) -> bool:
+        self.request_stop()
+        return self.wait_stopped(TRACKING_STOP_TIMEOUT_SECONDS)
+
+    def request_stop(self) -> None:
+        """Stop accepting work and signal the session without joining it."""
         with self._lock:
             self._accepting = False
-            stop = self._stop
+            self._stop.set()
+
+    def wait_stopped(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the signalled session to exit."""
+        with self._lock:
             thread = self._thread
-            stop.set()
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=TRACKING_STOP_TIMEOUT_SECONDS)
+            thread.join(timeout=max(0.0, timeout))
             if thread.is_alive():
                 LOGGER.error("object tracking worker did not stop for %s", self.camera.id)
         with self._lock:

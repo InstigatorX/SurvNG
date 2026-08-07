@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import traceback
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -22,8 +23,10 @@ def _service() -> tuple[CameraLifecycleService, SimpleNamespace]:
     capture.wait_stopped.return_value = {}
     onvif = Mock()
     onvif.running = False
+    onvif.wait_stopped.return_value = True
     tracking = Mock()
     tracking.stop.return_value = True
+    tracking.wait_stopped.return_value = True
     tracking.running.return_value = False
     motion_runtime = Mock()
     motion_runtime.active_workers.return_value = []
@@ -82,7 +85,7 @@ def test_start_failure_rolls_back_runtime_state() -> None:
     assert "capture unavailable" in owned.state.last_failure
     assert owned.state.stop_event.is_set()
     owned.capture.request_stop.assert_called_once_with()
-    owned.onvif.stop.assert_called_once_with()
+    owned.onvif.request_stop.assert_called_once_with()
 
 
 def test_start_failure_redacts_credentials_from_runtime_status() -> None:
@@ -107,13 +110,13 @@ def test_stop_attempts_later_cleanup_after_early_failure() -> None:
     with pytest.raises(RuntimeError, match="capture cleanup"):
         service.stop()
 
-    owned.onvif.stop.assert_called_once_with()
-    owned.tracking.stop.assert_called_once_with()
+    owned.onvif.request_stop.assert_called_once_with()
+    owned.tracking.request_stop.assert_called_once_with()
     owned.motion_runtime.request_stop.assert_called_once_with()
     owned.tracking_frames.clear.assert_called_once_with()
     owned.motion_runtime.wait_stopped.assert_called_once_with(
-        analysis_timeout=8.0,
-        decision_timeout=22.0,
+        analysis_timeout=pytest.approx(22.0, abs=0.1),
+        decision_timeout=pytest.approx(22.0, abs=0.1),
     )
     assert owned.state.phase is CameraLifecyclePhase.FAILED
 
@@ -241,6 +244,16 @@ def test_closed_camera_cannot_be_restarted() -> None:
         service.start()
 
 
+def test_repeated_fleet_stop_wait_preserves_closed_phase() -> None:
+    service, owned = _service()
+    service.close()
+
+    service.request_stop()
+    assert service.wait_stopped(time.monotonic() + 1.0)
+
+    assert owned.state.phase is CameraLifecyclePhase.CLOSED
+
+
 def test_close_rejects_running_camera_even_without_visible_worker_threads() -> None:
     service, owned = _service()
     owned.state.phase = CameraLifecyclePhase.RUNNING
@@ -262,7 +275,7 @@ def test_close_never_marks_camera_closed_with_residual_worker(
         owned.onvif.running = True
     elif residual_kind == "tracking":
         owned.tracking.running.return_value = True
-        owned.tracking.stop.return_value = False
+        owned.tracking.wait_stopped.return_value = False
     else:
         capture_thread = Mock()
         capture_thread.is_alive.return_value = True

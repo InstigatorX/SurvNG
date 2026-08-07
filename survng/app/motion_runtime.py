@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
@@ -225,6 +226,7 @@ class MotionRuntimeService:
                 self.decisions.start(stop_event)
             except BaseException as start_error:
                 rollback_errors: list[BaseException] = []
+                stop_event.set()
                 self._attempt(self.analysis.request_stop, rollback_errors)
                 self._attempt(self.decisions.request_stop, rollback_errors)
                 self._attempt(
@@ -250,6 +252,9 @@ class MotionRuntimeService:
     def request_stop(self) -> None:
         """Stop admission and wake both workers without blocking."""
         failures: list[BaseException] = []
+        stop_event = self._stop_event
+        if stop_event is not None:
+            stop_event.set()
         self._attempt(self.analysis.request_stop, failures)
         self._attempt(self.decisions.request_stop, failures)
         self._raise_failures("request stop", failures)
@@ -263,12 +268,23 @@ class MotionRuntimeService:
         """Join both workers and reset generation state only after they exit."""
         with self._operation_lock:
             failures: list[BaseException] = []
+            deadline = time.monotonic() + max(
+                0.0,
+                analysis_timeout,
+                decision_timeout,
+            )
             decision_stopped = self._attempt_result(
-                lambda: self.decisions.wait_stopped(decision_timeout),
+                lambda: self.decisions.wait_stopped(min(
+                    max(0.0, decision_timeout),
+                    max(0.0, deadline - time.monotonic()),
+                )),
                 failures,
             )
             analysis_stopped = self._attempt_result(
-                lambda: self.analysis.wait_stopped(analysis_timeout),
+                lambda: self.analysis.wait_stopped(min(
+                    max(0.0, analysis_timeout),
+                    max(0.0, deadline - time.monotonic()),
+                )),
                 failures,
             )
             workers_stopped = decision_stopped and analysis_stopped
@@ -386,4 +402,4 @@ class MotionRuntimeService:
         raise RuntimeError(
             f"motion runtime failed to {action} for {self.camera_id}: "
             f"{redact_secret_text(first)}"
-        ) from first
+        ) from None

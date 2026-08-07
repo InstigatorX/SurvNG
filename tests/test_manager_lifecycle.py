@@ -39,9 +39,13 @@ def manager_with_mocks() -> AppManager:
     manager.state_events = Mock()
     manager.workers = {"gate": Mock()}
     manager.workers["gate"].live_capture_ready.return_value = True
+    manager.workers["gate"].wait_stopped.return_value = True
+    manager.workers["gate"].wait_onvif_stopped.return_value = True
+    manager.workers["gate"].active_workers.return_value = []
     manager._start_state_monitor = Mock()
     manager._stop_state_monitor = Mock()
     manager._save_runtime_state = Mock()
+    manager._publish_camera_status = Mock()
     manager.camera_fleet = CameraFleetLifecycle(
         cameras=[camera],
         workers=manager.workers,
@@ -472,7 +476,7 @@ class ManagerLifecycleTest(unittest.TestCase):
     def test_camera_close_runs_even_when_camera_stop_fails(self) -> None:
         manager = manager_with_mocks()
         manager._started = True
-        manager.workers["gate"].stop.side_effect = RuntimeError("stop failed")
+        manager.workers["gate"].request_stop.side_effect = RuntimeError("stop failed")
 
         with self.assertRaisesRegex(RuntimeError, "camera gate"):
             manager.stop_all()
@@ -481,49 +485,87 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.detector.stop.assert_called_once_with()
         manager.recorder.stop_all.assert_called_once_with()
 
+    def test_shutdown_aggregate_does_not_chain_secret_bearing_camera_error(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+        manager.workers["gate"].request_stop.side_effect = RuntimeError(
+            "rtsp://admin:supersecret@192.0.2.10/live"
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            manager.stop_all()
+
+        self.assertNotIn("supersecret", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
     def test_manager_camera_shutdown_deadline_does_not_block_other_cleanup(self) -> None:
         manager = manager_with_mocks()
         manager._started = True
-        release = threading.Event()
-        manager.workers["gate"].stop.side_effect = lambda: release.wait(timeout=1)
+        manager.workers["gate"].wait_stopped.return_value = False
+        manager.workers["gate"].active_workers.return_value = ["capture: live"]
 
-        try:
-            with (
-                patch("survng.app.camera_fleet.CAMERA_SHUTDOWN_TIMEOUT_SECONDS", 0.02),
-                self.assertRaisesRegex(RuntimeError, "camera gate"),
-            ):
-                manager.stop_all()
-        finally:
-            release.set()
+        with (
+            patch("survng.app.camera_fleet.CAMERA_SHUTDOWN_TIMEOUT_SECONDS", 0.02),
+            self.assertRaisesRegex(RuntimeError, "gate"),
+        ):
+            manager.stop_all()
 
         manager.workers["gate"].close.assert_not_called()
-        manager.detector.stop.assert_called_once_with()
-        manager.recorder.stop_all.assert_called_once_with()
+        manager.detector.stop.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+        self.assertFalse(manager._closed)
 
     def test_onvif_release_deadline_is_bounded(self) -> None:
         manager = manager_with_mocks()
-        release = threading.Event()
-        manager.workers["gate"].stop_onvif_events.side_effect = (
-            lambda: release.wait(timeout=1)
-        )
+        manager.workers["gate"].wait_onvif_stopped.return_value = False
 
-        try:
-            with (
-                patch("survng.app.camera_fleet.ONVIF_RELEASE_TIMEOUT_SECONDS", 0.02),
-                self.assertRaisesRegex(RuntimeError, "gate"),
-            ):
-                manager.release_onvif_subscriptions()
-        finally:
-            release.set()
+        with (
+            patch("survng.app.camera_fleet.ONVIF_RELEASE_TIMEOUT_SECONDS", 0.02),
+            self.assertRaisesRegex(RuntimeError, "gate"),
+        ):
+            manager.release_onvif_subscriptions()
+
+    def test_onvif_shutdown_residual_keeps_shared_dependencies_alive(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+        manager.workers["gate"].wait_onvif_stopped.return_value = False
+
+        with self.assertRaisesRegex(RuntimeError, "gate"):
+            manager.stop_all()
+
+        manager.workers["gate"].request_stop.assert_not_called()
+        manager.detector.stop.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+        self.assertFalse(manager._closed)
+
+    def test_stuck_startup_admission_prevents_camera_stop_and_shared_teardown(self) -> None:
+        manager = manager_with_mocks()
+        manager._started = True
+
+        with (
+            patch.object(manager.camera_fleet.startup, "cancel", return_value=False),
+            self.assertRaisesRegex(RuntimeError, "gate"),
+        ):
+            manager.stop_all()
+
+        manager.workers["gate"].request_onvif_stop.assert_not_called()
+        manager.workers["gate"].request_stop.assert_not_called()
+        manager.detector.stop.assert_not_called()
+        manager.recorder.stop_all.assert_not_called()
+        self.assertEqual(
+            manager.camera_fleet.status()["shutdown_residual_camera_ids"],
+            ["gate"],
+        )
+        self.assertFalse(manager._closed)
 
     def test_shutdown_releases_onvif_before_other_camera_components(self) -> None:
         manager = manager_with_mocks()
         manager._started = True
         order: list[str] = []
-        manager.workers["gate"].stop_onvif_events.side_effect = (
+        manager.workers["gate"].request_onvif_stop.side_effect = (
             lambda: order.append("onvif")
         )
-        manager.workers["gate"].stop.side_effect = lambda: order.append("camera")
+        manager.workers["gate"].request_stop.side_effect = lambda: order.append("camera")
         manager.mqtt.stop.side_effect = lambda: order.append("mqtt")
 
         manager.stop_all()
@@ -536,24 +578,25 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.release_onvif_subscriptions()
 
-        manager.workers["gate"].stop_onvif_events.assert_called_once_with()
-        manager.workers["gate"].stop.assert_not_called()
+        manager.workers["gate"].request_onvif_stop.assert_called_once_with()
+        manager.workers["gate"].request_stop.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
 
-    def test_failed_camera_stop_rolls_back_power_and_recording_state(self) -> None:
+    def test_failed_camera_stop_remains_truthfully_off(self) -> None:
         manager = manager_with_mocks()
         manager.workers["gate"].stop.side_effect = RuntimeError("stop failed")
 
         with self.assertRaisesRegex(RuntimeError, "stop failed"):
             manager.stop_camera("gate")
 
-        self.assertTrue(manager._camera_enabled["gate"])
-        self.assertTrue(manager.camera_fleet.camera_enabled("gate"))
+        self.assertFalse(manager._camera_enabled["gate"])
+        self.assertFalse(manager.camera_fleet.camera_enabled("gate"))
         self.assertEqual(
             manager.recorder.set_camera_enabled.call_args_list,
-            [unittest.mock.call("gate", False), unittest.mock.call("gate", True)],
+            [unittest.mock.call("gate", False), unittest.mock.call("gate", False)],
         )
-        self.assertEqual(manager._save_runtime_state.call_count, 2)
+        self.assertEqual(manager._save_runtime_state.call_count, 1)
+        manager.mqtt.publish_camera_state.assert_called_once_with("gate", False)
 
     def test_camera_power_persistence_failure_does_not_touch_runtime(self) -> None:
         manager = manager_with_mocks()
@@ -578,7 +621,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.detector.start.assert_called_once_with()
         manager.workers["gate"].start.assert_called_once_with()
-        manager.workers["gate"].stop.assert_called_once_with()
+        manager.workers["gate"].request_stop.assert_called_once_with()
         manager.detector.stop.assert_called_once_with()
 
     def test_runtime_preferences_are_filtered_for_a_replacement_manager(self) -> None:

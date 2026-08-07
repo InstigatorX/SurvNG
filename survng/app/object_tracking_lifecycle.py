@@ -120,6 +120,14 @@ class ObjectTrackingLifecycle:
         with self.lifecycle_lock:
             return self._session.stop()
 
+    def request_stop(self) -> None:
+        with self.lifecycle_lock:
+            self._session.request_stop()
+
+    def wait_stopped(self, timeout: float) -> bool:
+        with self.lifecycle_lock:
+            return self._session.wait_stopped(timeout)
+
     def replace(
         self,
         replacement: ObjectTrackingSession,

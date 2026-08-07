@@ -93,8 +93,10 @@ def test_successful_stop_resets_owned_generation_state() -> None:
     assert stopped
     owned.analysis.request_stop.assert_called_once_with()
     owned.decisions.request_stop.assert_called_once_with()
-    owned.decisions.wait_stopped.assert_called_once_with(4.0)
-    owned.analysis.wait_stopped.assert_called_once_with(3.0)
+    decision_timeout = owned.decisions.wait_stopped.call_args.args[0]
+    analysis_timeout = owned.analysis.wait_stopped.call_args.args[0]
+    assert 3.9 < decision_timeout <= 4.0
+    assert 0.0 <= analysis_timeout <= 3.0
     owned.analysis.reset.assert_called_once_with()
     owned.evidence.clear.assert_called_once_with()
     owned.qualification.reset_runtime.assert_called_once_with()
@@ -132,12 +134,40 @@ def test_close_attempts_every_pipeline_after_failure() -> None:
 
 def test_stop_request_signals_both_workers_when_first_signal_fails() -> None:
     runtime, owned = _runtime()
+    stop_event = threading.Event()
+    runtime.start(stop_event)
     owned.analysis.request_stop.side_effect = RuntimeError("analysis signal failed")
 
     with pytest.raises(RuntimeError, match="analysis signal failed"):
         runtime.request_stop()
 
     owned.decisions.request_stop.assert_called_once_with()
+    assert stop_event.is_set()
+
+
+def test_partial_start_failure_sets_shared_stop_event() -> None:
+    runtime, owned = _runtime()
+    stop_event = threading.Event()
+    owned.decisions.start.side_effect = RuntimeError("secret rtsp://admin:pw@host/live")
+
+    with pytest.raises(RuntimeError):
+        runtime.start(stop_event)
+
+    assert stop_event.is_set()
+
+
+def test_runtime_error_does_not_chain_secret_bearing_cause() -> None:
+    runtime, owned = _runtime()
+    runtime.start(threading.Event())
+    owned.analysis.request_stop.side_effect = RuntimeError(
+        "rtsp://admin:supersecret@192.0.2.10/live"
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        runtime.request_stop()
+
+    assert "supersecret" not in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def test_stop_wait_joins_both_workers_when_first_join_fails() -> None:

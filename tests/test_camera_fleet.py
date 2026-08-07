@@ -16,9 +16,13 @@ def _fleet(*, cameras: list[CameraConfig] | None = None):
     workers = {camera.id: Mock() for camera in camera_list}
     for worker in workers.values():
         worker.live_capture_ready.return_value = True
+        worker.wait_stopped.return_value = True
+        worker.wait_onvif_stopped.return_value = True
+        worker.active_workers.return_value = []
     recorder = Mock()
     startup = Mock()
     startup.cancel.return_value = True
+    startup.status.return_value = {}
     publisher = Mock()
     fleet = CameraFleetLifecycle(
         cameras=camera_list,
@@ -100,34 +104,55 @@ def test_cancelled_admission_prevents_late_recorder_start() -> None:
     recorder.start.assert_not_called()
 
 
+def test_late_recording_disable_prevents_queued_recorder_start() -> None:
+    fleet, _workers, recorder, _startup, _publisher = _fleet()
+    recording_enabled = {"gate": True}
+    task = fleet.prepare_startup(
+        camera_enabled={"gate": True},
+        recording_enabled=recording_enabled,
+        detection_enabled={},
+        recording_is_enabled=lambda camera_id: recording_enabled[camera_id],
+    )[0]
+
+    recording_enabled["gate"] = False
+    task.start_recorders()
+
+    recorder.start.assert_not_called()
+
+
 def test_shutdown_attempts_and_closes_every_non_timed_out_camera() -> None:
     cameras = [
         CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/gate"),
         CameraConfig(id="yard", name="Yard", stream_url="rtsp://camera/yard"),
     ]
     fleet, workers, _recorder, _startup, _publisher = _fleet(cameras=cameras)
-    workers["gate"].stop.side_effect = RuntimeError("stop failed")
+    workers["gate"].request_stop.side_effect = RuntimeError("stop failed")
 
     with pytest.raises(CameraFleetOperationError, match="gate"):
         fleet.stop_workers(timeout=1.0)
 
-    workers["yard"].stop.assert_called_once_with()
+    workers["yard"].request_stop.assert_called_once_with()
     workers["gate"].close.assert_called_once_with()
     workers["yard"].close.assert_called_once_with()
 
 
 def test_shutdown_does_not_race_close_against_a_timed_out_stop() -> None:
     fleet, workers, _recorder, _startup, _publisher = _fleet()
-    release = threading.Event()
-    workers["gate"].stop.side_effect = release.wait
+    workers["gate"].wait_stopped.return_value = False
+    workers["gate"].active_workers.return_value = ["capture: live"]
 
-    try:
-        with pytest.raises(CameraFleetOperationError, match="gate"):
-            fleet.stop_workers(timeout=0.01)
-    finally:
-        release.set()
+    with pytest.raises(CameraFleetOperationError, match="gate"):
+        fleet.stop_workers(timeout=0.01)
 
     workers["gate"].close.assert_not_called()
+    assert fleet.status()["shutdown_residual_camera_ids"] == ["gate"]
+
+    workers["gate"].wait_stopped.return_value = True
+    workers["gate"].active_workers.return_value = []
+    fleet.stop_workers(timeout=1.0)
+
+    workers["gate"].close.assert_called_once_with()
+    assert fleet.status()["shutdown_residual_camera_ids"] == []
 
 
 def test_onvif_release_attempts_every_camera_after_peer_failure() -> None:
@@ -136,24 +161,24 @@ def test_onvif_release_attempts_every_camera_after_peer_failure() -> None:
         CameraConfig(id="yard", name="Yard", stream_url="rtsp://camera/yard"),
     ]
     fleet, workers, _recorder, _startup, _publisher = _fleet(cameras=cameras)
-    workers["gate"].stop_onvif_events.side_effect = RuntimeError("release failed")
+    workers["gate"].request_onvif_stop.side_effect = RuntimeError("release failed")
 
     with pytest.raises(CameraFleetOperationError, match="gate"):
         fleet.release_onvif(timeout=1.0)
 
-    workers["yard"].stop_onvif_events.assert_called_once_with()
+    workers["yard"].request_onvif_stop.assert_called_once_with()
 
 
 def test_onvif_quiescence_cancels_admission_before_release() -> None:
     fleet, workers, _recorder, startup, _publisher = _fleet()
     order: list[str] = []
     startup.cancel.side_effect = lambda: order.append("cancel") or True
-    workers["gate"].stop_onvif_events.side_effect = lambda: order.append("release")
+    workers["gate"].request_onvif_stop.side_effect = lambda: order.append("release")
 
     fleet.quiesce_onvif(timeout=1.0)
 
     assert order == ["cancel", "release"]
-    workers["gate"].stop.assert_not_called()
+    workers["gate"].request_stop.assert_not_called()
 
 
 def test_fleet_construction_rejects_camera_worker_mismatch() -> None:

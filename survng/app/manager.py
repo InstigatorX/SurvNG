@@ -67,6 +67,17 @@ from .state_events import StateEventBroker
 
 
 LOGGER = logging.getLogger("uvicorn.error")
+
+
+class ManagerShutdownIncompleteError(RuntimeError):
+    """Camera-owned work remains active, so shared services must stay alive."""
+
+    def __init__(self, error: CameraFleetOperationError) -> None:
+        self.fleet_error = error
+        residuals = ", ".join(error.residual_camera_ids) or "unknown cameras"
+        super().__init__(f"camera shutdown remains active: {residuals}")
+
+
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
     registry = build_builtin_motion_registry()
     targets = [("global", CameraMotionQualificationConfig())] + [
@@ -542,6 +553,7 @@ class AppManager:
                     camera_enabled=self._camera_enabled,
                     recording_enabled=self._recording_enabled,
                     detection_enabled=self._detection_enabled,
+                    recording_is_enabled=self.recording_enabled,
                 )
                 phase_started = time.monotonic()
                 self.recorder.start_indexer(cameras)
@@ -630,9 +642,18 @@ class AppManager:
             self._stopping = True
             try:
                 self._shutdown_components()
-            finally:
+            except ManagerShutdownIncompleteError:
+                # Keep the manager retryable and, critically, keep shared
+                # inference/recording dependencies alive beneath residual
+                # camera workers. The process supervisor owns the hard limit.
+                self._started = False
+                raise
+            except BaseException:
                 self._started = False
                 self._closed = True
+                raise
+            self._started = False
+            self._closed = True
             return preferences
 
     def release_onvif_subscriptions(self) -> None:
@@ -657,7 +678,15 @@ class AppManager:
         LOGGER.info(
             "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
         )
-        attempt("camera fleet ONVIF quiescence", self.release_onvif_subscriptions)
+        try:
+            self.release_onvif_subscriptions()
+        except CameraFleetOperationError as error:
+            if error.residual_camera_ids:
+                raise ManagerShutdownIncompleteError(error) from None
+            errors.extend(
+                (f"camera ONVIF {failure.label}", failure.error)
+                for failure in error.failures
+            )
         attempt("state monitor", self._stop_state_monitor)
         LOGGER.info("SurvNG shutdown: stopping MQTT command intake")
         attempt("MQTT", self.mqtt.stop)
@@ -665,6 +694,8 @@ class AppManager:
         try:
             self.camera_fleet.stop_workers()
         except CameraFleetOperationError as error:
+            if error.residual_camera_ids:
+                raise ManagerShutdownIncompleteError(error) from None
             errors.extend(
                 (f"camera {failure.label}", failure.error)
                 for failure in error.failures
@@ -692,7 +723,9 @@ class AppManager:
         LOGGER.info("SurvNG shutdown complete in %.2fs", time.monotonic() - started)
         if errors:
             labels = ", ".join(label for label, _exc in errors)
-            raise RuntimeError(f"one or more shutdown steps failed: {labels}") from errors[0][1]
+            raise RuntimeError(
+                f"one or more shutdown steps failed: {labels}"
+            ) from None
 
 
     def camera(self, camera_id: str):
@@ -756,19 +789,14 @@ class AppManager:
                 if not self.camera_fleet.stop_camera(camera_id):
                     raise RuntimeError(f"camera {camera_id} could not stop")
             except Exception:
-                self._camera_enabled[camera_id] = previous
-                self.camera_fleet.set_camera_enabled(camera_id, previous)
-                try:
-                    self._save_runtime_state()
-                except Exception:
-                    LOGGER.exception(
-                        "failed to roll back camera power state for %s",
-                        camera_id,
-                    )
-                self.recorder.set_camera_enabled(
-                    camera_id,
-                    previous and self.recording_enabled(camera_id),
-                )
+                # A failed stop may already have torn down part of the camera
+                # runtime. Never publish a desired "on" state without a
+                # verified compensating start; leave it explicitly off/FAILED.
+                self._camera_enabled[camera_id] = False
+                self.camera_fleet.set_camera_enabled(camera_id, False)
+                self.recorder.set_camera_enabled(camera_id, False)
+                self.mqtt.publish_camera_state(camera_id, False)
+                self._publish_camera_status(camera_id)
                 raise
             self.mqtt.publish_camera_state(camera_id, False)
             self._publish_camera_status(camera_id)

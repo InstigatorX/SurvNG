@@ -86,6 +86,9 @@ class CameraLifecycleService:
         # Serialize lifecycle commands without blocking state readers. This may
         # be held across joins and camera I/O; state.lock may not.
         self._operation_lock = threading.Lock()
+        self._pending_shutdown_errors: list[tuple[str, BaseException]] = []
+        self._pending_final_phase = CameraLifecyclePhase.STOPPED
+        self._pending_failure = ""
 
     def start(self) -> None:
         with self._operation_lock:
@@ -147,7 +150,31 @@ class CameraLifecycleService:
         with self._operation_lock:
             self._stop_runtime()
 
+    def request_stop(self) -> None:
+        """Broadcast a nonblocking stop request for every owned component."""
+        with self._operation_lock:
+            self._request_stop_runtime()
+
+    def wait_stopped(self, deadline: float) -> bool:
+        """Wait for a requested stop using one fleet-owned absolute deadline."""
+        with self._operation_lock:
+            return self._wait_stop_runtime(deadline)
+
     def _stop_runtime(
+        self,
+        *,
+        final_phase: CameraLifecyclePhase = CameraLifecyclePhase.STOPPED,
+        failure: str = "",
+    ) -> None:
+        self._request_stop_runtime(final_phase=final_phase, failure=failure)
+        deadline = time.monotonic() + max(
+            MOTION_THREAD_STOP_TIMEOUT_SECONDS,
+            CAPTURE_STOP_TIMEOUT_SECONDS,
+        )
+        if not self._wait_stop_runtime(deadline):
+            raise RuntimeError(f"camera {self.camera_id} did not stop cleanly")
+
+    def _request_stop_runtime(
         self,
         *,
         final_phase: CameraLifecyclePhase = CameraLifecyclePhase.STOPPED,
@@ -171,39 +198,72 @@ class CameraLifecycleService:
         with self.state.lock:
             if self.state.phase is CameraLifecyclePhase.CLOSED:
                 return
+            if self.state.phase is CameraLifecyclePhase.STOPPING:
+                return
             self.state.enabled = False
             self.state.accepting_motion_events = False
             self.state.stop_event.set()
             self.state.active_incident_event_id = None
             self._transition_locked(CameraLifecyclePhase.STOPPING)
 
-        # Release scarce camera I/O before waiting for inference workers.
+        # Broadcast first so all independent workers consume the same later
+        # wait budget instead of nesting their individual timeout budgets.
         attempt("capture", self.capture.request_stop)
-        attempt("ONVIF", self.onvif.stop)
-        tracking_stopped = attempt("object tracking", self.tracking.stop)
-        if tracking_stopped is False:
-            shutdown_errors.append((
-                "object tracking",
-                RuntimeError("object tracking session did not stop"),
-            ))
+        attempt("ONVIF", self.onvif.request_stop)
+        attempt("object tracking", self.tracking.request_stop)
         attempt("motion runtime", self.motion_runtime.request_stop)
+        self._pending_shutdown_errors = shutdown_errors
+        self._pending_final_phase = final_phase
+        self._pending_failure = failure
+
+    def _wait_stop_runtime(self, deadline: float) -> bool:
+        with self.state.lock:
+            if self.state.phase is CameraLifecyclePhase.CLOSED:
+                return True
+        shutdown_errors = self._pending_shutdown_errors
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def attempt(label: str, operation: Callable[[], Any]) -> Any:
+            try:
+                return operation()
+            except BaseException as error:
+                shutdown_errors.append((label, error))
+                LOGGER.error(
+                    "%s stop failed for %s: %s",
+                    label,
+                    self.camera_id,
+                    redact_secret_text(error),
+                )
+                return None
+
+        tracking_stopped = attempt(
+            "object tracking wait",
+            lambda: self.tracking.wait_stopped(remaining()),
+        ) is True
         motion_workers_stopped = attempt(
             "motion runtime wait",
             lambda: self.motion_runtime.wait_stopped(
-                analysis_timeout=CAPTURE_STOP_TIMEOUT_SECONDS,
-                decision_timeout=MOTION_THREAD_STOP_TIMEOUT_SECONDS,
+                analysis_timeout=remaining(),
+                decision_timeout=remaining(),
             ),
         ) is True
         if not motion_workers_stopped:
             LOGGER.error("motion workers did not stop for %s", self.camera_id)
         alive_threads = attempt(
             "capture wait",
-            lambda: self.capture.wait_stopped(CAPTURE_STOP_TIMEOUT_SECONDS),
+            lambda: self.capture.wait_stopped(remaining()),
         )
         if not isinstance(alive_threads, dict):
             alive_threads = {}
         alive = sorted(alive_threads)
         self._log_alive_capture_threads(alive_threads)
+
+        onvif_stopped = attempt(
+            "ONVIF wait",
+            lambda: self.onvif.wait_stopped(remaining()),
+        ) is True
 
         attempt("tracking frame history", self.tracking_frames.clear)
         shutdown_failures: list[str] = []
@@ -211,9 +271,13 @@ class CameraLifecycleService:
             shutdown_failures.append(f"capture sources: {', '.join(alive)}")
         if not motion_workers_stopped:
             shutdown_failures.append("motion workers")
-        if attempt("ONVIF status", lambda: self.onvif.running) is not False:
+        if not onvif_stopped or attempt(
+            "ONVIF status", lambda: self.onvif.running
+        ) is not False:
             shutdown_failures.append("ONVIF worker")
-        if attempt("object tracking status", self.tracking.running) is not False:
+        if not tracking_stopped or attempt(
+            "object tracking status", self.tracking.running
+        ) is not False:
             shutdown_failures.append("object tracking worker")
         shutdown_failures.extend(
             f"{label} cleanup"
@@ -238,11 +302,25 @@ class CameraLifecycleService:
                 raise stop_error from None
             raise stop_error
         with self.state.lock:
-            self._transition_locked(final_phase, failure=failure)
+            self._transition_locked(
+                self._pending_final_phase,
+                failure=self._pending_failure,
+            )
+        self._pending_shutdown_errors = []
+        return True
 
     def stop_onvif_events(self) -> None:
         with self._operation_lock:
             self.onvif.stop()
+
+    def request_onvif_stop(self) -> None:
+        self.onvif.request_stop()
+
+    def wait_onvif_stopped(self, deadline: float) -> bool:
+        return self.onvif.wait_stopped(max(0.0, deadline - time.monotonic()))
+
+    def active_workers(self) -> list[str]:
+        return self._residual_workers()
 
     def close(self) -> None:
         with self._operation_lock:

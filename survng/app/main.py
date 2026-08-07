@@ -69,7 +69,11 @@ from .calibration import (
     calibration_setting_value,
 )
 from .detector import detection_failure, objects_to_json
-from .manager import AppManager, validate_motion_pipeline_configuration
+from .manager import (
+    AppManager,
+    ManagerShutdownIncompleteError,
+    validate_motion_pipeline_configuration,
+)
 from .motion_pipeline import (
     analysis_preset_selections,
     guided_fusion_settings,
@@ -687,6 +691,16 @@ def reload_manager(
                 logging.getLogger(__name__).exception(
                     "failed to clean up replacement manager after reload failure"
                 )
+            if isinstance(reload_error, ManagerShutdownIncompleteError):
+                # The previous manager still owns live camera work. Starting a
+                # recovery generation would overlap its inference/recording
+                # dependencies and camera connections.
+                config = previous_config
+                manager = previous_manager
+                raise RuntimeError(
+                    "configuration reload aborted because camera shutdown is "
+                    "still active; restart SurvNG through its supervisor"
+                ) from None
             if not previous_stop_attempted:
                 if prewarmer_was_running:
                     _start_recording_prewarmer()

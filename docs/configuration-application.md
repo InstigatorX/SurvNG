@@ -36,7 +36,11 @@ cannot be safely replaced as a standalone value.
 
 The replacement manager constructs a dedicated `CameraFleetLifecycle`, which
 owns bounded camera admission, live power-state changes, early ONVIF release,
-and parallel stop/close deadlines. The web process starts serving during normal
+and a two-phase fleet stop: broadcast every stop request, then wait against one
+absolute deadline. A timed-out camera remains an observable fleet residual;
+SurvNG will not start a replacement manager or close shared inference/recording
+dependencies beneath it. The process supervisor owns the hard termination
+deadline. The web process starts serving during normal
 progressive startup. A configuration cutover commits after core service
 construction and atomic persistence succeed, then exposes progressive camera
 admission instead of blocking the save on unavailable feeds. MQTT replacement

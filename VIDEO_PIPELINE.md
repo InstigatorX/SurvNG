@@ -50,12 +50,16 @@ pipeline starts. Object inference, recording lookup, event persistence, MQTT,
 and SSE remain outside the motion pipeline.
 
 Process-wide camera admission and teardown are owned by
-`CameraFleetLifecycle`. It snapshots startup recording/detection preferences,
+`CameraFleetLifecycle`. It snapshots startup detection preferences, reads the
+current recording preference when a queued camera is admitted and starts its recorders,
 tracks live camera power changes during progressive admission, releases ONVIF
-subscriptions early, and applies one bounded parallel stop/close policy to the
-fleet. `AppManager` sequences this camera boundary with inference, recorder,
-MQTT, and auxiliary-service lifecycles but does not create or join per-camera
-shutdown threads itself.
+subscriptions early, and broadcasts nonblocking stop requests before waiting
+for the fleet against one absolute deadline. Cameras retain ownership of their
+workers; residual camera IDs remain observable and shared inference/recording
+services stay alive until every camera reports stopped. Resource `close()` then
+runs only for inactive cameras and is not represented as an I/O timeout.
+`AppManager` sequences this boundary with inference, recorder, MQTT, and
+auxiliary-service lifecycles without detached per-camera shutdown threads.
 
 `MotionDecisionHandler` owns downstream event persistence and notifications.
 It receives object evidence from an injected `RecordedMotionObjectDetector`,

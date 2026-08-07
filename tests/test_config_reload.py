@@ -5,6 +5,8 @@ from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig, DetectorConfig, ObjectTrackingConfig
 from survng.app import main
+from survng.app.manager import ManagerShutdownIncompleteError
+from survng.app.camera_fleet import CameraFleetOperationError, CameraFleetFailure
 
 
 class ConfigReloadTest(unittest.TestCase):
@@ -183,6 +185,38 @@ class ConfigReloadTest(unittest.TestCase):
         )
         save.assert_not_called()
         self.assertIs(main.manager, recovery)
+        self.assertEqual(main.config.base_path, "/old")
+
+    def test_incomplete_previous_shutdown_never_starts_overlapping_recovery(self) -> None:
+        active = Mock()
+        active.runtime_preferences.return_value = {
+            "recording_enabled": {},
+            "detection_enabled": {},
+            "camera_enabled": {"gate": True},
+        }
+        fleet_error = CameraFleetOperationError(
+            "shutdown",
+            [CameraFleetFailure("gate", RuntimeError("still stopping"))],
+            residual_camera_ids=["gate"],
+        )
+        active.stop_all_with_runtime_preferences.side_effect = (
+            ManagerShutdownIncompleteError(fleet_error)
+        )
+        candidate = Mock()
+        main.config = AppConfig(base_path="/old")
+        main.manager = active
+
+        with (
+            patch("survng.app.main.AppManager", return_value=candidate) as factory,
+            patch("survng.app.main._stop_recording_prewarmer"),
+            self.assertRaisesRegex(RuntimeError, "restart SurvNG"),
+        ):
+            main.reload_manager(AppConfig(base_path="/new"))
+
+        factory.assert_called_once()
+        candidate.start_all.assert_not_called()
+        candidate.stop_all.assert_called_once_with()
+        self.assertIs(main.manager, active)
         self.assertEqual(main.config.base_path, "/old")
 
     def test_successful_replacement_starts_before_atomic_persistence_and_swap(self) -> None:

@@ -2627,13 +2627,13 @@ class CameraWorkerTest(unittest.TestCase):
                 ),
                 patch.object(
                     worker.onvif,
-                    "stop",
+                    "request_stop",
                     side_effect=lambda: order.append("onvif"),
                 ),
                 patch.object(
-                    worker.tracking_lifecycle.current(),
-                    "stop",
-                    side_effect=lambda: order.append("tracking") or True,
+                    worker.tracking_lifecycle,
+                    "request_stop",
+                    side_effect=lambda: order.append("tracking"),
                 ),
             ):
                 worker.stop()
@@ -2652,10 +2652,10 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir))
             with (
                 patch.object(worker.capture, "request_stop", side_effect=lambda: order.append("capture")),
-                patch.object(worker.onvif, "stop", side_effect=lambda: order.append("onvif")),
+                patch.object(worker.onvif, "request_stop", side_effect=lambda: order.append("onvif")),
                 patch.object(
                     worker.tracking_lifecycle,
-                    "stop",
+                    "request_stop",
                     side_effect=fail_tracking_stop,
                 ),
                 patch.object(
