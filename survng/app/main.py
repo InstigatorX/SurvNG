@@ -86,6 +86,7 @@ from .assistant import (
     IncidentVisualReviewer,
 )
 from .assistant_investigation import correlate_incident_timeline
+from .appearance_routes import AppearanceRouteDependencies, create_appearance_router
 from .camera_intelligence import (
     aggregate_camera_intelligence,
     compare_camera_intelligence_results,
@@ -99,6 +100,17 @@ from .calibration import (
     calibration_setting_value,
 )
 from .detector import detection_failure, objects_to_json
+from .detection_routes import (
+    DetectionRouteDependencies,
+    TrackingComparisonVerdictRequest,
+    _tracking_comparison_duration,
+    create_detection_router,
+)
+from .face_routes import (
+    FaceRouteDependencies,
+    _public_face_observation,
+    create_face_router,
+)
 from .manager import (
     AppManager,
     ManagerShutdownIncompleteError,
@@ -1688,12 +1700,6 @@ class CalibrationRollbackRequest(BaseModel):
     camera_ids: list[str] = Field(default_factory=list, max_length=128)
     confirmed: bool = False
     force_conflicts: bool = False
-
-
-class TrackingComparisonVerdictRequest(BaseModel):
-    verdict: str = Field(
-        pattern=r"^(survng_hybrid|ultralytics_botsort|ultralytics_deepocsort|inconclusive)$"
-    )
 
 
 def _audit_ai_context(
@@ -3580,311 +3586,6 @@ def calibration_rollback(change_set_id: int, request: CalibrationRollbackRequest
     return {"ok": True, "rollback": rollback, "conflicts": conflicts}
 
 
-@app.get("/api/events/{event_id}/snapshot.jpg")
-def event_snapshot(event_id: int, download: bool = False) -> FileResponse:
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        event = active_manager.events.get(event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    try:
-        snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    media_type = snapshot_media_type(snapshot_path)
-    return FileResponse(
-        snapshot_path,
-        media_type=media_type,
-        filename=snapshot_path.name if download else None,
-        headers={"Cache-Control": "private, max-age=3600"},
-    )
-
-
-def _jpeg_thumbnail(frame: np.ndarray, width: int, quality: int) -> bytes:
-    frame_height, frame_width = frame.shape[:2]
-    if frame_width > width:
-        target_height = max(1, round(frame_height * width / frame_width))
-        frame = cv2.resize(frame, (width, target_height), interpolation=cv2.INTER_AREA)
-    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    if not ok:
-        raise HTTPException(status_code=500, detail="failed to encode thumbnail")
-    return encoded.tobytes()
-
-
-@app.get("/api/events/{event_id}/thumbnail.jpg")
-def event_thumbnail(event_id: int, width: int = 640, quality: int = 82) -> FileResponse:
-    safe_width = max(160, min(int(width), 1280))
-    safe_quality = max(50, min(int(quality), 92))
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        event = active_manager.events.get(event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    try:
-        snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
-        stat = snapshot_path.stat()
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    identity = f"{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:{safe_width}:{safe_quality}"
-
-    def build() -> bytes:
-        frame = cv2.imread(str(snapshot_path))
-        if frame is None:
-            raise HTTPException(status_code=404, detail="snapshot is unavailable")
-        return _jpeg_thumbnail(frame, safe_width, safe_quality)
-
-    cached = active_manager.image_cache.get_or_create("events", identity, build)
-    return FileResponse(
-        cached,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=86400, immutable"},
-    )
-
-
-@app.get("/api/events/{event_id}/appearance-matches")
-def event_appearance_matches(
-    event_id: int,
-    hours: float = 24.0,
-    limit: int = 12,
-    cross_camera_only: bool = True,
-) -> dict[str, Any]:
-    bounded_hours = max(0.25, min(float(hours), 24.0 * 30.0))
-    bounded_limit = max(1, min(int(limit), 100))
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        event = active_manager.events.get(event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="event not found")
-        try:
-            anchor_at = datetime.fromisoformat(
-                str(event.get("created_at") or "").replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="event timestamp is invalid") from exc
-        if anchor_at.tzinfo is None:
-            anchor_at = anchor_at.replace(tzinfo=timezone.utc)
-        matches = active_manager.appearance_index.matches(
-            event_id,
-            start_at=(anchor_at - timedelta(hours=bounded_hours)).isoformat(),
-            end_at=(anchor_at + timedelta(hours=bounded_hours)).isoformat(),
-            cross_camera_only=bool(cross_camera_only),
-            limit=bounded_limit,
-        )
-    return {
-        "event_id": event_id,
-        "hours": bounded_hours,
-        "cross_camera_only": bool(cross_camera_only),
-        "matches": matches,
-    }
-
-
-def _appearance_family_labels(event: dict[str, Any], tracking: Any) -> set[str]:
-    try:
-        objects = json.loads(str(event.get("objects_json") or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return set()
-    if not isinstance(objects, list):
-        return set()
-    labels = {
-        str(item.get("label") or "").strip().lower()
-        for item in objects
-        if isinstance(item, dict) and item.get("label")
-    }
-    families: set[str] = set()
-    if "person" in labels:
-        families.add("person")
-    vehicle_labels = set(getattr(tracking, "vehicle_reid_labels", []) or [])
-    if labels & vehicle_labels:
-        families.add("vehicle")
-    return families
-
-
-@app.get("/api/events/{event_id}/related-incidents")
-def event_related_incidents(
-    event_id: int,
-    hours: float = 24.0,
-    sequence_seconds: float | None = None,
-    limit: int = 16,
-) -> dict[str, Any]:
-    """Combine durable visual matches with explicitly qualified time-only candidates."""
-    bounded_hours = max(0.25, min(float(hours), 24.0 * 30.0))
-    bounded_limit = max(1, min(int(limit), 100))
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        event = active_manager.events.get(event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="event not found")
-        try:
-            anchor_at = datetime.fromisoformat(
-                str(event.get("created_at") or "").replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="event timestamp is invalid") from exc
-        if anchor_at.tzinfo is None:
-            anchor_at = anchor_at.replace(tzinfo=timezone.utc)
-        tracking = active_manager.config.detector.tracking
-        base_window = max(
-            1.0,
-            min(
-                float(sequence_seconds if sequence_seconds is not None else tracking.related_sequence_window_seconds),
-                300.0,
-            ),
-        )
-        route_window = max(
-            (
-                route.max_seconds
-                for route in tracking.camera_transition_routes
-                if route.enabled
-            ),
-            default=0.0,
-        )
-        window = min(300.0, max(base_window, route_window))
-        anchor_families = _appearance_family_labels(event, tracking)
-        visual_matches = active_manager.appearance_index.matches(
-            event_id,
-            start_at=(anchor_at - timedelta(hours=bounded_hours)).isoformat(),
-            end_at=(anchor_at + timedelta(hours=bounded_hours)).isoformat(),
-            cross_camera_only=True,
-            limit=100,
-        )
-        visual_by_event = {int(item["event_id"]): item for item in visual_matches}
-        temporal = active_manager.events.between(
-            (anchor_at - timedelta(seconds=window)).isoformat(),
-            (anchor_at + timedelta(seconds=window, microseconds=1)).isoformat(),
-            limit=500,
-        )
-
-    combined: dict[int, dict[str, Any]] = {}
-    for match in visual_matches:
-        if not match.get("visually_similar"):
-            continue
-        candidate_id = int(match["event_id"])
-        combined[candidate_id] = {**match, "relation_type": "appearance"}
-    for candidate in temporal:
-        candidate_id = int(candidate.get("id") or 0)
-        if (
-            candidate_id <= 0
-            or candidate_id == event_id
-            or str(candidate.get("camera_id") or "") == str(event.get("camera_id") or "")
-        ):
-            continue
-        candidate_families = _appearance_family_labels(candidate, tracking)
-        shared_families = sorted(anchor_families & candidate_families)
-        if not shared_families:
-            continue
-        try:
-            candidate_at = datetime.fromisoformat(
-                str(candidate.get("created_at") or "").replace("Z", "+00:00")
-            )
-            if candidate_at.tzinfo is None:
-                candidate_at = candidate_at.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        delta = abs((candidate_at - anchor_at).total_seconds())
-        if candidate_at <= anchor_at:
-            route_from_camera = str(candidate.get("camera_id") or "")
-            route_to_camera = str(event.get("camera_id") or "")
-        else:
-            route_from_camera = str(event.get("camera_id") or "")
-            route_to_camera = str(candidate.get("camera_id") or "")
-        route = match_camera_route(
-            tracking.camera_transition_routes,
-            route_from_camera,
-            route_to_camera,
-            delta,
-        )
-        visual = visual_by_event.get(candidate_id)
-        similar = bool(visual and visual.get("visually_similar"))
-        relation_type = (
-            "appearance_route" if route is not None and similar else
-            "expected_route" if route is not None else
-            "appearance_sequence" if similar else
-            "sequence_candidate"
-        )
-        combined[candidate_id] = {
-            **(visual or {}),
-            "event_id": candidate_id,
-            "camera_id": str(candidate.get("camera_id") or ""),
-            "created_at": str(candidate.get("created_at") or ""),
-            "model_kind": shared_families[0],
-            "sequence_delta_seconds": round(delta, 3),
-            "relation_type": relation_type,
-            "visually_similar": similar,
-            **(route.as_dict() if route is not None else {}),
-        }
-    related = sorted(
-        combined.values(),
-        key=lambda item: (
-            0 if item.get("relation_type") == "appearance_route" else
-            1 if item.get("relation_type") == "appearance_sequence" else
-            2 if item.get("relation_type") == "expected_route" else
-            3 if item.get("relation_type") == "appearance" else 4,
-            float(item.get("sequence_delta_seconds") or 1e12),
-            -float(item.get("similarity") or 0.0),
-        ),
-    )[:bounded_limit]
-    return {
-        "event_id": event_id,
-        "hours": bounded_hours,
-        "sequence_seconds": window,
-        "configured_routes": sum(
-            1 for route in tracking.camera_transition_routes if route.enabled
-        ),
-        "matches": related,
-        "identity_notice": "Time proximity alone is a sequence candidate, not identity proof.",
-    }
-
-
-@app.get("/api/appearance-index/status")
-def appearance_index_status() -> dict[str, Any]:
-    with MANAGER_RELOAD_LOCK:
-        return manager.appearance_index.status()
-
-
-@app.post("/api/appearance-index/backfill")
-def queue_appearance_backfill(start_at: str, end_at: str) -> dict[str, Any]:
-    try:
-        start = datetime.fromisoformat(str(start_at).replace("Z", "+00:00"))
-        end = datetime.fromisoformat(str(end_at).replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="backfill timestamps are invalid") from exc
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
-    if end <= start or (end - start) > timedelta(days=1):
-        raise HTTPException(status_code=422, detail="backfill window must be between 0 and 24 hours")
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        events = active_manager.events.between(start.isoformat(), end.isoformat(), limit=10_000)
-        queued = [
-            int(event["id"])
-            for event in events
-            if _appearance_family_labels(event, active_manager.config.detector.tracking)
-            and active_manager.appearance_backfill.enqueue(
-                int(event["id"]),
-                str(event.get("camera_id") or ""),
-                delay_seconds=0,
-            )
-        ]
-    return {"queued": len(queued), "event_ids": sorted(queued), "start_at": start.isoformat(), "end_at": end.isoformat()}
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def _assistant_catalog(active_config: AppConfig, active_manager: AppManager) -> dict[str, Any]:
     face_store = getattr(active_manager, "faces", None)
@@ -5486,16 +5187,6 @@ def incident_ai_apply(event_id: int, request: IncidentAiApplyRequest) -> dict:
     }
 
 
-class FacePersonCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    notes: str = Field(default="", max_length=1000)
-    observation_id: int | None = Field(default=None, gt=0)
-
-
-class FaceAssignment(BaseModel):
-    person_id: int | None = Field(default=None, gt=0)
-
-
 def _sync_face_observations(limit: int = 5000) -> int:
     global FACE_OBSERVATIONS_SYNCED
     with MANAGER_RELOAD_LOCK, FACE_OBSERVATIONS_SYNC_LOCK:
@@ -5530,465 +5221,6 @@ def _start_face_observation_sync() -> None:
         )
         FACE_OBSERVATIONS_SYNC_THREAD.start()
 
-
-@app.get("/api/faces/status")
-def face_status() -> dict:
-    _start_face_observation_sync()
-    stats = manager.faces.stats()
-    recognition = manager.faces.recognition_status()
-    if recognition.get("ready"):
-        pending = int(recognition.get("pending") or 0)
-        failed = int(recognition.get("failed") or 0)
-        recognition_message = (
-            f"Recognition ready on {recognition.get('device') or 'OpenVINO'}; "
-            f"{recognition.get('embedded', 0)} faces embedded and "
-            f"{recognition.get('suggested', 0)} suggestions awaiting review"
-            f"; {pending} pending and {failed} unable to process."
-        )
-    else:
-        recognition_message = str(recognition.get("error") or "Configure an OpenVINO face embedding model.")
-    return {
-        **stats,
-        "recognition_ready": bool(recognition.get("ready")),
-        "recognition_message": recognition_message,
-        "recognition": recognition,
-    }
-
-
-@app.get("/api/faces/people")
-def face_people() -> list[dict]:
-    _start_face_observation_sync()
-    return manager.faces.people()
-
-
-def _public_face_observation(observation: dict) -> dict:
-    payload = dict(observation)
-    payload.pop("snapshot_path", None)
-    return payload
-
-
-@app.post("/api/faces/people")
-def create_face_person(payload: FacePersonCreate) -> dict:
-    try:
-        return manager.faces.create_person(payload.name, payload.observation_id, payload.notes)
-    except ValueError as exc:
-        status_code = 404 if "not found" in str(exc).lower() else 409
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-
-
-@app.delete("/api/faces/people/{person_id}")
-def delete_face_person(person_id: int) -> dict:
-    if not manager.faces.delete_person(person_id):
-        raise HTTPException(status_code=404, detail="person not found")
-    return {"deleted": True, "person_id": person_id}
-
-
-@app.get("/api/faces/observations")
-def face_observations(
-    person_id: int | None = None,
-    camera_id: str = "",
-    status: str = "all",
-    limit: int = 200,
-    offset: int = 0,
-) -> list[dict]:
-    _start_face_observation_sync()
-    observations = manager.faces.observations(
-        person_id=person_id,
-        camera_id=camera_id,
-        status=status if status in {"all", "known", "unknown", "suggested"} else "all",
-        limit=limit,
-        offset=offset,
-    )
-    return [_public_face_observation(observation) for observation in observations]
-
-
-@app.get("/api/faces/observations/count")
-def face_observation_count(
-    person_id: int | None = None,
-    camera_id: str = "",
-    status: str = "all",
-) -> dict:
-    _start_face_observation_sync()
-    return {
-        "total": manager.faces.observation_count(
-            person_id=person_id,
-            camera_id=camera_id,
-            status=status if status in {"all", "known", "unknown", "suggested"} else "all",
-        )
-    }
-
-
-@app.get("/api/faces/observations/{observation_id}")
-def face_observation(observation_id: int) -> dict:
-    observation = manager.faces.observation(observation_id)
-    if observation is None:
-        raise HTTPException(status_code=404, detail="face observation not found")
-    return _public_face_observation(observation)
-
-
-@app.put("/api/faces/observations/{observation_id}")
-def assign_face_observation(observation_id: int, payload: FaceAssignment) -> dict:
-    try:
-        observation = manager.faces.assign(observation_id, payload.person_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if observation is None:
-        raise HTTPException(status_code=404, detail="face observation not found")
-    return _public_face_observation(observation)
-
-
-@app.get("/api/faces/observations/{observation_id}/crop.jpg")
-def face_crop(observation_id: int, padding: float = 0.2) -> FileResponse:
-    if not math.isfinite(padding):
-        raise HTTPException(status_code=422, detail="padding must be finite")
-    active_manager = manager
-    result = active_manager.faces.snapshot_path(observation_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="face observation not found")
-    snapshot_path, box = result
-    pad = max(0.0, min(float(padding), 1.0))
-    try:
-        stat = snapshot_path.stat()
-    except OSError as exc:
-        raise HTTPException(status_code=404, detail="snapshot is unavailable") from exc
-    box_identity = json.dumps(box, sort_keys=True, separators=(",", ":"))
-    identity = f"{observation_id}:{snapshot_path}:{stat.st_size}:{stat.st_mtime_ns}:{box_identity}:{pad:.3f}"
-
-    def build() -> bytes:
-        frame = cv2.imread(str(snapshot_path))
-        if frame is None:
-            raise HTTPException(status_code=404, detail="snapshot is unavailable")
-        height, width = frame.shape[:2]
-        x1, y1 = float(box.get("x1", 0)), float(box.get("y1", 0))
-        x2, y2 = float(box.get("x2", 0)), float(box.get("y2", 0))
-        dx, dy = (x2 - x1) * pad, (y2 - y1) * pad
-        left, top = max(0, int(x1 - dx)), max(0, int(y1 - dy))
-        right, bottom = min(width, int(x2 + dx)), min(height, int(y2 + dy))
-        if right <= left or bottom <= top:
-            raise HTTPException(status_code=422, detail="face crop is invalid")
-        ok, encoded = cv2.imencode(".jpg", frame[top:bottom, left:right], [cv2.IMWRITE_JPEG_QUALITY, 88])
-        if not ok:
-            raise HTTPException(status_code=500, detail="failed to encode face crop")
-        return encoded.tobytes()
-
-    cached = active_manager.image_cache.get_or_create("faces", identity, build)
-    return FileResponse(
-        cached,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=86400, immutable"},
-    )
-
-
-@app.post("/api/events/{event_id}/detect")
-def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict:
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        active_config = config.model_copy(deep=True)
-        event = active_manager.events.get(event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    try:
-        snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="snapshot not found")
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="snapshot outside storage directory") from None
-
-    if not math.isfinite(confidence):
-        raise HTTPException(status_code=422, detail="confidence must be finite")
-    safe_confidence = max(0.01, min(0.99, float(confidence)))
-    frame = cv2.imread(str(snapshot_path))
-    if frame is None:
-        raise HTTPException(status_code=422, detail="failed to read snapshot")
-
-    started = time.perf_counter()
-    camera = camera_by_id(active_config, str(event.get("camera_id") or ""))
-    effective_confidence = detection_threshold(camera, safe_confidence) if camera else safe_confidence
-    objects = active_manager.detector.detect(frame, confidence_threshold=effective_confidence)
-    detector_error = detection_failure(objects)
-    if detector_error:
-        raise HTTPException(status_code=503, detail=detector_error)
-    if camera:
-        apply_detection_zones(
-            camera,
-            objects,
-            int(frame.shape[1]),
-            int(frame.shape[0]),
-            safe_confidence,
-            bool(active_config.detector.require_incident_zone),
-        )
-    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-    for detected_object in objects:
-        detected_object["frame_source"] = detected_object.get("frame_source") or "manual_snapshot"
-        detected_object["detection_source"] = "manual_openvino"
-        detected_object["manual_confidence_threshold"] = safe_confidence
-        detected_object["detection_frame_width"] = int(frame.shape[1])
-        detected_object["detection_frame_height"] = int(frame.shape[0])
-    persisted_event = active_manager.events.replace_detected_objects(
-        event_id,
-        objects_to_json(objects),
-    )
-    if persisted_event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    detected = [
-        item for item in objects
-        if item.get("label") and item.get("box") and item.get("incident_eligible") is not False
-    ]
-    if detected:
-        active_manager.publish_event("object", {
-            "event_id": event_id,
-            "camera_id": str(event.get("camera_id") or ""),
-            "timestamp": str(event.get("created_at") or datetime.now(timezone.utc).isoformat()),
-            "snapshot_path": str(snapshot_path),
-            "recording_path": str(event.get("recording_path") or ""),
-            "source": "manual_openvino",
-            "objects": detected,
-        })
-    detector_status = active_manager.detector_status()
-    return {
-        "event_id": event_id,
-        "camera_id": event.get("camera_id"),
-        "snapshot_path": "available",
-        "snapshot_width": int(frame.shape[1]),
-        "snapshot_height": int(frame.shape[0]),
-        "confidence": safe_confidence,
-        "elapsed_ms": elapsed_ms,
-        "objects": objects,
-        "object_count": len(detected),
-        "labels": sorted({str(item.get("label")) for item in detected}),
-        "event": _event_row(persisted_event),
-        "persisted": True,
-        "detector": {
-            "enabled": detector_status.get("enabled"),
-            "loaded_backend": detector_status.get("loaded_backend"),
-            "loaded_device": detector_status.get("loaded_device"),
-            "configured_device": detector_status.get("configured_device"),
-            "input_shape": detector_status.get("input_shape"),
-            "output_format": detector_status.get("output_format"),
-        },
-    }
-
-
-def _tracking_comparison_evidence(result: dict) -> dict:
-    engines: dict[str, dict] = {}
-    for implementation in TRACKING_COMPARISON_IMPLEMENTATIONS:
-        engine = result.get("engines", {}).get(implementation, {})
-        engines[implementation] = {
-            key: engine.get(key)
-            for key in (
-                "track_count",
-                "observations",
-                "reid_recoveries",
-                "fragmentation_proxy",
-                "initialization_ms",
-                "processing_ms",
-                "average_ms_per_frame",
-                "labels",
-            )
-        }
-    return {
-        key: result.get(key)
-        for key in (
-            "sample_fps",
-            "frames_processed",
-            "duration_seconds",
-            "frame_width",
-            "frame_height",
-            "average_frame_decode_ms",
-            "average_detection_ms_per_frame",
-            "average_appearance_ms_per_frame",
-            "appearance_failures",
-            "clip_preparation_ms",
-            "elapsed_ms",
-        )
-    } | {"engines": engines}
-
-
-@app.get("/api/tracking-comparisons")
-def tracking_comparison_history(camera_id: str = "", limit: int = 25) -> dict:
-    normalized_camera_id = str(camera_id or "").strip()
-    return {
-        "items": manager.events.tracking_comparison_history(
-            camera_id=normalized_camera_id,
-            limit=limit,
-        ),
-        "summary": manager.events.tracking_comparison_summary(
-            camera_id=normalized_camera_id,
-        ),
-    }
-
-
-@app.put("/api/tracking-comparisons/{comparison_id}/verdict")
-def update_tracking_comparison_verdict(
-    comparison_id: int,
-    payload: TrackingComparisonVerdictRequest,
-) -> dict:
-    comparison = manager.events.set_tracking_comparison_verdict(
-        comparison_id,
-        payload.verdict,
-    )
-    if comparison is None:
-        raise HTTPException(status_code=404, detail="tracking comparison not found")
-    return {
-        "comparison": comparison,
-        "summary": manager.events.tracking_comparison_summary(
-            camera_id=str(comparison.get("camera_id") or ""),
-        ),
-    }
-
-
-TRACKING_COMPARISON_MIN_DURATION_SECONDS = 3.0
-TRACKING_COMPARISON_DEFAULT_DURATION_SECONDS = 30.0
-TRACKING_COMPARISON_MAX_DURATION_SECONDS = 30.0
-
-
-def _tracking_comparison_duration(duration_seconds: float | None) -> float:
-    requested = (
-        float(duration_seconds)
-        if duration_seconds is not None
-        else TRACKING_COMPARISON_DEFAULT_DURATION_SECONDS
-    )
-    return max(
-        TRACKING_COMPARISON_MIN_DURATION_SECONDS,
-        min(TRACKING_COMPARISON_MAX_DURATION_SECONDS, requested),
-    )
-
-
-@app.post("/api/events/{event_id}/tracking-comparison")
-def compare_event_tracking(event_id: int, duration_seconds: float | None = None) -> dict:
-    dependency = ultralytics_deepocsort_dependency_status()
-    if not dependency["available"]:
-        raise HTTPException(status_code=503, detail=dependency["reason"])
-    if duration_seconds is not None and not math.isfinite(duration_seconds):
-        raise HTTPException(status_code=422, detail="duration_seconds must be finite")
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        active_config = config.model_copy(deep=True)
-        event = active_manager.events.get(event_id)
-    duration = _tracking_comparison_duration(duration_seconds)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    camera = camera_by_id(active_config, str(event.get("camera_id") or ""))
-    if camera is None:
-        raise HTTPException(status_code=404, detail="event camera is not configured")
-    if not TRACKING_COMPARISON_LIMITER.acquire(blocking=False):
-        raise HTTPException(
-            status_code=429,
-            detail="another tracking comparison is already running",
-            headers={"Retry-After": "3"},
-        )
-    try:
-        request_started = time.perf_counter()
-        enriched = _event_row(event)
-        clip_started = time.perf_counter()
-        comparison_input = _ensure_event_clip(
-            enriched,
-            before=0.0,
-            after=duration,
-            source="main",
-        )
-        clip_ms = (time.perf_counter() - clip_started) * 1000.0
-        start_epoch = event_epoch(enriched)
-        runner = TrackingComparisonRunner(
-            config=active_config.detector.tracking,
-            detector=active_manager.detector,
-            appearance_encoder=active_manager.person_reidentifier,
-        )
-        detector_dimensions = [
-            int(value)
-            for value in (getattr(active_manager.detector, "input_shape", None) or [])
-            if isinstance(value, (int, float)) and int(value) > 0
-        ]
-        comparison_frames = sampled_video_frames(
-            comparison_input,
-            start_epoch=start_epoch,
-            sample_fps=active_config.detector.tracking.sample_fps,
-            duration_seconds=duration,
-            ffmpeg_path=active_config.ffmpeg_path,
-            maximum_width=max([640, *detector_dimensions]),
-        )
-        result = runner.run(camera, comparison_frames)
-        response = {
-            "event_id": event_id,
-            "camera_id": camera.id,
-            "created_at": str(enriched.get("created_at") or ""),
-            "requested_duration_seconds": duration,
-            "clip_preparation_ms": round(clip_ms, 1),
-            "elapsed_ms": round((time.perf_counter() - request_started) * 1000.0, 1),
-            **result,
-        }
-        comparison = active_manager.events.save_tracking_comparison(
-            event_id=event_id,
-            camera_id=camera.id,
-            event_created_at=str(enriched.get("created_at") or ""),
-            result=_tracking_comparison_evidence(response),
-        )
-        response["comparison_id"] = comparison["id"]
-        response["verdict"] = comparison["verdict"]
-        response["comparison"] = comparison
-        response["evidence_summary"] = active_manager.events.tracking_comparison_summary(
-            camera_id=camera.id,
-        )
-        return response
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logging.getLogger(__name__).exception(
-            "tracking comparison failed for event %d",
-            event_id,
-        )
-        raise HTTPException(
-            status_code=422,
-            detail="tracking comparison failed",
-        ) from None
-    finally:
-        TRACKING_COMPARISON_LIMITER.release()
-
-
-@app.post("/api/detector/frame")
-async def detect_debug_frame(request: Request, confidence: float = 0.35) -> dict:
-    maximum_bytes = 2 * 1024 * 1024
-    try:
-        content_length = int(request.headers.get("content-length") or 0)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid content-length header") from None
-    if content_length < 0:
-        raise HTTPException(status_code=400, detail="invalid content-length header")
-    if content_length > maximum_bytes:
-        raise HTTPException(status_code=413, detail="debug frame is too large")
-    payload = bytearray()
-    async for chunk in request.stream():
-        if len(payload) + len(chunk) > maximum_bytes:
-            raise HTTPException(status_code=413, detail="debug frame is too large")
-        payload.extend(chunk)
-    if not payload:
-        raise HTTPException(status_code=422, detail="invalid debug frame")
-    frame = cv2.imdecode(np.frombuffer(bytes(payload), dtype=np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        raise HTTPException(status_code=422, detail="failed to decode debug frame")
-    if not math.isfinite(confidence):
-        raise HTTPException(status_code=422, detail="confidence must be finite")
-    safe_confidence = max(0.01, min(0.99, float(confidence)))
-    with MANAGER_RELOAD_LOCK:
-        active_detector = manager.detector
-    started = time.perf_counter()
-    objects = await asyncio.to_thread(
-        active_detector.detect,
-        frame,
-        confidence_threshold=safe_confidence,
-    )
-    detector_error = detection_failure(objects)
-    if detector_error:
-        raise HTTPException(status_code=503, detail=detector_error)
-    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-    detected = [item for item in objects if item.get("label") and item.get("box")]
-    return {
-        "width": int(frame.shape[1]),
-        "height": int(frame.shape[0]),
-        "confidence": safe_confidence,
-        "elapsed_ms": elapsed_ms,
-        "objects": detected,
-    }
 
 
 @app.get("/api/cameras/{camera_id}/snapshot.jpg")
@@ -7150,6 +6382,71 @@ incident_feed = _incident_query_bundle.handlers["incident_feed"]
 incident_detail = _incident_query_bundle.handlers["incident_detail"]
 incident_search = _incident_query_bundle.handlers["incident_search"]
 incident_for_event = _incident_query_bundle.handlers["incident_for_event"]
+
+
+_detection_route_bundle = create_detection_router(
+    DetectionRouteDependencies(
+        get_manager=lambda: manager,
+        get_config=lambda: config,
+        manager_lock=MANAGER_RELOAD_LOCK,
+        get_comparison_limiter=lambda: TRACKING_COMPARISON_LIMITER,
+        ensure_event_clip=lambda *args, **kwargs: _ensure_event_clip(*args, **kwargs),
+        dependency_status=lambda: ultralytics_deepocsort_dependency_status(),
+        comparison_runner=lambda *args, **kwargs: TrackingComparisonRunner(
+            *args, **kwargs
+        ),
+        sample_video_frames=lambda *args, **kwargs: sampled_video_frames(
+            *args, **kwargs
+        ),
+    )
+)
+app.include_router(_detection_route_bundle.router)
+
+detect_event_snapshot = _detection_route_bundle.handlers["detect_event_snapshot"]
+tracking_comparison_history = _detection_route_bundle.handlers[
+    "tracking_comparison_history"
+]
+update_tracking_comparison_verdict = _detection_route_bundle.handlers[
+    "update_tracking_comparison_verdict"
+]
+compare_event_tracking = _detection_route_bundle.handlers["compare_event_tracking"]
+detect_debug_frame = _detection_route_bundle.handlers["detect_debug_frame"]
+
+
+_appearance_route_bundle = create_appearance_router(
+    AppearanceRouteDependencies(
+        get_manager=lambda: manager,
+        manager_lock=MANAGER_RELOAD_LOCK,
+    )
+)
+app.include_router(_appearance_route_bundle.router)
+
+event_snapshot = _appearance_route_bundle.handlers["event_snapshot"]
+event_thumbnail = _appearance_route_bundle.handlers["event_thumbnail"]
+event_appearance_matches = _appearance_route_bundle.handlers["event_appearance_matches"]
+event_related_incidents = _appearance_route_bundle.handlers["event_related_incidents"]
+appearance_index_status = _appearance_route_bundle.handlers["appearance_index_status"]
+queue_appearance_backfill = _appearance_route_bundle.handlers["queue_appearance_backfill"]
+
+
+_face_route_bundle = create_face_router(
+    FaceRouteDependencies(
+        get_manager=lambda: manager,
+        manager_lock=MANAGER_RELOAD_LOCK,
+        start_observation_sync=_start_face_observation_sync,
+    )
+)
+app.include_router(_face_route_bundle.router)
+
+face_status = _face_route_bundle.handlers["face_status"]
+face_people = _face_route_bundle.handlers["face_people"]
+create_face_person = _face_route_bundle.handlers["create_face_person"]
+delete_face_person = _face_route_bundle.handlers["delete_face_person"]
+face_observations = _face_route_bundle.handlers["face_observations"]
+face_observation_count = _face_route_bundle.handlers["face_observation_count"]
+face_observation = _face_route_bundle.handlers["face_observation"]
+assign_face_observation = _face_route_bundle.handlers["assign_face_observation"]
+face_crop = _face_route_bundle.handlers["face_crop"]
 
 
 # Assemble the recording HTTP boundary after its legacy media helpers exist.
