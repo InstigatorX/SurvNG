@@ -207,6 +207,27 @@ class ConfigReloadTest(unittest.TestCase):
         finally:
             runtime._qsv_cache = previous_qsv
 
+    def test_recording_cache_status_reuses_bounded_inventory(self) -> None:
+        runtime = main._recording_media_runtime
+        previous_at = runtime.recording_cache_status_cached_at
+        previous_inventory = runtime.recording_cache_status_cached_inventory
+        try:
+            runtime.recording_cache_status_cached_at = 0.0
+            with patch.object(
+                runtime,
+                "_recording_cache_inventory",
+                return_value=(7, 4096),
+            ) as inventory:
+                first = runtime.cache_status()
+                second = runtime.cache_status()
+
+            inventory.assert_called_once_with()
+            self.assertEqual(first["entries"], 7)
+            self.assertEqual(second["bytes"], 4096)
+        finally:
+            runtime.recording_cache_status_cached_at = previous_at
+            runtime.recording_cache_status_cached_inventory = previous_inventory
+
     def test_failed_replacement_restores_previous_manager_without_persisting(self) -> None:
         active = Mock()
         active.runtime_preferences.return_value = {

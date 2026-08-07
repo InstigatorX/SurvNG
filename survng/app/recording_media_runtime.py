@@ -65,6 +65,10 @@ class RecordingMediaRuntime:
         self.recording_preview_last_maintenance = 0.0
         self.recording_cache_maintenance_lock = threading.Lock()
         self.recording_cache_last_maintenance = 0.0
+        self.recording_cache_status_lock = threading.Lock()
+        self.recording_cache_status_cached_at = 0.0
+        self.recording_cache_status_cached_inventory = (0, 0)
+        self.recording_cache_status_seconds = 5.0
         self.recording_cache_metrics_lock = threading.Lock()
         self.recording_cache_metrics = {
             "playback_hits": 0.0, "playback_misses": 0.0,
@@ -96,6 +100,9 @@ class RecordingMediaRuntime:
     def clear_runtime_caches(self) -> None:
         with self.recording_day_cache_lock:
             self.recording_day_cache.clear()
+        with self.recording_cache_status_lock:
+            self.recording_cache_status_cached_at = 0.0
+            self.recording_cache_status_cached_inventory = (0, 0)
         self.clear_hardware_probe_caches()
 
     def clear_hardware_probe_caches(self) -> None:
@@ -110,16 +117,12 @@ class RecordingMediaRuntime:
         return self.media_exports.active_jobs() if self.media_exports is not None else []
 
     def cache_status(self) -> dict:
-        root = self.manager.storage_dir / "playback-cache" / "fmp4"
-        files = [path for path in root.glob("*/*") if path.is_file()] if root.exists() else []
-        existing_files: list[Path] = []
-        total_bytes = 0
-        for path in files:
-            try:
-                total_bytes += path.stat().st_size
-                existing_files.append(path)
-            except OSError:
-                continue
+        now = time.monotonic()
+        with self.recording_cache_status_lock:
+            if now - self.recording_cache_status_cached_at >= self.recording_cache_status_seconds:
+                self.recording_cache_status_cached_inventory = self._recording_cache_inventory()
+                self.recording_cache_status_cached_at = now
+            entries, total_bytes = self.recording_cache_status_cached_inventory
         with self.recording_cache_metrics_lock:
             metrics = dict(self.recording_cache_metrics)
         for origin in ("playback", "prewarm"):
@@ -128,13 +131,44 @@ class RecordingMediaRuntime:
             metrics[f"{origin}_last_remux_ms"] = round(float(metrics[f"{origin}_last_remux_ms"]), 1)
             metrics.pop(f"{origin}_remux_ms", None)
         return {
-            "entries": len({path.parent for path in existing_files}),
+            "entries": entries,
             "bytes": total_bytes,
             "max_bytes": int(float(self.config.recording_cache_max_gb) * 1024 * 1024 * 1024),
             "max_days": int(self.config.recording_cache_max_days),
             "prewarm": bool(self.config.recording_cache_prewarm),
             "metrics": metrics,
         }
+
+    def _recording_cache_inventory(self) -> tuple[int, int]:
+        root = self.manager.storage_dir / "playback-cache" / "fmp4"
+        if not root.exists():
+            return (0, 0)
+        entries = 0
+        total_bytes = 0
+        try:
+            cache_directories = os.scandir(root)
+        except OSError:
+            return (0, 0)
+        with cache_directories:
+            for directory in cache_directories:
+                try:
+                    if not directory.is_dir(follow_symlinks=False):
+                        continue
+                    has_files = False
+                    with os.scandir(directory.path) as files:
+                        for file_entry in files:
+                            if not file_entry.is_file(follow_symlinks=False):
+                                continue
+                            try:
+                                total_bytes += file_entry.stat(follow_symlinks=False).st_size
+                                has_files = True
+                            except OSError:
+                                continue
+                    if has_files:
+                        entries += 1
+                except OSError:
+                    continue
+        return entries, total_bytes
 
 
     def _run_ffmpeg_list(

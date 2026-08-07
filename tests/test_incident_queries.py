@@ -33,7 +33,12 @@ class IncidentQueryRouterTest(unittest.TestCase):
             return active_manager
 
         service = Mock(spec=IncidentQueryService)
-        service.feed.return_value = {"items": []}
+
+        def feed(*_args: object, **_kwargs: object) -> dict:
+            self.assertFalse(lock.held)
+            return {"items": []}
+
+        service.feed.side_effect = feed
         bundle = create_incident_query_router(
             IncidentQueryDependencies(get_manager=get_manager, manager_lock=lock),
             service,

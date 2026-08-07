@@ -40,9 +40,29 @@ class CameraApiRouteBundle:
 def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundle:
     router = APIRouter()
 
+    def manager_snapshot() -> AppManager:
+        """Select one manager generation without leasing its lock to I/O."""
+        with deps.manager_lock:
+            return deps.get_manager()
+
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
         with deps.manager_lock:
             return operation(deps.get_manager())
+
+    def cached_snapshot(
+        worker: Any,
+        camera: Any,
+        source: str,
+        status: dict[str, Any],
+    ) -> tuple[bytes | None, bool]:
+        normalized = camera.normalized_source(source)
+        freshness_key = "main_frame_fresh" if normalized == "main" else "frame_fresh"
+        freshness_known = freshness_key in status
+        if freshness_known and not status.get(freshness_key):
+            return None, True
+        if status.get(freshness_key):
+            return worker.snapshot(normalized), False
+        return None, False
 
     @router.get("/api/cameras/{camera_id}/snapshot.jpg")
     def snapshot(camera_id: str, source: str = "live") -> Response:
@@ -51,18 +71,21 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
             camera = active_manager.camera(camera_id)
             if worker is None or camera is None:
                 raise HTTPException(status_code=404, detail="camera not found")
-            if not worker.status().get("running"):
+            status = worker.status()
+            if not status.get("running"):
                 raise HTTPException(status_code=503, detail="camera is powered off")
-            try:
-                image = active_manager.go2rtc.snapshot(camera, source)
-            except Go2RtcError:
-                fallback = (
-                    "live"
-                    if source == "main"
-                    and camera.source_url("main") == camera.source_url("live")
-                    else source
-                )
-                image = worker.snapshot(fallback)
+            image, stale = cached_snapshot(worker, camera, source, status)
+            if image is None and not stale:
+                try:
+                    image = active_manager.go2rtc.snapshot(camera, source)
+                except Go2RtcError:
+                    fallback = (
+                        "live"
+                        if source == "main"
+                        and camera.source_url("main") == camera.source_url("live")
+                        else source
+                    )
+                    image = worker.snapshot(fallback)
             if image is None:
                 raise HTTPException(status_code=503, detail="no frame available")
             return Response(
@@ -71,7 +94,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 headers={"Cache-Control": "no-store"},
             )
 
-        return with_manager(response)
+        return response(manager_snapshot())
 
     @router.get("/api/cameras/{camera_id}/zone-snapshot.jpg")
     def zone_snapshot(camera_id: str, source: str = "live") -> Response:
@@ -80,8 +103,9 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
             camera = active_manager.camera(camera_id)
             if worker is None or camera is None:
                 raise HTTPException(status_code=404, detail="camera not found")
-            image = None
-            if worker.status().get("running"):
+            status = worker.status()
+            image, stale = cached_snapshot(worker, camera, source, status)
+            if image is None and status.get("running") and not stale:
                 try:
                     image = active_manager.go2rtc.snapshot(camera, source)
                 except Go2RtcError:
@@ -114,7 +138,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 status_code=503, detail="no camera or event snapshot available"
             )
 
-        return with_manager(response)
+        return response(manager_snapshot())
 
     @router.get("/api/cameras/{camera_id}/live-info")
     def live_info(camera_id: str, response: Response, source: str = "live") -> dict[str, Any]:
@@ -140,7 +164,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                     "error": str(exc)[:160],
                 }
 
-        return with_manager(info)
+        return info(manager_snapshot())
 
     @router.get("/api/cameras/{camera_id}/stream.mjpg")
     async def stream(
@@ -251,7 +275,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 await asyncio.gather(*tasks, return_exceptions=True)
             try:
                 await websocket.close(code=1000 if accepted else 1013)
-            except RuntimeError:
+            except (RuntimeError, WebSocketDisconnect):
                 pass
 
     @router.websocket("/api/cameras/{camera_id}/webrtc")

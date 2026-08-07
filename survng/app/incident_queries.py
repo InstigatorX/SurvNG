@@ -510,7 +510,7 @@ def create_incident_query_router(
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
         with dependencies.manager_lock:
             active_manager = dependencies.get_manager()
-            return operation(active_manager)
+        return operation(active_manager)
 
     @router.get("/api/events")
     def events(limit: int = 100) -> list[dict[str, Any]]:
