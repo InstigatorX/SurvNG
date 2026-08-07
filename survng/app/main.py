@@ -2144,6 +2144,7 @@ def _cgroup_memory_status(
     """Return service-wide cgroup v2 memory without conflating file cache with heap."""
     empty = {
         "total_bytes": 0,
+        "working_set_bytes": 0,
         "application_bytes": 0,
         "file_cache_bytes": 0,
         "reclaimable_file_cache_bytes": 0,
@@ -2168,11 +2169,17 @@ def _cgroup_memory_status(
     except (OSError, StopIteration, ValueError):
         return empty
     shmem = max(0, stats.get("shmem", 0))
+    file_cache = max(0, stats.get("file", 0) - shmem)
+    reclaimable_file_cache = min(
+        file_cache,
+        max(0, stats.get("inactive_file", 0) - shmem),
+    )
     return {
         "total_bytes": max(0, total),
+        "working_set_bytes": max(0, total - reclaimable_file_cache),
         "application_bytes": max(0, stats.get("anon", 0)) + shmem,
-        "file_cache_bytes": max(0, stats.get("file", 0) - shmem),
-        "reclaimable_file_cache_bytes": max(0, stats.get("inactive_file", 0) - shmem),
+        "file_cache_bytes": file_cache,
+        "reclaimable_file_cache_bytes": reclaimable_file_cache,
         "kernel_bytes": max(0, stats.get("kernel", 0)),
     }
 
@@ -2503,6 +2510,10 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             "process_rss_bytes": process_rss_bytes,
             "service_application_bytes": service_memory["application_bytes"],
             "service_file_cache_bytes": service_memory["file_cache_bytes"],
+            "service_reclaimable_file_cache_bytes": service_memory[
+                "reclaimable_file_cache_bytes"
+            ],
+            "service_working_set_bytes": service_memory["working_set_bytes"],
             "gpu_utilization_percent": gpu.get("utilization_percent"),
             "inference_ms": detector_runtime.get("average_inference_ms"),
             "detection_fps": detector_runtime.get("detection_fps"),

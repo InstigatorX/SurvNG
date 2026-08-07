@@ -67,6 +67,22 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_allocator_trim_ignores_ordinary_main_capture(self) -> None:
+        statuses = [{
+            "main_running": True,
+            "object_tracking": {"active": False, "worker_running": False},
+        }]
+
+        self.assertTrue(AppManager._allocator_trim_safe(statuses, {}))
+
+    def test_allocator_trim_waits_for_tracking_and_inference(self) -> None:
+        tracking = [{"object_tracking": {"worker_running": True}}]
+
+        self.assertFalse(AppManager._allocator_trim_safe(tracking, {}))
+        self.assertFalse(AppManager._allocator_trim_safe([], {"queue_depth": 1}))
+        self.assertFalse(AppManager._allocator_trim_safe([], {"pending_frames": 1}))
+        self.assertFalse(AppManager._allocator_trim_safe([], {"active_inferences": 1}))
+
     def test_tracking_burst_guard_fails_closed_during_manager_construction(self) -> None:
         manager = object.__new__(AppManager)
 

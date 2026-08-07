@@ -239,6 +239,7 @@ class EventApiSerializationTest(unittest.TestCase):
             status = main._cgroup_memory_status(root, process_cgroup)
 
         self.assertEqual(status["total_bytes"], 9000)
+        self.assertEqual(status["working_set_bytes"], 3300)
         self.assertEqual(status["application_bytes"], 2000)
         self.assertEqual(status["file_cache_bytes"], 6500)
         self.assertEqual(status["reclaimable_file_cache_bytes"], 5700)

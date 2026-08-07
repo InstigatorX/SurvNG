@@ -7807,14 +7807,14 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <TelemetryTrend title="Host pressure" description="Normalized 1-minute CPU load and memory use" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
           <TelemetryTrend title="GPU utilization" description="SurvNG inference workers" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "gpu_utilization_percent", label: "GPU", className: "gpu" }]} />
           <TelemetryTrend title="Inference latency" description="Rolling detector average" history={history} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Latency", className: "inference" }]} />
-          <TelemetryTrend title="SurvNG memory" description="Application allocations versus filesystem cache" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "service_application_bytes", label: "Application", className: "process-memory" }, { key: "service_file_cache_bytes", label: "File cache", className: "storage" }]} />
+          <TelemetryTrend title="SurvNG memory pressure" description="Application memory versus recording cache Linux can reclaim" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "service_application_bytes", label: "Application", className: "process-memory" }, { key: "service_reclaimable_file_cache_bytes", label: "Reclaimable cache", className: "storage" }]} />
           <TelemetryTrend title="Storage use" description="Recording filesystem" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "storage_used_percent", label: "Used", className: "storage" }]} />
           <TelemetryTrend title="Detection rate" description="Completed inference requests" history={history} timeZone={timeZone} valueFormatter={(value) => formatRate(value)} series={[{ key: "detection_fps", label: "Rate", className: "rate" }]} />
         </div>
       </section> : null}
 
       {!selected ? <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>Memory diagnostics</h3><p>Background samples continue while this page is closed. Allocated measures glibc-owned live blocks; retained is free space held inside allocator arenas.</p></div></div>
+        <div className="telemetry-section-head"><div><h3>Memory diagnostics</h3><p>Application and working-set memory indicate real pressure. Recording file cache is included in the service total but Linux can reclaim its inactive portion automatically. Allocator retained is reusable native heap, not live frame storage.</p></div></div>
         <div className="telemetry-trend-grid two-column">
           <TelemetryTrend title="Processes · 24 hours" description="Main-process RSS and isolated inference-worker RSS" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "Main RSS", className: "process-memory" }, { key: "worker_rss_bytes", label: "Workers", className: "secondary" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }]} />
           <TelemetryTrend title="Native allocator · 24 hours" description="Live allocations versus reusable retained arenas and large mappings" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "malloc_allocated_bytes", label: "Allocated", className: "process-memory" }, { key: "malloc_free_bytes", label: "Retained", className: "warning" }, { key: "malloc_mmap_bytes", label: "Mapped", className: "storage" }]} />
@@ -7825,20 +7825,22 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
 
       <div className={`telemetry-system-grid${selected ? " camera-only" : ""}`}>
         {!selected ? <section className="telemetry-section">
-          <div className="telemetry-section-head"><div><h3>System</h3><p>Current host and SurvNG process health.</p></div></div>
+          <div className="telemetry-section-head"><div><h3>System</h3><p>Current host health, with committed application memory separated from reclaimable recording cache.</p></div></div>
           <dl className="telemetry-details">
             <div><dt>SurvNG uptime</dt><dd>{formatDuration(data.system?.uptime_seconds || 0)}</dd></div>
             <div><dt>CPU load (1 / 5 / 15 min)</dt><dd>{data.system?.load_average?.one ?? "--"} / {data.system?.load_average?.five ?? "--"} / {data.system?.load_average?.fifteen ?? "--"} <small>({data.system?.cpu_count || 1} cores)</small></dd></div>
             <div><dt>System memory</dt><dd>{memory.used_percent || 0}% · {formatBytes(memory.used_bytes)} used</dd></div>
-            <div><dt>SurvNG service total</dt><dd>{formatBytes(serviceMemory.total_bytes)}</dd></div>
             <div><dt>Application memory</dt><dd>{formatBytes(serviceMemory.application_bytes)} <small>all workers and shared inference buffers</small></dd></div>
-            <div><dt>Filesystem cache</dt><dd>{formatBytes(serviceMemory.file_cache_bytes)} <small>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)} inactive/reclaimable</small></dd></div>
+            <div><dt>SurvNG working set</dt><dd>{formatBytes(serviceMemory.working_set_bytes)} <small>service total excluding reclaimable cache</small></dd></div>
+            <div><dt>Reclaimable recording cache</dt><dd>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)} <small>released automatically under memory pressure</small></dd></div>
+            <div><dt>Active filesystem cache</dt><dd>{formatBytes(Math.max(0, Number(serviceMemory.file_cache_bytes || 0) - Number(serviceMemory.reclaimable_file_cache_bytes || 0)))} <small>recent recording I/O</small></dd></div>
             <div><dt>Main process RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
             <div><dt>Main anonymous memory</dt><dd>{formatBytes(data.system?.process_memory?.anonymous_rss_bytes)} <small>{formatBytes(data.system?.process_memory?.malloc?.allocated_bytes)} live glibc allocations</small></dd></div>
             <div><dt>Allocator retained</dt><dd>{formatBytes(data.system?.process_memory?.malloc?.free_bytes)} <small>reusable arena space</small></dd></div>
             <div><dt>Inference worker memory</dt><dd>{formatBytes(workerMemory.total_rss_bytes)} <small>{Object.keys(workerMemory.workers || {}).length} isolated workers</small></dd></div>
             <div><dt>Allocator trims</dt><dd>{Number(memoryMaintenance.successful_trims || 0).toLocaleString()} <small>{formatBytes(memoryMaintenance.reclaimed_total_bytes)} reclaimed since restart</small></dd></div>
             <div><dt>Last allocator trim</dt><dd>{memoryMaintenance.last_trim_at ? formatDateTime(memoryMaintenance.last_trim_at, timeZone) : "Not yet needed"} <small>{memoryMaintenance.last_skip_reason ? String(memoryMaintenance.last_skip_reason).replaceAll("_", " ") : `${formatBytes(memoryMaintenance.last_reclaimed_bytes)} reclaimed`}</small></dd></div>
+            <div><dt>Cgroup total including cache</dt><dd>{formatBytes(serviceMemory.total_bytes)} <small>not all committed memory</small></dd></div>
             <div><dt>Threads / file descriptors</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
             <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
             <div><dt>Detector</dt><dd>{data.detector?.loaded_backend || "Not loaded"} · {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>

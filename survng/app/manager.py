@@ -1226,15 +1226,9 @@ class AppManager:
                     now = time.monotonic()
                     detector_status = self.detector_status()
                     detector_runtime = detector_status.get("runtime") or {}
-                    allocator_idle = not (
-                        any(
-                            bool(status.get("main_running"))
-                            or bool((status.get("object_tracking") or {}).get("active"))
-                            for status in statuses
-                        )
-                        or int(detector_runtime.get("queue_depth") or 0) > 0
-                        or int(detector_runtime.get("pending_frames") or 0) > 0
-                        or int(detector_runtime.get("active_inferences") or 0) > 0
+                    allocator_idle = self._allocator_trim_safe(
+                        statuses,
+                        detector_runtime,
                     )
                     self._allocator_memory_trimmer.observe_idle(allocator_idle, now=now)
                     if now - telemetry_sample_at >= 60.0:
@@ -1259,6 +1253,30 @@ class AppManager:
 
         self._state_monitor_thread = threading.Thread(target=monitor, name="camera-state-monitor", daemon=False)
         self._state_monitor_thread.start()
+
+    @staticmethod
+    def _allocator_trim_safe(
+        statuses: list[dict],
+        detector_runtime: dict,
+    ) -> bool:
+        """Allow thread-safe arena reclamation outside inference/tracking work.
+
+        Ordinary main-stream capture continuously allocates decoder frames and
+        is not a reason to retain otherwise-free glibc arenas. Object
+        inference and tracking remain protected from the occasional trim
+        latency.
+        """
+        tracking_busy = any(
+            bool((status.get("object_tracking") or {}).get("active"))
+            or bool((status.get("object_tracking") or {}).get("worker_running"))
+            for status in statuses
+        )
+        inference_busy = (
+            int(detector_runtime.get("queue_depth") or 0) > 0
+            or int(detector_runtime.get("pending_frames") or 0) > 0
+            or int(detector_runtime.get("active_inferences") or 0) > 0
+        )
+        return not tracking_busy and not inference_busy
 
     def _stop_state_monitor(self) -> None:
         self._state_monitor_stop.set()
