@@ -1354,14 +1354,37 @@ function AssistantPanel({ pageContext, timeZone }) {
 }
 
 function Shell({ page, theme, recordingContext, children }) {
+  const shellRef = useRef(null);
+  const topbarRef = useRef(null);
   const isLive = page === "live";
   const isRecordings = page === "recordings";
   const isConfig = page === "config";
   const isIncidents = page === "incidents";
   const isFaces = page === "faces";
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    const topbar = topbarRef.current;
+    if (!shell || !topbar) return undefined;
+    const updateTopbarHeight = () => {
+      shell.style.setProperty(
+        "--topbar-height",
+        `${Math.ceil(topbar.getBoundingClientRect().height)}px`,
+      );
+    };
+    updateTopbarHeight();
+    const observer = typeof ResizeObserver === "function"
+      ? new ResizeObserver(updateTopbarHeight)
+      : null;
+    observer?.observe(topbar);
+    window.addEventListener("resize", updateTopbarHeight);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateTopbarHeight);
+    };
+  }, []);
   return (
-    <div className={`app-shell page-${page}`}>
-      <header className="topbar">
+    <div ref={shellRef} className={`app-shell page-${page}`}>
+      <header ref={topbarRef} className="topbar">
         <div className="brand-block">
           <div className="brand-mark">
             <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />

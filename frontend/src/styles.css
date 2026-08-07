@@ -1311,6 +1311,9 @@ p {
 }
 
 .settings-tabs {
+  position: sticky;
+  top: var(--topbar-height, 64px);
+  z-index: 4;
   grid-column: 1 / 5;
   grid-row: 1;
   display: flex;
@@ -1319,6 +1322,11 @@ p {
   gap: 6px;
   min-width: 0;
   max-width: 100%;
+  margin: -8px -8px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--topbar);
+  padding: 8px;
+  backdrop-filter: blur(18px);
 }
 
 .settings-tab-list {
