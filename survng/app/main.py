@@ -92,6 +92,11 @@ from .camera_intelligence import (
     compare_camera_intelligence_results,
     select_balanced_samples,
 )
+from .camera_api_routes import (
+    CameraApiDependencies,
+    CameraFeatureState,
+    create_camera_api_router,
+)
 from .camera_routes import match_camera_route
 from .calibration import (
     apply_calibration_changes,
@@ -169,6 +174,7 @@ from .recording_routes import (
     recording_source,
 )
 from .object_tracking import ultralytics_deepocsort_dependency_status
+from .operations_routes import OperationsRouteDependencies, create_operations_router
 from .tracking_comparison import (
     TRACKING_COMPARISON_IMPLEMENTATIONS,
     TrackingComparisonRunner,
@@ -434,10 +440,6 @@ def install_memory_log_handler() -> None:
 
 
 install_memory_log_handler()
-
-
-class CameraFeatureState(BaseModel):
-    enabled: bool
 
 
 class SemanticSearchRequest(BaseModel):
@@ -741,6 +743,16 @@ app.include_router(
         SYSTEM_TELEMETRY,
     )
 )
+app.include_router(
+    create_operations_router(
+        OperationsRouteDependencies(
+            get_manager=lambda: manager,
+            manager_lock=MANAGER_RELOAD_LOCK,
+            log_rows=lambda: tuple(LOG_LINES),
+            storage_maintenance=STORAGE_MAINTENANCE,
+        )
+    )
+)
 
 
 @app.exception_handler(StorageTasksActiveError)
@@ -914,75 +926,6 @@ async def application_event_stream(request: Request) -> StreamingResponse:
 def get_motion_pipeline_catalog() -> dict:
     return motion_pipeline_catalog(manager.motion_pipeline_registry)
 
-
-@app.get("/api/logs")
-def logs(limit: int = 300, level: str = "", q: str = "") -> dict:
-    safe_limit = max(1, min(limit, 1000))
-    wanted_level = level.strip().upper()
-    query = q.strip().lower()
-    rows = list(LOG_LINES)[-safe_limit:]
-    if wanted_level:
-        levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-        try:
-            min_index = levels.index(wanted_level)
-            allowed = set(levels[min_index:])
-            rows = [row for row in rows if row.get("level") in allowed]
-        except ValueError:
-            rows = [row for row in rows if row.get("level") == wanted_level]
-    if query:
-        rows = [row for row in rows if query in f"{row.get('level', '')} {row.get('logger', '')} {row.get('message', '')}".lower()]
-    return {"lines": rows[-safe_limit:], "total": len(LOG_LINES)}
-
-
-class StorageMaintenanceRequest(BaseModel):
-    apply: bool = False
-    full: bool = False
-
-
-class RecordingRetentionRequest(BaseModel):
-    apply: bool = False
-
-
-@app.get("/api/retention/status")
-def recording_retention_status() -> dict:
-    return manager.recording.retention_status()
-
-
-@app.post("/api/retention/run", status_code=202)
-def run_recording_retention(request: RecordingRetentionRequest) -> dict:
-    return manager.recording.request_retention_run(apply=request.apply)
-
-
-@app.get("/api/maintenance/storage")
-def storage_maintenance_status() -> dict:
-    return STORAGE_MAINTENANCE.status()
-
-
-@app.post("/api/maintenance/storage", status_code=202)
-def start_storage_maintenance(request: StorageMaintenanceRequest) -> dict:
-    active_manager = manager
-    try:
-        return STORAGE_MAINTENANCE.start(
-            lambda cancel_event, progress: StorageReconciler(
-                active_manager.storage_dir,
-                active_manager.events.db_path,
-                active_manager.recorder,
-                cancel_event=cancel_event,
-                progress=progress,
-            ),
-            apply=request.apply,
-            full=request.full,
-        )
-    except RuntimeError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
-
-@app.delete("/api/maintenance/storage", status_code=202)
-def cancel_storage_maintenance() -> dict:
-    try:
-        return STORAGE_MAINTENANCE.cancel()
-    except RuntimeError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 def _run_ffmpeg_list(args: list[str], timeout: float = 5.0) -> str:
@@ -5223,287 +5166,6 @@ def _start_face_observation_sync() -> None:
 
 
 
-@app.get("/api/cameras/{camera_id}/snapshot.jpg")
-def snapshot(camera_id: str, source: str = "live") -> Response:
-    active_manager = manager
-    worker = active_manager.workers.get(camera_id)
-    camera = active_manager.camera(camera_id)
-    if worker is None or camera is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    if not worker.status().get("running"):
-        raise HTTPException(status_code=503, detail="camera is powered off")
-    try:
-        image = active_manager.go2rtc.snapshot(camera, source)
-    except Go2RtcError:
-        fallback_source = "live" if source == "main" and camera.source_url("main") == camera.source_url("live") else source
-        image = worker.snapshot(fallback_source)
-    if image is None:
-        raise HTTPException(status_code=503, detail="no frame available")
-    return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
-
-
-@app.get("/api/cameras/{camera_id}/zone-snapshot.jpg")
-def zone_snapshot(camera_id: str, source: str = "live") -> Response:
-    active_manager = manager
-    worker = active_manager.workers.get(camera_id)
-    camera = active_manager.camera(camera_id)
-    if worker is None or camera is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    image = None
-    if worker.status().get("running"):
-        try:
-            image = active_manager.go2rtc.snapshot(camera, source)
-        except Go2RtcError:
-            fallback_source = "live" if source == "main" and camera.source_url("main") == camera.source_url("live") else source
-            image = worker.snapshot(fallback_source)
-    if image is not None:
-        return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
-
-    for event in active_manager.events.recent(1000):
-        if event.get("camera_id") != camera_id:
-            continue
-        try:
-            snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
-        except (FileNotFoundError, PermissionError, OSError):
-            continue
-        media_type = snapshot_media_type(snapshot_path)
-        return FileResponse(snapshot_path, media_type=media_type, headers={"Cache-Control": "no-store"})
-    raise HTTPException(status_code=503, detail="no camera or event snapshot available")
-
-
-@app.get("/api/cameras/{camera_id}/live-info")
-def live_info(camera_id: str, response: Response, source: str = "live") -> dict:
-    response.headers["Cache-Control"] = "no-store"
-    active_manager = manager
-    camera = active_manager.camera(camera_id)
-    worker = active_manager.workers.get(camera_id)
-    if camera is None or worker is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    if not worker.status().get("running"):
-        raise HTTPException(status_code=503, detail="camera is powered off")
-    try:
-        return active_manager.go2rtc.stream_info(camera, source)
-    except Go2RtcError as exc:
-        return {
-            "available": False,
-            "video_codec": "",
-            "video_codecs": [],
-            "compatibility": "native",
-            "delivery": "native",
-            "transcoding": False,
-            "error": str(exc)[:160],
-        }
-
-
-@app.get("/api/cameras/{camera_id}/stream.mjpg")
-async def stream(
-    camera_id: str,
-    request: Request,
-    source: str = "live",
-    fps: float = 4.0,
-) -> StreamingResponse:
-    active_manager = manager
-    worker = active_manager.workers.get(camera_id)
-    if worker is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    if not worker.status().get("running"):
-        raise HTTPException(status_code=503, detail="camera is powered off")
-    frame_interval = 1.0 / max(0.5, min(4.0, fps))
-
-    async def frames():
-        while not await request.is_disconnected():
-            image = await asyncio.to_thread(worker.snapshot, source)
-            if image is not None:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"Cache-Control: no-cache\r\n\r\n"
-                    + image
-                    + b"\r\n"
-                )
-            await asyncio.sleep(frame_interval if image is not None else 0.1)
-
-    return StreamingResponse(
-        frames(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-async def relay_go2rtc_websocket(websocket: WebSocket, camera_id: str, transport: str) -> None:
-    """Relay one camera's go2rtc WebSocket without exposing the go2rtc API."""
-    try:
-        active_manager = manager
-        camera = active_manager.camera(camera_id)
-        worker = active_manager.workers.get(camera_id)
-        if camera is None or worker is None:
-            raise Go2RtcError("camera not found")
-        if not worker.status().get("running"):
-            raise Go2RtcError("camera is powered off")
-        upstream_url = await asyncio.to_thread(
-            active_manager.go2rtc.websocket_url,
-            camera,
-            websocket.query_params.get("source", "live"),
-        )
-    except (Go2RtcError, OSError, RuntimeError):
-        await websocket.close(code=1008)
-        return
-    accepted = False
-    tasks: list[asyncio.Task] = []
-    try:
-        async with websockets.connect(
-            upstream_url,
-            open_timeout=5,
-            close_timeout=2,
-            ping_interval=20,
-            ping_timeout=10,
-            max_size=8 * 1024 * 1024,
-            max_queue=4,
-            compression=None,
-        ) as upstream:
-            # Do not report an open browser relay until the upstream go2rtc
-            # socket is actually ready. This lets the client advance to its
-            # next transport immediately when go2rtc is unavailable.
-            await websocket.accept()
-            accepted = True
-
-            async def browser_to_go2rtc() -> None:
-                while True:
-                    message = await websocket.receive()
-                    if message["type"] == "websocket.disconnect":
-                        return
-                    if message.get("text") is not None:
-                        await upstream.send(message["text"])
-                    elif message.get("bytes") is not None:
-                        await upstream.send(message["bytes"])
-
-            async def go2rtc_to_browser() -> None:
-                async for message in upstream:
-                    if isinstance(message, bytes):
-                        await websocket.send_bytes(message)
-                    else:
-                        await websocket.send_text(message)
-
-            tasks = [
-                asyncio.create_task(browser_to_go2rtc()),
-                asyncio.create_task(go2rtc_to_browser()),
-            ]
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*done, *pending, return_exceptions=True)
-    except (WebSocketDisconnect, websockets.ConnectionClosed):
-        pass
-    except Exception as exc:
-        logging.getLogger(__name__).warning("%s relay failed for %s: %s", transport, camera_id, exc)
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        try:
-            await websocket.close(code=1000 if accepted else 1013)
-        except RuntimeError:
-            pass
-
-
-@app.websocket("/api/cameras/{camera_id}/webrtc")
-async def webrtc_signaling(websocket: WebSocket, camera_id: str) -> None:
-    """Relay signaling while go2rtc WebRTC media remains direct and shared."""
-    await relay_go2rtc_websocket(websocket, camera_id, "WebRTC signaling")
-
-
-@app.websocket("/api/cameras/{camera_id}/mse")
-async def mse_stream(websocket: WebSocket, camera_id: str) -> None:
-    """Relay go2rtc fragmented MP4 media over the SurvNG connection."""
-    await relay_go2rtc_websocket(websocket, camera_id, "MSE stream")
-
-
-@app.post("/api/cameras/{camera_id}/camera/start")
-def start_camera(camera_id: str) -> dict:
-    if not manager.start_camera(camera_id):
-        raise HTTPException(status_code=404, detail="camera not found")
-    return {"ok": True}
-
-
-@app.post("/api/cameras/{camera_id}/camera/stop")
-def stop_camera(camera_id: str) -> dict:
-    if not manager.stop_camera(camera_id):
-        raise HTTPException(status_code=404, detail="camera not found")
-    return {"ok": True}
-
-@app.post("/api/cameras/{camera_id}/motion-test")
-def motion_test(camera_id: str) -> dict:
-    worker = manager.workers.get(camera_id)
-    if worker is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    worker.handle_motion_event("manual/test", "manual GUI trigger")
-    return {"ok": True}
-
-
-@app.get("/api/cameras/{camera_id}/motion-debug")
-def motion_debug_status(camera_id: str) -> dict:
-    worker = manager.workers.get(camera_id)
-    if worker is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    return worker.motion_debug_status()
-
-
-@app.put("/api/cameras/{camera_id}/motion-debug")
-def set_motion_debug(camera_id: str, state: CameraFeatureState) -> dict:
-    worker = manager.workers.get(camera_id)
-    if worker is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    worker.set_motion_debug_enabled(state.enabled)
-    return worker.motion_debug_status()
-
-
-@app.get("/api/cameras/{camera_id}/motion-debug/{layer}.jpg")
-def motion_debug_image(camera_id: str, layer: str) -> Response:
-    worker = manager.workers.get(camera_id)
-    if worker is None:
-        raise HTTPException(status_code=404, detail="camera not found")
-    image = worker.motion_debug_image(layer)
-    if image is None:
-        raise HTTPException(status_code=404, detail="motion debug layer not available")
-    return Response(
-        content=image,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-@app.post("/api/cameras/{camera_id}/recording/start")
-def start_recording(camera_id: str, source: str = "main") -> dict:
-    if not manager.set_recording(camera_id, True):
-        raise HTTPException(status_code=404, detail="camera not found")
-    return {"ok": True, "recording_enabled": True}
-
-
-@app.post("/api/cameras/{camera_id}/recording/stop")
-def stop_recording(camera_id: str, source: str | None = None) -> dict:
-    if not manager.set_recording(camera_id, False):
-        raise HTTPException(status_code=404, detail="camera not found")
-    return {"ok": True, "recording_enabled": False}
-
-
-@app.put("/api/cameras/{camera_id}/recording")
-def set_camera_recording(camera_id: str, state: CameraFeatureState) -> dict:
-    if not manager.set_recording(camera_id, state.enabled):
-        raise HTTPException(status_code=404, detail="camera not found")
-    return {"ok": True, "recording_enabled": state.enabled}
-
-
-@app.put("/api/cameras/{camera_id}/detection")
-def set_camera_detection(camera_id: str, state: CameraFeatureState) -> dict:
-    if not manager.set_detection(camera_id, state.enabled):
-        raise HTTPException(status_code=404, detail="camera not found")
-    return {"ok": True, "detection_enabled": state.enabled}
-
 
 def _recording_day_rows(
     camera_id: str,
@@ -6382,6 +6044,35 @@ incident_feed = _incident_query_bundle.handlers["incident_feed"]
 incident_detail = _incident_query_bundle.handlers["incident_detail"]
 incident_search = _incident_query_bundle.handlers["incident_search"]
 incident_for_event = _incident_query_bundle.handlers["incident_for_event"]
+
+
+_camera_api_route_bundle = create_camera_api_router(
+    CameraApiDependencies(
+        get_manager=lambda: manager,
+        manager_lock=MANAGER_RELOAD_LOCK,
+    )
+)
+app.include_router(_camera_api_route_bundle.router)
+
+snapshot = _camera_api_route_bundle.handlers["snapshot"]
+zone_snapshot = _camera_api_route_bundle.handlers["zone_snapshot"]
+live_info = _camera_api_route_bundle.handlers["live_info"]
+stream = _camera_api_route_bundle.handlers["stream"]
+relay_go2rtc_websocket = _camera_api_route_bundle.handlers[
+    "relay_go2rtc_websocket"
+]
+webrtc_signaling = _camera_api_route_bundle.handlers["webrtc_signaling"]
+mse_stream = _camera_api_route_bundle.handlers["mse_stream"]
+start_camera = _camera_api_route_bundle.handlers["start_camera"]
+stop_camera = _camera_api_route_bundle.handlers["stop_camera"]
+motion_test = _camera_api_route_bundle.handlers["motion_test"]
+motion_debug_status = _camera_api_route_bundle.handlers["motion_debug_status"]
+set_motion_debug = _camera_api_route_bundle.handlers["set_motion_debug"]
+motion_debug_image = _camera_api_route_bundle.handlers["motion_debug_image"]
+start_recording = _camera_api_route_bundle.handlers["start_recording"]
+stop_recording = _camera_api_route_bundle.handlers["stop_recording"]
+set_camera_recording = _camera_api_route_bundle.handlers["set_camera_recording"]
+set_camera_detection = _camera_api_route_bundle.handlers["set_camera_detection"]
 
 
 _detection_route_bundle = create_detection_router(
