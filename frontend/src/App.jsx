@@ -9422,6 +9422,18 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
     setDragPoint(null);
   }, [camera.id]);
 
+  useEffect(() => {
+    if (!dragPoint) return undefined;
+    const preventSelection = (event) => event.preventDefault();
+    document.documentElement.classList.add("zone-vertex-dragging");
+    document.addEventListener("selectstart", preventSelection);
+    return () => {
+      document.documentElement.classList.remove("zone-vertex-dragging");
+      document.removeEventListener("selectstart", preventSelection);
+      window.getSelection()?.removeAllRanges();
+    };
+  }, [dragPoint]);
+
   function replaceZone(index, patch) {
     onChange(zones.map((zone, zoneIndex) => zoneIndex === index ? { ...zone, ...patch } : zone));
   }
@@ -9495,8 +9507,12 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
               preserveAspectRatio="none"
               onPointerDown={addPoint}
               onPointerMove={movePoint}
-              onPointerUp={() => setDragPoint(null)}
+              onPointerUp={(event) => {
+                movePoint(event);
+                setDragPoint(null);
+              }}
               onPointerCancel={() => setDragPoint(null)}
+              onDragStart={(event) => event.preventDefault()}
               aria-label="Zone polygon editor"
             >
               {zones.map((zone, zoneIndex) => {

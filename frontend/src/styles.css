@@ -4197,10 +4197,22 @@ section.detection-settings-card {
   height: 100%;
   cursor: crosshair;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .zone-canvas-media circle {
   cursor: grab;
+}
+
+html.zone-vertex-dragging,
+html.zone-vertex-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+html.zone-vertex-dragging .zone-canvas-media circle {
+  cursor: grabbing;
 }
 
 .zone-canvas-empty,
