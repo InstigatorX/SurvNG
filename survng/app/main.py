@@ -1911,6 +1911,7 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             "id": status_camera_id,
             "name": status.get("name") or status_camera_id,
             "connected": bool(status.get("connected")),
+            "expected_enabled": bool(status.get("expected_enabled", True)),
             "frame_fresh": bool(status.get("frame_fresh")),
             "last_frame_age_seconds": status.get("last_frame_age_seconds"),
             "recording": bool(status.get("recording") or status.get("sub_recording")),

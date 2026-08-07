@@ -6034,12 +6034,41 @@ section.detection-settings-card {
 
 .telemetry-camera-card header span.healthy {
   background: var(--ok-bg);
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 
 .telemetry-camera-card header span.offline {
   background: var(--hot-bg);
   color: var(--hot);
+}
+
+.telemetry-camera-card header span.attention {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.telemetry-camera-card header span.disabled {
+  background: var(--control-muted);
+  color: var(--muted);
+}
+
+.telemetry-technical {
+  border-top: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--control-muted) 55%, transparent);
+}
+
+.telemetry-technical > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 9px 13px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.telemetry-technical[open] > summary {
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
 }
 
 .telemetry-footnote {

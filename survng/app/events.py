@@ -1021,6 +1021,7 @@ class EventStore:
         process_memory: dict[str, Any] | None = None,
         worker_memory: dict[str, Any] | None = None,
         memory_maintenance: dict[str, Any] | None = None,
+        system_runtime: dict[str, Any] | None = None,
     ) -> None:
         """Persist one compact camera-health sample per UTC minute for seven days."""
         current = sampled_at or datetime.now(timezone.utc)
@@ -1034,7 +1035,11 @@ class EventStore:
                 continue
             motion = status.get("motion_qualification") or {}
             tracking = status.get("object_tracking") or {}
+            lifecycle = status.get("lifecycle") or {}
             cameras[camera_id] = {
+                "enabled": bool(
+                    status.get("expected_enabled", lifecycle.get("enabled", True))
+                ),
                 "connected": bool(status.get("connected")),
                 "frame_age_seconds": status.get("last_frame_age_seconds"),
                 "main_frame_age_seconds": status.get("main_last_frame_age_seconds"),
@@ -1050,6 +1055,7 @@ class EventStore:
                 "process_memory": process_memory or {},
                 "worker_memory": worker_memory or {},
                 "memory_maintenance": memory_maintenance or {},
+                "system_runtime": system_runtime or {},
             },
             separators=(",", ":"),
             allow_nan=False,
@@ -1191,10 +1197,36 @@ class EventStore:
                 "motion_copy_bytes": 0,
                 "event_evictions": 0,
                 "event_rejections": 0,
+                "event_retry_drops": 0,
+                "analysis_frames_sampled": 0,
+                "camera_availability_total": 0.0,
+                "camera_availability_samples": 0,
+                "expected_cameras": 0,
+                "unavailable_cameras": 0,
+                "cpu_load_percent_total": 0.0,
+                "memory_used_percent_total": 0.0,
+                "inference_ms_total": 0.0,
+                "system_runtime_samples": 0,
+                "inference_samples": 0,
             })
+            system_runtime = payload.get("system_runtime") or {}
+            if isinstance(system_runtime, dict):
+                cpu_load = system_runtime.get("cpu_load_percent")
+                memory_used = system_runtime.get("memory_used_percent")
+                if isinstance(cpu_load, (int, float)) and math.isfinite(cpu_load):
+                    bucket["cpu_load_percent_total"] += max(0.0, float(cpu_load))
+                    if isinstance(memory_used, (int, float)) and math.isfinite(memory_used):
+                        bucket["memory_used_percent_total"] += max(0.0, float(memory_used))
+                    bucket["system_runtime_samples"] += 1
+                inference_ms = system_runtime.get("inference_ms")
+                if isinstance(inference_ms, (int, float)) and math.isfinite(inference_ms):
+                    bucket["inference_ms_total"] += max(0.0, float(inference_ms))
+                    bucket["inference_samples"] += 1
             live_values: list[float] = []
             main_values: list[float] = []
             active = 0
+            expected = 0
+            available = 0
             for selected_id, item in selected:
                 capture = item.get("capture") or {}
                 live = capture.get("live") or {}
@@ -1208,6 +1240,11 @@ class EventStore:
                 if camera_id or main_fps > 0:
                     main_values.append(main_fps)
                 active += int(bool(item.get("tracking_active")))
+                if bool(item.get("enabled", True)):
+                    expected += 1
+                    frame_age = item.get("frame_age_seconds")
+                    frame_fresh = frame_age is None or float(frame_age) <= 5.0
+                    available += int(bool(item.get("connected")) and frame_fresh)
                 bucket["capture_observer_p99_ms"] = max(
                     float(bucket["capture_observer_p99_ms"]),
                     float(live.get("observer_p99_ms") or 0.0),
@@ -1226,15 +1263,25 @@ class EventStore:
                     "capture_open_failures": int(live.get("open_failures") or 0) + int(main.get("open_failures") or 0),
                     "main_capture_starts": int(main.get("starts") or 0),
                     "analysis_frames_dropped": int(item.get("analysis_frames_dropped") or 0),
+                    "analysis_frames_sampled": int(analysis_runtime.get("frames_sampled") or 0),
                     "motion_copy_bytes": int(analysis_runtime.get("copy_bytes") or 0),
                     "event_evictions": int(event_runtime.get("evicted") or 0),
                     "event_rejections": int(event_runtime.get("rejected") or 0),
+                    "event_retry_drops": int(event_runtime.get("retries_dropped") or 0),
                 }
                 previous = previous_counters.get(selected_id)
                 if previous is not None:
                     for key, value in counters.items():
                         bucket[key] += max(0, value - previous[key]) if value >= previous[key] else max(0, value)
                 previous_counters[selected_id] = counters
+            if expected:
+                bucket["camera_availability_total"] += (available / expected) * 100.0
+                bucket["camera_availability_samples"] += 1
+                bucket["expected_cameras"] = max(int(bucket["expected_cameras"]), expected)
+                bucket["unavailable_cameras"] = max(
+                    int(bucket["unavailable_cameras"]),
+                    expected - available,
+                )
             if live_values:
                 bucket["live_fps_total"] += sum(live_values) / len(live_values)
                 bucket["live_fps_samples"] += 1
@@ -1249,6 +1296,12 @@ class EventStore:
             bucket = buckets[bucket_epoch]
             live_samples = max(1, int(bucket["live_fps_samples"]))
             main_samples = max(1, int(bucket["main_fps_samples"]))
+            availability_samples = max(1, int(bucket["camera_availability_samples"]))
+            system_runtime_samples = int(bucket["system_runtime_samples"])
+            inference_samples = int(bucket["inference_samples"])
+            analyzed = int(bucket["analysis_frames_sampled"])
+            superseded = int(bucket["analysis_frames_dropped"])
+            analysis_total = analyzed + superseded
             result.append({
                 "sampled_at": bucket["sampled_at"],
                 "live_fps": round(float(bucket["live_fps_total"]) / live_samples, 2),
@@ -1256,14 +1309,43 @@ class EventStore:
                 "tracking_active_max": int(bucket["tracking_active_max"]),
                 "capture_read_failures": int(bucket["capture_read_failures"]),
                 "capture_open_failures": int(bucket["capture_open_failures"]),
+                "capture_interruptions": int(bucket["capture_read_failures"])
+                + int(bucket["capture_open_failures"]),
                 "main_capture_starts": int(bucket["main_capture_starts"]),
                 "analysis_frames_dropped": int(bucket["analysis_frames_dropped"]),
+                "analysis_frames_sampled": analyzed,
+                "analysis_coverage_percent": (
+                    round((analyzed / analysis_total) * 100.0, 3)
+                    if analysis_total else None
+                ),
+                "camera_availability_percent": (
+                    round(float(bucket["camera_availability_total"]) / availability_samples, 2)
+                    if bucket["camera_availability_samples"] else None
+                ),
+                "expected_cameras": int(bucket["expected_cameras"]),
+                "unavailable_cameras": int(bucket["unavailable_cameras"]),
+                "cpu_load_percent": (
+                    round(float(bucket["cpu_load_percent_total"]) / system_runtime_samples, 2)
+                    if system_runtime_samples else None
+                ),
+                "memory_used_percent": (
+                    round(float(bucket["memory_used_percent_total"]) / system_runtime_samples, 2)
+                    if system_runtime_samples else None
+                ),
+                "inference_ms": (
+                    round(float(bucket["inference_ms_total"]) / inference_samples, 2)
+                    if inference_samples else None
+                ),
                 "capture_observer_p99_ms": round(float(bucket["capture_observer_p99_ms"]), 3),
                 "capture_to_analysis_p95_ms": round(float(bucket["capture_to_analysis_p95_ms"]), 3),
                 "preprocess_p99_ms": round(float(bucket["preprocess_p99_ms"]), 3),
                 "motion_copy_bytes": int(bucket["motion_copy_bytes"]),
                 "event_evictions": int(bucket["event_evictions"]),
                 "event_rejections": int(bucket["event_rejections"]),
+                "event_retry_drops": int(bucket["event_retry_drops"]),
+                "event_delivery_failures": int(bucket["event_evictions"])
+                + int(bucket["event_rejections"])
+                + int(bucket["event_retry_drops"]),
             })
         return result
 

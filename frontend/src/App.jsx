@@ -7713,7 +7713,6 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const workerMemory = data.system?.worker_memory || {};
   const memoryMaintenance = data.system?.memory_maintenance || {};
   const hourly = activity?.hourly || [];
-  const history = data.history || [];
   const runtimeShort = data.runtime_history?.short || [];
   const runtimeLong = data.runtime_history?.long || [];
   const capacityShort = data.tracking_capacity_history?.short || [];
@@ -7737,21 +7736,53 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
     .reduce((total, source) => total + Number(source?.read_failures || 0), 0);
   const selectedOpenFailures = [selectedCapture.live, selectedCapture.main]
     .reduce((total, source) => total + Number(source?.open_failures || 0), 0);
+  const runtimeTotals = runtimeShort.reduce((total, point) => ({
+    analyzed: total.analyzed + Number(point.analysis_frames_sampled || 0),
+    superseded: total.superseded + Number(point.analysis_frames_dropped || 0),
+    interruptions: total.interruptions + Number(point.capture_interruptions || 0),
+    eventLoss: total.eventLoss + Number(point.event_delivery_failures || 0),
+    availabilitySum: total.availabilitySum + Number(point.camera_availability_percent ?? 0),
+    availabilitySamples: total.availabilitySamples + (point.camera_availability_percent == null ? 0 : 1),
+    minimumAvailability: Math.min(
+      total.minimumAvailability,
+      Number(point.camera_availability_percent ?? 100),
+    ),
+  }), {
+    analyzed: 0,
+    superseded: 0,
+    interruptions: 0,
+    eventLoss: 0,
+    availabilitySum: 0,
+    availabilitySamples: 0,
+    minimumAvailability: 100,
+  });
+  const averageAvailability = runtimeTotals.availabilitySamples
+    ? runtimeTotals.availabilitySum / runtimeTotals.availabilitySamples
+    : null;
+  const analysisTotal = runtimeTotals.analyzed + runtimeTotals.superseded;
+  const analysisCoverage = analysisTotal
+    ? (runtimeTotals.analyzed / analysisTotal) * 100
+    : null;
+  const formatCoverage = (value) => value == null
+    ? "--"
+    : `${Number(value).toFixed(Number(value) >= 99.95 ? 2 : 1)}%`;
   return (
     <div className="telemetry-viewer">
       <div className="telemetry-summary-grid">
         <article><span>Events · last hour</span><strong>{Number(lastHour.events || 0).toLocaleString()}</strong><small>{Number(lastDay.events || 0).toLocaleString()} in the shown 24-hour window</small></article>
         <article><span>Object incidents · 24h</span><strong>{Number(lastDay.object_incidents || 0).toLocaleString()}</strong><small>{Number(lastDay.objects || 0).toLocaleString()} eligible object detections</small></article>
         {selected ? <>
-          <article><span>Live stream</span><strong>{selected.connected ? "Online" : "Offline"}</strong><small>{Number(selectedCapture.live?.fps || 0).toFixed(1)} FPS · last frame {formatAge(selected.last_frame_age_seconds)}</small></article>
-          <article><span>Capture failures · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} read · {selectedOpenFailures.toLocaleString()} open</small></article>
+          <article><span>Live video</span><strong>{selected.connected ? "Available" : "Unavailable"}</strong><small>Last frame {formatAge(selected.last_frame_age_seconds)}</small></article>
+          <article><span>Stream interruptions · since restart</span><strong>{(selectedReadFailures + selectedOpenFailures).toLocaleString()}</strong><small>{selectedReadFailures.toLocaleString()} interrupted reads · {selectedOpenFailures.toLocaleString()} failed connections</small></article>
           <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.attempts} sessions · {capacityTotals.waited} waited · longest {capacityTotals.waitMax.toFixed(1)}s</small></article>
         </> : <>
-          <article><span>Object detector</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{formatRate(runtime.detection_fps)} · queue {runtime.queue_depth || 0} · {Number(runtime.failed_inferences || 0).toLocaleString()} failures since restart</small></article>
-          <article><span>GPU · SurvNG inference</span><strong>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : gpu.available ? "Sampling…" : "Unavailable"}</strong><small>{formatBytes(gpu.resident_bytes)} resident · {gpu.current_frequency_mhz || 0}/{gpu.maximum_frequency_mhz || 0} MHz</small></article>
+          <article><span>Camera availability · 2h</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
+          <article><span>Enhanced motion analysis · 2h</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
+          <article><span>Object detector response</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{Number(runtime.failed_inferences || 0) ? `${Number(runtime.failed_inferences).toLocaleString()} failures since restart` : "No failures since restart"}</small></article>
+          <article><span>Detection accelerator</span><strong>{gpu.available ? "Available" : "Unavailable"}</strong><small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "Collecting activity"}</small></article>
           <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
           <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} baseline · burst to {trackingCapacity.burst_limit || trackingCapacity.limit || 0} · {capacityTotals.waited} waited</small></article>
-          <article><span>Deferred appearance evidence</span><strong>{Number(backfillCounts.completed || 0).toLocaleString()} recovered</strong><small>{Number(backfillCounts.queued || 0).toLocaleString()} queued · {Number(backfillCounts.failed || 0).toLocaleString()} failed · {appearanceBackfill.running ? "worker online" : "worker idle"}</small></article>
+          <article><span>Delayed tracking recovery</span><strong>{Number(backfillCounts.completed || 0).toLocaleString()} recovered</strong><small>{Number(backfillCounts.queued || 0).toLocaleString()} waiting · {Number(backfillCounts.failed || 0).toLocaleString()} failed</small></article>
         </>}
       </div>
 
@@ -7772,54 +7803,46 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
       </section>
 
       <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} tracking` : "Tracking capacity"}</h3><p>{selected ? "Tracking sessions, waits, and timeouts for this camera." : "Immediate sessions, bounded waits, and capacity timeouts. EMA-rescued object incidents use the same tracking pool."}</p></div></div>
+        <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} object tracking` : "Object tracking"}</h3><p>Shows whether SurvNG had enough capacity to follow detected objects through their incidents. A skipped session means tracking could not start.</p></div></div>
         <div className="telemetry-trend-grid two-column">
-          <TelemetryTrend title="Tracking demand · 2 hours" description="One-minute view of burst contention" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Sessions", className: "rate" }, { key: "waited", label: "Waited", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
-          <TelemetryTrend title="Capacity wait · 2 hours" description="Longest wait in each minute" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)}s`} series={[{ key: "wait_seconds_max", label: "Longest", className: "warning" }, { key: "wait_seconds_average", label: "Average", className: "secondary" }]} />
-          <TelemetryTrend title={selected ? "Tracking active · 2 hours" : "Concurrent tracking · 2 hours"} description={selected ? "Whether this camera held a tracking slot" : `Peak active sessions; configured limit ${trackingCapacity.limit || 0}`} history={runtimeShort} timeZone={timeZone} maximum={selected ? 1 : Math.max(1, Number(trackingCapacity.limit || 0))} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "tracking_active_max", label: "Active", className: "secondary" }]} />
-          <TelemetryTrend title="Tracking demand · 7 days" description="15-minute long-term view" history={capacityLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Sessions", className: "rate" }, { key: "waited", label: "Waited", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
+          <TelemetryTrend title="Tracking results · 2 hours" description="Requested, delayed, or unable to start" history={capacityShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Requested", className: "rate" }, { key: "waited", label: "Delayed", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
+          <TelemetryTrend title="Tracking results · 7 days" description="Long-term 15-minute totals" history={capacityLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "attempts", label: "Requested", className: "rate" }, { key: "waited", label: "Delayed", className: "warning" }, { key: "skipped", label: "Skipped", className: "danger" }]} />
         </div>
       </section>
 
       <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>Camera stream health{selected ? ` · ${selected.name}` : ""}</h3><p>Background samples continue when this page is closed. Read failures are decoder/camera delivery failures; motion-analysis drops are internal queue pressure. Main-stream FPS is zero while its on-demand capture is idle.</p></div></div>
+        <div className="telemetry-section-head"><div><h3>Camera reliability{selected ? ` · ${selected.name}` : ""}</h3><p>Availability shows whether cameras expected to be on delivered fresh video. Stream interruptions are real camera or decoder disconnects—not normal on-demand main-stream activity.</p></div></div>
         <div className="telemetry-trend-grid two-column">
-          <TelemetryTrend title="Decoded FPS · 2 hours" description={selected ? "Selected camera" : "Average across cameras"} history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
-          <TelemetryTrend title="Capture lifecycle · 2 hours" description="Main decoder starts, read failures, and motion queue drops per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "main_capture_starts", label: "Main starts", className: "secondary" }, { key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
-          <TelemetryTrend title="Decoded FPS · 7 days" description="15-minute averages" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => `${value.toFixed(1)} FPS`} series={[{ key: "live_fps", label: "Live", className: "rate" }, { key: "main_fps", label: "Main", className: "secondary" }]} />
-          <TelemetryTrend title="Capture lifecycle · 7 days" description="Main decoder starts, read failures, and motion queue drops per 15 minutes" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "main_capture_starts", label: "Main starts", className: "secondary" }, { key: "capture_read_failures", label: "Read failures", className: "danger" }, { key: "analysis_frames_dropped", label: "Analysis drops", className: "warning" }]} />
+          <TelemetryTrend title="Video available · 2 hours" description="Percent of enabled cameras online with fresh frames" history={runtimeShort} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "camera_availability_percent", label: "Available", className: "rate" }]} />
+          <TelemetryTrend title="Stream interruptions · 2 hours" description="Connections that failed or could not open each minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_interruptions", label: "Interruptions", className: "danger" }]} />
+          <TelemetryTrend title="Video available · 7 days" description="Long-term availability in 15-minute windows" history={runtimeLong} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "camera_availability_percent", label: "Available", className: "rate" }]} />
+          <TelemetryTrend title="Stream interruptions · 7 days" description="Long-term camera and decoder disconnects" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "capture_interruptions", label: "Interruptions", className: "danger" }]} />
         </div>
       </section>
 
       <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>Camera dataflow{selected ? ` · ${selected.name}` : ""}</h3><p>Measures synchronous capture work, analysis handoff latency, preprocessing cost, and copied motion-frame volume.</p></div></div>
+        <div className="telemetry-section-head"><div><h3>Enhanced motion analysis coverage{selected ? ` · ${selected.name}` : ""}</h3><p>Percent of sampled frames analyzed while EMA watches for motion the cameras missed. Brief stale-frame replacements keep analysis current; sustained dips mean the visual backup may miss very short activity.</p></div></div>
         <div className="telemetry-trend-grid two-column">
-          <TelemetryTrend title="Frame handoff latency · 2 hours" description="Worst camera sample in each minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "capture_observer_p99_ms", label: "Capture observer p99", className: "warning" }, { key: "capture_to_analysis_p95_ms", label: "Capture to analysis p95", className: "secondary" }, { key: "preprocess_p99_ms", label: "Preprocess p99", className: "rate" }]} />
-          <TelemetryTrend title="Frame handoff latency · 7 days" description="Worst camera sample in each 15-minute bucket" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "capture_observer_p99_ms", label: "Capture observer p99", className: "warning" }, { key: "capture_to_analysis_p95_ms", label: "Capture to analysis p95", className: "secondary" }, { key: "preprocess_p99_ms", label: "Preprocess p99", className: "rate" }]} />
-          <TelemetryTrend title="Motion frame copies · 2 hours" description="Bytes copied by motion analysis per minute" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "motion_copy_bytes", label: "Copied", className: "secondary" }]} />
-          <TelemetryTrend title="Motion frame copies · 7 days" description="Bytes copied per 15-minute bucket" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "motion_copy_bytes", label: "Copied", className: "secondary" }]} />
+          <TelemetryTrend title="Frames analyzed · 2 hours" description="100% is ideal; isolated tiny dips are normally harmless" history={runtimeShort} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "analysis_coverage_percent", label: "Coverage", className: "rate" }]} />
+          <TelemetryTrend title="Frames analyzed · 7 days" description="Long-term 15-minute coverage" history={runtimeLong} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "analysis_coverage_percent", label: "Coverage", className: "rate" }]} />
         </div>
       </section>
 
       {!selected ? <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>System trends</h3><p>Live rolling history sampled while Telemetry is active.</p></div></div>
-        <div className="telemetry-trend-grid">
-          <TelemetryTrend title="Host pressure" description="Normalized 1-minute CPU load and memory use" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
-          <TelemetryTrend title="GPU utilization" description="SurvNG inference workers" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "gpu_utilization_percent", label: "GPU", className: "gpu" }]} />
-          <TelemetryTrend title="Inference latency" description="Rolling detector average" history={history} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Latency", className: "inference" }]} />
-          <TelemetryTrend title="SurvNG memory pressure" description="Application memory versus recording cache Linux can reclaim" history={history} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "service_application_bytes", label: "Application", className: "process-memory" }, { key: "service_reclaimable_file_cache_bytes", label: "Reclaimable cache", className: "storage" }]} />
-          <TelemetryTrend title="Storage use" description="Recording filesystem" history={history} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "storage_used_percent", label: "Used", className: "storage" }]} />
-          <TelemetryTrend title="Detection rate" description="Completed inference requests" history={history} timeZone={timeZone} valueFormatter={(value) => formatRate(value)} series={[{ key: "detection_fps", label: "Rate", className: "rate" }]} />
+        <div className="telemetry-section-head"><div><h3>System performance</h3><p>Persisted background samples show whether host demand or detector response degraded when an incident was missed or delayed.</p></div></div>
+        <div className="telemetry-trend-grid two-column">
+          <TelemetryTrend title="Host demand · 2 hours" description="CPU demand and host memory in use" history={runtimeShort} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
+          <TelemetryTrend title="Detector response · 2 hours" description="Lower and stable is better" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Response", className: "inference" }]} />
+          <TelemetryTrend title="Host demand · 7 days" description="Long-term 15-minute averages" history={runtimeLong} timeZone={timeZone} maximum={100} valueFormatter={(value) => `${value.toFixed(1)}%`} series={[{ key: "cpu_load_percent", label: "CPU", className: "cpu" }, { key: "memory_used_percent", label: "Memory", className: "memory" }]} />
+          <TelemetryTrend title="Detector response · 7 days" description="Long-term 15-minute average" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => formatMilliseconds(value)} series={[{ key: "inference_ms", label: "Response", className: "inference" }]} />
         </div>
       </section> : null}
 
       {!selected ? <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>Memory diagnostics</h3><p>Application and working-set memory indicate real pressure. Recording file cache is included in the service total but Linux can reclaim its inactive portion automatically. Allocator retained is reusable native heap, not live frame storage.</p></div></div>
+        <div className="telemetry-section-head"><div><h3>Memory stability</h3><p>Use these trends to spot steady growth. Recording file cache is excluded because Linux releases it automatically when memory is needed.</p></div></div>
         <div className="telemetry-trend-grid two-column">
-          <TelemetryTrend title="Processes · 24 hours" description="Main-process RSS and isolated inference-worker RSS" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "Main RSS", className: "process-memory" }, { key: "worker_rss_bytes", label: "Workers", className: "secondary" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }]} />
-          <TelemetryTrend title="Native allocator · 24 hours" description="Live allocations versus reusable retained arenas and large mappings" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "malloc_allocated_bytes", label: "Allocated", className: "process-memory" }, { key: "malloc_free_bytes", label: "Retained", className: "warning" }, { key: "malloc_mmap_bytes", label: "Mapped", className: "storage" }]} />
-          <TelemetryTrend title="Main process · 7 days" description="Fifteen-minute long-term memory trend" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "RSS", className: "process-memory" }, { key: "anonymous_rss_bytes", label: "Anonymous", className: "memory" }, { key: "malloc_allocated_bytes", label: "Allocated", className: "secondary" }]} />
-          <TelemetryTrend title="Process resources · 7 days" description="Thread and file-descriptor growth can expose lifecycle leaks" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "threads", label: "Threads", className: "rate" }, { key: "file_descriptors", label: "Files", className: "warning" }]} />
+          <TelemetryTrend title="Application processes · 24 hours" description="SurvNG plus isolated AI workers" history={memoryShort} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "SurvNG", className: "process-memory" }, { key: "worker_rss_bytes", label: "AI workers", className: "secondary" }]} />
+          <TelemetryTrend title="Application processes · 7 days" description="Long-term memory growth or stability" history={memoryLong} timeZone={timeZone} valueFormatter={(value) => formatBytes(value)} series={[{ key: "rss_bytes", label: "SurvNG", className: "process-memory" }, { key: "worker_rss_bytes", label: "AI workers", className: "secondary" }]} />
         </div>
       </section> : null}
 
@@ -7828,28 +7851,27 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <div className="telemetry-section-head"><div><h3>System</h3><p>Current host health, with committed application memory separated from reclaimable recording cache.</p></div></div>
           <dl className="telemetry-details">
             <div><dt>SurvNG uptime</dt><dd>{formatDuration(data.system?.uptime_seconds || 0)}</dd></div>
-            <div><dt>CPU load (1 / 5 / 15 min)</dt><dd>{data.system?.load_average?.one ?? "--"} / {data.system?.load_average?.five ?? "--"} / {data.system?.load_average?.fifteen ?? "--"} <small>({data.system?.cpu_count || 1} cores)</small></dd></div>
-            <div><dt>System memory</dt><dd>{memory.used_percent || 0}% · {formatBytes(memory.used_bytes)} used</dd></div>
-            <div><dt>Application memory</dt><dd>{formatBytes(serviceMemory.application_bytes)} <small>all workers and shared inference buffers</small></dd></div>
-            <div><dt>SurvNG working set</dt><dd>{formatBytes(serviceMemory.working_set_bytes)} <small>service total excluding reclaimable cache</small></dd></div>
+            <div><dt>CPU demand</dt><dd>{data.system?.load_average?.one ?? "--"} across {data.system?.cpu_count || 1} cores</dd></div>
+            <div><dt>Host memory available</dt><dd>{formatBytes(memory.available_bytes)} <small>{memory.used_percent || 0}% currently used</small></dd></div>
+            <div><dt>SurvNG application memory</dt><dd>{formatBytes(serviceMemory.application_bytes)} <small>app and AI workers</small></dd></div>
             <div><dt>Reclaimable recording cache</dt><dd>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)} <small>released automatically under memory pressure</small></dd></div>
-            <div><dt>Active filesystem cache</dt><dd>{formatBytes(Math.max(0, Number(serviceMemory.file_cache_bytes || 0) - Number(serviceMemory.reclaimable_file_cache_bytes || 0)))} <small>recent recording I/O</small></dd></div>
-            <div><dt>Main process RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)}</dd></div>
-            <div><dt>Main anonymous memory</dt><dd>{formatBytes(data.system?.process_memory?.anonymous_rss_bytes)} <small>{formatBytes(data.system?.process_memory?.malloc?.allocated_bytes)} live glibc allocations</small></dd></div>
-            <div><dt>Allocator retained</dt><dd>{formatBytes(data.system?.process_memory?.malloc?.free_bytes)} <small>reusable arena space</small></dd></div>
-            <div><dt>Inference worker memory</dt><dd>{formatBytes(workerMemory.total_rss_bytes)} <small>{Object.keys(workerMemory.workers || {}).length} isolated workers</small></dd></div>
-            <div><dt>Allocator trims</dt><dd>{Number(memoryMaintenance.successful_trims || 0).toLocaleString()} <small>{formatBytes(memoryMaintenance.reclaimed_total_bytes)} reclaimed since restart</small></dd></div>
-            <div><dt>Last allocator trim</dt><dd>{memoryMaintenance.last_trim_at ? formatDateTime(memoryMaintenance.last_trim_at, timeZone) : "Not yet needed"} <small>{memoryMaintenance.last_skip_reason ? String(memoryMaintenance.last_skip_reason).replaceAll("_", " ") : `${formatBytes(memoryMaintenance.last_reclaimed_bytes)} reclaimed`}</small></dd></div>
-            <div><dt>Cgroup total including cache</dt><dd>{formatBytes(serviceMemory.total_bytes)} <small>not all committed memory</small></dd></div>
-            <div><dt>Threads / file descriptors</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
+            <div><dt>Object detector</dt><dd>{runtime.failed_inferences ? `${runtime.failed_inferences} failures` : "Ready"} <small>{formatMilliseconds(runtime.average_inference_ms)} average response</small></dd></div>
+            <div><dt>GPU</dt><dd>{gpu.available ? "Available" : "Unavailable"} <small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "sampling"}</small></dd></div>
             <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
-            <div><dt>Detector</dt><dd>{data.detector?.loaded_backend || "Not loaded"} · {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
-            <div><dt>GPU</dt><dd>{gpu.available ? `${gpu.vendor} ${gpu.device_id} · ${gpu.driver || "DRM"}` : "Unavailable"}</dd></div>
-            <div><dt>GPU use</dt><dd>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}%` : "Collecting second sample"}{gpu.temperature_celsius != null ? ` · ${gpu.temperature_celsius}°C` : ""}</dd></div>
-            <div><dt>GPU memory</dt><dd>{formatBytes(gpu.resident_bytes)} resident · {formatBytes(gpu.allocated_bytes)} allocated</dd></div>
-            <div><dt>GPU engines</dt><dd>{Object.keys(gpu.engine_utilization || {}).length ? Object.entries(gpu.engine_utilization).map(([name, value]) => `${name} ${value}%`).join(" · ") : "Collecting second sample"}</dd></div>
-            <div><dt>Inference since restart</dt><dd>{Number(runtime.total_inferences || 0).toLocaleString()} total · {Number(runtime.object_hit_inferences || 0).toLocaleString()} with objects</dd></div>
           </dl>
+          <details className="telemetry-technical">
+            <summary>Technical diagnostics</summary>
+            <dl className="telemetry-details">
+              <div><dt>CPU load · 1 / 5 / 15 min</dt><dd>{data.system?.load_average?.one ?? "--"} / {data.system?.load_average?.five ?? "--"} / {data.system?.load_average?.fifteen ?? "--"}</dd></div>
+              <div><dt>Working set / service total</dt><dd>{formatBytes(serviceMemory.working_set_bytes)} / {formatBytes(serviceMemory.total_bytes)}</dd></div>
+              <div><dt>Main / inference-worker RSS</dt><dd>{formatBytes(data.system?.process_rss_bytes)} / {formatBytes(workerMemory.total_rss_bytes)}</dd></div>
+              <div><dt>Allocator live / retained</dt><dd>{formatBytes(data.system?.process_memory?.malloc?.allocated_bytes)} / {formatBytes(data.system?.process_memory?.malloc?.free_bytes)}</dd></div>
+              <div><dt>Allocator trims</dt><dd>{Number(memoryMaintenance.successful_trims || 0).toLocaleString()} <small>{formatBytes(memoryMaintenance.reclaimed_total_bytes)} reclaimed</small></dd></div>
+              <div><dt>Threads / open files</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
+              <div><dt>Detector backend / device</dt><dd>{data.detector?.loaded_backend || "Not loaded"} / {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
+              <div><dt>Inference requests / object hits</dt><dd>{Number(runtime.total_inferences || 0).toLocaleString()} / {Number(runtime.object_hit_inferences || 0).toLocaleString()}</dd></div>
+            </dl>
+          </details>
         </section> : null}
         <section className="telemetry-section">
           <div className="telemetry-section-head"><div><h3>{selected ? `${selected.name} activity` : "Object activity"}</h3><p>Counts from persisted event history.</p></div></div>
@@ -7873,51 +7895,68 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
       </div>
 
       <section className="telemetry-section">
-        <div className="telemetry-section-head"><div><h3>{selected ? selected.name : "Per-camera telemetry"}</h3><p>Health and runtime counters. ONVIF and motion counters reset when SurvNG restarts.</p></div></div>
+        <div className="telemetry-section-head"><div><h3>{selected ? selected.name : "Camera status"}</h3><p>What each camera is delivering and whether its detection path is keeping up. Counters reset when SurvNG restarts.</p></div></div>
         <div className="telemetry-camera-grid">
-          {shownCameras.map((camera) => (
-            <article className="telemetry-camera-card" key={camera.id}>
-              <header><div><strong>{camera.name}</strong><small>{camera.id}</small></div><span className={camera.connected ? "healthy" : "offline"}>{camera.connected ? "Online" : "Offline"}</span></header>
+          {shownCameras.map((camera) => {
+            const analysisRuntime = camera.motion?.analysis_runtime || {};
+            const analyzed = Number(analysisRuntime.frames_sampled || 0);
+            const superseded = Number(analysisRuntime.mailbox_replacements || camera.motion?.analysis_frames_dropped || 0);
+            const analysisCoverage = analyzed + superseded ? (analyzed / (analyzed + superseded)) * 100 : null;
+            const interruptions = [camera.capture?.live, camera.capture?.main].reduce(
+              (total, source) => total + Number(source?.read_failures || 0) + Number(source?.open_failures || 0),
+              0,
+            );
+            const eventLoss = Number(camera.motion?.event_runtime?.evicted || 0)
+              + Number(camera.motion?.event_runtime?.rejected || 0)
+              + Number(camera.motion?.event_runtime?.retries_dropped || 0);
+            const onvifIssues = Number(camera.onvif?.poll_errors || 0) + Number(camera.onvif?.poll_timeouts || 0) + Number(camera.onvif?.renewal_errors || 0);
+            const expected = camera.expected_enabled ?? (camera.lifecycle?.enabled !== false);
+            const fresh = camera.connected && (camera.frame_fresh ?? Number(camera.last_frame_age_seconds || 0) <= 5);
+            const cameraEventStatus = !camera.onvif?.enabled
+              ? "Disabled"
+              : !camera.onvif?.connected
+                ? "Unavailable"
+                : onvifIssues
+                  ? `Connected · ${onvifIssues.toLocaleString()} recovered issues`
+                  : "Healthy";
+            const statusClass = !expected ? "disabled" : fresh ? "healthy" : camera.connected ? "attention" : "offline";
+            const statusLabel = !expected ? "Paused" : fresh ? "Healthy" : camera.connected ? "Stale video" : "Offline";
+            return <article className="telemetry-camera-card" key={camera.id}>
+              <header><div><strong>{camera.name}</strong><small>{camera.id}</small></div><span className={statusClass}>{statusLabel}</span></header>
               <dl>
                 <div><dt>Last frame</dt><dd>{formatAge(camera.last_frame_age_seconds)}</dd></div>
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
-                <div><dt>Lifecycle / workers</dt><dd>{camera.lifecycle?.phase || "unknown"} · {camera.lifecycle?.active_worker_count || 0} active{camera.lifecycle?.active_workers?.length ? ` · ${camera.lifecycle.active_workers.join(", ")}` : ""}</dd></div>
-                <div><dt>Recorder clock recovery</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
-                <div><dt>Decoded FPS · live / main</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)} / {Number(camera.capture?.main?.fps || 0).toFixed(1)}</dd></div>
-                <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
-                <div><dt>Capture read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
-                <div><dt>Live capture observer · avg / p99</dt><dd>{formatMilliseconds(camera.capture?.live?.observer_average_ms)} / {formatMilliseconds(camera.capture?.live?.observer_p99_ms)}</dd></div>
-                <div><dt>Frame ownership / writable copies</dt><dd>{Number(camera.capture?.live?.frame_transfer_count || 0).toLocaleString()} transferred · {Number(camera.capture?.live?.frame_copy_count || 0).toLocaleString()} copied</dd></div>
+                <div><dt>Stream reliability</dt><dd>{!expected ? "Paused" : !fresh ? `Unavailable${interruptions ? ` · ${interruptions.toLocaleString()} issues` : ""}` : interruptions ? `Healthy now · ${interruptions.toLocaleString()} recovered issue${interruptions === 1 ? "" : "s"}` : "Healthy · no interruptions"}</dd></div>
+                <div><dt>Recording timeline</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
-                <div><dt>Object incidents · 24h</dt><dd>{camera.activity?.last_24h?.object_incidents || 0}</dd></div>
-                <div><dt>ONVIF notices / motion</dt><dd>{camera.onvif.notifications} / {camera.onvif.motion_events}</dd></div>
-                <div><dt>ONVIF errors / renewals</dt><dd>{camera.onvif.poll_errors + camera.onvif.poll_timeouts + camera.onvif.renewal_errors} / {camera.onvif.renewals}</dd></div>
-                <div><dt>Motion passed / rejected</dt><dd>{camera.motion.passed} / {camera.motion.rejected}</dd></div>
-                <div><dt>Motion suppressed / dropped</dt><dd>{camera.motion.suppressed} / {camera.motion.dropped}</dd></div>
-                <div><dt>Motion analysis frames dropped</dt><dd>{camera.motion.analysis_frames_dropped || 0}</dd></div>
-                <div><dt>Motion preprocessing · avg / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.preprocess_average_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.preprocess_p99_ms)}</dd></div>
-                <div><dt>Motion qualification · avg / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.qualification_average_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.qualification_p99_ms)}</dd></div>
-                <div><dt>Capture to analysis · p95 / p99</dt><dd>{formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p95_ms)} / {formatMilliseconds(camera.motion.analysis_runtime?.capture_to_analysis_p99_ms)}</dd></div>
-                <div><dt>Raw handoffs / replaced / deferred requests</dt><dd>{Number(camera.motion.analysis_runtime?.raw_frames_submitted || 0).toLocaleString()} / {Number(camera.motion.analysis_runtime?.mailbox_replacements || 0).toLocaleString()} / {Number(camera.motion.analysis_runtime?.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
-                <div><dt>Camera-clock recovery resets</dt><dd>{Number(camera.motion.analysis_runtime?.clock_discontinuity_resets || 0).toLocaleString()}</dd></div>
-                <div><dt>Motion frame copies</dt><dd>{Number(camera.motion.analysis_runtime?.copy_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.copy_bytes || 0)}</dd></div>
-                <div><dt>Motion shared frame reuse</dt><dd>{Number(camera.motion.analysis_runtime?.shared_read_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.shared_read_bytes || 0)}</dd></div>
-                <div><dt>Cached motion derivatives reused</dt><dd>{Number(camera.motion.analysis_runtime?.cached_derivative_reuse_count || 0).toLocaleString()} · {formatBytes(camera.motion.analysis_runtime?.cached_derivative_reuse_bytes || 0)}</dd></div>
-                <div><dt>Event queue · sampled peak / evicted / rejected</dt><dd>{camera.motion.event_runtime?.queue_high_water || 0} / {camera.motion.event_runtime?.evicted || 0} / {camera.motion.event_runtime?.rejected || 0}</dd></div>
-                <div><dt>ReID checks / recoveries</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0}</dd></div>
-                <div><dt>Tracking waits / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {camera.tracking?.capacity_timeouts || 0}</dd></div>
-                <div><dt>Tracking prewarm / handoff failures</dt><dd>{camera.tracking?.prewarm_failures || 0} / {camera.tracking?.handoff_failures || 0}{camera.tracking?.last_handoff_failure?.timestamp ? ` · last handoff ${formatDateTime(camera.tracking.last_handoff_failure.timestamp, timeZone)}` : ""}</dd></div>
-                <div><dt>Longest tracking wait</dt><dd>{Number(camera.tracking?.capacity_wait_seconds_max || 0).toFixed(1)}s</dd></div>
-                <div><dt>ReID checks avoided</dt><dd>{camera.tracking?.reid_avoided_geometry_matches || 0}</dd></div>
-                <div><dt>ReID latency / failures</dt><dd>{formatMilliseconds(camera.tracking?.reid_average_ms)} / {camera.tracking?.reid_failures || 0}</dd></div>
-                <div><dt>ReID checks by object</dt><dd>{Object.keys(camera.tracking?.reid_attempts_by_label || {}).length ? Object.entries(camera.tracking.reid_attempts_by_label).map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
-                <div><dt>ReID checks by reason</dt><dd>{Object.keys(camera.tracking?.reid_attempts_by_reason || {}).length ? Object.entries(camera.tracking.reid_attempts_by_reason).map(([reason, count]) => `${String(reason).replaceAll("_", " ")} ${count}`).join(" · ") : "None"}</dd></div>
+                <div><dt>Object incidents · 1h / 24h</dt><dd>{camera.activity?.last_hour?.object_incidents || 0} / {camera.activity?.last_24h?.object_incidents || 0}</dd></div>
+                <div><dt>Motion triggers · camera / EMA</dt><dd>{camera.onvif?.motion_events || 0} / {camera.motion?.visual_backup_triggers || 0}</dd></div>
+                <div><dt>Enhanced motion coverage</dt><dd>{analysisCoverage == null ? "Not active" : formatCoverage(analysisCoverage)}{superseded ? <small> · {superseded.toLocaleString()} stale skipped</small> : null}</dd></div>
+                <div><dt>Event delivery</dt><dd>{eventLoss ? `${eventLoss.toLocaleString()} lost` : "No loss"}</dd></div>
+                <div><dt>Tracking capacity</dt><dd>{camera.tracking?.capacity_timeouts ? `${camera.tracking.capacity_timeouts} skipped` : "No skips"}{camera.tracking?.capacity_waits ? <small> · {camera.tracking.capacity_waits} delayed</small> : null}</dd></div>
+                <div><dt>Camera event connection</dt><dd>{cameraEventStatus}</dd></div>
               </dl>
+              <details className="telemetry-technical">
+                <summary>Technical diagnostics</summary>
+                <dl>
+                  <div><dt>Lifecycle / workers</dt><dd>{camera.lifecycle?.phase || "unknown"} · {camera.lifecycle?.active_worker_count || 0} active</dd></div>
+                  <div><dt>Live decoded FPS</dt><dd>{Number(camera.capture?.live?.fps || 0).toFixed(1)}</dd></div>
+                  <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
+                  <div><dt>Read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
+                  <div><dt>Capture-to-analysis p95 / p99</dt><dd>{formatMilliseconds(analysisRuntime.capture_to_analysis_p95_ms)} / {formatMilliseconds(analysisRuntime.capture_to_analysis_p99_ms)}</dd></div>
+                  <div><dt>Analyzed / stale skipped / deferred</dt><dd>{analyzed.toLocaleString()} / {superseded.toLocaleString()} / {Number(analysisRuntime.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
+                  <div><dt>Motion passed / rejected / suppressed</dt><dd>{camera.motion?.passed || 0} / {camera.motion?.rejected || 0} / {camera.motion?.suppressed || 0}</dd></div>
+                  <div><dt>Event queue peak / evicted / rejected / retry lost</dt><dd>{camera.motion?.event_runtime?.queue_high_water || 0} / {camera.motion?.event_runtime?.evicted || 0} / {camera.motion?.event_runtime?.rejected || 0} / {camera.motion?.event_runtime?.retries_dropped || 0}</dd></div>
+                  <div><dt>ONVIF notices / renewals / issues</dt><dd>{camera.onvif?.notifications || 0} / {camera.onvif?.renewals || 0} / {onvifIssues}</dd></div>
+                  <div><dt>Tracking waits / longest / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {Number(camera.tracking?.capacity_wait_seconds_max || 0).toFixed(1)}s / {camera.tracking?.capacity_timeouts || 0}</dd></div>
+                  <div><dt>ReID checks / recoveries / failures</dt><dd>{camera.tracking?.reid_attempts || 0} / {camera.tracking?.reid_recoveries || 0} / {camera.tracking?.reid_failures || 0}</dd></div>
+                </dl>
+              </details>
             </article>
-          ))}
+          })}
         </div>
       </section>
-      <p className="telemetry-footnote">“Events” are stored camera events. “Object incidents” contain at least one incident-eligible detection; “objects” counts those detections individually. Camera-health samples are retained for eight days; tracking-capacity history comes from incident records and survives restarts.</p>
+      <p className="telemetry-footnote">Availability, interruptions, EMA coverage, event delivery, and tracking capacity are the primary health signals. “Stale skipped” means a newer frame replaced an older pending sample so analysis stayed current; it matters only when coverage drops persistently. Camera-health samples are retained for eight days.</p>
     </div>
   );
 }

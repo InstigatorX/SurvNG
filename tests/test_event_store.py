@@ -129,12 +129,14 @@ class EventStoreTest(unittest.TestCase):
                 analysis_drops: int,
                 fps: float,
                 main_starts: int,
+                frames_sampled: int,
             ) -> list[dict]:
                 return [{
                     "id": "gate",
                     "connected": True,
                     "last_frame_age_seconds": 0.1,
                     "main_last_frame_age_seconds": 0.2,
+                    "lifecycle": {"enabled": True},
                     "capture_stats": {
                         "live": {"fps": fps, "read_failures": read_failures, "open_failures": 0, "observer_p99_ms": float(read_failures)},
                         "main": {"fps": fps / 2, "read_failures": 0, "open_failures": 0, "starts": main_starts},
@@ -144,20 +146,35 @@ class EventStoreTest(unittest.TestCase):
                         "analysis_runtime": {
                             "capture_to_analysis_p95_ms": float(analysis_drops),
                             "preprocess_p99_ms": float(analysis_drops) / 2,
+                            "frames_sampled": frames_sampled,
                             "copy_bytes": analysis_drops * 100,
                         },
                         "event_runtime": {
                             "evicted": analysis_drops,
                             "rejected": analysis_drops // 2,
+                            "retries_dropped": analysis_drops // 3,
                         },
                     },
                     "object_tracking": {"active": False},
                 }]
 
-            store.record_runtime_telemetry(status(2, 3, 10.0, 4), sampled_at=first_at)
             store.record_runtime_telemetry(
-                status(4, 8, 12.0, 7),
+                status(2, 3, 10.0, 4, 100),
+                sampled_at=first_at,
+                system_runtime={
+                    "cpu_load_percent": 20.0,
+                    "memory_used_percent": 60.0,
+                    "inference_ms": 24.0,
+                },
+            )
+            store.record_runtime_telemetry(
+                status(4, 8, 12.0, 7, 200),
                 sampled_at=first_at + timedelta(minutes=1),
+                system_runtime={
+                    "cpu_load_percent": 40.0,
+                    "memory_used_percent": 70.0,
+                    "inference_ms": 28.0,
+                },
             )
             history = store.runtime_telemetry_history(
                 hours=2,
@@ -170,14 +187,72 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(history[-1]["live_fps"], 12.0)
             self.assertEqual(history[-1]["main_fps"], 6.0)
             self.assertEqual(history[-1]["capture_read_failures"], 2)
+            self.assertEqual(history[-1]["capture_interruptions"], 2)
             self.assertEqual(history[-1]["main_capture_starts"], 3)
             self.assertEqual(history[-1]["analysis_frames_dropped"], 5)
+            self.assertEqual(history[-1]["analysis_frames_sampled"], 100)
+            self.assertEqual(history[-1]["analysis_coverage_percent"], 95.238)
+            self.assertEqual(history[-1]["camera_availability_percent"], 100.0)
+            self.assertEqual(history[-1]["unavailable_cameras"], 0)
             self.assertEqual(history[-1]["capture_observer_p99_ms"], 4.0)
             self.assertEqual(history[-1]["capture_to_analysis_p95_ms"], 8.0)
             self.assertEqual(history[-1]["preprocess_p99_ms"], 4.0)
             self.assertEqual(history[-1]["motion_copy_bytes"], 500)
             self.assertEqual(history[-1]["event_evictions"], 5)
             self.assertEqual(history[-1]["event_rejections"], 3)
+            self.assertEqual(history[-1]["event_retry_drops"], 1)
+            self.assertEqual(history[-1]["event_delivery_failures"], 9)
+            self.assertEqual(history[-1]["cpu_load_percent"], 40.0)
+            self.assertEqual(history[-1]["memory_used_percent"], 70.0)
+            self.assertEqual(history[-1]["inference_ms"], 28.0)
+
+    def test_runtime_telemetry_availability_excludes_intentionally_disabled_cameras(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            sampled_at = datetime.fromisoformat("2026-08-02T12:00:00+00:00")
+            store.record_runtime_telemetry(
+                [
+                    {
+                        "id": "gate",
+                        "connected": True,
+                        "last_frame_age_seconds": 0.2,
+                        "lifecycle": {"enabled": True},
+                    },
+                    {
+                        "id": "garage",
+                        "connected": False,
+                        "last_frame_age_seconds": 30.0,
+                        "expected_enabled": True,
+                        "lifecycle": {"enabled": False},
+                    },
+                    {
+                        "id": "foyer",
+                        "connected": False,
+                        "last_frame_age_seconds": None,
+                        "expected_enabled": False,
+                        "lifecycle": {"enabled": True},
+                    },
+                ],
+                sampled_at=sampled_at,
+            )
+
+            history = store.runtime_telemetry_history(
+                hours=1,
+                bucket_minutes=1,
+                now=sampled_at + timedelta(minutes=1),
+            )
+
+            self.assertEqual(history[0]["camera_availability_percent"], 50.0)
+            self.assertEqual(history[0]["expected_cameras"], 2)
+            self.assertEqual(history[0]["unavailable_cameras"], 1)
+            paused_history = store.runtime_telemetry_history(
+                hours=1,
+                bucket_minutes=1,
+                camera_id="foyer",
+                now=sampled_at + timedelta(minutes=1),
+            )
+            self.assertIsNone(paused_history[0]["camera_availability_percent"])
+            self.assertIsNone(paused_history[0]["analysis_coverage_percent"])
 
     def test_runtime_telemetry_persists_process_memory_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

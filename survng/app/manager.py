@@ -1209,13 +1209,23 @@ class AppManager:
                             process_memory,
                             now=now,
                         )
+                        _memory_total, _memory_used, memory_used_percent = self._memory_usage()
+                        load_1m = os.getloadavg()[0]
                         self.events.record_runtime_telemetry(
                             statuses,
-                            process_memory=process_memory_status(),
+                            process_memory=process_memory,
                             worker_memory=self.worker_memory_status(
                                 detector_status=detector_status,
                             ),
                             memory_maintenance=self.allocator_memory_status(),
+                            system_runtime={
+                                "cpu_load_percent": round(
+                                    min(100.0, (load_1m / max(1, os.cpu_count() or 1)) * 100.0),
+                                    2,
+                                ),
+                                "memory_used_percent": memory_used_percent,
+                                "inference_ms": detector_runtime.get("average_inference_ms"),
+                            },
                         )
                         telemetry_sample_at = now
                 except Exception:
@@ -1321,6 +1331,7 @@ class AppManager:
             {
                 **worker.status(),
                 "startup": dict(startup_cameras.get(camera_id) or {}),
+                "expected_enabled": bool(self._camera_enabled.get(camera_id, True)),
                 "recording": recordings.get((camera_id, "main"), False),
                 "sub_recording": recordings.get((camera_id, "live"), False),
                 "recording_enabled": self.recording_enabled(camera_id),
