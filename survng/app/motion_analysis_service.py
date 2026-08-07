@@ -15,6 +15,7 @@ import numpy as np
 
 from .motion import MotionQualificationResult, preprocess_motion_frame
 from .config import MotionQualificationConfig
+from .domain_events import MotionObserved
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_coordinator import (
     VisualBackupAction,
@@ -1131,11 +1132,11 @@ class MotionAnalysisService:
         self.state.set_last_motion_at(timestamp)
         self.state.publish_event(
             "motion",
-            {
-                "camera_id": self.camera_id,
-                "timestamp": timestamp,
-                "source": source,
-            },
+            MotionObserved(
+                camera_id=self.camera_id,
+                timestamp=timestamp,
+                source=source,
+            ).to_payload(),
         )
 
     def _stopping(self) -> bool:

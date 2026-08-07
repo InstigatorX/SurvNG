@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .motion_decisions import priority_motion_topic
 from .motion_events import MotionEventCoordinator, MotionTrigger
+from .domain_events import MotionObserved
 
 
 class MotionIngressQualification(Protocol):
@@ -74,11 +75,14 @@ class MotionEventIngressService:
         if not manual:
             self.events.remember_camera_motion(received_at)
 
-        self.state.publish_event("motion", {
-            "camera_id": self.camera_id,
-            "timestamp": normalized_event_at.isoformat(),
-            "source": "manual" if manual else "onvif",
-        })
+        self.state.publish_event(
+            "motion",
+            MotionObserved(
+                camera_id=self.camera_id,
+                timestamp=normalized_event_at.isoformat(),
+                source="manual" if manual else "onvif",
+            ).to_payload(),
+        )
         self.enqueue(MotionTrigger(
             topic=topic,
             message=message,

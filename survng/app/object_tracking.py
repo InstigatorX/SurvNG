@@ -14,6 +14,7 @@ import numpy as np
 from .config import CameraConfig, ObjectTrackingConfig
 from .detector import detection_failure
 from .security import redact_secret_text
+from .domain_events import TrackingCompleted
 from .zones import apply_detection_zones
 
 
@@ -1756,11 +1757,15 @@ class ObjectTrackingSession:
         if self.publisher is None:
             return
         try:
-            self.publisher("object_tracking", {
-                "event_id": event_id,
-                "camera_id": self.camera.id,
-                **payload,
-            })
+            self.publisher(
+                "object_tracking",
+                TrackingCompleted(
+                    event_id=event_id,
+                    camera_id=self.camera.id,
+                    state=str(payload.get("state") or "complete"),
+                    details=payload,
+                ).to_payload(),
+            )
         except Exception:
             LOGGER.exception(
                 "object tracking notification failed for %s event %d",

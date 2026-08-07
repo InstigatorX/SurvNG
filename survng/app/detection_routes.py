@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from .config import AppConfig, camera_by_id
 from .detector import detection_failure, objects_to_json
+from .domain_events import ObjectDetected
 from .incident_presenter import _event_row
 from .incident_utils import event_epoch, event_snapshot_path
 from .manager import AppManager
@@ -178,18 +179,18 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         if detected:
             active_manager.publish_event(
                 "object",
-                {
-                    "event_id": event_id,
-                    "camera_id": str(event.get("camera_id") or ""),
-                    "timestamp": str(
+                ObjectDetected(
+                    event_id=event_id,
+                    camera_id=str(event.get("camera_id") or ""),
+                    timestamp=str(
                         event.get("created_at")
                         or datetime.now(timezone.utc).isoformat()
                     ),
-                    "snapshot_path": str(snapshot_path),
-                    "recording_path": str(event.get("recording_path") or ""),
-                    "source": "manual_openvino",
-                    "objects": detected,
-                },
+                    snapshot_path=str(snapshot_path),
+                    recording_path=str(event.get("recording_path") or ""),
+                    source="manual_openvino",
+                    objects=tuple(detected),
+                ).to_payload(),
             )
         detector_status = active_manager.detector_status()
         return {

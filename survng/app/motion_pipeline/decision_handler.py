@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
+from ..domain_events import IncidentCreated, ObjectDetected
 from .context import Frame
 
 
@@ -334,27 +335,26 @@ class MotionDecisionHandler:
         if self.event_callback:
             self._publish(
                 "incident",
-                {
-                    "event_id": event_id,
-                    "camera_id": self.camera_id,
-                    "timestamp": event_at.isoformat(),
-                    "kind": "motion",
-                },
+                IncidentCreated(
+                    event_id=event_id,
+                    camera_id=self.camera_id,
+                    timestamp=event_at.isoformat(),
+                ).to_payload(),
             )
 
         detected_objects = [detected for detected in stored_objects if detected.get("label")]
         if self.event_callback and detected_objects:
             self._publish(
                 "object",
-                {
-                    "event_id": event_id,
-                    "camera_id": self.camera_id,
-                    "timestamp": event_at.isoformat(),
-                    "snapshot_path": snapshot_path,
-                    "recording_path": recording_path,
-                    "objects": detected_objects,
-                    "incident_objects": eligible_objects,
-                },
+                ObjectDetected(
+                    event_id=event_id,
+                    camera_id=self.camera_id,
+                    timestamp=event_at.isoformat(),
+                    snapshot_path=snapshot_path,
+                    recording_path=recording_path,
+                    objects=tuple(detected_objects),
+                    incident_objects=tuple(eligible_objects),
+                ).to_payload(),
             )
         return MotionDecisionOutcome(
             event_id=event_id,
