@@ -47,6 +47,14 @@ admission instead of blocking the save on unavailable feeds. MQTT replacement
 also updates the fleet's typed state-publisher dependency, so an admission task
 never publishes through a retired MQTT generation.
 
+Inference-only changes do not rebuild the camera fleet. A dedicated
+`InferenceLifecycle` transaction owns detector-role replacement, face queue
+coordination, tracking-session cutover, ReID/backfill dependencies, and semantic
+search generations. It prepares replacements before cutover, restores prior
+tracking and detector state on failure, and exposes any old generation whose
+cleanup must be retried. This keeps configuration persistence aligned with the
+generation actually serving requests.
+
 The configuration file is written atomically before a targeted runtime update.
 If runtime application fails, SurvNG restores both the previous runtime settings
 and the previous persisted configuration. Full manager reloads retain their

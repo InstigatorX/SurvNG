@@ -61,6 +61,15 @@ runs only for inactive cameras and is not represented as an I/O timeout.
 `AppManager` sequences this boundary with inference, recorder, MQTT, and
 auxiliary-service lifecycles without detached per-camera shutdown threads.
 
+`InferenceLifecycle` owns the process inference generation as one transaction:
+the object detector supervisor, face queue, person/vehicle ReID adapters,
+per-camera tracking-session factory and limiter, deferred appearance backfill,
+and semantic search. Camera workers are bound once after construction. Runtime
+model or tracking changes are prepared before cutover, roll back every swapped
+session on failure, and retire old search/backfill generations only after the
+replacement is committed. Failed retirement is retained for shutdown retry so
+configuration state never points back at a partially closed generation.
+
 `MotionDecisionHandler` owns downstream event persistence and notifications.
 It receives object evidence from an injected `RecordedMotionObjectDetector`,
 which owns recorded-frame selection, decode, zone-aware inference, and live

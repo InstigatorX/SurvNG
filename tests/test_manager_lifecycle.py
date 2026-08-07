@@ -34,6 +34,16 @@ def manager_with_mocks() -> AppManager:
     manager._detection_enabled = {}
     manager.detector = Mock()
     manager.faces = Mock()
+    manager.inference = Mock()
+    manager.inference.detector = manager.detector
+    manager.inference.faces = manager.faces
+    manager.inference.face_recognizer = Mock()
+    manager.inference.person_reidentifier = Mock()
+    manager.inference.semantic_search = Mock()
+    manager.inference.appearance_backfill = Mock()
+    manager.inference.tracking_limiter = Mock()
+    manager.inference.tracking_factory = Mock()
+    manager.inference.status.return_value = {}
     manager.recorder = Mock()
     manager.mqtt = Mock()
     manager.state_events = Mock()
@@ -57,6 +67,21 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_tracking_burst_guard_fails_closed_during_manager_construction(self) -> None:
+        manager = object.__new__(AppManager)
+
+        self.assertFalse(manager._tracking_burst_available())
+
+    def test_detector_status_includes_inference_lifecycle_health(self) -> None:
+        manager = manager_with_mocks()
+        manager.detector.status.return_value = {"enabled": True}
+        manager.inference.status.return_value = {"retired_cleanup_pending": 1}
+
+        status = manager.detector_status()
+
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["lifecycle"]["retired_cleanup_pending"], 1)
+
     def test_mqtt_server_health_accepts_loaded_isolated_detector(self) -> None:
         manager = manager_with_mocks()
         manager.config = AppConfig(
@@ -165,31 +190,13 @@ class ManagerLifecycleTest(unittest.TestCase):
 
     def test_tracking_reconfiguration_keeps_camera_capture_and_recorders_running(self) -> None:
         manager = manager_with_mocks()
-        manager.events = Mock()
-        manager.publish_event = Mock()
-        manager.person_reidentifier = Mock()
-        manager.face_recognizer = Mock()
-        manager.appearance_index = Mock()
-        manager.object_tracking_session_factory = Mock()
-        manager._object_tracking_limiter = threading.BoundedSemaphore(2)
-        manager.detector.config = manager.config.detector
-        replacement = Mock()
-        previous = Mock()
         worker = manager.workers["gate"]
-        worker.create_object_tracking_session.return_value = replacement
-        worker.replace_object_tracking_session.return_value = previous
         next_detector = manager.config.detector.model_copy(deep=True)
         next_detector.tracking.sample_fps = 3.0
 
-        with patch("survng.app.manager.ObjectTrackingSessionFactory") as factory_type:
-            factory_type.return_value = Mock()
-            manager.reconfigure_object_tracking(next_detector)
+        manager.reconfigure_object_tracking(next_detector)
 
-        worker.create_object_tracking_session.assert_called_once_with(
-            factory_type.return_value
-        )
-        worker.replace_object_tracking_session.assert_called_once_with(replacement)
-        manager.detector.update_runtime_config.assert_called_once_with(next_detector)
+        manager.inference.reconfigure_tracking.assert_called_once_with(next_detector)
         worker.stop.assert_not_called()
         worker.start.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
@@ -205,9 +212,10 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.reconfigure_inference(next_detector, {"object"})
 
-        manager.detector.reconfigure_roles.assert_called_once_with(
+        manager.inference.reconfigure_roles.assert_called_once_with(
             next_detector,
             {"object"},
+            refresh_tracking=False,
         )
         manager.faces.close.assert_not_called()
         manager.workers["gate"].stop.assert_not_called()
@@ -221,17 +229,6 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.face_recognizer = Mock()
         manager.person_reidentifier = Mock()
         manager._mqtt_connected = Mock()
-        manager.reconfigure_object_tracking = Mock()
-        order: list[str] = []
-        manager.workers["gate"].pause_object_tracking_session.side_effect = (
-            lambda: order.append("pause")
-        )
-        manager.detector.reconfigure_roles.side_effect = (
-            lambda _config, _roles: order.append("inference")
-        )
-        manager.reconfigure_object_tracking.side_effect = (
-            lambda _config: order.append("tracking")
-        )
         next_detector = manager.config.detector.model_copy(deep=True)
         next_detector.model_path = "/models/replacement.xml"
 
@@ -241,31 +238,20 @@ class ManagerLifecycleTest(unittest.TestCase):
             refresh_tracking=True,
         )
 
-        manager.reconfigure_object_tracking.assert_called_once_with(next_detector)
-        self.assertEqual(order, ["pause", "inference", "tracking"])
+        manager.inference.reconfigure_roles.assert_called_once_with(
+            next_detector,
+            {"object"},
+            refresh_tracking=True,
+        )
         manager.workers["gate"].stop.assert_not_called()
 
     def test_failed_tracking_refresh_restores_inference_before_resuming_tracking(self) -> None:
         manager = manager_with_mocks()
-        previous = manager.config.detector
-        manager.detector.config = previous
-        manager.face_recognizer = Mock()
-        manager.person_reidentifier = Mock()
-        manager._mqtt_connected = Mock()
-        order: list[str] = []
-        worker = manager.workers["gate"]
-        worker.pause_object_tracking_session.side_effect = lambda: order.append("pause")
-        worker.resume_object_tracking_session.side_effect = lambda: order.append("resume")
-        manager.detector.reconfigure_roles.side_effect = (
-            lambda config, _roles: order.append(
-                "inference-new" if config.device == "GPU" else "inference-old"
-            )
-        )
-        manager.reconfigure_object_tracking = Mock(
-            side_effect=RuntimeError("tracking refresh failed")
-        )
-        next_detector = previous.model_copy(deep=True)
+        next_detector = manager.config.detector.model_copy(deep=True)
         next_detector.device = "GPU"
+        manager.inference.reconfigure_roles.side_effect = RuntimeError(
+            "tracking refresh failed"
+        )
 
         with self.assertRaisesRegex(RuntimeError, "tracking refresh failed"):
             manager.reconfigure_inference(
@@ -274,25 +260,26 @@ class ManagerLifecycleTest(unittest.TestCase):
                 refresh_tracking=True,
             )
 
-        self.assertEqual(
-            order,
-            ["pause", "inference-new", "pause", "inference-old", "resume"],
+        manager.inference.reconfigure_roles.assert_called_once_with(
+            next_detector,
+            {"object"},
+            refresh_tracking=True,
         )
 
     def test_face_queue_is_restored_when_stopping_it_fails(self) -> None:
         manager = manager_with_mocks()
-        manager.detector.config = manager.config.detector
-        manager.face_recognizer = Mock()
-        manager.person_reidentifier = Mock()
-        manager.faces.close.side_effect = RuntimeError("face queue busy")
+        manager.inference.reconfigure_roles.side_effect = RuntimeError("face queue busy")
         next_detector = manager.config.detector.model_copy(deep=True)
         next_detector.face_recognition_enabled = True
 
         with self.assertRaisesRegex(RuntimeError, "face queue busy"):
             manager.reconfigure_inference(next_detector, {"face"})
 
-        manager.detector.reconfigure_roles.assert_not_called()
-        manager.faces.start.assert_called_once_with()
+        manager.inference.reconfigure_roles.assert_called_once_with(
+            next_detector,
+            {"face"},
+            refresh_tracking=False,
+        )
         manager.workers["gate"].stop.assert_not_called()
 
     def test_camera_state_fingerprint_includes_trigger_health_changes(self) -> None:
@@ -347,15 +334,18 @@ class ManagerLifecycleTest(unittest.TestCase):
         self.assertIsNone(manager.recorder._watchdog_thread)
 
     def test_constructor_failure_closes_services_created_before_workers(self) -> None:
-        detector = Mock()
-        faces = Mock()
+        inference = Mock()
+        inference.detector = Mock()
+        inference.faces = Mock()
+        inference.face_recognizer = Mock()
+        inference.person_reidentifier = Mock()
+        inference.tracking_factory = Mock()
         recorder = Mock()
         state_events = Mock()
         mqtt = Mock()
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            patch("survng.app.manager.InferenceSupervisor", return_value=detector),
-            patch("survng.app.manager.FaceStore", return_value=faces),
+            patch("survng.app.manager.InferenceLifecycle", return_value=inference),
             patch("survng.app.manager.Recorder", return_value=recorder),
             patch("survng.app.manager.StateEventBroker", return_value=state_events),
             patch("survng.app.manager.MqttService", return_value=mqtt),
@@ -368,8 +358,25 @@ class ManagerLifecycleTest(unittest.TestCase):
                 ))
 
         mqtt.stop.assert_called_once_with()
-        faces.close.assert_called_once_with()
-        detector.stop.assert_called_once_with()
+        inference.close.assert_called_once_with()
+        recorder.stop_all.assert_called_once_with()
+        state_events.close.assert_called_once_with()
+
+    def test_inference_construction_failure_closes_recorder_and_state_broker(self) -> None:
+        recorder = Mock()
+        state_events = Mock()
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("survng.app.manager.Recorder", return_value=recorder),
+            patch("survng.app.manager.StateEventBroker", return_value=state_events),
+            patch(
+                "survng.app.manager.InferenceLifecycle",
+                side_effect=RuntimeError("inference construction failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "inference construction failed"),
+        ):
+            AppManager(AppConfig(storage_dir=tmpdir, cameras=[]))
+
         recorder.stop_all.assert_called_once_with()
         state_events.close.assert_called_once_with()
 
@@ -463,12 +470,12 @@ class ManagerLifecycleTest(unittest.TestCase):
     def test_shutdown_continues_after_one_cleanup_failure(self) -> None:
         manager = manager_with_mocks()
         manager._started = True
-        manager.faces.close.side_effect = RuntimeError("face close failed")
+        manager.inference.close.side_effect = RuntimeError("face recognition failed")
 
-        with self.assertRaisesRegex(RuntimeError, "face recognition"):
+        with self.assertRaisesRegex(RuntimeError, "inference lifecycle"):
             manager.stop_all()
 
-        manager.detector.stop.assert_called_once_with()
+        manager.inference.close.assert_called_once_with()
         manager.recorder.stop_all.assert_called_once_with()
         manager.state_events.close.assert_called_once_with()
         self.assertTrue(manager._closed)
@@ -482,7 +489,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager.stop_all()
 
         manager.workers["gate"].close.assert_called_once_with()
-        manager.detector.stop.assert_called_once_with()
+        manager.inference.close.assert_called_once_with()
         manager.recorder.stop_all.assert_called_once_with()
 
     def test_shutdown_aggregate_does_not_chain_secret_bearing_camera_error(self) -> None:
@@ -511,7 +518,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager.stop_all()
 
         manager.workers["gate"].close.assert_not_called()
-        manager.detector.stop.assert_not_called()
+        manager.inference.close.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
         self.assertFalse(manager._closed)
 
@@ -534,7 +541,7 @@ class ManagerLifecycleTest(unittest.TestCase):
             manager.stop_all()
 
         manager.workers["gate"].request_stop.assert_not_called()
-        manager.detector.stop.assert_not_called()
+        manager.inference.close.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
         self.assertFalse(manager._closed)
 
@@ -550,7 +557,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         manager.workers["gate"].request_onvif_stop.assert_not_called()
         manager.workers["gate"].request_stop.assert_not_called()
-        manager.detector.stop.assert_not_called()
+        manager.inference.close.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
         self.assertEqual(
             manager.camera_fleet.status()["shutdown_residual_camera_ids"],
@@ -619,10 +626,11 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager.stop_all()
         manager.stop_all()
 
-        manager.detector.start.assert_called_once_with()
+        manager.inference.start_core.assert_called_once_with()
+        manager.inference.start_auxiliary.assert_called_once_with()
         manager.workers["gate"].start.assert_called_once_with()
         manager.workers["gate"].request_stop.assert_called_once_with()
-        manager.detector.stop.assert_called_once_with()
+        manager.inference.close.assert_called_once_with()
 
     def test_runtime_preferences_are_filtered_for_a_replacement_manager(self) -> None:
         manager = manager_with_mocks()

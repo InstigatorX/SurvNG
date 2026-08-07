@@ -18,8 +18,8 @@ from .camera_startup import (
     CAMERA_STARTUP_RECORDER_SETTLE_SECONDS,
     CameraStartupCoordinator,
 )
-from .appearance_index import AppearanceIndex
 from .appearance_backfill import DeferredAppearanceBackfill
+from .appearance_index import AppearanceIndex
 from .config import (
     AppConfig,
     CameraConfig,
@@ -31,24 +31,18 @@ from .config import (
     SemanticSearchConfig,
 )
 from .events import EventStore
-from .faces import FaceStore
 from .detector import objects_to_json
 from .go2rtc import Go2RtcAdapter
-from .inference import InferenceSupervisor, IsolatedFaceRecognizer, IsolatedPersonReidentifier
+from .inference_lifecycle import InferenceLifecycle
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
-from .object_tracking import (
-    AdaptiveTrackingLimiter,
-    ObjectTrackingSession,
-    ObjectTrackingSessionFactory,
-)
 from .process_memory import (
     AllocatorMemoryTrimmer,
     process_memory_status,
     process_memory_status_for_pid,
 )
-from .semantic_search import SemanticIndex, build_semantic_search
+from .semantic_search import DisabledSemanticSearch, SemanticIndex
 from .motion_pipeline import (
     LoggingMotionPipelineObserver,
     EVIDENCE_REPOSITORY_SERVICE,
@@ -64,6 +58,7 @@ from .motion_pipeline import (
 from .motion_analysis import FairMotionAnalysisLimiter
 from .recorder import Recorder
 from .state_events import StateEventBroker
+from .security import redact_secret_text
 
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -136,17 +131,6 @@ class AppManager:
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.semantic_index = SemanticIndex(self.events.db_path)
-        self.semantic_search = build_semantic_search(config.semantic_search, self.semantic_index)
-        self.detector = InferenceSupervisor(config.detector)
-        self.face_recognizer = IsolatedFaceRecognizer(self.detector)
-        self.person_reidentifier = IsolatedPersonReidentifier(self.detector)
-        self.faces = FaceStore(
-            self.storage_dir,
-            config.detector.face_max_observations,
-            self.face_recognizer,
-            start_recognition=False,
-            database_dir=self.database_dir,
-        )
         recording_index_dir = Path(config.recording_index_dir) if config.recording_index_dir else None
         self.recorder = Recorder(
             config.ffmpeg_path,
@@ -167,12 +151,39 @@ class AppManager:
             self._capture_open_limiter
         )
         self.state_events = StateEventBroker()
-        self._object_tracking_limiter = AdaptiveTrackingLimiter(
-            config.detector.tracking.max_active_cameras,
-            config.detector.tracking.burst_max_active_cameras,
-            burst_enabled=config.detector.tracking.adaptive_burst_enabled,
-            burst_guard=self._tracking_burst_available,
-        )
+        try:
+            self.inference = InferenceLifecycle(
+                config=config.detector,
+                semantic_config=config.semantic_search,
+                storage_dir=self.storage_dir,
+                events=self.events,
+                appearance_index=self.appearance_index,
+                semantic_index=self.semantic_index,
+                event_publisher=self.publish_event,
+                tracking_burst_guard=self._tracking_burst_available,
+                database_dir=self.database_dir,
+            )
+        except BaseException:
+            for label, operation in (
+                ("recorder", self.recorder.stop_all),
+                ("state event broker", self.state_events.close),
+            ):
+                try:
+                    operation()
+                except Exception as error:
+                    LOGGER.error(
+                        "%s cleanup failed during inference construction: %s",
+                        label,
+                        redact_secret_text(error),
+                    )
+            raise
+        # Stable compatibility handles used throughout the application. The
+        # lifecycle replaces generations behind these supervisors, not the
+        # supervisor objects themselves.
+        self.detector = self.inference.detector
+        self.face_recognizer = self.inference.face_recognizer
+        self.person_reidentifier = self.inference.person_reidentifier
+        self.faces = self.inference.faces
         self.motion_pipeline_registry = build_builtin_motion_registry()
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
@@ -182,24 +193,23 @@ class AppManager:
             detector=self.detector,
             recorder=self.recorder,
         )
-        self.object_tracking_session_factory = ObjectTrackingSessionFactory(
-            config=config.detector.tracking,
-            detector=self.detector,
-            update_event=self.events.update_object_tracking,
-            publisher=self.publish_event,
-            limiter=self._object_tracking_limiter,
-            appearance_encoder=self.person_reidentifier,
-            appearance_indexer=self.appearance_index.replace_event,
-        )
-        self.appearance_backfill = DeferredAppearanceBackfill(
-            self.events.db_path,
-            self.storage_dir,
-            config.detector.tracking,
-            self.events,
-            self.appearance_index,
-            self.person_reidentifier,
-        )
-        self.mqtt = self._build_mqtt_service(config.mqtt)
+        try:
+            self.mqtt = self._build_mqtt_service(config.mqtt)
+        except BaseException:
+            for label, operation in (
+                ("inference lifecycle", self.inference.close),
+                ("recorder", self.recorder.stop_all),
+                ("state event broker", self.state_events.close),
+            ):
+                try:
+                    operation()
+                except Exception as error:
+                    LOGGER.error(
+                        "%s cleanup failed during MQTT construction: %s",
+                        label,
+                        redact_secret_text(error),
+                    )
+            raise
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
         self._lifecycle_lock = threading.RLock()
@@ -241,21 +251,28 @@ class AppManager:
             for worker in reversed(tuple(workers.values())):
                 try:
                     worker.close()
-                except Exception:
-                    LOGGER.exception("camera cleanup failed during manager construction")
+                except Exception as error:
+                    LOGGER.error(
+                        "camera cleanup failed during manager construction: %s",
+                        redact_secret_text(error),
+                    )
             for label, callback in (
                 ("MQTT", self.mqtt.stop),
-                ("face recognition", self.faces.close),
-                ("inference", self.detector.stop),
+                ("inference lifecycle", self.inference.close),
                 ("recorder", self.recorder.stop_all),
                 ("state event broker", self.state_events.close),
             ):
                 try:
                     callback()
-                except Exception:
-                    LOGGER.exception("%s cleanup failed during manager construction", label)
+                except Exception as error:
+                    LOGGER.error(
+                        "%s cleanup failed during manager construction: %s",
+                        label,
+                        redact_secret_text(error),
+                    )
             raise
         self.workers = workers
+        self.inference.bind_workers(self.workers)
         self.camera_fleet = CameraFleetLifecycle(
             cameras=tuple(self._unique_cameras()),
             workers=self.workers,
@@ -266,10 +283,16 @@ class AppManager:
 
     def _tracking_burst_available(self) -> bool:
         """Allow the optional extra tracker only while inference and memory are healthy."""
-        if self._stopping or self._closed:
+        if getattr(self, "_stopping", False) or getattr(self, "_closed", False):
+            return False
+        detector = getattr(self, "detector", None)
+        if detector is None:
+            # The limiter is assembled with the inference lifecycle. Deny a
+            # burst if a future implementation evaluates the guard before the
+            # manager has published its stable detector handle.
             return False
         try:
-            runtime = self.detector.cached_object_status().get("runtime") or {}
+            runtime = detector.cached_object_status().get("runtime") or {}
             _total, _used, memory_percent = self._memory_usage()
             return (
                 int(runtime.get("queue_depth") or 0) == 0
@@ -339,7 +362,7 @@ class AppManager:
                 motion_pipeline_origins=graphs.origins,
                 motion_decision_handler_factory=self.motion_decision_handler_factory,
                 motion_object_detector_factory=self.motion_object_detector_factory,
-                object_tracking_session_factory=self.object_tracking_session_factory,
+                object_tracking_session_factory=self.inference.tracking_factory,
                 motion_analysis_limiter=self._motion_analysis_limiter,
                 image_writer=self.image_writer,
                 onvif_cache_dir=self.database_dir / "onvif",
@@ -535,8 +558,7 @@ class AppManager:
                 # service start these are all-on defaults; reload candidates
                 # receive the active manager's preferences before this point.
                 self._save_runtime_state()
-                self.detector.start()
-                self.faces.start()
+                self.inference.start_core()
                 self._startup_timings = {
                     "inference_seconds": round(time.monotonic() - phase_started, 3),
                 }
@@ -578,12 +600,7 @@ class AppManager:
                     on_complete=self._camera_startup_completed,
                 )
                 phase_started = time.monotonic()
-                appearance_backfill = getattr(self, "appearance_backfill", None)
-                if appearance_backfill is not None:
-                    appearance_backfill.start()
-                semantic_search = getattr(self, "semantic_search", None)
-                if semantic_search is not None:
-                    semantic_search.start(self.events, self.storage_dir)
+                self.inference.start_auxiliary()
                 self._startup_timings["auxiliary_services_seconds"] = round(
                     time.monotonic() - phase_started,
                     3,
@@ -701,21 +718,8 @@ class AppManager:
                 for failure in error.failures
             )
 
-        LOGGER.info("SurvNG shutdown: stopping face recognition")
-        attempt("face recognition", self.faces.close)
-
-        LOGGER.info("SurvNG shutdown: stopping semantic search")
-        semantic_search = getattr(self, "semantic_search", None)
-        if semantic_search is not None:
-            attempt("semantic search", semantic_search.close)
-
-        LOGGER.info("SurvNG shutdown: stopping deferred appearance backfill")
-        appearance_backfill = getattr(self, "appearance_backfill", None)
-        if appearance_backfill is not None:
-            attempt("appearance backfill", appearance_backfill.close)
-
-        LOGGER.info("SurvNG shutdown: stopping isolated inference workers")
-        attempt("inference", self.detector.stop)
+        LOGGER.info("SurvNG shutdown: stopping inference lifecycle")
+        attempt("inference lifecycle", self.inference.close)
 
         LOGGER.info("SurvNG shutdown: stopping recorder processes")
         attempt("recorders", self.recorder.stop_all)
@@ -1047,86 +1051,14 @@ class AppManager:
 
     def reconfigure_detector_policy(self, config: DetectorConfig) -> None:
         """Apply policy-only detector settings without disturbing camera workers."""
-        self.detector.update_runtime_config(config)
-        self.face_recognizer.config = self.detector.config
-        self.faces.reconfigure_max_observations(config.face_max_observations)
+        self.inference.reconfigure_policy(config)
 
     def reconfigure_object_tracking(self, config: DetectorConfig) -> None:
         """Replace tracking sessions without restarting camera-owned services."""
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
-            tracking = config.tracking.model_copy(deep=True)
-            next_limiter = AdaptiveTrackingLimiter(
-                tracking.max_active_cameras,
-                tracking.burst_max_active_cameras,
-                burst_enabled=tracking.adaptive_burst_enabled,
-                burst_guard=self._tracking_burst_available,
-            )
-            next_factory = ObjectTrackingSessionFactory(
-                config=tracking,
-                detector=self.detector,
-                update_event=self.events.update_object_tracking,
-                publisher=self.publish_event,
-                limiter=next_limiter,
-                appearance_encoder=self.person_reidentifier,
-                appearance_indexer=self.appearance_index.replace_event,
-            )
-            workers = list(self.workers.values())
-            replacements = [
-                worker.create_object_tracking_session(next_factory)
-                for worker in workers
-            ]
-            previous_sessions: list[tuple[CameraWorker, ObjectTrackingSession]] = []
-            previous_config = self.detector.config
-            previous_factory = self.object_tracking_session_factory
-            previous_limiter = self._object_tracking_limiter
-            previous_backfill = getattr(self, "appearance_backfill", None)
-            next_backfill = (
-                DeferredAppearanceBackfill(
-                    self.events.db_path,
-                    self.storage_dir,
-                    tracking,
-                    self.events,
-                    self.appearance_index,
-                    self.person_reidentifier,
-                )
-                if previous_backfill is not None
-                else None
-            )
-            try:
-                for worker, replacement in zip(workers, replacements, strict=True):
-                    previous = worker.replace_object_tracking_session(replacement)
-                    previous_sessions.append((worker, previous))
-                self.detector.update_runtime_config(config)
-                self.face_recognizer.config = self.detector.config
-                self.person_reidentifier.config = self.detector.config.tracking
-                self.object_tracking_session_factory = next_factory
-                self._object_tracking_limiter = next_limiter
-                if next_backfill is not None and previous_backfill is not None:
-                    self.appearance_backfill = next_backfill
-                    if self._started:
-                        next_backfill.start()
-                    previous_backfill.close()
-            except BaseException:
-                for worker, previous in reversed(previous_sessions):
-                    try:
-                        worker.replace_object_tracking_session(previous)
-                    except Exception:
-                        LOGGER.exception(
-                            "failed to roll back object tracking for %s",
-                            worker.camera.id,
-                        )
-                self.detector.update_runtime_config(previous_config)
-                self.face_recognizer.config = self.detector.config
-                self.person_reidentifier.config = self.detector.config.tracking
-                self.object_tracking_session_factory = previous_factory
-                self._object_tracking_limiter = previous_limiter
-                if previous_backfill is not None:
-                    self.appearance_backfill = previous_backfill
-                if next_backfill is not None:
-                    next_backfill.close()
-                raise
+            self.inference.reconfigure_tracking(config)
 
     def reconfigure_inference(
         self,
@@ -1139,89 +1071,36 @@ class AppManager:
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
-            previous_config = self.detector.config.model_copy(deep=True)
-            face_role = "face" in roles
-            inference_applied = False
-            tracking_applied = False
-            face_queue_stop_attempted = False
-            try:
-                if refresh_tracking:
-                    for worker in self.workers.values():
-                        worker.pause_object_tracking_session()
-                if face_role:
-                    face_queue_stop_attempted = True
-                    self.faces.close()
-                self.detector.reconfigure_roles(config, roles)
-                inference_applied = True
-                self.face_recognizer.config = self.detector.config
-                self.person_reidentifier.config = self.detector.config.tracking
-
-                if refresh_tracking:
-                    self.reconfigure_object_tracking(config)
-                    tracking_applied = True
-                if face_role:
-                    self.faces.start()
-                if "object" in roles:
-                    try:
-                        self._mqtt_connected()
-                    except Exception:
-                        LOGGER.exception(
-                            "MQTT discovery refresh failed after detector reconfiguration"
-                        )
-            except BaseException:
-                if refresh_tracking:
-                    for worker in self.workers.values():
-                        try:
-                            worker.pause_object_tracking_session()
-                        except Exception:
-                            LOGGER.exception(
-                                "failed to quiesce object tracking for %s during rollback",
-                                worker.camera.id,
-                            )
-                inference_restored = not inference_applied
-                if inference_applied:
-                    try:
-                        self.detector.reconfigure_roles(previous_config, roles)
-                        inference_restored = True
-                    except Exception:
-                        LOGGER.exception("failed to roll back inference roles")
-                if tracking_applied and inference_restored:
-                    try:
-                        self.reconfigure_object_tracking(previous_config)
-                    except Exception:
-                        LOGGER.exception("failed to roll back object tracking sessions")
-                elif refresh_tracking and inference_restored:
-                    for worker in self.workers.values():
-                        try:
-                            worker.resume_object_tracking_session()
-                        except Exception:
-                            LOGGER.exception(
-                                "failed to resume object tracking for %s",
-                                worker.camera.id,
-                            )
-                self.face_recognizer.config = self.detector.config
-                self.person_reidentifier.config = self.detector.config.tracking
-                if face_queue_stop_attempted:
-                    try:
-                        self.faces.start()
-                    except Exception:
-                        LOGGER.exception("failed to restore face recognition queue")
-                raise
+            self.inference.reconfigure_roles(
+                config,
+                roles,
+                refresh_tracking=refresh_tracking,
+            )
+            if "object" in roles:
+                try:
+                    self._mqtt_connected()
+                except Exception:
+                    LOGGER.exception(
+                        "MQTT discovery refresh failed after detector reconfiguration"
+                    )
 
     def reconfigure_semantic_search(self, config: SemanticSearchConfig) -> None:
         """Replace semantic search independently of cameras and object inference."""
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
-            replacement = build_semantic_search(config, self.semantic_index)
-            if self._started:
-                replacement.start(self.events, self.storage_dir)
-            previous = self.semantic_search
-            self.semantic_search = replacement
-            previous.close()
+            self.inference.reconfigure_semantic_search(config)
 
     def semantic_search_status(self) -> dict:
-        return self.semantic_search.status()
+        return self.inference.semantic_search.status()
+
+    @property
+    def semantic_search(self) -> DisabledSemanticSearch:
+        return self.inference.semantic_search
+
+    @property
+    def appearance_backfill(self) -> DeferredAppearanceBackfill:
+        return self.inference.appearance_backfill
 
     def _mqtt_connected(self) -> None:
         self.mqtt.publish_discovery([
@@ -1359,6 +1238,7 @@ class AppManager:
                     )
                     self._allocator_memory_trimmer.observe_idle(allocator_idle, now=now)
                     if now - telemetry_sample_at >= 60.0:
+                        self.inference.maintain()
                         process_memory = process_memory_status()
                         self._allocator_memory_trimmer.maybe_trim(
                             process_memory,
@@ -1470,7 +1350,10 @@ class AppManager:
         ]
 
     def detector_status(self) -> dict:
-        return self.detector.status()
+        return {
+            **self.detector.status(),
+            "lifecycle": self.inference.status(),
+        }
 
     def go2rtc_status(self) -> dict:
         return self.go2rtc.status(list(self._unique_cameras()))

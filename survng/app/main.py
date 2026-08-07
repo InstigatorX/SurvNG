@@ -2547,8 +2547,8 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
             "waits_since_restart": sum(item["tracking"]["capacity_waits"] for item in cameras),
             "timeouts_since_restart": sum(item["tracking"]["capacity_timeouts"] for item in cameras),
             "limiter": (
-                manager._object_tracking_limiter.status()
-                if hasattr(manager, "_object_tracking_limiter")
+                manager.inference.tracking_limiter.status()
+                if hasattr(manager, "inference")
                 else {}
             ),
         },
