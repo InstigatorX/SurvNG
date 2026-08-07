@@ -496,7 +496,7 @@ async def lifespan(app: FastAPI):
         _start_face_observation_sync()
         _recording_media_runtime._start_recording_prewarmer()
         calibration_monitor_task = asyncio.create_task(
-            _calibration_followup_monitor(),
+            _intelligence_route_bundle.service._calibration_followup_monitor(),
             name="survng-calibration-followup-monitor",
         )
         _record_process_lifecycle("startup_ready")
