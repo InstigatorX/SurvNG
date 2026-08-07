@@ -37,6 +37,7 @@ from .inference_lifecycle import InferenceLifecycle
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
 from .mqtt import MqttService
+from .mqtt_lifecycle import MqttLifecycle
 from .process_memory import (
     AllocatorMemoryTrimmer,
     process_memory_status,
@@ -192,7 +193,7 @@ class AppManager:
             recorder=self.recorder,
         )
         try:
-            self.mqtt = self._build_mqtt_service(config.mqtt)
+            self.mqtt = MqttLifecycle(config.mqtt, self._build_mqtt_service)
         except BaseException:
             for label, operation in (
                 ("inference lifecycle", self.inference.close),
@@ -823,24 +824,16 @@ class AppManager:
         with self._lifecycle_lock:
             if self._stopping or self._closed:
                 raise RuntimeError("application manager is stopping")
-            previous = self.mqtt
-            replacement = self._build_mqtt_service(mqtt_config)
-            previous.stop(lifecycle="restarting")
-            self.mqtt = replacement
-            try:
-                replacement.start()
-                if self._started:
-                    replacement.set_server_lifecycle("running")
-                self.camera_fleet.replace_state_publisher(replacement)
-            except BaseException:
-                self.mqtt = previous
-                try:
-                    replacement.stop(lifecycle="restarting")
-                finally:
-                    previous.start()
-                    if self._started:
-                        previous.set_server_lifecycle("running")
-                raise
+            running = self._started
+        # Do not hold the manager lock while the old MQTT command worker
+        # drains: a command already in flight may need that same lock to finish.
+        # MqttLifecycle serializes cutover against stop(), and this guard is
+        # evaluated only after that lifecycle lock has been acquired.
+        self.mqtt.reconfigure(
+            mqtt_config,
+            running=running,
+            allowed=lambda: not self._stopping and not self._closed,
+        )
 
     @staticmethod
     def _memory_usage() -> tuple[int, int, float]:

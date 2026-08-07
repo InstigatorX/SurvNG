@@ -12,6 +12,7 @@ from survng.app.config import AppConfig, CameraConfig
 from survng.app.camera_fleet import CameraFleetLifecycle
 from survng.app.camera_startup import CameraStartupCoordinator
 from survng.app.manager import AppManager
+from survng.app.mqtt_lifecycle import MqttLifecycle
 from survng.app.recording_lifecycle import RecordingLifecycle
 
 
@@ -153,21 +154,18 @@ class ManagerLifecycleTest(unittest.TestCase):
         manager = manager_with_mocks()
         previous = manager.mqtt
         replacement = Mock()
-        startup_task = manager.camera_fleet.prepare_startup(
-            camera_enabled={"gate": True},
-            recording_enabled={},
-            detection_enabled={},
-        )[0]
+        manager.mqtt = MqttLifecycle(
+            manager.config.mqtt,
+            lambda _config: replacement,
+            service=previous,
+        )
+        manager.reconfigure_mqtt(manager.config.mqtt)
 
-        with patch("survng.app.manager.MqttService", return_value=replacement) as service:
-            manager.reconfigure_mqtt(manager.config.mqtt)
-
-        previous.stop.assert_called_once_with(lifecycle="restarting")
-        replacement.start.assert_called_once_with()
-        startup_task.publish_state()
-        replacement.publish_camera_state.assert_called_once_with("gate", True)
-        previous.publish_camera_state.assert_not_called()
-        service.assert_called_once()
+        previous.stop.assert_called_once_with(
+            lifecycle="restarting",
+            require_quiesced=True,
+        )
+        replacement.start.assert_called_once_with(raise_on_failure=True)
         manager.workers["gate"].stop.assert_not_called()
         manager.recorder.stop_all.assert_not_called()
 
@@ -176,22 +174,17 @@ class ManagerLifecycleTest(unittest.TestCase):
         previous = manager.mqtt
         replacement = Mock()
         replacement.start.side_effect = RuntimeError("mqtt start failed")
-        startup_task = manager.camera_fleet.prepare_startup(
-            camera_enabled={"gate": True},
-            recording_enabled={},
-            detection_enabled={},
-        )[0]
+        manager.mqtt = MqttLifecycle(
+            manager.config.mqtt,
+            lambda _config: replacement,
+            service=previous,
+        )
+        with self.assertRaisesRegex(RuntimeError, "mqtt start failed"):
+            manager.reconfigure_mqtt(manager.config.mqtt)
 
-        with patch("survng.app.manager.MqttService", return_value=replacement):
-            with self.assertRaisesRegex(RuntimeError, "mqtt start failed"):
-                manager.reconfigure_mqtt(manager.config.mqtt)
-
-        self.assertIs(manager.mqtt, previous)
+        self.assertIs(manager.mqtt.service, previous)
         replacement.stop.assert_called_once_with(lifecycle="restarting")
-        previous.start.assert_called_once_with()
-        startup_task.publish_state()
-        previous.publish_camera_state.assert_called_once_with("gate", True)
-        replacement.publish_camera_state.assert_not_called()
+        previous.start.assert_called_once_with(raise_on_failure=True)
         manager.workers["gate"].stop.assert_not_called()
 
     def test_recorder_reconfiguration_keeps_camera_capture_running(self) -> None:

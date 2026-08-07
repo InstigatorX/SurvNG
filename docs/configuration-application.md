@@ -32,6 +32,13 @@ cutover restores the prior FFmpeg settings and desired per-camera recorder
 state before surfacing the error, so configuration persistence cannot leave a
 partially replaced recording generation behind.
 
+A stable `MqttLifecycle` publisher owns MQTT client generations. Camera
+admission and event producers retain that stable identity during a broker
+configuration change, eliminating publication through a retired client. A
+targeted cutover requires the prior command and telemetry workers to quiesce,
+uses strict setup validation for the replacement, and restores the prior
+generation if replacement startup fails.
+
 ## Full manager reload
 
 A transactional manager reload remains necessary when a setting changes object

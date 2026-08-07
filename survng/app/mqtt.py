@@ -72,7 +72,7 @@ class MqttService:
     def prefix(self) -> str:
         return self.config.topic_prefix.strip().strip("/") or "survng"
 
-    def start(self) -> None:
+    def start(self, *, raise_on_failure: bool = False) -> None:
         with self._lifecycle_lock:
             self._accept_incidents = True
             if not self.config.enabled or not self.config.host.strip() or self.client is not None:
@@ -131,8 +131,17 @@ class MqttService:
                 self._stop_command_worker()
                 self._stop_server_monitor()
                 LOGGER.exception("failed to start MQTT client")
+                if raise_on_failure:
+                    raise RuntimeError(
+                        f"failed to start MQTT client: {self.last_error}"
+                    ) from exc
 
-    def stop(self, *, lifecycle: str = "stopping") -> None:
+    def stop(
+        self,
+        *,
+        lifecycle: str = "stopping",
+        require_quiesced: bool = False,
+    ) -> None:
         with self._lifecycle_lock:
             client = self.client
             self._accept_incidents = False
@@ -172,8 +181,10 @@ class MqttService:
             self.connected = False
             self.command_subscriptions_active = False
             self.client = None
-            self._stop_command_worker()
-            self._stop_server_monitor()
+            command_stopped = self._stop_command_worker()
+            monitor_stopped = self._stop_server_monitor()
+            if require_quiesced and not (command_stopped and monitor_stopped):
+                raise RuntimeError("MQTT background workers did not quiesce")
 
     def _start_server_monitor(self) -> None:
         if not self.config.server_status_enabled or self.server_status_callback is None:
@@ -190,15 +201,17 @@ class MqttService:
         self._server_monitor_thread = thread
         thread.start()
 
-    def _stop_server_monitor(self) -> None:
+    def _stop_server_monitor(self) -> bool:
         self._server_monitor_stop.set()
         thread = self._server_monitor_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=MQTT_SERVER_MONITOR_STOP_TIMEOUT_SECONDS)
         if thread is not None and thread.is_alive():
             LOGGER.error("MQTT server monitor did not stop")
+            return False
         else:
             self._server_monitor_thread = None
+            return True
 
     def _run_server_monitor(self) -> None:
         interval = float(self.config.server_metrics_interval_seconds)
@@ -300,7 +313,7 @@ class MqttService:
         self._command_thread = thread
         thread.start()
 
-    def _stop_command_worker(self) -> None:
+    def _stop_command_worker(self) -> bool:
         self._command_stop.set()
         while True:
             try:
@@ -316,8 +329,10 @@ class MqttService:
             thread.join(timeout=MQTT_COMMAND_STOP_TIMEOUT_SECONDS)
         if thread is not None and thread.is_alive():
             LOGGER.error("MQTT command worker did not stop")
+            return False
         else:
             self._command_thread = None
+            return True
 
     def _run_commands(self) -> None:
         while not self._command_stop.is_set():

@@ -58,22 +58,6 @@ def test_prepared_generation_uses_an_immutable_preference_snapshot() -> None:
     publisher.publish_camera_state.assert_called_once_with("gate", True)
 
 
-def test_startup_task_publishes_through_current_mqtt_generation() -> None:
-    fleet, _workers, _recorder, _startup, previous = _fleet()
-    replacement = Mock()
-    task = fleet.prepare_startup(
-        camera_enabled={"gate": True},
-        recording_enabled={},
-        detection_enabled={},
-    )[0]
-
-    fleet.replace_state_publisher(replacement)
-    task.publish_state()
-
-    previous.publish_camera_state.assert_not_called()
-    replacement.publish_camera_state.assert_called_once_with("gate", True)
-
-
 def test_runtime_power_change_is_visible_to_an_active_admission_task() -> None:
     fleet, _workers, _recorder, _startup, publisher = _fleet()
     task = fleet.prepare_startup(

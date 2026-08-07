@@ -408,6 +408,26 @@ class MqttServiceTest(unittest.TestCase):
         client.loop_stop.assert_called_once_with()
         self.assertIn("connect setup failed", service.last_error)
 
+    def test_strict_start_failure_is_reported_to_lifecycle_owner(self) -> None:
+        service = MqttService(
+            MqttConfig(enabled=True, host="broker"),
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+            lambda camera_id, enabled: True,
+        )
+        client = Mock()
+        client.connect_async.side_effect = RuntimeError("connect setup failed")
+
+        with (
+            patch("paho.mqtt.client.Client", return_value=client),
+            self.assertRaisesRegex(RuntimeError, "connect setup failed"),
+        ):
+            service.start(raise_on_failure=True)
+
+        self.assertIsNone(service.client)
+        self.assertIsNone(service._command_thread)
+        client.loop_stop.assert_called_once_with()
+
     def test_nonzero_network_loop_result_rolls_back_startup(self) -> None:
         service = MqttService(
             MqttConfig(enabled=True, host="broker"),

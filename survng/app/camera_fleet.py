@@ -88,7 +88,6 @@ class CameraFleetLifecycle:
             )
         self.recorder = recorder
         self.startup = startup
-        self._publisher_lock = threading.Lock()
         self._state_publisher = state_publisher
         self._stopping = threading.Event()
         self._cameras_by_id = {camera.id: camera for camera in self.cameras}
@@ -98,10 +97,6 @@ class CameraFleetLifecycle:
         self._shutdown_residuals: set[str] = set()
         self._onvif_residuals: set[str] = set()
         self._closed_workers: set[str] = set()
-
-    def replace_state_publisher(self, publisher: CameraFleetStatePublisher) -> None:
-        with self._publisher_lock:
-            self._state_publisher = publisher
 
     def recorder_keys(self) -> set[tuple[str, str]]:
         keys: set[tuple[str, str]] = set()
@@ -193,9 +188,7 @@ class CameraFleetLifecycle:
         return tuple(tasks)
 
     def _publish_state(self, camera_id: str, enabled: bool) -> None:
-        with self._publisher_lock:
-            publisher = self._state_publisher
-        publisher.publish_camera_state(camera_id, enabled)
+        self._state_publisher.publish_camera_state(camera_id, enabled)
 
     def _publish_current_state(self, camera_id: str) -> None:
         self._publish_state(camera_id, self.camera_enabled(camera_id))
