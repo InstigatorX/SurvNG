@@ -15,7 +15,6 @@ import secrets
 import platform
 import shutil
 import time
-import socket
 import struct
 import subprocess
 import tempfile
@@ -26,7 +25,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
@@ -37,7 +36,15 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 
-from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, load_config, normalize_config, save_config, slugify_camera_id
+from .config import (
+    AppConfig,
+    CameraConfig,
+    camera_by_id,
+    load_config,
+    normalize_config,
+    save_config,
+    slugify_camera_id,
+)
 from .config_application import (
     DETECTOR_FACE_ENGINE_FIELDS,
     DETECTOR_HOT_POLICY_FIELDS,
@@ -50,6 +57,16 @@ from .config_application import (
     TRACKING_SESSION_FIELDS,
     TargetedConfigApplication,
     manager_owned_config,
+)
+from .config_routes import (
+    ConfigProbeRequest,
+    ConfigRouteDependencies,
+    SECRET_PLACEHOLDER,
+    _restore_camera_secrets,
+    create_config_router,
+    redacted_camera_payload as _redacted_camera_payload,
+    redacted_config_payload as _redacted_config_payload,
+    restore_config_secrets as _restore_config_secrets,
 )
 from .audit_ai import (
     AuditAiAdvisor,
@@ -129,7 +146,6 @@ config = load_config()
 manager = AppManager(config)
 LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
-SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
 RECORDING_LOOKUP_LIMIT = 20000
 RECORDING_FMP4_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 RECORDING_FMP4_LOCKS_GUARD = threading.Lock()
@@ -373,173 +389,6 @@ def redact_log_message(message: str) -> str:
     return redact_secret_text(message)
 
 
-def _mask_url_password(value: str | None) -> str | None:
-    if not value:
-        return value
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return value
-    userinfo, separator, host = parsed.netloc.rpartition("@")
-    if not separator or ":" not in userinfo:
-        return value
-    username, _password = userinfo.split(":", 1)
-    return urlunsplit(parsed._replace(netloc=f"{username}:{SECRET_PLACEHOLDER}@{host}"))
-
-
-def _encoded_url_password(value: str | None) -> str | None:
-    if not value:
-        return None
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return None
-    userinfo, separator, _host = parsed.netloc.rpartition("@")
-    if not separator or ":" not in userinfo:
-        return None
-    return userinfo.split(":", 1)[1]
-
-
-def _restore_url_password(masked: str | None, current: str | None, field: str) -> str | None:
-    if not masked or _encoded_url_password(masked) != SECRET_PLACEHOLDER:
-        return masked
-    current_password = _encoded_url_password(current)
-    if current_password is None:
-        raise ValueError(f"{field} contains a masked secret without an existing value")
-    parsed = urlsplit(masked)
-    userinfo, _separator, host = parsed.netloc.rpartition("@")
-    username, _masked_password = userinfo.split(":", 1)
-    return urlunsplit(parsed._replace(netloc=f"{username}:{current_password}@{host}"))
-
-
-def _restore_secret(masked: str, current: str, field: str) -> str:
-    if masked != SECRET_PLACEHOLDER:
-        return masked
-    if not current:
-        raise ValueError(f"{field} contains a masked secret without an existing value")
-    return current
-
-
-def _camera_uses_masked_secret(camera: CameraConfig) -> bool:
-    return (
-        _encoded_url_password(camera.stream_url) == SECRET_PLACEHOLDER
-        or _encoded_url_password(camera.live_stream_url) == SECRET_PLACEHOLDER
-        or camera.onvif.password == SECRET_PLACEHOLDER
-        or camera.baichuan.password == SECRET_PLACEHOLDER
-    )
-
-
-def _restore_camera_secrets(
-    incoming: CameraConfig,
-    current: CameraConfig | None,
-) -> CameraConfig:
-    restored = incoming.model_copy(deep=True)
-    if not _camera_uses_masked_secret(restored):
-        return restored
-    if current is None:
-        raise ValueError("new cameras must provide their own credentials")
-    restored.stream_url = str(
-        _restore_url_password(restored.stream_url, current.stream_url, "stream_url")
-        or ""
-    )
-    restored.live_stream_url = _restore_url_password(
-        restored.live_stream_url,
-        current.live_stream_url,
-        "live_stream_url",
-    )
-    restored.onvif.password = _restore_secret(
-        restored.onvif.password,
-        current.onvif.password,
-        "onvif.password",
-    )
-    restored.baichuan.password = _restore_secret(
-        restored.baichuan.password,
-        current.baichuan.password,
-        "baichuan.password",
-    )
-    return restored
-
-
-def _camera_secret_identity_matches(incoming: CameraConfig, current: CameraConfig) -> bool:
-    if _mask_url_password(incoming.stream_url) == _mask_url_password(current.stream_url):
-        return True
-    if (
-        incoming.live_stream_url
-        and _mask_url_password(incoming.live_stream_url)
-        == _mask_url_password(current.live_stream_url)
-    ):
-        return True
-    return any(
-        incoming_host
-        and incoming_host == current_host
-        and incoming_user == current_user
-        for incoming_host, current_host, incoming_user, current_user in (
-            (
-                incoming.onvif.host,
-                current.onvif.host,
-                incoming.onvif.username,
-                current.onvif.username,
-            ),
-            (
-                incoming.baichuan.host,
-                current.baichuan.host,
-                incoming.baichuan.username,
-                current.baichuan.username,
-            ),
-        )
-    )
-
-
-def _restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig:
-    restored = incoming.model_copy(deep=True)
-    restored.mqtt.password = _restore_secret(
-        restored.mqtt.password,
-        current.mqtt.password,
-        "mqtt.password",
-    )
-    restored.audit_ai.api_key = _restore_secret(
-        restored.audit_ai.api_key,
-        current.audit_ai.api_key,
-        "audit_ai.api_key",
-    )
-    current_by_id = {camera.id: camera for camera in current.cameras}
-    same_shape = len(restored.cameras) == len(current.cameras)
-    restored.cameras = [
-        _restore_camera_secrets(
-            camera,
-            current_by_id.get(camera.id)
-            or (
-                current.cameras[index]
-                if same_shape
-                and _camera_secret_identity_matches(camera, current.cameras[index])
-                else None
-            ),
-        )
-        for index, camera in enumerate(restored.cameras)
-    ]
-    return AppConfig.model_validate(restored.model_dump(mode="json"))
-
-
-def _redacted_camera_payload(camera: CameraConfig) -> dict:
-    payload = camera.model_dump(mode="json")
-    payload["stream_url"] = _mask_url_password(camera.stream_url)
-    payload["live_stream_url"] = _mask_url_password(camera.live_stream_url)
-    payload["onvif"]["password"] = SECRET_PLACEHOLDER if camera.onvif.password else ""
-    payload["baichuan"]["password"] = SECRET_PLACEHOLDER if camera.baichuan.password else ""
-    return payload
-
-
-def _redacted_config_payload(active_config: AppConfig) -> dict:
-    payload = active_config.model_dump(mode="json")
-    payload["mqtt"]["password"] = SECRET_PLACEHOLDER if active_config.mqtt.password else ""
-    payload["audit_ai"]["api_key"] = SECRET_PLACEHOLDER if active_config.audit_ai.api_key else ""
-    payload["cameras"] = [
-        _redacted_camera_payload(camera)
-        for camera in active_config.cameras
-    ]
-    return payload
-
-
 def install_memory_log_handler() -> None:
     root = logging.getLogger()
     if any(getattr(handler, "name", "") == "survng-memory-log" for handler in root.handlers):
@@ -556,15 +405,6 @@ install_memory_log_handler()
 
 class CameraFeatureState(BaseModel):
     enabled: bool
-
-
-class ConfigProbeRequest(BaseModel):
-    camera_id: str = Field(default="", max_length=128)
-    host: str = Field(min_length=1, max_length=255, pattern=r"^[^\s/@?#]+$")
-    username: str = Field(default="", max_length=256)
-    password: str = Field(default="", max_length=1024)
-    onvif_port: int = Field(default=8000, ge=1, le=65535)
-    baichuan_port: int = Field(default=9000, ge=1, le=65535)
 
 
 class SemanticSearchRequest(BaseModel):
@@ -846,6 +686,29 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SurvNG", lifespan=lifespan)
 
 
+def _publish_config_runtime(next_config: AppConfig) -> None:
+    global config
+    config = next_config
+    manager.config = next_config
+
+
+app.include_router(
+    create_config_router(
+        ConfigRouteDependencies(
+            get_config=lambda: config,
+            get_manager=lambda: manager,
+            publish_config=_publish_config_runtime,
+            apply_config=apply_config_update,
+            reload_manager=reload_manager,
+            save_config=save_config,
+            validate_config=validate_motion_pipeline_configuration,
+            lock=MANAGER_RELOAD_LOCK,
+            probe_limiter=CONFIG_PROBE_LIMITER,
+        )
+    )
+)
+
+
 @app.exception_handler(StorageTasksActiveError)
 async def storage_tasks_active_handler(
     _request: Request,
@@ -1005,11 +868,6 @@ async def application_event_stream(request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.get("/api/config")
-def get_config() -> dict:
-    return _redacted_config_payload(config)
 
 
 @app.get("/api/motion/pipeline/catalog")
@@ -2201,193 +2059,6 @@ def telemetry(hours: int = 24, camera_id: str = "") -> dict:
         "activity": activity,
         "cameras": cameras,
     }
-
-
-@app.put("/api/config")
-def put_config(next_config: AppConfig) -> dict:
-    try:
-        next_config = _restore_config_secrets(next_config, config)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    try:
-        validate_motion_pipeline_configuration(next_config)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    effective_config, apply_result = apply_config_update(next_config, assign_ids=True)
-    return {"ok": True, "cameras": len(effective_config.cameras), **apply_result}
-
-
-@app.put("/api/config/cameras/{camera_id}/zones")
-def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:
-    global config
-    with MANAGER_RELOAD_LOCK:
-        next_config = config.model_copy(deep=True)
-        camera = camera_by_id(next_config, camera_id)
-        if camera is None:
-            raise HTTPException(status_code=404, detail="camera not found")
-        worker = manager.workers.get(camera_id)
-        if worker is None:
-            raise HTTPException(status_code=404, detail="camera worker not found")
-        current_camera = camera_by_id(config, camera_id)
-        previous_zones = [zone.model_dump(mode="json") for zone in (current_camera.zones if current_camera else [])]
-        camera.zones = zones
-        next_zone_payload = [zone.model_dump(mode="json") for zone in camera.zones]
-        try:
-            manager.update_camera_zones(camera_id, camera.zones, previous_zones)
-            save_config(next_config, assign_ids=False)
-        except Exception:
-            try:
-                manager.update_camera_zones(
-                    camera_id,
-                    [DetectionZone.model_validate(zone) for zone in previous_zones],
-                    next_zone_payload,
-                )
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "failed to roll back camera zones for %s",
-                    camera_id,
-                )
-            raise
-        config = next_config
-        manager.config = next_config
-    return {
-        "ok": True,
-        "camera_id": camera.id,
-        "zones": [zone.model_dump(mode="json") for zone in camera.zones],
-        "workers_restarted": False,
-    }
-
-
-@app.put("/api/config/cameras/order")
-def put_camera_order(camera_ids: list[str]) -> dict:
-    global config
-    with MANAGER_RELOAD_LOCK:
-        existing_ids = [camera.id for camera in config.cameras]
-        if len(camera_ids) != len(existing_ids) or len(set(camera_ids)) != len(camera_ids):
-            raise HTTPException(status_code=400, detail="camera order must contain every camera exactly once")
-        if set(camera_ids) != set(existing_ids):
-            raise HTTPException(status_code=400, detail="camera order does not match configured cameras")
-        camera_by_identifier = {camera.id: camera for camera in config.cameras}
-        next_config = config.model_copy(deep=True)
-        next_config.cameras = [camera_by_identifier[camera_id].model_copy(deep=True) for camera_id in camera_ids]
-        save_config(next_config, assign_ids=False)
-
-        config = next_config
-        manager.config = next_config
-        manager.workers = {camera_id: manager.workers[camera_id] for camera_id in camera_ids}
-    return {"ok": True, "camera_ids": camera_ids}
-
-
-@app.put("/api/config/cameras/{camera_id}")
-def put_camera(camera_id: str, camera_settings: CameraConfig) -> dict:
-    with MANAGER_RELOAD_LOCK:
-        next_config = config.model_copy(deep=True)
-        existing_index = next((index for index, item in enumerate(next_config.cameras) if item.id == camera_id), None)
-        existing = next_config.cameras[existing_index] if existing_index is not None else None
-        try:
-            camera_settings = _restore_camera_secrets(camera_settings, existing)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        used_ids = {item.id for item in next_config.cameras if item.id != camera_id}
-        base_id = slugify_camera_id(camera_settings.name or camera_settings.id)
-        next_id = base_id
-        suffix = 2
-        while next_id in used_ids:
-            next_id = f"{base_id}-{suffix}"
-            suffix += 1
-        camera_settings.id = next_id
-        camera_settings.zones = existing.zones if existing is not None else []
-        if existing_index is None:
-            next_config.cameras.append(camera_settings)
-        else:
-            next_config.cameras[existing_index] = camera_settings
-        try:
-            validate_motion_pipeline_configuration(next_config)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        _effective, apply_result = apply_config_update(next_config)
-    return {
-        "ok": True,
-        "camera": _redacted_camera_payload(camera_settings),
-        **apply_result,
-    }
-
-
-@app.delete("/api/config/cameras/{camera_id}")
-def delete_camera(camera_id: str) -> dict:
-    with MANAGER_RELOAD_LOCK:
-        next_config = config.model_copy(deep=True)
-        remaining = [camera for camera in next_config.cameras if camera.id != camera_id]
-        if len(remaining) == len(next_config.cameras):
-            raise HTTPException(status_code=404, detail="camera not found")
-        next_config.cameras = remaining
-        reload_manager(next_config)
-    return {"ok": True, "camera_id": camera_id}
-
-
-@app.post("/api/config/probe")
-def probe_config(payload: ConfigProbeRequest) -> dict:
-    if not CONFIG_PROBE_LIMITER.acquire(blocking=False):
-        raise HTTPException(
-            status_code=429,
-            detail="too many camera probes are already running",
-            headers={"Retry-After": "2"},
-        )
-    try:
-        host = payload.host.strip()
-        username = payload.username.strip()
-        password = payload.password
-        if password == SECRET_PLACEHOLDER:
-            existing = camera_by_id(config, payload.camera_id)
-            if existing is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="masked probe credentials require an existing camera",
-                )
-            password = existing.onvif.password or existing.baichuan.password
-        result = {
-            "host": host,
-            "onvif": {
-                "port": payload.onvif_port,
-                "reachable": _tcp_reachable(host, payload.onvif_port),
-                "capabilities": {},
-                "error": "",
-            },
-            "baichuan": {
-                "port": payload.baichuan_port,
-                "reachable": _tcp_reachable(host, payload.baichuan_port),
-            },
-            "reolink_likely": False,
-        }
-        result["reolink_likely"] = bool(result["baichuan"]["reachable"])
-
-        if result["onvif"]["reachable"] and username and password:
-            try:
-                from onvif import ONVIFCamera
-                from zeep import Transport
-
-                transport = Transport(operation_timeout=5)
-                camera = ONVIFCamera(
-                    host,
-                    payload.onvif_port,
-                    username,
-                    password,
-                    transport=transport,
-                )
-                device = camera.create_devicemgmt_service()
-                capabilities = device.GetCapabilities({"Category": "All"})
-                result["onvif"]["capabilities"] = {
-                    "media": bool(getattr(capabilities, "Media", None)),
-                    "events": bool(getattr(capabilities, "Events", None)),
-                    "ptz": bool(getattr(capabilities, "PTZ", None)),
-                    "analytics": bool(getattr(capabilities, "Analytics", None)),
-                }
-            except Exception as exc:
-                error = redact_log_message(str(exc) or "ONVIF capability probe failed")
-                result["onvif"]["error"] = error[:500]
-        return result
-    finally:
-        CONFIG_PROBE_LIMITER.release()
 
 
 @app.get("/api/events")
@@ -9277,14 +8948,6 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     finally:
         concat_path.unlink(missing_ok=True)
         tmp_path.unlink(missing_ok=True)
-
-
-def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
 
 
 def _write_concat_file(rows: list[dict]) -> Path:

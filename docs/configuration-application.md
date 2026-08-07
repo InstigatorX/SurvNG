@@ -80,3 +80,11 @@ dependency order, and compensates every attempted step in reverse order.
 runtime-preference transfer, persistence, atomic publication, and recovery-manager
 construction. The API layer supplies process cache hooks but no longer implements
 either transaction itself.
+
+The Admin API is also isolated behind `config_routes.py`. That router owns HTTP
+validation, secret masking/restoration, camera probes, and response formatting;
+it receives configuration and lifecycle operations explicitly from the process
+composition root. It does not construct managers or mutate module globals. This
+keeps transport concerns separate from the transactional application services
+while preserving one process-wide lock for camera edits, zone updates, and
+ordering changes.

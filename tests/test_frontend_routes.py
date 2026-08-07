@@ -19,7 +19,11 @@ class FrontendRouteTest(unittest.TestCase):
                 self.assertIn("text/html", response.media_type)
 
     def test_smart_search_route_is_registered(self) -> None:
-        paths = {route.path for route in app.routes}
+        paths = {
+            path
+            for route in app.routes
+            if (path := getattr(route, "path", None)) is not None
+        }
 
         self.assertIn("/recordings/search", paths)
 
