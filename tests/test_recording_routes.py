@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import TestCase
+
+from survng.app.recording_routes import (
+    RecordingRouteDependencies,
+    create_recording_router,
+)
+
+
+class _Recorder:
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+
+    def recording_availability_between(self, *_args, **_kwargs) -> dict:
+        return {
+            "ranges": [{"marker": self.marker}],
+            "segment_count": 1,
+        }
+
+
+class _Events:
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+
+    def for_camera_range(self, *_args, **_kwargs) -> list[dict]:
+        return []
+
+
+class _Manager:
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+        self.recorder = _Recorder(marker)
+        self.events = _Events(marker)
+        self.config = SimpleNamespace(recording_segment_seconds=10, cameras=[])
+
+    def camera(self, camera_id: str) -> object | None:
+        return object() if camera_id == "gate" else None
+
+
+def _dependencies(get_manager) -> RecordingRouteDependencies:
+    return RecordingRouteDependencies(
+        get_manager=get_manager,
+        get_config=lambda: SimpleNamespace(
+            recording_segment_seconds=10,
+            cameras=[],
+        ),
+        get_media_exports=lambda: SimpleNamespace(),
+        public_url=lambda value: value,
+        recording_rows=lambda *_args, **_kwargs: [],
+        recording_day_rows=lambda *_args, **_kwargs: [],
+        recording_preview_path=lambda *_args, **_kwargs: Path("preview.jpg"),
+        recording_day_fmp4_paths=lambda *_args, **_kwargs: (
+            Path("init.mp4"),
+            Path("media.m4s"),
+        ),
+        recording_file_response=lambda *_args, **_kwargs: None,
+        event_clip_window=lambda *_args: (5.0, 5.0),
+        ensure_event_clip=lambda *_args, **_kwargs: Path("clip.mp4"),
+    )
+
+
+class RecordingRouteLifecycleTests(TestCase):
+    def test_recording_helper_receives_request_manager_snapshot(self) -> None:
+        active_manager = _Manager("current")
+        helper_managers: list[_Manager] = []
+        dependencies = replace(
+            _dependencies(lambda: active_manager),
+            recording_rows=lambda manager, *_args, **_kwargs: (
+                helper_managers.append(manager) or []
+            ),
+        )
+
+        bundle = create_recording_router(dependencies)
+        bundle.handlers["recordings"]("gate", 10, "main")
+
+        self.assertEqual(helper_managers, [active_manager])
+
+    def test_request_snapshots_one_manager_generation(self) -> None:
+        managers = [_Manager("old"), _Manager("new")]
+        calls = 0
+
+        def get_manager() -> _Manager:
+            nonlocal calls
+            manager = managers[min(calls, 1)]
+            calls += 1
+            return manager
+
+        bundle = create_recording_router(_dependencies(get_manager))
+        response = bundle.handlers["recording_day"](
+            "gate",
+            100.0,
+            200.0,
+            "main",
+        )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(response["recordings"], [{"marker": "old"}])
+
+    def test_new_request_observes_new_manager_generation(self) -> None:
+        active = _Manager("old")
+
+        def get_manager() -> _Manager:
+            return active
+
+        bundle = create_recording_router(_dependencies(get_manager))
+        first = bundle.handlers["recording_day"]("gate", 100.0, 200.0, "main")
+        active = _Manager("new")
+        second = bundle.handlers["recording_day"]("gate", 100.0, 200.0, "main")
+
+        self.assertEqual(first["recordings"], [{"marker": "old"}])
+        self.assertEqual(second["recordings"], [{"marker": "new"}])

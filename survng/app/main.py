@@ -119,17 +119,34 @@ from .incident_utils import (
     DEFAULT_INCIDENT_GAP_SECONDS,
     event_epoch,
     event_snapshot_path,
-    incident_event_groups,
     snapshot_media_type,
-    stable_incident_id,
-    stable_incident_key,
+)
+from .incident_presenter import (
+    _best_incident_event,
+    _event_row,
+    _incident_event_payload,
+    _incident_list_payload,
+    _incident_row,
+    _incident_rows,
+    _recording_event_row,
+    _recording_grid_incident_payload,
 )
 from .recording_media import (
     concatenated_clip_timing,
     event_clip_window,
-    hls_map_transition,
     playback_segment_duration,
-    resolve_stream_fingerprints,
+)
+from .recording_routes import (
+    MediaExportBatchRequest,
+    MediaExportMetadataRequest,
+    MediaExportProtectionRequest,
+    MediaExportRequest,
+    RecordingRouteDependencies,
+    _public_recording_row,
+    _recording_playback_window,
+    _validate_recording_range,
+    create_recording_router,
+    recording_source,
 )
 from .process_memory import process_memory_status
 from .object_tracking import ultralytics_deepocsort_dependency_status
@@ -146,7 +163,6 @@ config = load_config()
 manager = AppManager(config)
 LOGGER = logging.getLogger(__name__)
 LOG_LINES: deque[dict] = deque(maxlen=1000)
-RECORDING_LOOKUP_LIMIT = 20000
 RECORDING_FMP4_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 RECORDING_FMP4_LOCKS_GUARD = threading.Lock()
 EVENT_CLIP_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
@@ -155,7 +171,6 @@ RECORDING_DAY_CACHE: dict[tuple[str, str, int, int], tuple[float, list[dict]]] =
 RECORDING_DAY_CACHE_LOCK = threading.Lock()
 RECORDING_DAY_CACHE_SECONDS = 30.0
 RECORDING_NEAR_LIVE_CACHE_SECONDS = 2.0
-RECORDING_PLAYBACK_WINDOW_SECONDS = 15 * 60
 RECORDING_PREVIEW_INTERVAL_SECONDS = 5.0
 RECORDING_PREVIEW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 RECORDING_PREVIEW_MAX_BYTES = 256 * 1024 * 1024
@@ -417,7 +432,6 @@ class SemanticSearchRequest(BaseModel):
     minimum_score: float = Field(default=-1.0, ge=-1.0, le=1.0)
 
 
-
 def _ffmpeg_sibling_tool(name: str) -> str:
     ffmpeg = Path(config.ffmpeg_path)
     if ffmpeg.name == "ffmpeg":
@@ -438,30 +452,9 @@ def normalize_source(source: str) -> str:
     return "main" if source == "main" else "live"
 
 
-def recording_source(source: str = "main") -> str:
-    return "live" if source == "live" else "main"
-
-
 def _require_recording_camera(camera_id: str) -> None:
     if manager.camera(camera_id) is None:
         raise HTTPException(status_code=404, detail="camera not found")
-
-
-def _validate_recording_range(
-    start_epoch: float,
-    end_epoch: float,
-    maximum_seconds: float,
-    detail: str,
-) -> None:
-    if not math.isfinite(start_epoch) or not math.isfinite(end_epoch):
-        raise HTTPException(status_code=400, detail=detail)
-    try:
-        datetime.fromtimestamp(start_epoch, timezone.utc)
-        datetime.fromtimestamp(end_epoch, timezone.utc)
-    except (OverflowError, OSError, ValueError):
-        raise HTTPException(status_code=400, detail=detail) from None
-    if end_epoch <= start_epoch or end_epoch - start_epoch > maximum_seconds:
-        raise HTTPException(status_code=400, detail=detail)
 
 
 class StorageTasksActiveError(RuntimeError):
@@ -548,7 +541,6 @@ def reload_manager(
     )
     lifecycle.reload(config, manager, effective, persist=persist)
     return effective
-
 
 
 def _manager_owned_config(config_value: AppConfig) -> dict:
@@ -903,32 +895,6 @@ class RecordingRetentionRequest(BaseModel):
     apply: bool = False
 
 
-class MediaExportRequest(BaseModel):
-    kind: str = Field(default="recording", pattern=r"^(recording|timelapse)$")
-    camera_id: str = Field(min_length=1, max_length=128)
-    source: str = Field(default="main", pattern=r"^(main|live)$")
-    start_epoch: float
-    end_epoch: float
-    sample_interval_seconds: float = Field(default=30.0, ge=1.0, le=3600.0)
-    output_fps: int = Field(default=30, ge=1, le=60)
-    width: int = Field(default=1280, ge=320, le=3840)
-    height: int = Field(default=0, ge=0, le=2160)
-    label: str = Field(default="", max_length=120)
-
-
-class MediaExportProtectionRequest(BaseModel):
-    protected: bool
-
-
-class MediaExportMetadataRequest(BaseModel):
-    label: str = Field(default="", max_length=120)
-
-
-class MediaExportBatchRequest(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=100)
-    action: str = Field(pattern=r"^(protect|unprotect|delete)$")
-
-
 @app.get("/api/retention/status")
 def recording_retention_status() -> dict:
     return manager.recording.retention_status()
@@ -969,7 +935,6 @@ def cancel_storage_maintenance() -> dict:
         return STORAGE_MAINTENANCE.cancel()
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-
 
 
 def _run_ffmpeg_list(args: list[str], timeout: float = 5.0) -> str:
@@ -6981,555 +6946,6 @@ def set_camera_detection(camera_id: str, state: CameraFeatureState) -> dict:
     return {"ok": True, "detection_enabled": state.enabled}
 
 
-@app.get("/api/cameras/{camera_id}/recordings")
-def recordings(camera_id: str, limit: int = 200, source: str = "main") -> list[dict]:
-    _require_recording_camera(camera_id)
-    rows = _recording_rows(
-        camera_id,
-        limit=max(1, min(limit, RECORDING_LOOKUP_LIMIT)),
-        source=recording_source(source),
-    )
-    return [_public_recording_row(row) for row in rows]
-
-
-@app.get("/api/cameras/{camera_id}/recordings/events")
-def recording_events(camera_id: str, limit: int = 1000, source: str = "main") -> list[dict]:
-    _require_recording_camera(camera_id)
-    rows = _recording_rows(camera_id, limit=RECORDING_LOOKUP_LIMIT, source=recording_source(source))
-    if not rows:
-        return []
-    start_epoch = rows[0].get("start_epoch")
-    end_epoch = rows[-1].get("end_epoch")
-    if start_epoch is None or end_epoch is None:
-        return []
-
-    events = manager.events.for_camera_range(
-        camera_id,
-        datetime.fromtimestamp(float(start_epoch), timezone.utc).isoformat(),
-        datetime.fromtimestamp(float(end_epoch), timezone.utc).isoformat(),
-        limit=max(1, min(limit, 5000)),
-    )
-    return [_recording_event_row(event, rows) for event in events]
-
-
-@app.get("/api/cameras/{camera_id}/recordings/day")
-def recording_day(
-    camera_id: str,
-    start_epoch: float,
-    end_epoch: float,
-    source: str = "main",
-) -> dict:
-    _require_recording_camera(camera_id)
-    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
-    selected_source = recording_source(source)
-    source_availability = {
-        candidate: manager.recorder.recording_availability_between(
-            camera_id,
-            start_epoch,
-            end_epoch,
-            candidate,
-            discover_missing=False,
-        )
-        for candidate in ("main", "live")
-    }
-    availability = source_availability[selected_source]
-    available_sources = [
-        candidate for candidate in ("main", "live")
-        if int(source_availability[candidate]["segment_count"]) > 0
-    ]
-    events = manager.events.for_camera_range(
-        camera_id,
-        datetime.fromtimestamp(start_epoch, timezone.utc).isoformat(),
-        datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
-        limit=5000,
-    )
-    public_events = [_event_row(event) for event in events]
-    return {
-        "camera_id": camera_id,
-        "source": selected_source,
-        "start_epoch": start_epoch,
-        "end_epoch": end_epoch,
-        "recordings": availability["ranges"],
-        "availability": availability["ranges"],
-        "recording_count": availability["segment_count"],
-        "events": public_events,
-        "incidents": [
-            _incident_list_payload(incident)
-            for incident in _incident_rows(public_events)
-        ],
-        "available_sources": available_sources,
-    }
-
-
-@app.get("/api/recordings/grid/day")
-def recording_grid_day(
-    start_epoch: float,
-    end_epoch: float,
-    source: str = "live",
-) -> dict:
-    """Return local-index history for the synchronized all-camera recording view."""
-    _validate_recording_range(
-        start_epoch,
-        end_epoch,
-        90000,
-        "invalid recording grid day range",
-    )
-    selected_source = recording_source(source)
-    start_at = datetime.fromtimestamp(start_epoch, timezone.utc).isoformat()
-    end_at = datetime.fromtimestamp(end_epoch, timezone.utc).isoformat()
-    camera_payloads: list[dict[str, object]] = []
-    aggregate_ranges: list[dict[str, object]] = []
-    aggregate_incidents: list[dict] = []
-    available_sources: set[str] = set()
-    cameras = list(config.cameras)
-    camera_ids = {camera.id for camera in cameras}
-    events_by_camera: dict[str, list[dict]] = {camera_id: [] for camera_id in camera_ids}
-    if hasattr(manager.events, "between_compact"):
-        for event in manager.events.between_compact(start_at, end_at):
-            camera_id = str(event.get("camera_id") or "")
-            if camera_id in events_by_camera:
-                events_by_camera[camera_id].append(event)
-    grid_availability = None
-    if hasattr(manager.recorder, "recording_grid_availability_between"):
-        grid_availability = manager.recorder.recording_grid_availability_between(
-            [camera.id for camera in cameras],
-            start_epoch,
-            end_epoch,
-        )
-    for camera in cameras:
-        if grid_availability is not None:
-            source_availability = grid_availability[camera.id]
-        else:
-            source_availability = {
-                candidate: manager.recorder.recording_availability_between(
-                    camera.id,
-                    start_epoch,
-                    end_epoch,
-                    candidate,
-                    discover_missing=False,
-                )
-                for candidate in ("main", "live")
-            }
-        camera_sources = [
-            candidate
-            for candidate in ("main", "live")
-            if int(source_availability[candidate]["segment_count"]) > 0
-        ]
-        available_sources.update(camera_sources)
-        availability = source_availability[selected_source]
-        ranges = [dict(item) for item in availability["ranges"]]
-        for candidate in (selected_source, "live" if selected_source == "main" else "main"):
-            for range_item in source_availability[candidate]["ranges"]:
-                item = dict(range_item)
-                item["camera_id"] = camera.id
-                item["source"] = candidate
-                aggregate_ranges.append(item)
-        event_rows = events_by_camera[camera.id]
-        if not hasattr(manager.events, "between_compact"):
-            event_rows = manager.events.for_camera_range(
-                camera.id,
-                start_at,
-                end_at,
-                limit=5000,
-            )
-        public_events = [_event_row(event) for event in event_rows]
-        incidents = [
-            _recording_grid_incident_payload(incident)
-            for incident in _incident_rows(public_events)
-        ]
-        aggregate_incidents.extend(incidents)
-        camera_payloads.append({
-            "camera_id": camera.id,
-            "camera_name": camera.name,
-            "source": selected_source,
-            "recordings": ranges,
-            "recording_count": int(availability["segment_count"]),
-            "available_sources": camera_sources,
-        })
-    aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
-    aggregate_incidents.sort(
-        key=lambda item: float(item.get("start_epoch") or 0)
-    )
-    return {
-        "view": "all_cameras",
-        "source": selected_source,
-        "start_epoch": start_epoch,
-        "end_epoch": end_epoch,
-        "recordings": aggregate_ranges,
-        "availability": aggregate_ranges,
-        "incidents": aggregate_incidents,
-        "available_sources": sorted(available_sources),
-        "cameras": camera_payloads,
-    }
-
-
-@app.get("/api/recordings/grid/updates")
-def recording_grid_updates(
-    start_epoch: float,
-    end_epoch: float,
-    after_epoch: float,
-    source: str = "live",
-) -> dict:
-    """Return a bounded near-live delta for the synchronized camera grid."""
-    _validate_recording_range(
-        start_epoch,
-        end_epoch,
-        90000,
-        "invalid recording grid update range",
-    )
-    if not math.isfinite(after_epoch):
-        raise HTTPException(status_code=400, detail="invalid recording grid update cursor")
-    selected_source = recording_source(source)
-    cameras = list(config.cameras)
-    camera_ids = {camera.id for camera in cameras}
-    overlap_seconds = max(
-        5.0,
-        float(getattr(config, "recording_segment_seconds", 10.0)) * 2,
-        float(DEFAULT_INCIDENT_GAP_SECONDS) * 2,
-    )
-    update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
-    # The recorder's ten-second index loop already discovers every configured
-    # source. Keep this multi-camera request SQLite-only instead of scheduling
-    # a second wave of per-camera NFS directory scans.
-    availability_by_camera = manager.recorder.recording_grid_availability_between(
-        [camera.id for camera in cameras],
-        update_start,
-        end_epoch,
-    )
-    aggregate_ranges: list[dict[str, object]] = []
-    for camera in cameras:
-        source_availability = availability_by_camera[camera.id]
-        for candidate in (selected_source, "live" if selected_source == "main" else "main"):
-            for range_item in source_availability[candidate]["ranges"]:
-                item = dict(range_item)
-                item["camera_id"] = camera.id
-                item["source"] = candidate
-                aggregate_ranges.append(item)
-    event_start = max(
-        start_epoch,
-        min(end_epoch, after_epoch) - max(overlap_seconds, 5 * 60.0),
-    )
-    event_rows = [
-        row
-        for row in manager.events.between_compact(
-            datetime.fromtimestamp(event_start, timezone.utc).isoformat(),
-            datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
-        )
-        if str(row.get("camera_id") or "") in camera_ids
-    ]
-    public_events = [_event_row(event) for event in event_rows]
-    aggregate_ranges.sort(key=lambda item: float(item.get("start_epoch") or 0))
-    return {
-        "view": "all_cameras",
-        "source": selected_source,
-        "start_epoch": update_start,
-        "end_epoch": end_epoch,
-        "availability": aggregate_ranges,
-        "incidents": [
-            _recording_grid_incident_payload(incident)
-            for incident in _incident_rows(public_events)
-        ],
-    }
-
-
-def _public_media_export(job: dict[str, object]) -> dict[str, object]:
-    payload = dict(job)
-    for key in ("download_url", "media_url"):
-        if payload.get(key):
-            payload[key] = public_url(str(payload[key]))
-    return payload
-
-
-@app.post("/api/exports", status_code=202)
-def create_media_export(request: MediaExportRequest) -> dict[str, object]:
-    _require_recording_camera(request.camera_id)
-    maximum = 24 * 60 * 60 if request.kind == "recording" else 7 * 24 * 60 * 60
-    _validate_recording_range(
-        request.start_epoch,
-        request.end_epoch,
-        maximum,
-        f"invalid {request.kind} export range",
-    )
-    options: dict[str, object] = {}
-    if request.kind == "recording":
-        options = {"height": request.height}
-    elif request.height > 0:
-        options = {
-            "sample_interval_seconds": request.sample_interval_seconds,
-            "output_fps": request.output_fps,
-            "height": request.height,
-        }
-    else:
-        options = {
-            "sample_interval_seconds": request.sample_interval_seconds,
-            "output_fps": request.output_fps,
-            "width": request.width,
-        }
-    try:
-        job = _media_export_manager().create({
-            "kind": request.kind,
-            "camera_id": request.camera_id,
-            "source": recording_source(request.source),
-            "start_epoch": request.start_epoch,
-            "end_epoch": request.end_epoch,
-            "options": options,
-            "label": request.label.strip(),
-            "origin": "manual",
-        })
-    except RuntimeError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-    return _public_media_export(job)
-
-
-@app.get("/api/exports")
-def list_media_exports(
-    limit: int = 50,
-    offset: int = 0,
-    camera_id: str = "",
-    kind: str = "",
-    status: str = "",
-    protected: bool | None = None,
-) -> dict[str, object]:
-    if kind and kind not in {"recording", "timelapse"}:
-        raise HTTPException(status_code=400, detail="invalid export kind")
-    if status and status not in {
-        "queued", "running", "cancelling", "completed", "failed", "cancelled",
-        "active", "terminal",
-    }:
-        raise HTTPException(status_code=400, detail="invalid export status")
-    export_manager = _media_export_manager()
-    filters = {
-        "camera_id": camera_id,
-        "kind": kind,
-        "status": status,
-        "protected": protected,
-    }
-    jobs = export_manager.list(
-        max(1, min(limit, 1000)),
-        offset=max(0, offset),
-        **filters,
-    )
-    return {
-        "exports": [_public_media_export(job) for job in jobs],
-        "total": export_manager.count(**filters),
-        "offset": max(0, offset),
-        "limit": max(1, min(limit, 1000)),
-    }
-
-
-@app.get("/api/exports/summary")
-def media_export_summary() -> dict[str, object]:
-    return _media_export_manager().summary()
-
-
-@app.post("/api/exports/batch")
-def batch_media_exports(request: MediaExportBatchRequest) -> dict[str, object]:
-    return _public_media_export_batch(
-        _media_export_manager().batch(request.ids, request.action)
-    )
-
-
-def _public_media_export_batch(payload: dict[str, object]) -> dict[str, object]:
-    result = dict(payload)
-    result["results"] = [
-        _public_media_export(job)
-        for job in list(payload.get("results") or [])
-    ]
-    return result
-
-
-@app.get("/api/exports/{job_id}")
-def get_media_export(job_id: str) -> dict[str, object]:
-    job = _media_export_manager().get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="export not found")
-    return _public_media_export(job)
-
-
-@app.get("/api/exports/{job_id}/download")
-def download_media_export(job_id: str) -> FileResponse:
-    try:
-        path, name = _media_export_manager().output_path(job_id)
-    except (FileNotFoundError, ValueError):
-        raise HTTPException(status_code=404, detail="completed export not found") from None
-    return FileResponse(
-        path,
-        filename=name,
-        # New recording exports are always MP4. Keep the legacy ZIP media type
-        # until any already-completed archive jobs expire from the export store.
-        media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
-        headers={"Cache-Control": "private, no-store"},
-    )
-
-
-@app.get("/api/exports/{job_id}/media")
-def play_media_export(job_id: str) -> FileResponse:
-    try:
-        path, _name = _media_export_manager().output_path(job_id)
-    except (FileNotFoundError, ValueError):
-        raise HTTPException(status_code=404, detail="completed export not found") from None
-    return FileResponse(
-        path,
-        media_type="application/zip" if path.suffix.lower() == ".zip" else "video/mp4",
-        headers={"Cache-Control": "private, max-age=3600"},
-    )
-
-
-@app.patch("/api/exports/{job_id}/protection")
-def protect_media_export(
-    job_id: str,
-    request: MediaExportProtectionRequest,
-) -> dict[str, object]:
-    try:
-        return _public_media_export(
-            _media_export_manager().set_protected(job_id, request.protected)
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="export not found") from None
-
-
-@app.patch("/api/exports/{job_id}/metadata")
-def update_media_export_metadata(
-    job_id: str,
-    request: MediaExportMetadataRequest,
-) -> dict[str, object]:
-    try:
-        return _public_media_export(
-            _media_export_manager().set_label(job_id, request.label)
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="export not found") from None
-
-
-@app.delete("/api/exports/{job_id}", status_code=202)
-def delete_media_export(job_id: str, force: bool = False) -> dict[str, object]:
-    try:
-        return _public_media_export(
-            _media_export_manager().cancel_or_delete(job_id, force=force)
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="export not found") from None
-    except PermissionError:
-        raise HTTPException(
-            status_code=409,
-            detail="protected exports require explicit forced deletion",
-        ) from None
-
-
-@app.get("/api/cameras/{camera_id}/recordings/window")
-def recording_window(
-    camera_id: str,
-    start_epoch: float,
-    end_epoch: float,
-    source: str = "main",
-) -> dict:
-    _require_recording_camera(camera_id)
-    _validate_recording_range(start_epoch, end_epoch, 3600, "invalid recording window range")
-    selected_source = recording_source(source)
-    window_start, window_end = _recording_playback_window(start_epoch)
-    rows = _recording_day_rows(camera_id, window_start, window_end, selected_source)
-    return {
-        "camera_id": camera_id,
-        "source": selected_source,
-        "start_epoch": window_start,
-        "end_epoch": window_end,
-        "recordings": [_public_recording_row(row) for row in rows],
-    }
-
-
-@app.get("/api/cameras/{camera_id}/recordings/preview.jpg")
-def recording_preview(camera_id: str, epoch: float, source: str = "main") -> FileResponse:
-    _require_recording_camera(camera_id)
-    if not math.isfinite(epoch) or epoch <= 0:
-        raise HTTPException(status_code=400, detail="invalid recording preview time")
-    selected_source = recording_source(source)
-    rows = manager.recorder.recording_rows_between(
-        camera_id,
-        epoch - 0.001,
-        epoch + 0.001,
-        selected_source,
-        discover_missing=False,
-    )
-    row = next(
-        (
-            candidate for candidate in rows
-            if float(candidate.get("start_epoch") or 0) <= epoch
-            < float(candidate.get("end_epoch") or 0)
-        ),
-        None,
-    )
-    if row is None:
-        raise HTTPException(status_code=404, detail="no recording exists at this time")
-    preview_path = _recording_preview_path(row, epoch)
-    return FileResponse(
-        preview_path,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=3600"},
-    )
-
-
-@app.get("/api/cameras/{camera_id}/recordings/updates")
-def recording_updates(
-    camera_id: str,
-    start_epoch: float,
-    end_epoch: float,
-    after_epoch: float,
-    source: str = "main",
-) -> dict:
-    _require_recording_camera(camera_id)
-    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
-    if not math.isfinite(after_epoch):
-        raise HTTPException(status_code=400, detail="invalid recording update position")
-    selected_source = recording_source(source)
-    overlap_seconds = max(
-        5.0,
-        float(config.recording_segment_seconds) * 2,
-        float(DEFAULT_INCIDENT_GAP_SECONDS) * 2,
-    )
-    update_start = max(start_epoch, min(end_epoch, after_epoch) - overlap_seconds)
-    # Object analysis and tracking can finish after the recording edge moves.
-    # Re-read a wider event window so late-persisted incidents still appear in
-    # an already-open recording page without widening the recording-index scan.
-    event_update_start = max(
-        start_epoch,
-        min(end_epoch, after_epoch) - max(overlap_seconds, 5 * 60.0),
-    )
-    # Keep NFS directory enumeration off the request thread. The index worker
-    # services this wake-up immediately and the next lightweight update poll
-    # observes newly finalized segments.
-    manager.recorder.request_recording_edge_refresh(
-        camera_id,
-        selected_source,
-        after_epoch,
-    )
-    availability = manager.recorder.recording_availability_between(
-        camera_id,
-        update_start,
-        end_epoch,
-        selected_source,
-        discover_missing=False,
-    )
-    events = manager.events.for_camera_range(
-        camera_id,
-        datetime.fromtimestamp(event_update_start, timezone.utc).isoformat(),
-        datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
-        limit=1000,
-    )
-    public_events = [_event_row(event) for event in events]
-    return {
-        "camera_id": camera_id,
-        "source": selected_source,
-        "start_epoch": update_start,
-        "end_epoch": end_epoch,
-        "availability": availability["ranges"],
-        "events": public_events,
-        "incidents": [
-            _incident_list_payload(incident)
-            for incident in _incident_rows(public_events)
-        ],
-    }
-
-
 def _recording_day_rows(
     camera_id: str,
     start_epoch: float,
@@ -7537,24 +6953,29 @@ def _recording_day_rows(
     source: str,
     *,
     fresh: bool = False,
+    active_manager: AppManager | None = None,
 ) -> list[dict]:
+    selected_manager = active_manager or manager
     selected_source = recording_source(source)
     cache_key = (camera_id, selected_source, int(start_epoch), int(end_epoch))
     now = time.monotonic()
     if not fresh:
         with RECORDING_DAY_CACHE_LOCK:
             cached = RECORDING_DAY_CACHE.get(cache_key)
-            near_live = end_epoch >= time.time() - max(30.0, manager.recorder.segment_seconds * 3)
+            near_live = end_epoch >= time.time() - max(
+                30.0,
+                selected_manager.recorder.segment_seconds * 3,
+            )
             cache_seconds = (
                 RECORDING_NEAR_LIVE_CACHE_SECONDS
                 if near_live
                 else RECORDING_DAY_CACHE_SECONDS
             )
             if cached is not None and now - cached[0] < cache_seconds:
-                manager.recorder.lease_recordings_for_playback(cached[1])
+                selected_manager.recorder.lease_recordings_for_playback(cached[1])
                 return cached[1]
     rows = [
-        row for row in manager.recorder.recording_rows_between(
+        row for row in selected_manager.recorder.recording_rows_between(
             camera_id,
             start_epoch,
             end_epoch,
@@ -7564,20 +6985,15 @@ def _recording_day_rows(
         if int(row.get("size_bytes") or 0) > 1024
     ]
     if fresh:
-        rows = manager.recorder.discard_missing_recording_rows(rows)
-    manager.recorder.lease_recordings_for_playback(rows)
-    manager.recorder.queue_stream_fingerprints(rows)
+        rows = selected_manager.recorder.discard_missing_recording_rows(rows)
+    selected_manager.recorder.lease_recordings_for_playback(rows)
+    selected_manager.recorder.queue_stream_fingerprints(rows)
     with RECORDING_DAY_CACHE_LOCK:
         RECORDING_DAY_CACHE[cache_key] = (now, rows)
         expired = [key for key, value in RECORDING_DAY_CACHE.items() if now - value[0] >= RECORDING_DAY_CACHE_SECONDS]
         for key in expired:
             RECORDING_DAY_CACHE.pop(key, None)
     return rows
-
-
-def _recording_playback_window(epoch: float) -> tuple[float, float]:
-    start = math.floor(epoch / RECORDING_PLAYBACK_WINDOW_SECONDS) * RECORDING_PLAYBACK_WINDOW_SECONDS
-    return start, start + RECORDING_PLAYBACK_WINDOW_SECONDS
 
 
 def _recording_cache_metric(origin: str, metric: str, value: float = 1.0) -> None:
@@ -7773,9 +7189,19 @@ def _recording_file_response(path: Path, media_type: str) -> FileResponse:
     )
 
 
-def _recording_preview_path(row: dict, epoch: float) -> Path:
+def _recording_preview_path(
+    row: dict,
+    epoch: float,
+    *,
+    active_manager: AppManager | None = None,
+) -> Path:
     """Return a small cached JPEG near an epoch without mutating playback."""
-    source_path = _recording_storage_path(row.get("path"))
+    selected_manager = active_manager or manager
+    selected_config = getattr(selected_manager, "config", config)
+    source_path = _recording_storage_path(
+        row.get("path"),
+        active_manager=selected_manager,
+    )
     start_epoch = float(row.get("start_epoch") or 0)
     end_epoch = float(row.get("end_epoch") or start_epoch)
     if not start_epoch <= epoch < end_epoch:
@@ -7795,7 +7221,7 @@ def _recording_preview_path(row: dict, epoch: float) -> Path:
         f"{preview_offset:.3f}:480"
     )
     cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
-    cache_dir = manager.database_dir / "recording-preview-cache"
+    cache_dir = selected_manager.database_dir / "recording-preview-cache"
     preview_path = cache_dir / f"{cache_key}.jpg"
     if _recording_preview_ready(preview_path, touch=True):
         return preview_path
@@ -7815,7 +7241,7 @@ def _recording_preview_path(row: dict, epoch: float) -> Path:
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             command = [
-                config.ffmpeg_path,
+                selected_config.ffmpeg_path,
                 "-hide_banner",
                 "-loglevel",
                 "error",
@@ -8069,61 +7495,6 @@ def _recording_prewarm_loop() -> None:
                     logging.getLogger(__name__).exception("Recording prewarm failed for %s/%s", camera.id, source)
 
 
-@app.get("/api/cameras/{camera_id}/recordings/day.m3u8")
-def recording_day_hls_playlist(
-    camera_id: str,
-    start_epoch: float,
-    end_epoch: float,
-    source: str = "main",
-) -> Response:
-    _require_recording_camera(camera_id)
-    _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
-    selected_source = recording_source(source)
-    rows = _recording_day_rows(
-        camera_id,
-        start_epoch,
-        end_epoch,
-        selected_source,
-        fresh=True,
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="no recordings found")
-    target_duration = max(1, math.ceil(max(float(row["duration_seconds"]) for row in rows)))
-    query = f"start_epoch={start_epoch:.3f}&end_epoch={end_epoch:.3f}&source={selected_source}"
-    lines = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:7",
-        f"#EXT-X-TARGETDURATION:{target_duration}",
-        "#EXT-X-MEDIA-SEQUENCE:0",
-        "#EXT-X-PLAYLIST-TYPE:VOD",
-    ]
-    media_offset = 0.0
-    previous_fingerprint: str | None = None
-    fingerprints = resolve_stream_fingerprints([row.get("stream_fingerprint") for row in rows])
-    for row, stream_fingerprint in zip(rows, fingerprints):
-        row_start = float(row["start_epoch"])
-        segment_name = quote(str(row["name"]), safe="")
-        segment_query = f"{query}&media_offset={media_offset:.3f}"
-        map_lines, previous_fingerprint = hls_map_transition(
-            previous_fingerprint,
-            stream_fingerprint,
-            f"day/segment/{segment_name}/init.mp4?{segment_query}",
-        )
-        lines.extend(map_lines)
-        lines.extend([
-            f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
-            f"#EXTINF:{float(row['duration_seconds']):.3f},",
-            f"day/segment/{segment_name}/media.m4s?{segment_query}",
-        ])
-        media_offset += float(row["duration_seconds"])
-    lines.append("#EXT-X-ENDLIST")
-    return Response(
-        "\n".join(lines) + "\n",
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-store"},
-    )
-
-
 def _recording_day_fmp4_paths(
     camera_id: str,
     segment_name: str,
@@ -8132,12 +7503,22 @@ def _recording_day_fmp4_paths(
     source: str = "main",
     media_offset: float = 0.0,
     trim_end: bool = False,
+    *,
+    active_manager: AppManager | None = None,
 ) -> tuple[Path, Path]:
-    _require_recording_camera(camera_id)
+    selected_manager = active_manager or manager
+    if selected_manager.camera(camera_id) is None:
+        raise HTTPException(status_code=404, detail="camera not found")
     _validate_recording_range(start_epoch, end_epoch, 90000, "invalid recording day range")
     if not math.isfinite(media_offset) or media_offset < 0:
         raise HTTPException(status_code=400, detail="invalid recording media offset")
-    rows = _recording_day_rows(camera_id, start_epoch, end_epoch, source)
+    rows = _recording_day_rows(
+        camera_id,
+        start_epoch,
+        end_epoch,
+        source,
+        active_manager=selected_manager,
+    )
     if not segment_name or Path(segment_name).name != segment_name:
         raise HTTPException(status_code=404, detail="recording segment not found")
     segment_index = next(
@@ -8147,7 +7528,10 @@ def _recording_day_fmp4_paths(
     if segment_index is None:
         raise HTTPException(status_code=404, detail="recording segment not found")
     row = rows[segment_index]
-    path = _recording_storage_path(row.get("path"))
+    path = _recording_storage_path(
+        row.get("path"),
+        active_manager=selected_manager,
+    )
     segment_duration = playback_segment_duration(
         float(row["start_epoch"]),
         float(row["duration_seconds"]),
@@ -8160,149 +7544,32 @@ def _recording_day_fmp4_paths(
     return _recording_fmp4_files(path, segment_duration, media_offset)
 
 
-@app.get("/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/init.mp4")
-def recording_day_hls_init(
+def _recording_rows(
     camera_id: str,
-    segment_name: str,
-    start_epoch: float,
-    end_epoch: float,
+    limit: int,
     source: str = "main",
-    media_offset: float = 0.0,
-    trim_end: bool = False,
-) -> FileResponse:
-    init_path, _ = _recording_day_fmp4_paths(
-        camera_id, segment_name, start_epoch, end_epoch, source, media_offset, trim_end
-    )
-    return _recording_file_response(init_path, "video/mp4")
-
-
-@app.get("/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/media.m4s")
-def recording_day_hls_segment(
-    camera_id: str,
-    segment_name: str,
-    start_epoch: float,
-    end_epoch: float,
-    source: str = "main",
-    media_offset: float = 0.0,
-    trim_end: bool = False,
-) -> FileResponse:
-    _, media_path = _recording_day_fmp4_paths(
-        camera_id, segment_name, start_epoch, end_epoch, source, media_offset, trim_end
-    )
-    return _recording_file_response(media_path, "video/iso.segment")
-
-
-
-
-@app.get("/api/events/{event_id}/clip.mp4")
-def event_clip(event_id: int, before: float | None = None, after: float | None = None, source: str = "main") -> FileResponse:
-    event = manager.events.get(event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    enriched = _event_row(event)
-    before_seconds, after_seconds = _event_clip_window(before, after)
-    clip_source = recording_source(source)
-    clip_path = _ensure_event_clip(
-        enriched,
-        before=before_seconds,
-        after=after_seconds,
-        source=clip_source,
-    )
-    return FileResponse(
-        clip_path,
-        media_type="video/mp4",
-        headers={"Cache-Control": "private, max-age=3600"},
-    )
-
-
-@app.get("/api/events/{event_id}/stream.m3u8")
-def event_stream(event_id: int, before: float | None = None, after: float | None = None, source: str = "main") -> Response:
-    event = manager.events.get(event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    enriched = _event_row(event)
-    camera_id = str(enriched.get("camera_id") or "")
-    if not camera_id:
-        raise HTTPException(status_code=400, detail="event is missing camera")
-    before_seconds, after_seconds = _event_clip_window(before, after)
-    event_created_epoch = event_epoch(enriched)
-    window_start = event_created_epoch - before_seconds
-    window_end = event_created_epoch + after_seconds
-    selected_source = recording_source(source)
-    rows = _recording_day_rows(
+    *,
+    active_manager: AppManager | None = None,
+) -> list[dict]:
+    selected_manager = active_manager or manager
+    return selected_manager.recorder.recording_rows(
         camera_id,
-        window_start,
-        window_end,
-        selected_source,
-        fresh=True,
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="no recording window found")
-
-    first_start = float(rows[0]["start_epoch"])
-    start_offset = max(0.0, window_start - first_start)
-    clip_durations = [
-        playback_segment_duration(
-            float(row["start_epoch"]),
-            float(row["duration_seconds"]),
-            window_end,
-            True,
-        )
-        for row in rows
-    ]
-    target_duration = max(1, math.ceil(max(clip_durations)))
-    query = f"start_epoch={window_start:.3f}&end_epoch={window_end:.3f}&source={selected_source}"
-    lines = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:7",
-        f"#EXT-X-TARGETDURATION:{target_duration}",
-        "#EXT-X-MEDIA-SEQUENCE:0",
-        "#EXT-X-PLAYLIST-TYPE:VOD",
-        f"#EXT-X-START:TIME-OFFSET={start_offset:.3f},PRECISE=YES",
-    ]
-    media_offset = 0.0
-    previous_fingerprint: str | None = None
-    fingerprints = resolve_stream_fingerprints([row.get("stream_fingerprint") for row in rows])
-    for row, stream_fingerprint, clip_duration in zip(rows, fingerprints, clip_durations):
-        row_start = float(row["start_epoch"])
-        segment_name = quote(str(row["name"]), safe="")
-        segment_query = f"{query}&media_offset={media_offset:.3f}&trim_end=true"
-        map_uri = public_url(
-            f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/init.mp4?"
-            f"{segment_query}"
-        )
-        map_lines, previous_fingerprint = hls_map_transition(
-            previous_fingerprint,
-            stream_fingerprint,
-            map_uri,
-        )
-        lines.extend(map_lines)
-        lines.extend([
-            f"#EXT-X-PROGRAM-DATE-TIME:{datetime.fromtimestamp(row_start, timezone.utc).isoformat()}",
-            f"#EXTINF:{clip_duration:.3f},",
-            public_url(f"/api/cameras/{quote(camera_id, safe='')}/recordings/day/segment/{segment_name}/media.m4s?{segment_query}"),
-        ])
-        media_offset += clip_duration
-    lines.append("#EXT-X-ENDLIST")
-    return Response(
-        "\n".join(lines) + "\n",
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "private, max-age=30"},
+        limit=limit,
+        source=recording_source(source),
     )
 
 
-
-
-def _recording_rows(camera_id: str, limit: int, source: str = "main") -> list[dict]:
-    return manager.recorder.recording_rows(camera_id, limit=limit, source=recording_source(source))
-
-
-def _recording_storage_path(value: object) -> Path:
+def _recording_storage_path(
+    value: object,
+    *,
+    active_manager: AppManager | None = None,
+) -> Path:
+    selected_manager = active_manager or manager
     if not value:
         raise HTTPException(status_code=404, detail="recording file not found")
     try:
         path = Path(str(value)).resolve(strict=True)
-        path.relative_to(manager.recorder.recordings_dir.resolve())
+        path.relative_to(selected_manager.recorder.recordings_dir.resolve())
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="recording file not found") from None
     except (OSError, ValueError):
@@ -8310,120 +7577,6 @@ def _recording_storage_path(value: object) -> Path:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="recording file not found")
     return path
-
-
-def _public_recording_row(row: dict) -> dict:
-    payload = dict(row)
-    payload.pop("path", None)
-    return payload
-
-
-def _event_row(row: dict) -> dict:
-    event = dict(row)
-    event["snapshot_path"] = "available" if event.get("snapshot_path") else ""
-    event["recording_path"] = "available" if event.get("recording_path") else ""
-    try:
-        objects = json.loads(event.pop("objects_json", "[]") or "[]")
-    except (json.JSONDecodeError, TypeError):
-        objects = []
-    if not isinstance(objects, list):
-        objects = []
-    objects = [item for item in objects if isinstance(item, dict)]
-    qualification_entry = next(
-        (
-            item.get("motion_qualification")
-            for item in reversed(objects)
-            if item.get("status") == "motion_qualification"
-            and isinstance(item.get("motion_qualification"), dict)
-        ),
-        None,
-    )
-    raw_trigger_source = str(
-        (qualification_entry or {}).get("trigger_source")
-        or event.get("topic")
-        or "camera"
-    ).lower()
-    event["trigger_source"] = (
-        "ema"
-        if raw_trigger_source in {"adaptive", "visual_backup", "adaptive/visual_backup"}
-        else "camera"
-    )
-    tracking_entry = next(
-        (
-            item.get("object_tracking")
-            for item in reversed(objects)
-            if item.get("status") == "object_tracking"
-            and isinstance(item.get("object_tracking"), dict)
-        ),
-        None,
-    )
-    event["object_tracking"] = tracking_entry
-
-    def positive_confidence(item: dict) -> bool:
-        try:
-            confidence = float(item.get("confidence") or 0)
-            return math.isfinite(confidence) and confidence > 0
-        except (TypeError, ValueError):
-            return False
-
-    detected_objects = [
-        item for item in objects
-        if item.get("label")
-        and positive_confidence(item)
-        and item.get("incident_eligible") is not False
-    ]
-    tracked_objects = (
-        [item for item in tracking_entry.get("tracks", []) if isinstance(item, dict)]
-        if isinstance(tracking_entry, dict)
-        else []
-    )
-    event["objects"] = objects
-    event["has_objects"] = bool(detected_objects)
-    event["labels"] = sorted({
-        str(item["label"])
-        for item in [*detected_objects, *tracked_objects]
-        if item.get("label")
-    })
-    event["zones"] = sorted({
-        str(zone_name)
-        for item in [*detected_objects, *tracked_objects]
-        for zone_name in (
-            item.get("zones", [])
-            if isinstance(item.get("zones", []), list)
-            else []
-        )
-        if zone_name
-    })
-    return event
-
-
-def _best_incident_event(events: list[dict]) -> dict:
-    object_events = [event for event in events if event.get("has_objects")]
-    candidates = object_events or events
-
-    def score(event: dict) -> tuple[float, int]:
-        objects = event.get("objects") or []
-        confidences: list[float] = []
-        for item in objects:
-            if not isinstance(item, dict):
-                continue
-            try:
-                confidence = float(item.get("confidence") or 0)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(confidence):
-                confidences.append(confidence)
-        best_confidence = max(confidences, default=0.0)
-        return (best_confidence, int(event.get("id") or 0))
-
-    return max(candidates, key=score)
-
-
-def _incident_rows(rows: list[dict], gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
-    return [
-        _incident_row(camera_id, events)
-        for camera_id, events in incident_event_groups(rows, gap_seconds)
-    ]
 
 
 def _recent_incident_summaries(limit: int, gap_seconds: int) -> list[dict]:
@@ -8593,224 +7746,17 @@ def _incidents_with_faces(
     return incidents
 
 
-def _incident_event_payload(event: dict) -> dict:
-    payload = dict(event)
-    payload.pop("topic", None)
-    payload.pop("message", None)
-    payload["objects"] = [
-        {
-            key: item[key]
-            for key in (
-                "label",
-                "confidence",
-                "box",
-                "zones",
-                "mask_polygon",
-                "detection_frame_width",
-                "detection_frame_height",
-                "incident_eligible",
-                "temporal_consensus",
-                "temporal_sample_offset_seconds",
-                "temporal_observations",
-                "temporal_track_observations",
-                "temporal_incident_observations",
-                "temporal_required_observations",
-                "temporal_samples",
-                "temporal_peak_confidence",
-                "temporal_label_votes",
-                "temporal_center_displacement_ratio",
-                "temporal_center_path_ratio",
-                "temporal_first_observation_offset_seconds",
-                "temporal_last_observation_offset_seconds",
-                "temporal_newly_appeared",
-                "motion_correlated",
-                "motion_correlation",
-                "motion_correlation_threshold",
-                "motion_temporal_evidence_available",
-                "track_id",
-                "track_state",
-                "track_observations",
-            )
-            if key in item
-        }
-        for item in payload.get("objects", [])
-        if isinstance(item, dict) and item.get("label")
-    ]
-    payload["object_tracking"] = event.get("object_tracking")
-    return payload
-
-
-def _incident_list_payload(incident: dict) -> dict:
-    """Return the media-card data without expensive investigation details."""
-    payload = dict(incident)
-    representative_id = int(payload.get("representative_event_id") or 0)
-    representative_tracking = payload.get("object_tracking")
-    payload.pop("object_tracking", None)
-    payload.pop("motion_observations", None)
-    payload.pop("faces", None)
-
-    def compact_objects(objects: object) -> list[dict]:
-        if not isinstance(objects, list):
-            return []
-        return [
-            {
-                key: item[key]
-                for key in (
-                    "label",
-                    "confidence",
-                    "box",
-                    "zones",
-                    "mask_polygon",
-                    "detection_frame_width",
-                    "detection_frame_height",
-                    "incident_eligible",
-                    "track_id",
-                    "track_state",
-                )
-                if key in item
-            }
-            for item in objects
-            if isinstance(item, dict) and item.get("label")
-        ]
-
-    payload["objects"] = compact_objects(payload.get("objects"))
-
-    def compact_tracking_dimensions(tracking: object) -> dict[str, int] | None:
-        if not isinstance(tracking, dict):
-            return None
-        try:
-            width = int(tracking.get("frame_width") or 0)
-            height = int(tracking.get("frame_height") or 0)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if width <= 0 or height <= 0:
-            return None
-        return {"frame_width": width, "frame_height": height}
-
-    tracking_dimensions = compact_tracking_dimensions(representative_tracking)
-    if tracking_dimensions:
-        # The list view needs only the coordinate plane, not tracks or samples.
-        # Supplying it with the first payload prevents annotations from briefly
-        # scaling against the progressively resized thumbnail dimensions.
-        payload["object_tracking"] = tracking_dimensions
-    compact_events: list[dict] = []
-    for event in payload.get("events", []):
-        event_id = int(event.get("id") or 0)
-        compact_event = {
-            key: event[key]
-            for key in (
-                "id",
-                "camera_id",
-                "kind",
-                "created_at",
-                "has_objects",
-                "labels",
-                "zones",
-                "trigger_source",
-            )
-            if key in event
-        }
-        compact_event["objects"] = (
-            compact_objects(event.get("objects")) if event_id == representative_id else []
-        )
-        event_tracking_dimensions = compact_tracking_dimensions(event.get("object_tracking"))
-        if event_tracking_dimensions:
-            compact_event["object_tracking"] = event_tracking_dimensions
-        compact_events.append(compact_event)
-    payload["events"] = compact_events
-    return payload
-
-
-def _recording_grid_incident_payload(incident: dict) -> dict:
-    """Return only fields used by Recording History's timeline and thumbnail rail."""
-    return {
-        key: incident[key]
-        for key in (
-            "id",
-            "representative_event_id",
-            "camera_id",
-            "snapshot_path",
-            "start_epoch",
-            "last_epoch",
-            "has_objects",
-            "labels",
-        )
-        if key in incident
-    }
-
-
-def _incident_row(camera_id: str, events: list[dict]) -> dict:
-    ordered = sorted(events, key=event_epoch)
-    first = ordered[0]
-    last = ordered[-1]
-    representative = _best_incident_event(ordered)
-    representative_payload = _incident_event_payload(representative)
-    labels = sorted({label for event in ordered for label in event.get("labels", [])})
-    zones = sorted({zone for event in ordered for zone in event.get("zones", [])})
-    start_epoch = event_epoch(first)
-    motion_observations = sorted(
-        [
-            observation
-            for event in ordered
-            for observation in event.get("motion_observations", [])
-            if isinstance(observation, dict)
-        ],
-        key=event_epoch,
-    )
-    tracking_updates = [
-        {"created_at": str(tracking.get("updated_at") or "")}
-        for event in ordered
-        if isinstance((tracking := event.get("object_tracking")), dict)
-        and tracking.get("updated_at")
-        and tracking.get("tracks")
-    ]
-    final_item = max([last, *motion_observations, *tracking_updates], key=event_epoch)
-    last_epoch = event_epoch(final_item)
-    object_count = sum(1 for event in ordered if event.get("has_objects"))
-    incident = {
-        **representative_payload,
-        "id": stable_incident_id(camera_id, first.get("id")),
-        "incident_id": stable_incident_key(camera_id, first.get("id")),
-        "representative_event_id": representative.get("id"),
-        "camera_id": camera_id,
-        "kind": "motion",
-        "created_at": representative.get("created_at"),
-        "start_at": first.get("created_at"),
-        "end_at": final_item.get("created_at"),
-        "start_epoch": start_epoch,
-        "last_epoch": last_epoch,
-        "duration_seconds": max(0.0, last_epoch - start_epoch),
-        "event_count": len(ordered),
-        "motion_observation_count": len(motion_observations),
-        "object_event_count": object_count,
-        # An incident's trigger is the source that opened it, even when later
-        # events from another source are grouped into the same incident.
-        "trigger_source": first.get("trigger_source", "camera"),
-        "has_objects": bool(labels),
-        "labels": labels,
-        "zones": zones,
-        "events": [_incident_event_payload(event) for event in reversed(ordered)],
-        "motion_observations": list(reversed(motion_observations)),
-        # Top-level incident media and objects come from the representative
-        # event, so its tracking metadata must use the same temporal context.
-        "object_tracking": representative.get("object_tracking"),
-    }
-    return incident
-
-
-def _recording_event_row(event: dict, recordings: list[dict]) -> dict:
-    event = _event_row(event)
-    created_epoch = event_epoch(event)
-    first_start = float(recordings[0]["start_epoch"])
-    event["timeline_offset"] = max(0.0, created_epoch - first_start)
-    return event
-
-
-def _event_clip_window(before: float | None, after: float | None) -> tuple[float, float]:
+def _event_clip_window(
+    before: float | None,
+    after: float | None,
+    *,
+    active_manager: AppManager | None = None,
+) -> tuple[float, float]:
+    selected_config = (active_manager or manager).config
     try:
         return event_clip_window(
-            config.event_clip_before_seconds,
-            config.event_clip_after_seconds,
+            selected_config.event_clip_before_seconds,
+            selected_config.event_clip_after_seconds,
             before,
             after,
         )
@@ -8818,13 +7764,21 @@ def _event_clip_window(before: float | None, after: float | None) -> tuple[float
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-def _event_clip_path(event: dict, before: float, after: float, source: str = "main") -> Path:
+def _event_clip_path(
+    event: dict,
+    before: float,
+    after: float,
+    source: str = "main",
+    *,
+    active_manager: AppManager | None = None,
+) -> Path:
+    selected_manager = active_manager or manager
     event_id = int(event.get("id") or 0)
     camera_id = slugify_camera_id(str(event.get("camera_id") or "camera"))
     safe_before = int(max(0.0, min(float(before), 3600.0)) * 1000)
     safe_after = int(max(0.0, min(float(after), 3600.0)) * 1000)
     clip_source = recording_source(source)
-    clip_dir = manager.storage_dir / "event_clips" / camera_id / clip_source
+    clip_dir = selected_manager.storage_dir / "event_clips" / camera_id / clip_source
     clip_dir.mkdir(parents=True, exist_ok=True)
     accel_mode = _hardware_acceleration_mode()
     return clip_dir / f"{event_id}-{safe_before}-{safe_after}-a3-{accel_mode}.mp4"
@@ -8836,9 +7790,17 @@ def _ensure_event_clip(
     before: float,
     after: float,
     source: str = "main",
+    active_manager: AppManager | None = None,
 ) -> Path:
+    selected_manager = active_manager or manager
     clip_source = recording_source(source)
-    clip_path = _event_clip_path(event, before=before, after=after, source=clip_source)
+    clip_path = _event_clip_path(
+        event,
+        before=before,
+        after=after,
+        source=clip_source,
+        active_manager=selected_manager,
+    )
     if clip_path.exists() and clip_path.stat().st_size > 0:
         return clip_path
     cache_key = str(clip_path)
@@ -8860,13 +7822,23 @@ def _ensure_event_clip(
                 after=after,
                 output_path=clip_path,
                 source=clip_source,
+                active_manager=selected_manager,
             )
         finally:
             EVENT_CLIP_BUILD_LIMITER.release()
     return clip_path
 
 
-def _build_event_clip(event: dict, before: float, after: float, output_path: Path, source: str = "main") -> None:
+def _build_event_clip(
+    event: dict,
+    before: float,
+    after: float,
+    output_path: Path,
+    source: str = "main",
+    *,
+    active_manager: AppManager | None = None,
+) -> None:
+    selected_manager = active_manager or manager
     camera_id = str(event.get("camera_id") or "")
     if not camera_id:
         raise HTTPException(status_code=400, detail="event is missing camera")
@@ -8878,7 +7850,7 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     window_end = event_created_epoch + window_after
 
     rows: list[dict] = []
-    for candidate in manager.recorder.recording_rows_between(
+    for candidate in selected_manager.recorder.recording_rows_between(
             camera_id,
             window_start,
             window_end,
@@ -8888,7 +7860,15 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
         if candidate.get("start_epoch") is None or candidate.get("end_epoch") is None:
             continue
         try:
-            candidate = {**candidate, "path": str(_recording_storage_path(candidate.get("path")))}
+            candidate = {
+                **candidate,
+                "path": str(
+                    _recording_storage_path(
+                        candidate.get("path"),
+                        active_manager=selected_manager,
+                    )
+                ),
+            }
         except HTTPException:
             continue
         rows.append(candidate)
@@ -8905,7 +7885,7 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
 
-    concat_path = _write_concat_file(selected)
+    concat_path = _write_concat_file(selected, active_manager=selected_manager)
     tmp_path = output_path.with_name(f".{output_path.stem}.{os.getpid()}.tmp.mp4")
     source_codec = _probe_video_codec(Path(str(selected[0]["path"])))
     commands: list[tuple[str, list[str]]] = []
@@ -8951,8 +7931,21 @@ def _build_event_clip(event: dict, before: float, after: float, output_path: Pat
         tmp_path.unlink(missing_ok=True)
 
 
-def _write_concat_file(rows: list[dict]) -> Path:
-    paths = [str(_recording_storage_path(row.get("path"))) for row in rows]
+def _write_concat_file(
+    rows: list[dict],
+    *,
+    active_manager: AppManager | None = None,
+) -> Path:
+    selected_manager = active_manager or manager
+    paths = [
+        str(
+            _recording_storage_path(
+                row.get("path"),
+                active_manager=selected_manager,
+            )
+        )
+        for row in rows
+    ]
     if any("\n" in path or "\r" in path for path in paths):
         raise HTTPException(status_code=400, detail="recording path is invalid")
     handle = tempfile.NamedTemporaryFile(
@@ -8971,3 +7964,89 @@ def _write_concat_file(rows: list[dict]) -> Path:
 
 def _recording_start_epoch(path: Path) -> float | None:
     return manager.recorder.recording_start_epoch(path)
+
+
+# Assemble the recording HTTP boundary after its legacy media helpers exist.
+# The explicit aliases preserve the direct-call surface used by internal tools
+# and tests while route ownership lives in recording_routes.
+_recording_route_bundle = create_recording_router(
+    RecordingRouteDependencies(
+        get_manager=lambda: manager,
+        get_config=lambda: config,
+        get_media_exports=lambda: _media_export_manager(),
+        public_url=lambda path: public_url(path),
+        recording_rows=lambda active_manager, *args, **kwargs: _recording_rows(
+            *args,
+            active_manager=active_manager,
+            **kwargs,
+        ),
+        recording_day_rows=lambda active_manager, *args, **kwargs: _recording_day_rows(
+            *args,
+            active_manager=active_manager,
+            **kwargs,
+        ),
+        recording_preview_path=lambda active_manager, *args, **kwargs: (
+            _recording_preview_path(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_day_fmp4_paths=lambda active_manager, *args, **kwargs: (
+            _recording_day_fmp4_paths(
+                *args,
+                active_manager=active_manager,
+                **kwargs,
+            )
+        ),
+        recording_file_response=lambda *args, **kwargs: _recording_file_response(
+            *args,
+            **kwargs,
+        ),
+        event_clip_window=lambda active_manager, before, after: _event_clip_window(
+            before,
+            after,
+            active_manager=active_manager,
+        ),
+        ensure_event_clip=lambda active_manager, *args, **kwargs: _ensure_event_clip(
+            *args,
+            active_manager=active_manager,
+            **kwargs,
+        ),
+    )
+)
+app.include_router(_recording_route_bundle.router)
+
+recordings = _recording_route_bundle.handlers["recordings"]
+recording_events = _recording_route_bundle.handlers["recording_events"]
+recording_day = _recording_route_bundle.handlers["recording_day"]
+recording_grid_day = _recording_route_bundle.handlers["recording_grid_day"]
+recording_grid_updates = _recording_route_bundle.handlers["recording_grid_updates"]
+_public_media_export = _recording_route_bundle.handlers["_public_media_export"]
+create_media_export = _recording_route_bundle.handlers["create_media_export"]
+list_media_exports = _recording_route_bundle.handlers["list_media_exports"]
+media_export_summary = _recording_route_bundle.handlers["media_export_summary"]
+batch_media_exports = _recording_route_bundle.handlers["batch_media_exports"]
+_public_media_export_batch = _recording_route_bundle.handlers[
+    "_public_media_export_batch"
+]
+get_media_export = _recording_route_bundle.handlers["get_media_export"]
+download_media_export = _recording_route_bundle.handlers["download_media_export"]
+play_media_export = _recording_route_bundle.handlers["play_media_export"]
+protect_media_export = _recording_route_bundle.handlers["protect_media_export"]
+update_media_export_metadata = _recording_route_bundle.handlers[
+    "update_media_export_metadata"
+]
+delete_media_export = _recording_route_bundle.handlers["delete_media_export"]
+recording_window = _recording_route_bundle.handlers["recording_window"]
+recording_preview = _recording_route_bundle.handlers["recording_preview"]
+recording_updates = _recording_route_bundle.handlers["recording_updates"]
+recording_day_hls_playlist = _recording_route_bundle.handlers[
+    "recording_day_hls_playlist"
+]
+recording_day_hls_init = _recording_route_bundle.handlers["recording_day_hls_init"]
+recording_day_hls_segment = _recording_route_bundle.handlers[
+    "recording_day_hls_segment"
+]
+event_clip = _recording_route_bundle.handlers["event_clip"]
+event_stream = _recording_route_bundle.handlers["event_stream"]
