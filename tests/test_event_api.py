@@ -190,17 +190,17 @@ class EventApiSerializationTest(unittest.TestCase):
         active_manager = SimpleNamespace()
         with (
             patch.object(main, "manager", active_manager),
-            patch.object(main, "_assistant_incident_for_event", return_value=expected) as resolve,
+            patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=expected) as resolve,
         ):
             response = main.incident_for_event(7)
 
         self.assertEqual(response, expected)
-        resolve.assert_called_once_with(7, active_manager)
+        resolve.assert_called_once_with(active_manager, 7)
 
     def test_incident_for_event_returns_not_found_for_stale_match(self) -> None:
         with (
             patch.object(main, "manager", SimpleNamespace()),
-            patch.object(main, "_assistant_incident_for_event", return_value=None),
+            patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=None),
             self.assertRaises(HTTPException) as raised,
         ):
             main.incident_for_event(999)
@@ -1041,13 +1041,15 @@ class EventApiSerializationTest(unittest.TestCase):
         )
 
         with patch.object(main, "manager", fake_manager):
-            first, first_has_more, _ = main._recent_filtered_incident_summaries(
+            first, first_has_more, _ = main.INCIDENT_QUERIES.recent_filtered_summaries(
+                fake_manager,
                 limit=1,
                 offset=0,
                 gap_seconds=45,
                 event_type="object",
             )
-            second, second_has_more, _ = main._recent_filtered_incident_summaries(
+            second, second_has_more, _ = main.INCIDENT_QUERIES.recent_filtered_summaries(
+                fake_manager,
                 limit=1,
                 offset=1,
                 gap_seconds=45,

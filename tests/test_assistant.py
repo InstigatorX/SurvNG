@@ -468,7 +468,7 @@ class AssistantApiTest(unittest.TestCase):
             )],
         )
         with (
-            patch.object(main, "_assistant_incident_for_event", return_value=incident),
+            patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=incident),
             patch.object(main, "event_snapshot_path", return_value=Path("/tmp/incident.jpg")),
             patch.object(main, "_assistant_camera_evidence", return_value=[]),
             patch.object(IncidentVisualReviewer, "review", return_value=advice),
@@ -759,10 +759,10 @@ class AssistantApiTest(unittest.TestCase):
             events=SimpleNamespace(between_compact=lambda *_args: [{"id": 43}]),
         )
         with (
-            patch.object(main, "_assistant_incident_for_event", return_value=anchor),
+            patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
             patch.object(main, "_incident_rows", return_value=[match]),
-            patch.object(main, "_hydrate_incidents", return_value=[match]),
-            patch.object(main, "_incidents_with_faces", return_value=[match]),
+            patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
+            patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
             evidence = main._assistant_trace_across_cameras(
                 AssistantToolCall(
@@ -820,10 +820,10 @@ class AssistantApiTest(unittest.TestCase):
             "context": {"incident_event_id": 42},
         })
         with (
-            patch.object(main, "_assistant_incident_for_event", return_value=anchor),
+            patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
             patch.object(main, "_incident_rows", return_value=[match]),
-            patch.object(main, "_hydrate_incidents", return_value=[match]),
-            patch.object(main, "_incidents_with_faces", return_value=[match]),
+            patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
+            patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
             evidence = main._assistant_trace_across_cameras(
                 AssistantToolCall(

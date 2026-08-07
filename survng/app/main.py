@@ -131,6 +131,14 @@ from .incident_presenter import (
     _recording_event_row,
     _recording_grid_incident_payload,
 )
+from .incident_queries import (
+    IncidentQueryDependencies,
+    IncidentQueryService,
+    _filter_incident_summaries,
+    _filter_incidents_by_event_type,
+    _motion_audit_row,
+    create_incident_query_router,
+)
 from .recording_media import (
     concatenated_clip_timing,
     event_clip_window,
@@ -221,6 +229,7 @@ EVENT_CLIP_BUILD_LIMITER = threading.BoundedSemaphore(2)
 TRACKING_COMPARISON_LIMITER = threading.BoundedSemaphore(1)
 SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
+INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
 MEDIA_EXPORTS_LOCK = threading.Lock()
 MEDIA_EXPORTS: MediaExportManager | None = None
@@ -1566,12 +1575,6 @@ def recording_cache_status() -> dict:
         "metrics": metrics,
     }
 
-@app.get("/api/events")
-def events(limit: int = 100) -> list[dict]:
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        rows = active_manager.events.recent(limit)
-    return [_event_row(row) for row in rows]
 
 
 @app.get("/api/semantic-search/status")
@@ -1636,27 +1639,6 @@ def semantic_search(request: SemanticSearchRequest) -> dict[str, Any]:
     return {"query": request.query.strip(), "count": len(results), "results": results}
 
 
-def _motion_audit_row(row: dict, storage_dir: Path) -> dict:
-    audit = dict(row)
-    try:
-        features = json.loads(str(audit.pop("features_json", "{}") or "{}"))
-    except (json.JSONDecodeError, TypeError):
-        features = {}
-    audit["features"] = features if isinstance(features, dict) else {}
-    snapshot_path = str(audit.pop("snapshot_path", "") or "")
-    try:
-        event_snapshot_path(storage_dir, {"snapshot_path": snapshot_path})
-        audit["has_snapshot"] = True
-    except (FileNotFoundError, PermissionError):
-        audit["has_snapshot"] = False
-    raw_outcome = audit.get("object_detected")
-    audit["object_detected"] = None if raw_outcome is None else bool(raw_outcome)
-    audit["interpretation"] = motion_audit_interpretation(
-        reason=audit.get("reason"),
-        event_id=audit.get("event_id"),
-        object_detected=audit["object_detected"],
-    )
-    return audit
 
 
 class AuditAiApplyRequest(BaseModel):
@@ -2394,9 +2376,9 @@ def _camera_intelligence_candidates(
         [_event_row(row) for row in event_rows],
         DEFAULT_INCIDENT_GAP_SECONDS,
     )[:record_limit]
-    incidents = _incidents_with_faces(
-        _hydrate_incidents(incident_summaries, active_manager),
+    incidents = INCIDENT_QUERIES.with_faces(
         active_manager,
+        INCIDENT_QUERIES.hydrate(active_manager, incident_summaries),
     ) if incident_summaries else []
 
     candidates: list[dict[str, Any]] = []
@@ -3892,167 +3874,16 @@ def queue_appearance_backfill(start_at: str, end_at: str) -> dict[str, Any]:
     return {"queued": len(queued), "event_ids": sorted(queued), "start_at": start.isoformat(), "end_at": end.isoformat()}
 
 
-@app.get("/api/incidents")
-def incidents(limit: int = 200, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> list[dict]:
-    bounded_limit = max(1, min(limit, 200))
-    bounded_gap = max(5, min(gap_seconds, 300))
-    summaries = _recent_incident_summaries(bounded_limit, bounded_gap)
-    return _incidents_with_faces(_hydrate_incidents(summaries))
 
 
-@app.get("/api/incidents/feed")
-def incident_feed(
-    event_type: str = "object",
-    camera_id: str = "",
-    object_label: str = "",
-    zone: str = "",
-    limit: int = 18,
-    offset: int = 0,
-    gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
-) -> dict:
-    bounded_limit = max(1, min(limit, 100))
-    bounded_offset = max(0, min(offset, 100_000))
-    bounded_gap = max(5, min(gap_seconds, 300))
-    page, has_more, scanned = _recent_filtered_incident_summaries(
-        limit=bounded_limit,
-        offset=bounded_offset,
-        gap_seconds=bounded_gap,
-        event_type=event_type,
-        camera_id=camera_id,
-        object_label=object_label,
-        zone=zone,
-    )
-    facets = {
-        "camera_ids": sorted({str(item.get("camera_id") or "") for item in scanned if item.get("camera_id")}),
-        "labels": sorted({str(label) for item in scanned for label in item.get("labels", []) if label}),
-        "zones": sorted({str(item_zone) for item in scanned for item_zone in item.get("zones", []) if item_zone}),
-    }
-    return {
-        "items": [_incident_list_payload(item) for item in page],
-        "limit": bounded_limit,
-        "offset": bounded_offset,
-        "has_more": has_more,
-        "facets": facets,
-    }
 
 
-@app.get("/api/incidents/detail")
-def incident_detail(event_ids: str, gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS) -> dict:
-    try:
-        requested_ids = list(dict.fromkeys(
-            int(value.strip())
-            for value in event_ids.split(",")
-            if value.strip()
-        ))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="event_ids must be comma-separated integers") from exc
-    if not requested_ids or len(requested_ids) > 200 or any(event_id <= 0 for event_id in requested_ids):
-        raise HTTPException(status_code=422, detail="event_ids must contain 1 to 200 positive integers")
-
-    rows = manager.events.get_many(requested_ids)
-    if {int(row["id"]) for row in rows} != set(requested_ids):
-        raise HTTPException(status_code=404, detail="incident events were not found")
-    bounded_gap = max(5, min(gap_seconds, 300))
-    summaries = _incident_rows([_event_row(row) for row in rows], bounded_gap)
-    if len(summaries) != 1:
-        raise HTTPException(status_code=422, detail="event_ids do not identify one incident")
-    hydrated = _incidents_with_faces(_hydrate_incidents(summaries))
-    if not hydrated:
-        raise HTTPException(status_code=404, detail="incident was not found")
-    return hydrated[0]
 
 
-def _filter_incidents_by_event_type(incidents: list[dict], event_type: str) -> list[dict]:
-    if event_type == "object":
-        return [item for item in incidents if item.get("has_objects")]
-    if event_type == "motion":
-        return [item for item in incidents if not item.get("has_objects")]
-    return incidents
 
 
-def _filter_incident_summaries(
-    summaries: list[dict],
-    event_type: str,
-    camera_id: str = "",
-    object_label: str = "",
-    zone: str = "",
-) -> list[dict]:
-    filtered = _filter_incidents_by_event_type(summaries, event_type)
-    if camera_id:
-        filtered = [item for item in filtered if item.get("camera_id") == camera_id]
-    if object_label:
-        filtered = [item for item in filtered if object_label in item.get("labels", [])]
-    if zone:
-        filtered = [item for item in filtered if zone in item.get("zones", [])]
-    return filtered
 
 
-@app.get("/api/incidents/search")
-def incident_search(
-    day: str = "",
-    time_zone: str = "America/New_York",
-    camera_id: str = "",
-    event_type: str = "motion",
-    object_label: str = "",
-    zone: str = "",
-    limit: int = 18,
-    offset: int = 0,
-    gap_seconds: int = DEFAULT_INCIDENT_GAP_SECONDS,
-) -> dict:
-    try:
-        selected_zone = ZoneInfo(time_zone)
-    except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail="unknown timezone") from exc
-    if day:
-        try:
-            selected_date = datetime.strptime(day, "%Y-%m-%d").date()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="day must use YYYY-MM-DD") from exc
-    else:
-        selected_date = datetime.now(selected_zone).date()
-        day = selected_date.isoformat()
-    day_start = datetime.combine(selected_date, datetime.min.time(), selected_zone)
-    day_end = day_start + timedelta(days=1)
-    bounded_gap = max(5, min(gap_seconds, 300))
-    query_start = day_start.astimezone(timezone.utc) - timedelta(seconds=bounded_gap)
-    query_end = day_end.astimezone(timezone.utc) + timedelta(seconds=bounded_gap)
-    compact_rows = [
-        _event_row(row)
-        for row in manager.events.between_compact(query_start.isoformat(), query_end.isoformat())
-    ]
-    day_start_epoch = day_start.timestamp()
-    day_end_epoch = day_end.timestamp()
-    day_incidents = [
-        incident
-        for incident in _incident_rows(compact_rows, gap_seconds=bounded_gap)
-        if incident["last_epoch"] >= day_start_epoch and incident["start_epoch"] < day_end_epoch
-    ]
-    facets = {
-        "camera_ids": sorted({str(item.get("camera_id") or "") for item in day_incidents if item.get("camera_id")}),
-        "labels": sorted({str(label) for item in day_incidents for label in item.get("labels", []) if label}),
-        "zones": sorted({str(item_zone) for item in day_incidents for item_zone in item.get("zones", []) if item_zone}),
-    }
-    filtered = _filter_incidents_by_event_type(day_incidents, event_type)
-    if camera_id:
-        filtered = [item for item in filtered if item.get("camera_id") == camera_id]
-    if object_label:
-        filtered = [item for item in filtered if object_label in item.get("labels", [])]
-    if zone:
-        filtered = [item for item in filtered if zone in item.get("zones", [])]
-    bounded_limit = max(1, min(limit, 100))
-    bounded_offset = max(0, offset)
-    page_summaries = filtered[bounded_offset:bounded_offset + bounded_limit]
-    return {
-        "items": [_incident_list_payload(item) for item in page_summaries],
-        "total": len(filtered),
-        "limit": bounded_limit,
-        "offset": bounded_offset,
-        "day": day,
-        "time_zone": time_zone,
-        "start_at": day_start.astimezone(timezone.utc).isoformat(),
-        "end_at": day_end.astimezone(timezone.utc).isoformat(),
-        "facets": facets,
-    }
 
 
 def _assistant_catalog(active_config: AppConfig, active_manager: AppManager) -> dict[str, Any]:
@@ -4355,51 +4186,8 @@ def _assistant_incident_payload(incident: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _assistant_incident_for_event(
-    event_id: int,
-    active_manager: AppManager,
-) -> dict[str, Any] | None:
-    row = active_manager.events.get(event_id)
-    if row is None:
-        return None
-    try:
-        anchor = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
-    except (KeyError, TypeError, ValueError):
-        return None
-    if anchor.tzinfo is None:
-        anchor = anchor.replace(tzinfo=timezone.utc)
-    # Fetch enough context to include delayed discoveries and a longer active
-    # incident. Grouping still enforces the normal incident gap.
-    start = (anchor - timedelta(minutes=15)).isoformat()
-    end = (anchor + timedelta(minutes=15)).isoformat()
-    rows = [
-        _event_row(candidate)
-        for candidate in active_manager.events.for_camera_range(
-            str(row.get("camera_id") or ""),
-            start,
-            end,
-            limit=2000,
-        )
-    ]
-    for summary in _incident_rows(rows, DEFAULT_INCIDENT_GAP_SECONDS):
-        if any(int(event.get("id") or 0) == event_id for event in summary.get("events") or []):
-            hydrated = _incidents_with_faces(
-                _hydrate_incidents([summary], active_manager),
-                active_manager,
-            )
-            return hydrated[0] if hydrated else summary
-    return None
 
 
-@app.get("/api/incidents/by-event/{event_id}")
-def incident_for_event(event_id: int) -> dict[str, Any]:
-    """Resolve one event to its complete grouped incident for linked previews."""
-    with MANAGER_RELOAD_LOCK:
-        active_manager = manager
-        incident = _assistant_incident_for_event(event_id, active_manager)
-    if incident is None:
-        raise HTTPException(status_code=404, detail="incident was not found")
-    return incident
 
 
 def _assistant_incident_evidence(
@@ -4439,7 +4227,7 @@ def _assistant_inspect_incident(
     event_id: int,
     active_manager: AppManager,
 ) -> AssistantEvidence | None:
-    incident = _assistant_incident_for_event(event_id, active_manager)
+    incident = INCIDENT_QUERIES.resolve_event(active_manager, event_id)
     if incident is None:
         return None
     return _assistant_incident_evidence(incident, event_id)
@@ -4611,7 +4399,7 @@ def _assistant_visual_incident_evidence(
     active_config: AppConfig,
     active_manager: AppManager,
 ) -> AssistantEvidence | None:
-    incident = _assistant_incident_for_event(event_id, active_manager)
+    incident = INCIDENT_QUERIES.resolve_event(active_manager, event_id)
     if incident is None:
         return None
     camera = camera_by_id(active_config, str(incident.get("camera_id") or ""))
@@ -4925,9 +4713,9 @@ def _assistant_search_incidents(
         call.zone,
     )
     candidate_summaries = summaries[: min(250, max(call.limit * 8, call.limit))]
-    hydrated = _incidents_with_faces(
-        _hydrate_incidents(candidate_summaries, active_manager),
+    hydrated = INCIDENT_QUERIES.with_faces(
         active_manager,
+        INCIDENT_QUERIES.hydrate(active_manager, candidate_summaries),
     )
     filtered: list[dict[str, Any]] = []
     wanted_face = call.face_name.strip().lower()
@@ -5042,7 +4830,7 @@ def _assistant_semantic_search(
         href="/recordings/search",
     )]
     for event_id in best:
-        incident = _assistant_incident_for_event(event_id, active_manager)
+        incident = INCIDENT_QUERIES.resolve_event(active_manager, event_id)
         if incident is not None:
             evidence.append(_assistant_incident_evidence(incident, event_id))
     return evidence
@@ -5210,7 +4998,7 @@ def _assistant_trace_across_cameras(
     if not event_id and not call.face_name.strip() and not call.object_label.strip():
         return []
     anchor = (
-        _assistant_incident_for_event(int(event_id), active_manager)
+        INCIDENT_QUERIES.resolve_event(active_manager, int(event_id))
         if event_id
         else None
     )
@@ -5306,9 +5094,9 @@ def _assistant_trace_across_cameras(
         distance_from_anchor,
     )
 
-    candidates = _incidents_with_faces(
-        _hydrate_incidents(candidate_summaries, active_manager),
+    candidates = INCIDENT_QUERIES.with_faces(
         active_manager,
+        INCIDENT_QUERIES.hydrate(active_manager, candidate_summaries),
     )
     correlation_anchor = anchor or {
         "representative_event_id": 0,
@@ -7118,171 +6906,12 @@ def _recording_storage_path(
     return path
 
 
-def _recent_incident_summaries(limit: int, gap_seconds: int) -> list[dict]:
-    batch_size = max(500, min(5000, limit * 8))
-    compact_rows: list[dict] = []
-    before_created_at: str | None = None
-    before_id: int | None = None
-
-    while True:
-        batch = manager.events.recent_compact(batch_size, before_created_at, before_id)
-        if not batch:
-            return _incident_rows(compact_rows, gap_seconds)[:limit]
-        compact_rows.extend(_event_row(row) for row in batch)
-        summaries = _incident_rows(compact_rows, gap_seconds)
-        if len(summaries) > limit or len(batch) < batch_size:
-            return summaries[:limit]
-        oldest = batch[-1]
-        before_created_at = str(oldest["created_at"])
-        before_id = int(oldest["id"])
 
 
-def _recent_filtered_incident_summaries(
-    *,
-    limit: int,
-    offset: int,
-    gap_seconds: int,
-    event_type: str,
-    camera_id: str = "",
-    object_label: str = "",
-    zone: str = "",
-) -> tuple[list[dict], bool, list[dict]]:
-    desired = offset + limit + 1
-    compact_rows: list[dict] = []
-    before_created_at: str | None = None
-    before_id: int | None = None
-    # Most first-page filters are satisfied by a few hundred recent rows. A
-    # fixed 5,000-row batch made every toggle deserialize and regroup far more
-    # history than it displayed. Grow naturally through the cursor loop only
-    # when a selective camera/object/zone filter actually needs older events.
-    batch_size = max(500, min(5000, desired * 16))
-
-    while True:
-        batch = manager.events.recent_compact(batch_size, before_created_at, before_id)
-        if not batch:
-            summaries = _incident_rows(compact_rows, gap_seconds)
-            filtered = _filter_incident_summaries(
-                summaries, event_type, camera_id, object_label, zone
-            )
-            return filtered[offset:offset + limit], False, summaries
-        compact_rows.extend(_event_row(row) for row in batch)
-        summaries = _incident_rows(compact_rows, gap_seconds)
-        filtered = _filter_incident_summaries(
-            summaries, event_type, camera_id, object_label, zone
-        )
-        if len(filtered) >= desired:
-            return filtered[offset:offset + limit], True, summaries
-        if len(batch) < batch_size:
-            return filtered[offset:offset + limit], False, summaries
-        oldest = batch[-1]
-        before_created_at = str(oldest["created_at"])
-        before_id = int(oldest["id"])
 
 
-def _hydrate_incidents(
-    summaries: list[dict],
-    active_manager: AppManager | None = None,
-) -> list[dict]:
-    selected_manager = active_manager or manager
-    event_ids = [
-        int(event["id"])
-        for summary in summaries
-        for event in summary.get("events", [])
-        if str(event.get("id", "")).isdigit()
-    ]
-    full_events = {
-        int(event["id"]): _event_row(event)
-        for event in selected_manager.events.get_many(event_ids)
-    }
-    observations_by_event: dict[int, list[dict]] = {}
-    for audit in selected_manager.events.motion_audits_for_related_events(event_ids):
-        related_event_id = int(audit.get("related_event_id") or 0)
-        observations_by_event.setdefault(related_event_id, []).append(
-            _motion_audit_row(audit, selected_manager.storage_dir)
-        )
-    for event_id, event in full_events.items():
-        event["motion_observations"] = observations_by_event.get(event_id, [])
-    hydrated: list[dict] = []
-    for summary in summaries:
-        events = [
-            full_events[int(event["id"])]
-            for event in summary.get("events", [])
-            if int(event.get("id") or 0) in full_events
-        ]
-        if events:
-            hydrated.append(_incident_row(str(summary.get("camera_id") or ""), events))
-    return hydrated
 
 
-def _incidents_with_faces(
-    incidents: list[dict],
-    active_manager: AppManager | None = None,
-) -> list[dict]:
-    selected_manager = active_manager or manager
-    event_ids = [
-        int(event["id"])
-        for incident in incidents
-        for event in incident.get("events", [])
-        if str(event.get("id", "")).isdigit()
-    ]
-    observations_by_event: dict[int, list[dict]] = {}
-    for observation in selected_manager.faces.for_event_ids(event_ids):
-        observations_by_event.setdefault(int(observation["event_id"]), []).append(observation)
-
-    status_rank = {"confirmed": 0, "possible": 1, "unknown": 2}
-
-    def summarize(observations: list[dict]) -> list[dict]:
-        summaries: dict[tuple[str, int], dict] = {}
-        for observation in observations:
-            person_id = observation.get("person_id")
-            candidate_id = observation.get("candidate_person_id")
-            if person_id is not None:
-                status = "confirmed"
-                identity_id = int(person_id)
-                name = str(observation.get("person_name") or "Unknown")
-                confidence = observation.get("match_confidence")
-            elif candidate_id is not None:
-                status = "possible"
-                identity_id = int(candidate_id)
-                name = str(observation.get("candidate_person_name") or "Unknown")
-                confidence = observation.get("candidate_confidence")
-            else:
-                status = "unknown"
-                identity_id = 0
-                name = "Unknown"
-                confidence = observation.get("candidate_confidence")
-                if confidence is None:
-                    confidence = observation.get("confidence")
-            try:
-                score = float(confidence or 0)
-            except (TypeError, ValueError):
-                score = 0.0
-            if not math.isfinite(score):
-                score = 0.0
-            score = max(0.0, min(1.0, score))
-            key = (status, identity_id)
-            current = summaries.get(key)
-            if current is None or score > current["confidence"]:
-                summaries[key] = {
-                    "observation_id": int(observation["observation_id"]),
-                    "identity_id": identity_id,
-                    "name": name,
-                    "status": status,
-                    "confidence": round(score, 4),
-                }
-        return sorted(
-            summaries.values(),
-            key=lambda face: (status_rank[face["status"]], -face["confidence"], face["name"].lower()),
-        )
-
-    for incident in incidents:
-        incident_observations: list[dict] = []
-        for event in incident.get("events", []):
-            event_observations = observations_by_event.get(int(event.get("id") or 0), [])
-            event["faces"] = summarize(event_observations)
-            incident_observations.extend(event_observations)
-        incident["faces"] = summarize(incident_observations)
-    return incidents
 
 
 def _event_clip_window(
@@ -7503,6 +7132,24 @@ def _write_concat_file(
 
 def _recording_start_epoch(path: Path) -> float | None:
     return manager.recorder.recording_start_epoch(path)
+
+
+# Assemble incident/event queries after all assistant consumers are defined.
+_incident_query_bundle = create_incident_query_router(
+    IncidentQueryDependencies(
+        get_manager=lambda: manager,
+        manager_lock=MANAGER_RELOAD_LOCK,
+    ),
+    INCIDENT_QUERIES,
+)
+app.include_router(_incident_query_bundle.router)
+
+events = _incident_query_bundle.handlers["events"]
+incidents = _incident_query_bundle.handlers["incidents"]
+incident_feed = _incident_query_bundle.handlers["incident_feed"]
+incident_detail = _incident_query_bundle.handlers["incident_detail"]
+incident_search = _incident_query_bundle.handlers["incident_search"]
+incident_for_event = _incident_query_bundle.handlers["incident_for_event"]
 
 
 # Assemble the recording HTTP boundary after its legacy media helpers exist.
