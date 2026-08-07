@@ -301,7 +301,7 @@ class CameraIntelligenceTest(unittest.TestCase):
             patch.object(main, "AUDIT_AI_LIMITER", limiter),
             patch.object(main, "_begin_ai_operation"),
             patch.object(
-                main,
+                main._intelligence_route_bundle.service,
                 "_camera_intelligence_candidates",
                 return_value=(samples, 10),
             ) as candidates,

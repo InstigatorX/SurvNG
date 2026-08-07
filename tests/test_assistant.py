@@ -387,7 +387,9 @@ class AssistantApiTest(unittest.TestCase):
             events=SimpleNamespace(between_compact=lambda _start, _end: [])
         )
 
-        with patch.object(main, "_incident_rows", return_value=summaries):
+        with patch(
+            "survng.app.intelligence_routes._incident_rows", return_value=summaries
+        ):
             evidence = main._assistant_recent_activity_summary(
                 call, "America/New_York", active_manager
             )
@@ -469,8 +471,15 @@ class AssistantApiTest(unittest.TestCase):
         )
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=incident),
-            patch.object(main, "event_snapshot_path", return_value=Path("/tmp/incident.jpg")),
-            patch.object(main, "_assistant_camera_evidence", return_value=[]),
+            patch(
+                "survng.app.intelligence_routes.event_snapshot_path",
+                return_value=Path("/tmp/incident.jpg"),
+            ),
+            patch.object(
+                main._intelligence_route_bundle.service,
+                "_assistant_camera_evidence",
+                return_value=[],
+            ),
             patch.object(IncidentVisualReviewer, "review", return_value=advice),
         ):
             evidence = main._assistant_visual_incident_evidence(
@@ -649,7 +658,11 @@ class AssistantApiTest(unittest.TestCase):
             "context": {"incident_event_id": 42},
         })
         expected = AssistantEvidence("E-visual-42", "incident_visual_review", "Review", "Done", {})
-        with patch.object(main, "_assistant_visual_incident_evidence", return_value=expected) as review:
+        with patch.object(
+            main._intelligence_route_bundle.service,
+            "_assistant_visual_incident_evidence",
+            return_value=expected,
+        ) as review:
             evidence = main._assistant_execute_tool(
                 AssistantToolCall(name="analyze_incident_visual"),
                 request,
@@ -675,7 +688,7 @@ class AssistantApiTest(unittest.TestCase):
             {},
         )
         with patch.object(
-            main,
+            main._intelligence_route_bundle.service,
             "_assistant_trace_across_cameras",
             return_value=[expected],
         ) as trace:
@@ -760,7 +773,9 @@ class AssistantApiTest(unittest.TestCase):
         )
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
-            patch.object(main, "_incident_rows", return_value=[match]),
+            patch(
+                "survng.app.intelligence_routes._incident_rows", return_value=[match]
+            ),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
@@ -821,7 +836,9 @@ class AssistantApiTest(unittest.TestCase):
         })
         with (
             patch.object(main.INCIDENT_QUERIES, "resolve_event", return_value=anchor),
-            patch.object(main, "_incident_rows", return_value=[match]),
+            patch(
+                "survng.app.intelligence_routes._incident_rows", return_value=[match]
+            ),
             patch.object(main.INCIDENT_QUERIES, "hydrate", return_value=[match]),
             patch.object(main.INCIDENT_QUERIES, "with_faces", return_value=[match]),
         ):
@@ -893,7 +910,11 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             patch.object(AssistantProvider, "plan", return_value=plan) as planner,
             patch.object(AssistantProvider, "answer", return_value=answer) as responder,
-            patch.object(main, "_assistant_execute_tool", return_value=[evidence]),
+            patch.object(
+                main._intelligence_route_bundle.service,
+                "_assistant_execute_tool",
+                return_value=[evidence],
+            ),
             patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
         ):
             response = asyncio.run(main.assistant_chat(request))
@@ -935,7 +956,11 @@ class AssistantApiTest(unittest.TestCase):
             patch.object(main, "manager", active_manager),
             patch.object(AssistantProvider, "plan", return_value=plan),
             patch.object(AssistantProvider, "answer") as responder,
-            patch.object(main, "_assistant_execute_tool", return_value=[evidence]),
+            patch.object(
+                main._intelligence_route_bundle.service,
+                "_assistant_execute_tool",
+                return_value=[evidence],
+            ),
             patch.object(main.asyncio, "to_thread", new=AsyncMock(side_effect=lambda function: function())),
         ):
             response = asyncio.run(main.assistant_chat(request))
