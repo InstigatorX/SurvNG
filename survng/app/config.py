@@ -460,6 +460,7 @@ class DetectorConfig(BaseModel):
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)
     event_class_confidence_thresholds: dict[str, float] = Field(default_factory=dict)
+    object_activity_attribution: Literal["off", "shadow", "enforce"] = "enforce"
     require_incident_zone: bool = True
     labels: list[str] = Field(default_factory=list)
     tracking: ObjectTrackingConfig = Field(default_factory=ObjectTrackingConfig)

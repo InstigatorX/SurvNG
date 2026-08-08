@@ -18,6 +18,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 class MotionDecisionProcessor(Protocol):
+    def activity_status(self) -> dict[str, Any]: ...
+
     def handle(
         self,
         topic: str,
@@ -139,6 +141,7 @@ class MotionIncidentService:
                         for key, value in self._timing_totals_ms.items()
                     },
                 },
+                "object_activity_attribution": self.decision_processor.activity_status(),
             }
 
     def start(self, stop_event: threading.Event) -> None:

@@ -494,6 +494,46 @@ def _temporal_consensus(
                 last_observation_index
             ].offset
             enriched["temporal_newly_appeared"] = first_observation_index > 0
+            pretrigger_indices = [
+                index
+                for index in observation_indices
+                if samples[index].offset < 0.0
+            ]
+            posttrigger_indices = [
+                index
+                for index in observation_indices
+                if samples[index].offset >= 0.0
+            ]
+            pretrigger_sample_count = sum(sample.offset < 0.0 for sample in samples)
+            same_label_seen_pretrigger = any(
+                str(candidate.get("label") or "").strip() == track.winning_label
+                for sample in samples
+                if sample.offset < 0.0
+                for candidate in sample.objects
+                if _candidate_detection(candidate)
+            )
+            enriched["temporal_pretrigger_observations"] = len(pretrigger_indices)
+            enriched["temporal_posttrigger_observations"] = len(posttrigger_indices)
+            enriched["temporal_pretrigger_samples"] = pretrigger_sample_count
+            enriched["temporal_same_label_seen_pretrigger"] = same_label_seen_pretrigger
+            enriched["temporal_robust_new_appearance"] = bool(
+                not pretrigger_indices
+                and pretrigger_sample_count >= 2
+                and len(posttrigger_indices) >= 2
+                and not same_label_seen_pretrigger
+            )
+            first_zones = set(
+                str(value)
+                for value in (track.observations[first_observation_index].get("zones") or [])
+                if str(value)
+            )
+            later_zones = {
+                str(value)
+                for index in observation_indices[1:]
+                for value in (track.observations[index].get("zones") or [])
+                if str(value)
+            }
+            enriched["temporal_zone_entry"] = bool(later_zones - first_zones)
         displacement, path = motion_by_track.get(
             id(track),
             _temporal_motion_metrics(track, samples),

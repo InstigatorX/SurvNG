@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from .camera_startup import CameraStartupCoordinator, CameraStartupTask
 from .config import CameraConfig
+from .object_activity import AttributionMode
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -30,6 +31,7 @@ class CameraFleetWorker(Protocol):
     def wait_onvif_stopped(self, deadline: float) -> bool: ...
     def live_capture_ready(self) -> bool: ...
     def set_detection_enabled(self, enabled: bool) -> None: ...
+    def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None: ...
 
 
 class CameraFleetRecorder(Protocol):

@@ -7960,6 +7960,16 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const maxHourly = Math.max(1, ...hourly.map((item) => Number(item.events) || 0));
   const topLabels = Object.entries(lastDay.labels || {}).sort((left, right) => right[1] - left[1]).slice(0, 5);
   const shownCameras = selected ? [selected] : (data.cameras || []);
+  const activityAttribution = shownCameras.reduce((total, camera) => {
+    const status = camera.object_tracking?.object_activity_attribution || {};
+    total.evaluated += Number(status.evaluated || 0);
+    total.active += Number(status.active || 0);
+    total.sceneContext += Number(status.scene_context || 0);
+    total.indeterminate += Number(status.indeterminate || 0);
+    total.enforced += Number(status.enforced_suppressions || 0);
+    if (status.mode) total.modes.add(status.mode);
+    return total;
+  }, { evaluated: 0, active: 0, sceneContext: 0, indeterminate: 0, enforced: 0, modes: new Set() });
   const selectedCapture = selected?.capture || {};
   const selectedReadFailures = [selectedCapture.live, selectedCapture.main]
     .reduce((total, source) => total + Number(source?.read_failures || 0), 0);
@@ -8112,6 +8122,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>Object incidents (1h / 24h)</dt><dd>{lastHour.object_incidents || 0} / {lastDay.object_incidents || 0}</dd></div>
             <div><dt>Eligible objects (1h / 24h)</dt><dd>{lastHour.objects || 0} / {lastDay.objects || 0}</dd></div>
             <div><dt>Top labels · 24h</dt><dd>{topLabels.length ? topLabels.map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
+            <div><dt>Activity attribution · since restart</dt><dd>{activityAttribution.evaluated.toLocaleString()} checked <small>{activityAttribution.active.toLocaleString()} active · {activityAttribution.sceneContext.toLocaleString()} scene context · {activityAttribution.indeterminate.toLocaleString()} uncertain</small></dd></div>
+            <div><dt>Context prevented from labeling incidents</dt><dd>{activityAttribution.enforced.toLocaleString()} <small>{activityAttribution.modes.size ? [...activityAttribution.modes].join(" / ").replaceAll("_", " ") : "waiting for detections"}</small></dd></div>
           </dl>
           {!selected ? <div className="telemetry-semantic-subsection">
             <header><strong>Semantic search</strong><small>Local visual search indexing</small></header>
@@ -10479,6 +10491,11 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           </select><small>Independent OpenVINO workers can process simultaneous camera events. More workers use more accelerator and memory capacity.</small></label>
           <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
           <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label in this many of five event-time frames. Confirmed is recommended and suppresses one-frame false identifications.</small></label>
+          <label>Repeated stationary objects<select value={config.detector?.object_activity_attribution || "enforce"} onChange={(event) => updateConfig(["detector", "object_activity_attribution"], event.target.value)}>
+            <option value="enforce">Prevent false incident labels</option>
+            <option value="shadow">Observe without changing incidents</option>
+            <option value="off">Off</option>
+          </select><small>After the same object stays in the same place across several incidents, keep it as evidence without treating it as the cause. Moving or uncertain objects remain eligible.</small></label>
           <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>
             <option value="true">Zones</option>
             <option value="false">Zones + Full Frame</option>

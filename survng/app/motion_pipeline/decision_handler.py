@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
 from ..domain_events import IncidentCreated, ObjectDetected
+from ..object_activity import AttributionMode, ObjectActivityAttributor
 from .context import Frame
 
 
@@ -222,6 +223,7 @@ class MotionDecisionOutcome:
     motion_correlation: dict[str, Any] | None = None
     refinement_pending: bool = False
     processing_timing: dict[str, Any] | None = None
+    object_activity: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -232,6 +234,7 @@ class MotionDecisionOutcome:
             "motion_correlation": self.motion_correlation,
             "refinement_pending": self.refinement_pending,
             "processing_timing": self.processing_timing,
+            "object_activity": self.object_activity,
         }
 
 
@@ -247,6 +250,7 @@ class MotionDecisionHandler:
         object_serializer: MotionObjectSerializer,
         initial_detection_provider: MotionDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
@@ -255,6 +259,19 @@ class MotionDecisionHandler:
         self.snapshot_writer = snapshot_writer
         self.object_serializer = object_serializer
         self.event_callback = event_callback
+        self.activity_attributor = activity_attributor
+
+    def activity_status(self) -> dict[str, Any]:
+        if self.activity_attributor is None:
+            return {"mode": "off", "evaluated": 0}
+        return self.activity_attributor.status()
+
+    def reconfigure_activity_attribution(self, mode: AttributionMode) -> None:
+        if (
+            self.activity_attributor is not None
+            and self.activity_attributor.mode != "off"
+        ):
+            self.activity_attributor.reconfigure(mode)
 
     def handle(
         self,
@@ -354,6 +371,41 @@ class MotionDecisionHandler:
 
         detection_completed = frame is not None and not detection_failure(objects)
 
+        activity_summary: dict[str, Any] | None = None
+        if self.activity_attributor is not None:
+            admissions = self.activity_attributor.admit(
+                objects,
+                qualification,
+                event_key=normalized_event_at.isoformat(),
+                observed_at_epoch=normalized_event_at.timestamp(),
+            )
+            objects = [admission.stored_observation() for admission in admissions]
+            activity_objects = [
+                {
+                    "label": admission.observation.get("label"),
+                    "role": admission.attribution.role.value,
+                    "confidence": round(admission.attribution.confidence, 4),
+                    "admitted": admission.admitted,
+                    "reason": admission.reason,
+                }
+                for admission in admissions
+                if admission.observation.get("label")
+            ]
+            activity_summary = {
+                "mode": self.activity_attributor.mode,
+                "observed": len(activity_objects),
+                "active": sum(item["role"] == "active" for item in activity_objects),
+                "scene_context": sum(
+                    item["role"] == "scene_context" for item in activity_objects
+                ),
+                "indeterminate": sum(
+                    item["role"] == "indeterminate" for item in activity_objects
+                ),
+                "admitted": sum(bool(item["admitted"]) for item in activity_objects),
+                "objects": activity_objects,
+            }
+            qualification["object_activity_attribution"] = activity_summary
+
         eligible_objects = [
             detected
             for detected in objects
@@ -401,6 +453,7 @@ class MotionDecisionHandler:
                     getattr(provider_result, "refinement_pending", False)
                 ),
                 processing_timing=processing_timing,
+                object_activity=activity_summary,
             )
 
         stored_objects = [
@@ -461,6 +514,7 @@ class MotionDecisionHandler:
                 getattr(provider_result, "refinement_pending", False)
             ),
             processing_timing=processing_timing,
+            object_activity=activity_summary,
         )
 
     def record_audit(
@@ -531,6 +585,7 @@ class MotionDecisionHandlerFactory:
         snapshot_writer: MotionSnapshotWriter,
         initial_detection_provider: MotionDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
+        activity_attributor: ObjectActivityAttributor | None = None,
     ) -> MotionDecisionHandler:
         return MotionDecisionHandler(
             camera_id=camera_id,
@@ -540,4 +595,5 @@ class MotionDecisionHandlerFactory:
             snapshot_writer=snapshot_writer,
             object_serializer=self.object_serializer,
             event_callback=event_callback,
+            activity_attributor=activity_attributor,
         )

@@ -323,6 +323,36 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(objects[0]["temporal_first_observation_offset_seconds"], 0.0)
         self.assertEqual(objects[0]["temporal_last_observation_offset_seconds"], 0.5)
 
+    def test_temporal_consensus_requires_clean_pretrigger_samples_for_appearance(self) -> None:
+        car = detected("car", 0.9, (4, 4, 20, 18))
+        samples = [
+            sample(-0.8, []),
+            sample(-0.4, []),
+            sample(0.0, [dict(car)]),
+            sample(1.0, [dict(car)]),
+        ]
+
+        _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(objects[0]["temporal_pretrigger_samples"], 2)
+        self.assertEqual(objects[0]["temporal_pretrigger_observations"], 0)
+        self.assertEqual(objects[0]["temporal_posttrigger_observations"], 2)
+        self.assertTrue(objects[0]["temporal_robust_new_appearance"])
+
+    def test_temporal_consensus_rejects_association_flicker_as_new_appearance(self) -> None:
+        car = detected("car", 0.9, (4, 4, 20, 18))
+        samples = [
+            sample(-0.8, [dict(car)]),
+            sample(-0.4, []),
+            sample(0.0, [dict(car)]),
+            sample(1.0, [dict(car)]),
+        ]
+
+        _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertTrue(objects[0]["temporal_same_label_seen_pretrigger"])
+        self.assertFalse(objects[0]["temporal_robust_new_appearance"])
+
     def test_spatial_track_votes_prevent_high_confidence_label_outliers(self) -> None:
         samples = [
             sample(-1.0, [detected("robot_lawnmower", 0.93, (100, 100, 150, 150))]),

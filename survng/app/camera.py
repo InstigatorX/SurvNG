@@ -36,6 +36,7 @@ from .motion_ingress import MotionEventIngressService
 from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
+from .object_activity import AttributionMode, ObjectActivityAttributor
 from .tracking_frames import TrackingFrameService
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
@@ -132,6 +133,13 @@ class CameraWorker:
             snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=(
                 self.motion_state.publish_event if event_callback is not None else None
+            ),
+            activity_attributor=ObjectActivityAttributor(
+                mode=getattr(
+                    motion_object_detector_factory.detector.config,
+                    "object_activity_attribution",
+                    "enforce",
+                )
             ),
         )
         self.motion_incidents = MotionIncidentService(
@@ -300,6 +308,9 @@ class CameraWorker:
 
     def status(self) -> dict[str, Any]:
         return self.status_reporter.snapshot()
+
+    def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None:
+        self.motion_decision_handler.reconfigure_activity_attribution(mode)
 
     def live_capture_ready(self) -> bool:
         """Expose capture readiness to lifecycle orchestration without a frame copy."""

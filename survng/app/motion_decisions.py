@@ -567,6 +567,7 @@ class MotionDecisionOrchestrator:
                         **audit_features(result),
                         "suppression_verification": suppression_verification_candidate,
                         "object_detection_timing": outcome.get("processing_timing"),
+                        "object_activity_attribution": outcome.get("object_activity"),
                     },
                 )
         except Exception:
@@ -611,6 +612,7 @@ class MotionDecisionOrchestrator:
             "motion_correlation": correlation,
             "suppression_verification": suppression_verification_candidate,
             "object_detection_timing": outcome.get("processing_timing"),
+            "object_activity_attribution": outcome.get("object_activity"),
         }
         if visual_backup:
             features["visual_backup_original_reason"] = result.reason
@@ -676,6 +678,7 @@ class MotionDecisionOrchestrator:
                 "visual_backup_original_reason": result.reason,
                 "motion_correlation": correlation,
                 "object_detection_timing": outcome.get("processing_timing"),
+                "object_activity_attribution": outcome.get("object_activity"),
             },
             category="visual_backup",
         )

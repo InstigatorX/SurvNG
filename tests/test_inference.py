@@ -35,6 +35,8 @@ class InferenceSupervisorTest(unittest.TestCase):
             DetectorConfig(object_worker_count=0)
         with self.assertRaises(ValidationError):
             DetectorConfig(object_worker_count=5)
+        with self.assertRaises(ValidationError):
+            DetectorConfig(object_activity_attribution="unsupported")
 
     def setUp(self) -> None:
         self.supervisor = InferenceSupervisor(DetectorConfig(enabled=False))

@@ -821,6 +821,10 @@ class AppManager:
     def reconfigure_detector_policy(self, config: DetectorConfig) -> None:
         """Apply policy-only detector settings without disturbing camera workers."""
         self.inference.reconfigure_policy(config)
+        for worker in self.camera_fleet.workers.values():
+            worker.reconfigure_object_activity_attribution(
+                config.object_activity_attribution
+            )
 
     def reconfigure_object_tracking(self, config: DetectorConfig) -> None:
         """Replace tracking sessions without restarting camera-owned services."""
@@ -912,6 +916,10 @@ class AppManager:
                 )
         if event_type == "object":
             objects = payload.get("objects") or []
+            incident_objects = payload.get("incident_objects")
+            alert_objects = (
+                incident_objects if isinstance(incident_objects, list) else objects
+            )
             event_id = payload.get("event_id")
             if event_id:
                 event = self.events.get(int(event_id))
@@ -921,8 +929,8 @@ class AppManager:
                     self.appearance_backfill.enqueue(int(event_id), camera_id)
             payload = {
                 **payload,
-                "classes": sorted({str(item.get("label")) for item in objects if item.get("label")}),
-                "zones": sorted({str(zone) for item in objects for zone in item.get("zones", []) if zone}),
+                "classes": sorted({str(item.get("label")) for item in alert_objects if item.get("label")}),
+                "zones": sorted({str(zone) for item in alert_objects for zone in item.get("zones", []) if zone}),
             }
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
         self.state_events.publish(event_type, payload)
@@ -946,7 +954,7 @@ class AppManager:
                         }
                         for zone in camera.zones
                     ],
-                    payload,
+                    {**payload, "objects": alert_objects},
                 )
 
     def mqtt_status(self) -> dict:
