@@ -8478,40 +8478,50 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     const sequence = ++configLoadSequence.current;
     setConfigLoadError("");
     try {
-      const results = await Promise.allSettled([
-        fetch("/api/config"),
-        fetch("/api/cameras"),
-        fetch("/api/accelerator"),
-        fetch("/api/detector/models"),
-        fetch("/api/recordings/cache/status"),
-        fetch("/api/system/status"),
-        fetch("/api/motion/pipeline/catalog"),
-        fetch("/api/retention/status"),
-      ]);
-      const response = results[0].status === "fulfilled" ? results[0].value : null;
-      if (!response?.ok) throw new Error(`Configuration failed to load${response ? ` (${response.status})` : ""}`);
+      const response = await fetch("/api/config");
+      if (!response.ok) throw new Error(`Configuration failed to load (${response.status})`);
       const nextConfig = await response.json();
-      const optionalPayload = async (index) => {
-        const result = results[index];
-        if (result.status !== "fulfilled" || !result.value.ok) return null;
-        try { return await result.value.json(); } catch { return null; }
-      };
-      const [status, acceleratorPayload, models, cache, system, catalog, retention] = await Promise.all([
-        optionalPayload(1), optionalPayload(2), optionalPayload(3), optionalPayload(4), optionalPayload(5), optionalPayload(6), optionalPayload(7),
-      ]);
       if (sequence !== configLoadSequence.current) return false;
       setConfig(nextConfig);
-      if (Array.isArray(status)) setRuntimeStatus(status);
-      if (acceleratorPayload) setAccelerator(acceleratorPayload);
-      if (models) setDetectorModels(models.models || []);
-      if (cache) setRecordingCache(cache);
-      if (system) {
-        setMqttStatus(system.mqtt || null);
-        setDetectorStatus(system.detector || null);
-      }
-      if (catalog) setMotionCatalog(catalog);
-      if (retention) setRetentionStatus(retention);
       setSelectedId((current) => nextConfig.cameras?.some((camera) => camera.id === current) ? current : nextConfig.cameras?.[0]?.id || "");
+
+      // These values enrich individual cards but are not required to render
+      // editable configuration. Load them independently so a slow storage or
+      // hardware status probe cannot strand the entire Admin page.
+      const optionalPayload = async (path, timeoutMs = 5000) => {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const optionalResponse = await fetch(path, { signal: controller.signal });
+          if (!optionalResponse.ok) return null;
+          return await optionalResponse.json();
+        } catch {
+          return null;
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      };
+      void Promise.all([
+        optionalPayload("/api/cameras"),
+        optionalPayload("/api/accelerator"),
+        optionalPayload("/api/detector/models"),
+        optionalPayload("/api/recordings/cache/status"),
+        optionalPayload("/api/system/status"),
+        optionalPayload("/api/motion/pipeline/catalog"),
+        optionalPayload("/api/retention/status"),
+      ]).then(([status, acceleratorPayload, models, cache, system, catalog, retention]) => {
+        if (sequence !== configLoadSequence.current) return;
+        if (Array.isArray(status)) setRuntimeStatus(status);
+        if (acceleratorPayload) setAccelerator(acceleratorPayload);
+        if (models) setDetectorModels(models.models || []);
+        if (cache) setRecordingCache(cache);
+        if (system) {
+          setMqttStatus(system.mqtt || null);
+          setDetectorStatus(system.detector || null);
+        }
+        if (catalog) setMotionCatalog(catalog);
+        if (retention) setRetentionStatus(retention);
+      });
       return true;
     } catch (error) {
       if (sequence === configLoadSequence.current) setConfigLoadError(error.message || "Configuration failed to load");
