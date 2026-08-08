@@ -220,7 +220,6 @@ class InferenceLifecycle:
         with self._lock:
             self._ensure_open()
             self.detector.update_runtime_config(config)
-            self.face_recognizer.config = self.detector.config
             self.faces.reconfigure_max_observations(config.face_max_observations)
 
     def reconfigure_tracking(self, config: DetectorConfig) -> None:

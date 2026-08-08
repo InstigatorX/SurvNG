@@ -176,6 +176,24 @@ def test_tracking_reconfiguration_commits_one_coherent_generation() -> None:
     assert service.appearance_backfill is next_backfill
 
 
+def test_policy_reconfiguration_supports_read_only_face_config_proxy() -> None:
+    service = _lifecycle()
+
+    class ReadOnlyFaceRecognizer:
+        @property
+        def config(self):
+            return service.detector.config
+
+    service.face_recognizer = ReadOnlyFaceRecognizer()
+    next_config = AppConfig().detector.model_copy(deep=True)
+    next_config.face_max_observations = 37
+
+    service.reconfigure_policy(next_config)
+
+    service.detector.update_runtime_config.assert_called_once_with(next_config)
+    service.faces.reconfigure_max_observations.assert_called_once_with(37)
+
+
 def test_tracking_swap_failure_restores_previous_and_closes_unbound_sessions() -> None:
     service = _lifecycle()
     first = Mock()

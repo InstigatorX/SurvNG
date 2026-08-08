@@ -129,6 +129,16 @@ export function showIncidentCardAnnotations(expanded, thumbnailAnnotations) {
   return !expanded && Boolean(thumbnailAnnotations);
 }
 
+export function incidentProgressiveImageWidth(renderedWidth, devicePixelRatio = 1) {
+  const width = Math.max(0, Number(renderedWidth) || 0);
+  const ratio = Math.max(1, Math.min(4, Number(devicePixelRatio) || 1));
+  if (!width) return 1280;
+  const requiredPixels = width * ratio;
+  if (requiredPixels <= 1280) return 1280;
+  if (requiredPixels <= 1920) return 1920;
+  return 2560;
+}
+
 export function incidentTriggerLabel(incident) {
   const source = String(incident?.trigger_source || "camera").toLowerCase();
   return ["ema", "adaptive", "visual_backup", "adaptive/visual_backup"].includes(source)

@@ -95,8 +95,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
     def event_thumbnail(
         event_id: int, width: int = 640, quality: int = 82
     ) -> FileResponse:
-        safe_width = max(160, min(int(width), 1280))
-        safe_quality = max(50, min(int(quality), 92))
+        safe_width = max(160, min(int(width), 2560))
+        safe_quality = max(50, min(int(quality), 95))
 
         def response(active_manager: AppManager) -> FileResponse:
             event = active_manager.events.get(event_id)

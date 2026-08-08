@@ -967,6 +967,25 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(first.path, second.path)
             self.assertTrue(str(first.path).startswith(str(root / "cache")))
 
+    def test_event_thumbnail_supports_large_desktop_pixel_density(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "large.jpg"
+            snapshot.parent.mkdir(parents=True)
+            self.assertTrue(cv2.imwrite(str(snapshot), np.zeros((300, 3000, 3), dtype=np.uint8)))
+            fake_manager = SimpleNamespace(
+                storage_dir=root,
+                image_cache=LocalImageCache(root / "cache"),
+                events=SimpleNamespace(get=lambda _event_id: {"id": 1, "snapshot_path": str(snapshot)}),
+            )
+
+            with patch.object(main, "manager", fake_manager):
+                response = main.event_thumbnail(1, width=9000, quality=100)
+
+            cached = cv2.imread(str(response.path))
+            self.assertIsNotNone(cached)
+            self.assertEqual(cached.shape[1], 2560)
+
     def test_webp_snapshot_uses_correct_media_type_and_download_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1229,6 +1248,33 @@ class EventApiSerializationTest(unittest.TestCase):
 
         selected = _best_incident_event([row])
         self.assertEqual(selected["id"], 1)
+
+    def test_incident_representative_prefers_clearer_confirmed_snapshot(self) -> None:
+        blurred_high_confidence = _event_row({
+            "id": 10,
+            "objects_json": json.dumps([{
+                "label": "person",
+                "confidence": 0.94,
+                "incident_eligible": True,
+                "snapshot_quality_score": 0.61,
+            }]),
+        })
+        clear_lower_confidence = _event_row({
+            "id": 11,
+            "objects_json": json.dumps([{
+                "label": "person",
+                "confidence": 0.78,
+                "incident_eligible": True,
+                "snapshot_quality_score": 0.88,
+            }]),
+        })
+
+        selected = _best_incident_event([
+            blurred_high_confidence,
+            clear_lower_confidence,
+        ])
+
+        self.assertEqual(selected["id"], 11)
 
     def test_linked_motion_observation_extends_incident_without_duplicate_event(self) -> None:
         incident = _incident_row("foyer", [{

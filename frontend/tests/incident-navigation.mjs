@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -22,6 +22,11 @@ assert.equal(incidentDetailQuery({ events: [] }), "");
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);
 assert.equal(showIncidentCardAnnotations(true, true), false);
+assert.equal(incidentProgressiveImageWidth(0, 1), 1280);
+assert.equal(incidentProgressiveImageWidth(390, 3), 1280);
+assert.equal(incidentProgressiveImageWidth(1440, 1), 1920);
+assert.equal(incidentProgressiveImageWidth(1600, 1.5), 2560);
+assert.equal(incidentProgressiveImageWidth(1920, 2), 2560);
 assert.equal(incidentTriggerLabel({ trigger_source: "camera" }), "Camera");
 assert.equal(incidentTriggerLabel({ trigger_source: "ema" }), "EMA");
 assert.equal(incidentTriggerLabel({ trigger_source: "visual_backup" }), "EMA");

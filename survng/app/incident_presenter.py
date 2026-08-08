@@ -102,20 +102,38 @@ def _best_incident_event(events: list[dict]) -> dict:
     object_events = [event for event in events if event.get("has_objects")]
     candidates = object_events or events
 
-    def score(event: dict) -> tuple[float, int]:
+    def score(event: dict) -> tuple[int, int, float, float, int]:
         objects = event.get("objects") or []
         confidences: list[float] = []
+        quality_scores: list[float] = []
+        eligible_objects = 0
         for item in objects:
             if not isinstance(item, dict):
+                continue
+            if not item.get("label") or item.get("incident_eligible") is False:
                 continue
             try:
                 confidence = float(item.get("confidence") or 0)
             except (TypeError, ValueError):
-                continue
+                confidence = 0.0
             if math.isfinite(confidence):
                 confidences.append(confidence)
+            try:
+                quality = float(item.get("snapshot_quality_score"))
+            except (TypeError, ValueError):
+                quality = float("nan")
+            if math.isfinite(quality):
+                quality_scores.append(max(0.0, min(1.0, quality)))
+            eligible_objects += 1
         best_confidence = max(confidences, default=0.0)
-        return (best_confidence, int(event.get("id") or 0))
+        best_quality = max(quality_scores, default=0.0)
+        return (
+            eligible_objects,
+            int(bool(quality_scores)),
+            best_quality,
+            best_confidence,
+            int(event.get("id") or 0),
+        )
 
     return max(candidates, key=score)
 
@@ -338,4 +356,3 @@ def _recording_event_row(event: dict, recordings: list[dict]) -> dict:
     first_start = float(recordings[0]["start_epoch"])
     event["timeline_offset"] = max(0.0, created_epoch - first_start)
     return event
-

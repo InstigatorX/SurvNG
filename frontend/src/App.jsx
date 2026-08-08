@@ -95,7 +95,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomGridMetrics, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera } from "./liveCustomLayout.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
@@ -2197,6 +2197,11 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   const [progressiveState, setProgressiveState] = useState({ key: "", base: false, intermediate: false, full: false });
   const progressiveReady = progressiveState.key === progressiveImageKey ? progressiveState : { base: false, intermediate: false, full: false };
   const imageReady = loadedImageKey === progressiveImageKey;
+  const devicePixelRatio = Math.max(1, Math.min(4, Number(window.devicePixelRatio) || 1));
+  const displayPixelWidth = (frameSize?.width || 0) * devicePixelRatio;
+  const progressiveWidth = incidentProgressiveImageWidth(frameSize?.width, devicePixelRatio);
+  const progressiveQuality = progressiveWidth > 1280 ? 90 : 86;
+  const shouldLoadFullResolution = fullResolution || displayPixelWidth > 2560;
   const renderedImage = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
     const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
@@ -2333,14 +2338,14 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
                 <img
                   key={`${progressiveImageKey}-intermediate`}
                   className={`snapshot-progressive-image ${progressiveReady.intermediate ? "ready" : ""}`}
-                  src={eventThumbnailUrl(event, 1280, 86)}
+                  src={eventThumbnailUrl(event, progressiveWidth, progressiveQuality)}
                   alt=""
                   aria-hidden="true"
                   decoding="async"
                   onLoad={(loadEvent) => markProgressiveReady("intermediate", loadEvent)}
                 />
               ) : null}
-              {fullResolution && progressiveReady.intermediate ? (
+              {shouldLoadFullResolution && progressiveReady.intermediate ? (
                 <img
                   key={`${progressiveImageKey}-full`}
                   className={`snapshot-progressive-image ${progressiveReady.full ? "ready" : ""}`}

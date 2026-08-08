@@ -14,6 +14,7 @@ from survng.app.config import CameraConfig
 from survng.app.motion_pipeline.object_detection import (
     _RecordedDetectionSample,
     RecordedMotionObjectDetector,
+    _image_quality,
     _temporal_consensus,
 )
 
@@ -121,7 +122,8 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(selected.offset, 0.5)
 
     def test_visual_quality_breaks_ties_between_equally_valid_object_frames(self) -> None:
-        checker = np.indices((80, 80)).sum(axis=0) % 2
+        rows, columns = np.indices((80, 80))
+        checker = ((rows // 4) + (columns // 4)) % 2
         sharp = np.repeat((checker * 255).astype(np.uint8)[..., None], 3, axis=2)
         blurred = cv2.GaussianBlur(sharp, (21, 21), 0)
         object_in_both = detected("person", 0.82, (8, 8, 72, 72))
@@ -135,7 +137,22 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(selected.recording_path, "sharp.mp4")
         self.assertTrue(objects[0]["temporal_consensus"])
         self.assertGreater(objects[0]["snapshot_sharpness_score"], 0.5)
+        self.assertLess(objects[0]["snapshot_sharpness_score"], 1.0)
+        self.assertGreater(objects[0]["snapshot_edge_detail_score"], 0.5)
         self.assertGreater(objects[0]["snapshot_quality_score"], 0.5)
+
+    def test_quality_score_preserves_separation_between_detailed_frames(self) -> None:
+        rows, columns = np.indices((256, 256))
+        checker = ((rows // 4) + (columns // 4)) % 2
+        sharp = np.repeat((checker * 255).astype(np.uint8)[..., None], 3, axis=2)
+        lightly_blurred = cv2.GaussianBlur(sharp, (5, 5), 0)
+
+        sharp_quality = _image_quality(sharp)
+        blurred_quality = _image_quality(lightly_blurred)
+
+        self.assertLess(sharp_quality.sharpness, 1.0)
+        self.assertGreater(sharp_quality.sharpness, blurred_quality.sharpness)
+        self.assertGreater(sharp_quality.edge_detail, blurred_quality.edge_detail)
 
     def test_recorded_frame_transport_is_lossless_bmp_instead_of_mjpeg(self) -> None:
         expected = np.arange(24 * 32 * 3, dtype=np.uint8).reshape((24, 32, 3))
