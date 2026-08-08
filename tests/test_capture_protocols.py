@@ -97,7 +97,7 @@ class CaptureProtocolTest(unittest.TestCase):
         with self.assertRaisesRegex(BaichuanError, "extension length"):
             reader.read_frame()
 
-    def test_onvif_callback_failure_does_not_force_resubscription(self) -> None:
+    def test_onvif_response_arriving_after_stop_does_not_emit_callback(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
         listener._stop.clear()
         notification = SimpleNamespace(Topic="motion", Message="motion")
@@ -109,7 +109,7 @@ class CaptureProtocolTest(unittest.TestCase):
             return response
 
         pullpoint.PullMessages.side_effect = pull_messages
-        callback = Mock(side_effect=RuntimeError("application failure"))
+        callback = Mock()
         listener.on_motion = callback
         fake_onvif = type("FakeOnvifCamera", (), {})
         modules = {
@@ -125,14 +125,46 @@ class CaptureProtocolTest(unittest.TestCase):
         ):
             listener._run_until_stopped()
 
-        callback.assert_called_once()
+        callback.assert_not_called()
         subscribe.assert_called_once()
+        self.assertEqual(listener.poll_errors, 0)
+        self.assertEqual(listener.notifications_received, 0)
+        self.assertEqual(listener.motion_events_received, 0)
+        self.assertEqual(listener.callback_errors, 0)
+
+    def test_onvif_callback_failure_does_not_force_resubscription(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        listener._stop.clear()
+        notification = SimpleNamespace(Topic="motion", Message="motion")
+        pullpoint = Mock()
+        pullpoint.PullMessages.return_value = SimpleNamespace(
+            NotificationMessage=[notification]
+        )
+
+        def callback(*_args):
+            listener._stop.set()
+            raise RuntimeError("application failure")
+
+        listener.on_motion = Mock(side_effect=callback)
+        fake_onvif = type("FakeOnvifCamera", (), {})
+        modules = {
+            "onvif": SimpleNamespace(ONVIFCamera=fake_onvif),
+            "zeep": SimpleNamespace(Transport=object),
+            "zeep.cache": SimpleNamespace(SqliteCache=object),
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(listener, "_subscribe", return_value=pullpoint),
+            patch.object(listener, "_unsubscribe"),
+            patch.object(listener, "_close_transport"),
+        ):
+            listener._run_until_stopped()
+
+        listener.on_motion.assert_called_once()
         self.assertEqual(listener.poll_errors, 0)
         self.assertEqual(listener.notifications_received, 1)
         self.assertEqual(listener.motion_events_received, 1)
         self.assertEqual(listener.callback_errors, 1)
-        self.assertTrue(listener.last_event_at)
-        self.assertTrue(listener.last_motion_event_at)
 
     def test_onvif_run_always_releases_subscription_and_transport(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
@@ -161,7 +193,7 @@ class CaptureProtocolTest(unittest.TestCase):
         with patch.object(
             listener,
             "_run_until_stopped",
-            side_effect=lambda: listener._stop.wait(2),
+            side_effect=lambda _generation, stop: stop.wait(2),
         ):
             listener.start()
             listener.stop()
@@ -183,6 +215,128 @@ class CaptureProtocolTest(unittest.TestCase):
             [STOP_GRACE_SECONDS, STOP_FORCE_SECONDS],
         )
         self.assertLessEqual(STOP_GRACE_SECONDS + STOP_FORCE_SECONDS, 15)
+
+    def test_onvif_stop_during_subscribe_closes_generation_once(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        entered = threading.Event()
+        released = threading.Event()
+        transport = SimpleNamespace(session=Mock())
+        transport.session.close.side_effect = released.set
+
+        def subscribe(*_args, **_kwargs):
+            with listener._lifecycle_lock:
+                listener._transport = transport
+                listener._transport_generation = listener._generation
+            entered.set()
+            self.assertTrue(released.wait(1))
+            return Mock()
+
+        with (
+            patch.object(listener, "_subscribe", side_effect=subscribe),
+            patch("survng.app.onvif_events.STOP_GRACE_SECONDS", 0.01),
+            patch("survng.app.onvif_events.STOP_FORCE_SECONDS", 0.2),
+        ):
+            listener.start()
+            self.assertTrue(entered.wait(1))
+            listener.request_stop()
+            self.assertTrue(listener.wait_stopped(1.0))
+
+        transport.session.close.assert_called_once_with()
+        listener.on_motion.assert_not_called()
+        self.assertFalse(listener.running)
+
+    def test_onvif_stop_during_pull_drops_returned_notification(self) -> None:
+        callback = Mock()
+        listener = OnvifEventListener(camera(onvif=True), callback)
+        entered = threading.Event()
+        released = threading.Event()
+        manager = Mock()
+        transport = SimpleNamespace(session=Mock())
+        transport.session.close.side_effect = released.set
+        notification = SimpleNamespace(Topic="motion", Message="motion")
+        response = SimpleNamespace(NotificationMessage=[notification])
+        pullpoint = Mock()
+
+        def pull_messages(_request):
+            entered.set()
+            self.assertTrue(released.wait(1))
+            return response
+
+        pullpoint.PullMessages.side_effect = pull_messages
+
+        def subscribe(*_args, **_kwargs):
+            with listener._lifecycle_lock:
+                generation = listener._generation
+                listener._transport = transport
+                listener._transport_generation = generation
+                listener._subscription_manager = manager
+                listener._subscription_generation = generation
+            return pullpoint
+
+        with (
+            patch.object(listener, "_subscribe", side_effect=subscribe),
+            patch("survng.app.onvif_events.STOP_GRACE_SECONDS", 0.01),
+            patch("survng.app.onvif_events.STOP_FORCE_SECONDS", 0.2),
+        ):
+            listener.start()
+            self.assertTrue(entered.wait(1))
+            listener.request_stop()
+            self.assertTrue(listener.wait_stopped(1.0))
+
+        callback.assert_not_called()
+        manager.Unsubscribe.assert_called_once_with()
+        transport.session.close.assert_called_once_with()
+        self.assertEqual(listener.notifications_received, 0)
+        self.assertFalse(listener.running)
+
+    def test_onvif_stop_during_renew_cannot_resume_polling(self) -> None:
+        callback = Mock()
+        listener = OnvifEventListener(camera(onvif=True), callback)
+        entered = threading.Event()
+        released = threading.Event()
+        manager = Mock()
+        transport = SimpleNamespace(session=Mock())
+        transport.session.close.side_effect = released.set
+        pullpoint = Mock()
+
+        def renew(**_kwargs):
+            entered.set()
+            self.assertTrue(released.wait(1))
+            return SimpleNamespace(
+                CurrentTime="2026-08-08T12:00:00Z",
+                TerminationTime="2026-08-08T13:00:00Z",
+            )
+
+        manager.Renew.side_effect = renew
+
+        def subscribe(*_args, **_kwargs):
+            with listener._lifecycle_lock:
+                generation = listener._generation
+                listener._transport = transport
+                listener._transport_generation = generation
+                listener._subscription_manager = manager
+                listener._subscription_generation = generation
+            listener._subscription_granted_lifetime_seconds = 60.0
+            listener._subscription_expires_monotonic = time.monotonic()
+            return pullpoint
+
+        with (
+            patch.object(listener, "_subscribe", side_effect=subscribe),
+            patch("survng.app.onvif_events.STOP_GRACE_SECONDS", 0.01),
+            patch("survng.app.onvif_events.STOP_FORCE_SECONDS", 0.2),
+        ):
+            listener.start()
+            self.assertTrue(entered.wait(1))
+            listener.request_stop()
+            self.assertTrue(listener.wait_stopped(1.0))
+
+        manager.Renew.assert_called_once_with(TerminationTime="PT1H")
+        manager.Unsubscribe.assert_called_once_with()
+        transport.session.close.assert_called_once_with()
+        pullpoint.PullMessages.assert_not_called()
+        callback.assert_not_called()
+        self.assertEqual(listener.renewals, 0)
+        self.assertFalse(listener.running)
 
     def test_onvif_numeric_off_state_is_not_reported_as_motion(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())

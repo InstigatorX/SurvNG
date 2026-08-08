@@ -46,8 +46,11 @@ class OnvifEventListener:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._generation = 0
         self._transport: Any = None
+        self._transport_generation: int | None = None
         self._subscription_manager: Any = None
+        self._subscription_generation: int | None = None
         self.connected = False
         self.last_event_at = ""
         self.last_camera_event_at = ""
@@ -88,9 +91,13 @@ class OnvifEventListener:
         with self._lifecycle_lock:
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._stop.clear()
+            self._generation += 1
+            generation = self._generation
+            stop_event = threading.Event()
+            self._stop = stop_event
             thread = threading.Thread(
                 target=self._run,
+                args=(generation, stop_event),
                 name=f"onvif-{self.camera.id}",
                 # Some camera SDK calls can ignore a closed HTTP transport.
                 # Cleanup below is bounded, so a broken camera must not pin
@@ -111,13 +118,16 @@ class OnvifEventListener:
 
     def request_stop(self) -> None:
         """Signal the listener without waiting for camera I/O to return."""
-        self._stop.set()
+        with self._lifecycle_lock:
+            stop_event = self._stop
+        stop_event.set()
 
     def wait_stopped(self, timeout: float) -> bool:
         """Wait within one caller-owned budget, forcing transport closure once."""
         deadline = time.monotonic() + max(0.0, timeout)
         with self._lifecycle_lock:
             thread = self._thread
+            generation = self._generation
         if thread is not None:
             # PullMessages has a short bounded timeout. Let the owning worker
             # return from it and send Unsubscribe while its transport is still
@@ -127,7 +137,7 @@ class OnvifEventListener:
                 max(0.0, deadline - time.monotonic()),
             ))
             if thread.is_alive():
-                self._close_transport()
+                self._close_transport(generation)
                 thread.join(timeout=min(
                     STOP_FORCE_SECONDS,
                     max(0.0, deadline - time.monotonic()),
@@ -139,22 +149,34 @@ class OnvifEventListener:
             if self._thread is thread and (thread is None or not thread.is_alive()):
                 self._thread = None
         if thread is None or not thread.is_alive():
-            self._transport = None
+            self._close_transport(generation)
         return thread is None or not thread.is_alive()
 
-    def _run(self) -> None:
+    def _run(
+        self,
+        generation: int | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        generation = self._generation if generation is None else generation
+        stop_event = self._stop if stop_event is None else stop_event
         try:
-            self._run_until_stopped()
+            self._run_until_stopped(generation, stop_event)
         finally:
-            self._unsubscribe()
-            self._close_transport()
-            self.connected = False
+            self._unsubscribe(generation)
+            self._close_transport(generation)
             current = threading.current_thread()
             with self._lifecycle_lock:
                 if self._thread is current:
                     self._thread = None
+                    self.connected = False
 
-    def _run_until_stopped(self) -> None:
+    def _run_until_stopped(
+        self,
+        generation: int | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        generation = self._generation if generation is None else generation
+        stop_event = self._stop if stop_event is None else stop_event
         try:
             from onvif import ONVIFCamera
             from zeep import Transport
@@ -178,9 +200,17 @@ class OnvifEventListener:
                 return super().create_events_service(from_template)
 
         retry_delay = RETRY_INITIAL_SECONDS
-        while not self._stop.is_set():
+        while not stop_event.is_set() and self._generation_matches(generation):
             try:
-                pullpoint = self._subscribe(SingleSubscriptionCamera, Transport, SqliteCache)
+                pullpoint = self._subscribe(
+                    SingleSubscriptionCamera,
+                    Transport,
+                    SqliteCache,
+                    generation=generation,
+                    stop_event=stop_event,
+                )
+                if stop_event.is_set() or not self._generation_matches(generation):
+                    return
                 if self.last_connected_at:
                     self.resubscriptions += 1
                 retry_delay = RETRY_INITIAL_SECONDS
@@ -192,24 +222,24 @@ class OnvifEventListener:
                 self.connected = False
                 self.retry_attempts += 1
                 self.last_error = f"subscription failed: {self._error_text(exc)[:200]}"
-                self._unsubscribe()
-                self._close_transport()
+                self._unsubscribe(generation)
+                self._close_transport(generation)
                 LOGGER.warning(
                     "failed to subscribe to ONVIF events for %s, retrying in %.0fs: %s",
                     self.camera.id,
                     retry_delay,
                     self._error_text(exc),
                 )
-                if self._stop.wait(retry_delay):
+                if stop_event.wait(retry_delay):
                     return
                 retry_delay = min(RETRY_MAX_SECONDS, retry_delay * 2)
                 continue
 
             failures = 0
             planned_resubscription = False
-            while not self._stop.is_set():
+            while not stop_event.is_set() and self._generation_matches(generation):
                 if self._subscription_renewal_due():
-                    if self._renew_subscription():
+                    if self._renew_subscription(generation, stop_event):
                         continue
                     planned_resubscription = True
                     LOGGER.info(
@@ -221,6 +251,8 @@ class OnvifEventListener:
                     response = pullpoint.PullMessages(
                         {"Timeout": f"PT{PULL_TIMEOUT_SECONDS}S", "MessageLimit": 10}
                     )
+                    if stop_event.is_set() or not self._generation_matches(generation):
+                        return
                     self._record_subscription_times(response)
                     failures = 0
                     self.connected = True
@@ -256,7 +288,7 @@ class OnvifEventListener:
                         else:
                             self.unrecognized_notifications += 1
                 except Exception as exc:
-                    if self._stop.is_set():
+                    if stop_event.is_set() or not self._generation_matches(generation):
                         return
                     error_text = self._error_text(exc)
                     self.last_poll_error = error_text
@@ -292,30 +324,46 @@ class OnvifEventListener:
                             failures,
                         )
                         break
-                    if self._stop.wait(POLL_RETRY_SECONDS):
+                    if stop_event.wait(POLL_RETRY_SECONDS):
                         return
 
-            self._unsubscribe()
-            self._close_transport()
+            self._unsubscribe(generation)
+            self._close_transport(generation)
             self.connected = False
-            if not self._stop.is_set():
+            if not stop_event.is_set() and self._generation_matches(generation):
                 if planned_resubscription:
                     retry_delay = RETRY_INITIAL_SECONDS
                     continue
-                if self._stop.wait(retry_delay):
+                if stop_event.wait(retry_delay):
                     return
                 retry_delay = min(RETRY_MAX_SECONDS, retry_delay * 2)
 
-    def _subscribe(self, ONVIFCamera: Any, Transport: Any, SqliteCache: Any) -> Any:
-        self._close_transport()
+    def _subscribe(
+        self,
+        ONVIFCamera: Any,
+        Transport: Any,
+        SqliteCache: Any,
+        *,
+        generation: int | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> Any:
+        generation = self._generation if generation is None else generation
+        stop_event = self._stop if stop_event is None else stop_event
+        self._close_transport(generation)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = self._cache_dir / f"onvif-zeep-{self.camera.id}.sqlite3"
         transport = Transport(
             cache=SqliteCache(path=str(cache_path)),
             operation_timeout=TRANSPORT_OPERATION_TIMEOUT_SECONDS,
         )
-        self._transport = transport
-        self._subscription_manager = None
+        with self._lifecycle_lock:
+            if generation != self._generation or stop_event.is_set():
+                transport.session.close()
+                raise RuntimeError("ONVIF subscription generation stopped")
+            self._transport = transport
+            self._transport_generation = generation
+            self._subscription_manager = None
+            self._subscription_generation = None
         camera = ONVIFCamera(
             self.camera.onvif.host,
             self.camera.onvif.port,
@@ -333,17 +381,26 @@ class OnvifEventListener:
         camera.xaddrs[PULLPOINT_NAMESPACE] = address
         self._record_subscription_times(subscription)
         try:
-            self._subscription_manager = events_service.zeep_client.create_service(
+            manager = events_service.zeep_client.create_service(
                 SUBSCRIPTION_MANAGER_BINDING,
                 address,
             )
+            with self._lifecycle_lock:
+                if generation == self._generation:
+                    self._subscription_manager = manager
+                    self._subscription_generation = generation
         except Exception:
             LOGGER.debug(
                 "ONVIF subscription manager unavailable for %s",
                 self.camera.id,
                 exc_info=True,
             )
-        return camera.create_pullpoint_service()
+        pullpoint = camera.create_pullpoint_service()
+        if stop_event.is_set() or not self._generation_matches(generation):
+            self._unsubscribe(generation)
+            self._close_transport(generation)
+            raise RuntimeError("ONVIF subscription generation stopped")
+        return pullpoint
 
     @staticmethod
     def _subscription_address(subscription: Any) -> str:
@@ -391,9 +448,22 @@ class OnvifEventListener:
         )
         return remaining <= margin
 
-    def _renew_subscription(self) -> bool:
-        manager = self._subscription_manager
+    def _renew_subscription(
+        self,
+        generation: int | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        generation = self._generation if generation is None else generation
+        stop_event = self._stop if stop_event is None else stop_event
+        with self._lifecycle_lock:
+            manager = (
+                self._subscription_manager
+                if self._subscription_generation in {None, generation}
+                else None
+            )
         if manager is None:
+            return False
+        if stop_event.is_set() or not self._generation_matches(generation):
             return False
         self.renewal_attempts += 1
         try:
@@ -402,6 +472,8 @@ class OnvifEventListener:
             # Raw Zeep operations require keyword arguments here; a positional
             # dict would be serialized as the literal TerminationTime value.
             response = manager.Renew(TerminationTime=SUBSCRIPTION_DURATION)
+            if stop_event.is_set() or not self._generation_matches(generation):
+                return False
             self._subscription_granted_lifetime_seconds = None
             self._subscription_expires_monotonic = None
             self.subscription_lifetime_seconds = None
@@ -425,9 +497,16 @@ class OnvifEventListener:
             )
             return False
 
-    def _unsubscribe(self) -> None:
-        manager = self._subscription_manager
-        self._subscription_manager = None
+    def _unsubscribe(self, generation: int | None = None) -> None:
+        with self._lifecycle_lock:
+            if (
+                generation is not None
+                and self._subscription_generation not in {None, generation}
+            ):
+                return
+            manager = self._subscription_manager
+            self._subscription_manager = None
+            self._subscription_generation = None
         if manager is None:
             return
         try:
@@ -440,9 +519,16 @@ class OnvifEventListener:
                 exc_info=True,
             )
 
-    def _close_transport(self) -> None:
-        transport = self._transport
-        self._transport = None
+    def _close_transport(self, generation: int | None = None) -> None:
+        with self._lifecycle_lock:
+            if (
+                generation is not None
+                and self._transport_generation not in {None, generation}
+            ):
+                return
+            transport = self._transport
+            self._transport = None
+            self._transport_generation = None
         if transport is None:
             return
         try:
@@ -453,6 +539,10 @@ class OnvifEventListener:
                 self.camera.id,
                 exc_info=True,
             )
+
+    def _generation_matches(self, generation: int) -> bool:
+        with self._lifecycle_lock:
+            return generation == self._generation
 
 
     def _is_timeout_error(self, exc: Exception) -> bool:
