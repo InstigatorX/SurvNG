@@ -72,6 +72,17 @@ def test_start_orders_state_cleanup_before_producers() -> None:
     owned.onvif.start.assert_called_once_with()
 
 
+def test_start_skips_onvif_when_detection_is_disabled() -> None:
+    service, owned = _service()
+    service.set_detection_enabled(False)
+
+    service.start()
+
+    assert owned.state.phase is CameraLifecyclePhase.RUNNING
+    assert owned.state.detection_enabled is False
+    owned.onvif.start.assert_not_called()
+
+
 def test_start_failure_rolls_back_runtime_state() -> None:
     service, owned = _service()
     owned.capture.start.side_effect = RuntimeError("capture unavailable")
@@ -142,6 +153,37 @@ def test_detection_change_rolls_back_when_tracking_sync_fails() -> None:
 
     assert owned.state.detection_enabled is True
     assert owned.tracking.sync_accepting.call_count == 2
+
+
+def test_detection_switch_controls_onvif_while_camera_is_running() -> None:
+    service, owned = _service()
+    service.start()
+    owned.onvif.reset_mock()
+
+    service.set_detection_enabled(False)
+
+    assert owned.state.detection_enabled is False
+    owned.onvif.stop.assert_called_once_with()
+    owned.onvif.start.assert_not_called()
+
+    service.set_detection_enabled(True)
+
+    assert owned.state.detection_enabled is True
+    owned.onvif.start.assert_called_once_with()
+
+
+def test_detection_change_rolls_back_when_onvif_start_fails() -> None:
+    service, owned = _service()
+    service.set_detection_enabled(False)
+    service.start()
+    owned.onvif.start.side_effect = RuntimeError("subscription failed")
+
+    with pytest.raises(RuntimeError, match="subscription failed"):
+        service.set_detection_enabled(True)
+
+    assert owned.state.detection_enabled is False
+    assert owned.tracking.sync_accepting.call_count == 4
+    owned.onvif.stop.assert_called_once_with()
 
 
 def test_runtime_status_reports_authoritative_state_and_active_workers() -> None:

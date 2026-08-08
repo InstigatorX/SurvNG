@@ -417,10 +417,8 @@ class AppManager:
             startup_started = time.monotonic()
             phase_started = startup_started
             try:
-                # Replace any state left by the previous process with the
-                # preferences this manager will actually apply. On a full
-                # service start these are all-on defaults; reload candidates
-                # receive the active manager's preferences before this point.
+                # Rewrite the restored or explicitly transferred snapshot so
+                # removed cameras are pruned before startup admission.
                 self.camera_controls.persist()
                 self.inference.start_core()
                 self._startup_timings = {

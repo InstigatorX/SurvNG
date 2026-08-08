@@ -40,10 +40,28 @@ def control_service(
 
 
 class CameraControlServiceTest(unittest.TestCase):
-    def test_defaults_all_controls_on_without_loading_stale_process_state(self) -> None:
+    def test_restores_persisted_controls_for_configured_cameras(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "runtime_state.json"
-            path.write_text('{"camera_enabled":{"gate":false}}', encoding="utf-8")
+            path.write_text(
+                '{"recording_enabled":{"gate":false},'
+                '"detection_enabled":{"gate":false},'
+                '"camera_enabled":{"gate":false,"removed":false}}',
+                encoding="utf-8",
+            )
+
+            controls, _worker, _recording, _fleet, _mqtt = control_service(path)
+
+            self.assertEqual(controls.snapshot(), {
+                "recording_enabled": {"gate": False},
+                "detection_enabled": {"gate": False},
+                "camera_enabled": {"gate": False},
+            })
+
+    def test_malformed_persisted_controls_fall_back_to_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime_state.json"
+            path.write_text('{"camera_enabled":{"gate":"false"}}', encoding="utf-8")
 
             controls, _worker, _recording, _fleet, _mqtt = control_service(path)
 

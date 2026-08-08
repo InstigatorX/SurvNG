@@ -100,6 +100,7 @@ import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearc
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, visibleRelatedAppearances } from "./relatedIncidents.mjs";
+import { nextFaceReviewObservation } from "./faceReview.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const LEGACY_INCIDENT_FILTER_KEYS = [
@@ -11064,7 +11065,7 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || "Could not update this face");
       }
-      await onUpdated?.();
+      await onUpdated?.("", { advance: true, observationId: observation.id });
     } catch (requestError) {
       setError(requestError.message || "Could not update this face");
     } finally {
@@ -11087,7 +11088,7 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || "Could not create this person");
       }
-      await onUpdated?.(`${name} enrolled`);
+      await onUpdated?.(`${name} enrolled`, { advance: true, observationId: observation.id });
     } catch (requestError) {
       setError(requestError.message || "Could not create this person");
     } finally {
@@ -11108,7 +11109,7 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || "Could not update this reference");
       }
-      await onUpdated?.(pinned ? "Reference pinned" : "Reference unpinned");
+      await onUpdated?.(pinned ? "Reference pinned" : "Reference unpinned", { advance: false });
     } catch (requestError) {
       setError(requestError.message || "Could not update this reference");
     } finally {
@@ -11205,8 +11206,10 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
           if (statusPayload) setStatus(statusPayload);
         })
         .catch(() => {});
+      return observationPayload;
     } catch (error) {
       if (sequence === faceLoadSequence.current) setNotice(error.message || "Unable to load faces");
+      return null;
     } finally {
       if (sequence === faceLoadSequence.current) setLoading(false);
     }
@@ -11318,7 +11321,14 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         </div>
       </section>
 
-      {selected ? <FaceReviewDialog observation={selected} people={people} timeZone={timeZone} onClose={() => setSelected(null)} onUpdated={async (message) => { setSelected(null); if (message) setNotice(message); await load(); }} /> : null}
+      {selected ? <FaceReviewDialog observation={selected} people={people} timeZone={timeZone} onClose={() => setSelected(null)} onUpdated={async (message, action = {}) => {
+        const currentObservations = observations;
+        if (message) setNotice(message);
+        const refreshed = await load();
+        setSelected(action.advance && refreshed
+          ? nextFaceReviewObservation(action.observationId || selected.id, currentObservations, refreshed)
+          : null);
+      }} /> : null}
     </main>
   );
 }

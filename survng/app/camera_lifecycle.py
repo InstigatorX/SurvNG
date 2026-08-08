@@ -114,6 +114,7 @@ class CameraLifecycleService:
                 self.state.accepting_motion_events = True
                 self.state.stop_event.clear()
                 self.state.generation += 1
+                detection_enabled = self.state.detection_enabled
                 self._transition_locked(CameraLifecyclePhase.STARTING)
             try:
                 self.tracking.sync_accepting()
@@ -123,7 +124,11 @@ class CameraLifecycleService:
                     raise RuntimeError(
                         f"camera source did not start for {self.camera_id}"
                     )
-                self.onvif.start()
+                # ONVIF events only feed object-detection admission. Preserve
+                # live capture for a detection-disabled camera without holding
+                # a camera subscription that cannot produce useful work.
+                if detection_enabled:
+                    self.onvif.start()
             except BaseException as startup_error:
                 try:
                     self._stop_runtime(
@@ -397,11 +402,20 @@ class CameraLifecycleService:
 
     def set_detection_enabled(self, enabled: bool) -> None:
         with self._operation_lock:
+            desired = bool(enabled)
             with self.state.lock:
                 previous = self.state.detection_enabled
-                self.state.detection_enabled = bool(enabled)
+                phase = self.state.phase
+                if previous is desired:
+                    return
+                self.state.detection_enabled = desired
             try:
                 self.tracking.sync_accepting()
+                if phase is CameraLifecyclePhase.RUNNING:
+                    if desired:
+                        self.onvif.start()
+                    else:
+                        self.onvif.stop()
             except BaseException:
                 with self.state.lock:
                     self.state.detection_enabled = previous
@@ -412,6 +426,17 @@ class CameraLifecycleService:
                         "object tracking eligibility rollback failed for %s",
                         self.camera_id,
                     )
+                if phase is CameraLifecyclePhase.RUNNING:
+                    try:
+                        if previous:
+                            self.onvif.start()
+                        else:
+                            self.onvif.stop()
+                    except BaseException:
+                        LOGGER.exception(
+                            "ONVIF eligibility rollback failed for %s",
+                            self.camera_id,
+                        )
                 raise
 
     def runtime_status(self) -> dict[str, Any]:

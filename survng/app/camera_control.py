@@ -28,9 +28,9 @@ class DetectionControlWorker(Protocol):
 class CameraControlService:
     """Own desired runtime state and apply camera-control transactions.
 
-    Preferences are deliberately initialized to the all-on process default.
-    Configuration-generation reloads explicitly transfer the active snapshot;
-    stale state from a prior process is never loaded implicitly.
+    Preferences are restored from the last atomically persisted control state.
+    Missing, malformed, and removed-camera values safely fall back to on.
+    Configuration-generation reloads can still transfer an active snapshot.
     """
 
     def __init__(
@@ -58,6 +58,44 @@ class CameraControlService:
         self._detection_enabled: dict[str, bool] = {}
         self._camera_enabled = {camera_id: True for camera_id in self._cameras}
         self._accepting_commands = True
+        self._load_persisted_state()
+
+    def _load_persisted_state(self) -> None:
+        try:
+            if self._state_path.stat().st_size > 1024 * 1024:
+                raise ValueError("camera control state exceeds 1 MiB")
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("camera control state must be an object")
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning(
+                "camera control state could not be restored from %s: %s; using defaults",
+                self._state_path,
+                exc,
+            )
+            return
+
+        camera_ids = set(self._cameras)
+
+        def boolean_map(name: str) -> dict[str, bool]:
+            values = payload.get(name)
+            if not isinstance(values, dict):
+                return {}
+            return {
+                camera_id: enabled
+                for camera_id, enabled in values.items()
+                if camera_id in camera_ids and isinstance(enabled, bool)
+            }
+
+        self._recording_enabled = boolean_map("recording_enabled")
+        self._detection_enabled = boolean_map("detection_enabled")
+        saved_cameras = boolean_map("camera_enabled")
+        self._camera_enabled = {
+            camera_id: saved_cameras.get(camera_id, True)
+            for camera_id in camera_ids
+        }
 
     def quiesce(self) -> None:
         """Reject new commands after any in-flight control transaction drains."""

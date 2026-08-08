@@ -726,7 +726,7 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         self.assertEqual(manager.runtime_preferences(), previous)
 
-    def test_fresh_process_ignores_saved_runtime_state_and_defaults_all_controls_on(self) -> None:
+    def test_fresh_process_restores_saved_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "runtime_state.json").write_text(
                 json.dumps({
@@ -748,13 +748,13 @@ class ManagerLifecycleTest(unittest.TestCase):
             self.assertEqual(
                 manager.runtime_preferences(),
                 {
-                    "recording_enabled": {},
-                    "detection_enabled": {},
-                    "camera_enabled": {"gate": True},
+                    "recording_enabled": {"gate": False},
+                    "detection_enabled": {"gate": False},
+                    "camera_enabled": {"gate": False},
                 },
             )
-            self.assertTrue(manager.recording_enabled("gate"))
-            self.assertTrue(manager.detection_enabled("gate"))
+            self.assertFalse(manager.recording_enabled("gate"))
+            self.assertFalse(manager.detection_enabled("gate"))
 
             manager.stop_all()
 
