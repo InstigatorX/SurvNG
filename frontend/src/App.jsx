@@ -1391,9 +1391,8 @@ function Shell({ page, theme, recordingContext, children }) {
           <div className="brand-mark">
             <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />
           </div>
-          <div>
-            <h1>{isConfig ? "Admin" : isRecordings ? "Recordings" : isIncidents ? "Incidents" : isFaces ? "Faces" : "SurvNG"}</h1>
-            <p>{isConfig ? "Camera inventory, cloning, and capability detection" : isRecordings ? "Continuous review of saved camera history" : isIncidents ? "Motion and object incident review" : isFaces ? "Face enrollment and observation review" : "Streams, events, recordings, and object detections"}</p>
+          <div className="brand-title">
+            <h1>SurvNG</h1>
           </div>
           {!isConfig && !isRecordings && !isIncidents && !isFaces ? <LiveHeaderStats /> : null}
         </div>

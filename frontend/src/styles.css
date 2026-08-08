@@ -213,6 +213,12 @@ p {
   gap: 10px;
 }
 
+.brand-title {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+}
+
 .header-stats {
   display: flex;
   align-items: center;
