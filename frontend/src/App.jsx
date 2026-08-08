@@ -1093,8 +1093,6 @@ function AssistantPanel({ pageContext, timeZone }) {
   const [messages, setMessages] = useState(readAssistantMessages);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState(null);
-  const [calibration, setCalibration] = useState(null);
-  const [calibrating, setCalibrating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
   const [error, setError] = useState("");
@@ -11158,6 +11156,8 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
   const [observations, setObservations] = useState([]);
   const [cameras, setCameras] = useState([]);
   const [status, setStatus] = useState(null);
+  const [calibration, setCalibration] = useState(null);
+  const [calibrating, setCalibrating] = useState(false);
   const [filter, setFilter] = useState("unknown");
   const [cameraId, setCameraId] = useState("");
   const [personId, setPersonId] = useState("");
