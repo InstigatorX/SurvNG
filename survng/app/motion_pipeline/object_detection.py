@@ -35,8 +35,14 @@ RECORDED_EVENT_FRAME_OFFSETS = tuple(
 RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 24.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
+RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
 TEMPORAL_ASSOCIATION_MIN_IOU = 0.05
 TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO = 2.5
+REPRESENTATIVE_DYNAMIC_DISPLACEMENT_RATIO = 0.01
+REPRESENTATIVE_DYNAMIC_PATH_RATIO = 0.025
+REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO = 0.01
+REPRESENTATIVE_MIN_SUBJECT_AREA_RATIO = 0.0025
+REPRESENTATIVE_MIN_QUALITY_SCORE = 0.25
 
 
 @dataclass(frozen=True)
@@ -239,6 +245,55 @@ def _temporal_motion_metrics(
     return displacement, path
 
 
+def _normalized_box_metrics(
+    detected: dict[str, Any],
+    frame: Frame,
+) -> tuple[float, float]:
+    """Return edge clearance and area in resolution-independent units."""
+    box = _box(detected)
+    height, width = frame.shape[:2]
+    if box is None or width <= 0 or height <= 0:
+        return 0.0, 0.0
+    x1, y1, x2, y2 = box
+    clearance = min(
+        x1 / width,
+        y1 / height,
+        (width - x2) / width,
+        (height - y2) / height,
+    )
+    area = ((x2 - x1) * (y2 - y1)) / float(width * height)
+    return (
+        max(0.0, min(0.5, clearance)),
+        max(0.0, min(1.0, area)),
+    )
+
+
+def _representative_needs_refinement(objects: list[dict[str, Any]]) -> bool:
+    """Identify an avoidably weak cover frame after detection is confirmed.
+
+    Refinement is deliberately limited to the active/new subject rather than a
+    stationary corroborating object. This keeps a parked vehicle from making a
+    clipped person look like an acceptable two-object representative frame.
+    """
+    primary = [
+        item
+        for item in objects
+        if item.get("temporal_consensus") is True
+        and item.get("snapshot_primary_subject") is True
+    ]
+    if not primary:
+        return False
+    return any(
+        float(item.get("snapshot_edge_clearance_ratio") or 0.0)
+        < REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO
+        or float(item.get("snapshot_subject_area_ratio") or 0.0)
+        < REPRESENTATIVE_MIN_SUBJECT_AREA_RATIO
+        or float(item.get("snapshot_quality_score") or 0.0)
+        < REPRESENTATIVE_MIN_QUALITY_SCORE
+        for item in primary
+    )
+
+
 def _temporal_consensus(
     samples: list[_RecordedDetectionSample],
     minimum_confirmations: int,
@@ -294,11 +349,30 @@ def _temporal_consensus(
             and len(track.winning_observations) >= required_by_track[id(track)]
         )
 
+    motion_by_track = {
+        id(track): _temporal_motion_metrics(track, samples)
+        for track in evidence
+        if id(track) in confirmed_ids
+    }
+    primary_ids = {
+        id(track)
+        for track in evidence
+        if id(track) in confirmed_ids
+        and (
+            min(track.observations, default=0) > 0
+            or motion_by_track[id(track)][0]
+            >= REPRESENTATIVE_DYNAMIC_DISPLACEMENT_RATIO
+            or motion_by_track[id(track)][1] >= REPRESENTATIVE_DYNAMIC_PATH_RATIO
+        )
+    }
+    if not primary_ids:
+        primary_ids = set(confirmed_ids)
+
     quality_by_sample: dict[int, _ImageQuality] = {}
 
     def sample_score(
         item: tuple[int, _RecordedDetectionSample],
-    ) -> tuple[int, int, float, float, float, float, float]:
+    ) -> tuple[int, int, float, float, int, int, float, float, float, float]:
         sample_index, sample = item
         visible = [
             track
@@ -311,6 +385,23 @@ def _temporal_consensus(
             track for track in visible
             if _eligible_detection(track.observations[sample_index])
         ]
+        primary_visible = [track for track in visible if id(track) in primary_ids]
+        primary_metrics = [
+            _normalized_box_metrics(track.observations[sample_index], sample.frame)
+            for track in primary_visible
+        ]
+        fully_framed_primary = sum(
+            clearance >= REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO
+            for clearance, _area in primary_metrics
+        )
+        best_primary_clearance = max(
+            (clearance for clearance, _area in primary_metrics),
+            default=0.0,
+        )
+        best_primary_area = max(
+            (area for _clearance, area in primary_metrics),
+            default=0.0,
+        )
         quality = _sample_image_quality(sample, visible, sample_index)
         quality_by_sample[sample_index] = quality
         face_quality = max(
@@ -323,6 +414,10 @@ def _temporal_consensus(
         )
         raw_peak = max((_confidence(detected) for detected in sample.objects if _candidate_detection(detected)), default=0.0)
         return (
+            int(bool(primary_visible)),
+            fully_framed_primary,
+            best_primary_clearance,
+            best_primary_area,
             len(admitted_visible),
             len(visible),
             face_quality,
@@ -346,6 +441,7 @@ def _temporal_consensus(
         label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
         confirmed = confirmed and label_confirmed_here
         incident_confirmed = confirmed and not bool(detected.get("auxiliary_detection"))
+        edge_clearance, subject_area = _normalized_box_metrics(detected, selected.frame)
         enriched = {
             **detected,
             "incident_eligible": incident_confirmed,
@@ -365,6 +461,9 @@ def _temporal_consensus(
             "snapshot_exposure_score": round(selected_quality.exposure, 4),
             "snapshot_contrast_score": round(selected_quality.contrast, 4),
             "snapshot_edge_detail_score": round(selected_quality.edge_detail, 4),
+            "snapshot_primary_subject": id(track) in primary_ids,
+            "snapshot_edge_clearance_ratio": round(edge_clearance, 5),
+            "snapshot_subject_area_ratio": round(subject_area, 5),
         }
         observation_indices = sorted(track.observations)
         if observation_indices:
@@ -377,7 +476,10 @@ def _temporal_consensus(
                 last_observation_index
             ].offset
             enriched["temporal_newly_appeared"] = first_observation_index > 0
-        displacement, path = _temporal_motion_metrics(track, samples)
+        displacement, path = motion_by_track.get(
+            id(track),
+            _temporal_motion_metrics(track, samples),
+        )
         enriched["temporal_center_displacement_ratio"] = round(displacement, 5)
         enriched["temporal_center_path_ratio"] = round(path, 5)
         if confirmed:
@@ -443,6 +545,7 @@ class RecordedMotionObjectDetector:
             time.sleep(min(wait_seconds, 3.0))
 
         deadline = time.monotonic() + max(0.0, RECORDED_EVENT_RETRY_SECONDS)
+        refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
         default_required = max(
             1,
@@ -463,10 +566,16 @@ class RecordedMotionObjectDetector:
 
         for stage_index, stage_offsets in enumerate(RECORDED_EVENT_FRAME_STAGES):
             while True:
+                stage_deadline = min(
+                    deadline,
+                    refinement_deadline
+                    if refinement_deadline is not None
+                    else deadline,
+                )
                 for sample_offset in stage_offsets:
                     if sample_offset in samples_by_offset:
                         continue
-                    if time.monotonic() >= deadline:
+                    if time.monotonic() >= stage_deadline:
                         break
                     target_epoch = event_epoch + sample_offset
                     if target_epoch + RECORDED_EVENT_SETTLE_SECONDS > time.time():
@@ -481,7 +590,7 @@ class RecordedMotionObjectDetector:
                     frame = self._read_recorded_frame(
                         Path(str(row["path"])),
                         frame_offset,
-                        deadline=deadline,
+                        deadline=stage_deadline,
                     )
                     if frame is None:
                         continue
@@ -505,9 +614,25 @@ class RecordedMotionObjectDetector:
                         class_confirmations,
                     )
                     if any(item.get("temporal_consensus") is True for item in objects):
+                        # Detection is already proven. If its cover image clips,
+                        # obscures, or barely shows the active/new subject, spend
+                        # one existing +4 second stage looking for a better frame.
+                        # This is bounded and does not wait through the full
+                        # tracking lifecycle or add a second inference pipeline.
+                        if stage_index == 0 and _representative_needs_refinement(objects):
+                            refinement_deadline = min(
+                                deadline,
+                                time.monotonic()
+                                + RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS,
+                            )
+                            LOGGER.info(
+                                "recorded object representative refinement requested for %s",
+                                self.camera.id,
+                            )
+                            break
                         if stage_index:
                             LOGGER.info(
-                                "late recorded object discovery confirmed for %s at stage +%.1fs",
+                                "recorded object selection completed for %s at stage +%.1fs",
                                 self.camera.id,
                                 max(stage_offsets),
                             )
@@ -515,9 +640,19 @@ class RecordedMotionObjectDetector:
                 if all(offset in samples_by_offset for offset in stage_offsets):
                     break
                 remaining = deadline - time.monotonic()
+                if refinement_deadline is not None:
+                    remaining = min(
+                        remaining,
+                        refinement_deadline - time.monotonic(),
+                    )
                 if remaining <= 0:
                     break
                 time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
+            if (
+                refinement_deadline is not None
+                and time.monotonic() >= refinement_deadline
+            ):
+                break
             if time.monotonic() >= deadline:
                 break
 

@@ -15,6 +15,7 @@ from survng.app.motion_pipeline.object_detection import (
     _RecordedDetectionSample,
     RecordedMotionObjectDetector,
     _image_quality,
+    _representative_needs_refinement,
     _temporal_consensus,
 )
 
@@ -140,6 +141,44 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertLess(objects[0]["snapshot_sharpness_score"], 1.0)
         self.assertGreater(objects[0]["snapshot_edge_detail_score"], 0.5)
         self.assertGreater(objects[0]["snapshot_quality_score"], 0.5)
+
+    def test_representative_prefers_fully_framed_active_subject_over_stationary_context(self) -> None:
+        rows, columns = np.indices((100, 100))
+        checker = (((rows // 4) + (columns // 4)) % 2 * 255).astype(np.uint8)
+        frame = np.repeat(checker[..., None], 3, axis=2)
+        stationary_car = detected("car", 0.9, (40, 55, 80, 80))
+        clipped_person = detected("person", 0.88, (0, 10, 22, 95))
+        centered_person = detected("person", 0.84, (25, 10, 55, 95))
+        samples = [
+            _RecordedDetectionSample(-0.5, frame, [dict(stationary_car)], "before.mp4"),
+            _RecordedDetectionSample(0.5, frame, [dict(stationary_car), clipped_person], "clipped.mp4"),
+            _RecordedDetectionSample(1.0, frame, [dict(stationary_car), centered_person], "centered.mp4"),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.recording_path, "centered.mp4")
+        selected_person = next(item for item in objects if item["label"] == "person")
+        self.assertTrue(selected_person["snapshot_primary_subject"])
+        self.assertGreaterEqual(
+            selected_person["snapshot_edge_clearance_ratio"],
+            0.01,
+        )
+        self.assertFalse(_representative_needs_refinement(objects))
+
+    def test_clipped_new_subject_requests_one_bounded_refinement_stage(self) -> None:
+        frame = np.full((100, 100, 3), 127, dtype=np.uint8)
+        person = detected("person", 0.88, (0, 10, 22, 95))
+        samples = [
+            _RecordedDetectionSample(-0.5, frame, [], "before.mp4"),
+            _RecordedDetectionSample(0.5, frame, [dict(person)], "first.mp4"),
+            _RecordedDetectionSample(1.0, frame, [dict(person)], "second.mp4"),
+        ]
+
+        _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertTrue(objects[0]["snapshot_primary_subject"])
+        self.assertTrue(_representative_needs_refinement(objects))
 
     def test_quality_score_preserves_separation_between_detailed_frames(self) -> None:
         rows, columns = np.indices((256, 256))
@@ -546,6 +585,66 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
         self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 8.0)
+
+    def test_detector_uses_one_followup_stage_to_replace_clipped_cover_frame(self) -> None:
+        event_epoch = 1_800_000_000.0
+        requested_offsets: list[float] = []
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                offset = round(epoch - event_epoch, 1)
+                requested_offsets.append(offset)
+                return {"path": f"sample-{offset}.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, frame, confidence_threshold=None):
+                offset = float(frame[0, 0, 0]) / 10.0 - 2.0
+                # Keep the stationary corroborating object assigned before the
+                # new subject so this fixture exercises representative choice,
+                # not deliberately label-tolerant temporal association.
+                car = detected("car", 0.96, (40, 55, 80, 80))
+                if offset < 0.5:
+                    return [car]
+                person_box = (0, 10, 22, 95) if offset < 4.0 else (25, 10, 55, 95)
+                return [car, detected("person", 0.88, person_box)]
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="front-door", name="Front Door", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+
+        def read_frame(path, _offset, **_kwargs):
+            offset = float(str(path).removeprefix("sample-").removesuffix(".mp4"))
+            rows, columns = np.indices((100, 100))
+            checker = (((rows // 4) + (columns // 4)) % 2 * 200).astype(np.uint8)
+            frame = np.repeat(checker[..., None], 3, axis=2)
+            frame[0, 0, :] = int(round((offset + 2.0) * 10.0))
+            return frame
+
+        with (
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(backend, "_read_recorded_frame", side_effect=read_frame),
+        ):
+            _frame, objects, path = backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertIn(4.0, requested_offsets)
+        self.assertIn(4.5, requested_offsets)
+        self.assertEqual(path, "sample-4.0.mp4")
+        selected_person = next(item for item in objects if item.get("label") == "person")
+        self.assertGreaterEqual(selected_person["snapshot_edge_clearance_ratio"], 0.01)
+        self.assertFalse(_representative_needs_refinement(objects))
 
 
 if __name__ == "__main__":
