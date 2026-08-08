@@ -18,6 +18,7 @@ from .security import redact_secret_text
 
 
 CAPTURE_OPEN_TIMEOUT_MS = 3000
+CAPTURE_RECONNECT_OPEN_TIMEOUT_MS = 10000
 CAPTURE_READ_TIMEOUT_MS = 5000
 CAPTURE_DECODER_THREADS = 1
 CAPTURE_OPEN_LOCK_POLL_SECONDS = 0.1
@@ -52,6 +53,8 @@ class CaptureBackend(Protocol):
         handle: CaptureHandle,
         source_url: str,
         cancelled: Callable[[], bool],
+        *,
+        open_timeout_ms: int | None = None,
     ) -> bool: ...
 
 
@@ -121,6 +124,8 @@ class OpenCvFfmpegCaptureBackend:
         handle: CaptureHandle,
         source_url: str,
         cancelled: Callable[[], bool],
+        *,
+        open_timeout_ms: int | None = None,
     ) -> bool:
         if not isinstance(handle, OpenCvCaptureHandle):
             raise TypeError("OpenCvFfmpegCaptureBackend requires OpenCvCaptureHandle")
@@ -136,7 +141,14 @@ class OpenCvFfmpegCaptureBackend:
                         cv2.CAP_PROP_N_THREADS,
                         self.options.decoder_threads,
                         cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
-                        self.options.open_timeout_ms,
+                        max(
+                            1,
+                            int(
+                                self.options.open_timeout_ms
+                                if open_timeout_ms is None
+                                else open_timeout_ms
+                            ),
+                        ),
                         cv2.CAP_PROP_READ_TIMEOUT_MSEC,
                         self.options.read_timeout_ms,
                     ],
@@ -184,6 +196,8 @@ class CameraCaptureService:
         main_idle_seconds: float = MAIN_SOURCE_IDLE_SECONDS,
         retry_initial_seconds: float = CAPTURE_RETRY_INITIAL_SECONDS,
         retry_max_seconds: float = CAPTURE_RETRY_MAX_SECONDS,
+        initial_open_timeout_ms: int = CAPTURE_OPEN_TIMEOUT_MS,
+        reconnect_open_timeout_ms: int = CAPTURE_RECONNECT_OPEN_TIMEOUT_MS,
     ) -> None:
         self.camera_id = camera_id
         self._source_url = source_url
@@ -197,6 +211,11 @@ class CameraCaptureService:
         self.main_idle_seconds = main_idle_seconds
         self.retry_initial_seconds = retry_initial_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.initial_open_timeout_ms = max(1, int(initial_open_timeout_ms))
+        self.reconnect_open_timeout_ms = max(
+            self.initial_open_timeout_ms,
+            int(reconnect_open_timeout_ms),
+        )
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._stop.set()
@@ -224,6 +243,8 @@ class CameraCaptureService:
                 "frames_received": 0,
                 "read_failures": 0,
                 "open_failures": 0,
+                "open_timeout_escalations": 0,
+                "last_open_timeout_ms": 0,
                 "reconnects": 0,
                 "starts": 0,
                 "observer_errors": 0,
@@ -498,22 +519,35 @@ class CameraCaptureService:
 
     def _run_source(self, source: str, stop_event: threading.Event) -> None:
         retry_delay = self.retry_initial_seconds
+        consecutive_open_failures = 0
         try:
             while not self._cancelled(stop_event):
                 if self._should_exit_for_idle(source, stop_event):
                     return
                 failure_reason = ""
                 handle: CaptureHandle | None = None
+                session_received_frame = False
                 try:
                     handle = self.backend.create_handle()
+                    open_timeout_ms = (
+                        self.reconnect_open_timeout_ms
+                        if source == "live" and consecutive_open_failures > 0
+                        else self.initial_open_timeout_ms
+                    )
+                    with self._lock:
+                        self._stats[source]["last_open_timeout_ms"] = open_timeout_ms
+                        if open_timeout_ms > self.initial_open_timeout_ms:
+                            self._stats[source]["open_timeout_escalations"] += 1
                     opened = self.backend.open(
                         handle,
                         self._source_url(source),
                         lambda: self._cancelled(stop_event),
+                        open_timeout_ms=open_timeout_ms,
                     )
                     if self._cancelled(stop_event):
                         return
                     if not opened or not handle.is_opened():
+                        consecutive_open_failures += 1
                         failure_reason = "failed to open stream"
                         self._increment(source, "open_failures")
                         self._set_error(source, failure_reason)
@@ -538,9 +572,13 @@ class CameraCaptureService:
                                 break
                             if self._cancelled(stop_event):
                                 break
+                            session_received_frame = True
+                            consecutive_open_failures = 0
                             retry_delay = self.retry_initial_seconds
                             self._publish_frame(source, image, stop_event)
                 except Exception as exc:
+                    if not session_received_frame:
+                        consecutive_open_failures += 1
                     failure_reason = f"stream error: {redact_secret_text(exc)[:160]}"
                     self._set_error(source, failure_reason)
                     LOGGER.warning(

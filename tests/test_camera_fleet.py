@@ -104,6 +104,23 @@ def test_late_recording_disable_prevents_queued_recorder_start() -> None:
     recorder.start.assert_not_called()
 
 
+def test_live_capture_starts_when_recording_and_detection_are_disabled() -> None:
+    fleet, workers, recorder, _startup, _publisher = _fleet()
+    task = fleet.prepare_startup(
+        camera_enabled={"gate": True},
+        recording_enabled={"gate": False},
+        detection_enabled={"gate": False},
+    )[0]
+
+    task.start_camera()
+    task.start_recorders()
+
+    workers["gate"].set_detection_enabled.assert_called_once_with(False)
+    workers["gate"].start.assert_called_once_with()
+    recorder.set_camera_enabled.assert_called_once_with("gate", False)
+    recorder.start.assert_not_called()
+
+
 def test_shutdown_attempts_and_closes_every_non_timed_out_camera() -> None:
     cameras = [
         CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/gate"),

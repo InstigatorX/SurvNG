@@ -4,13 +4,18 @@ import threading
 import time
 from collections import deque
 
+import cv2
 import numpy as np
 import pytest
 
 from survng.app.camera_capture import (
     CameraCaptureService,
     CaptureHandle,
+    CaptureOpenLimiter,
     CapturedFrame,
+    OpenCvCaptureHandle,
+    OpenCvCaptureOptions,
+    OpenCvFfmpegCaptureBackend,
 )
 
 
@@ -49,7 +54,7 @@ class FakeBackend:
         self.handles.append(handle)
         return handle
 
-    def open(self, handle, source_url, cancelled) -> bool:
+    def open(self, handle, source_url, cancelled, *, open_timeout_ms=None) -> bool:
         self.open_calls += 1
         if cancelled():
             return False
@@ -58,7 +63,7 @@ class FakeBackend:
 
 
 class FailingOpenBackend(FakeBackend):
-    def open(self, handle, source_url, cancelled) -> bool:
+    def open(self, handle, source_url, cancelled, *, open_timeout_ms=None) -> bool:
         raise RuntimeError(f"unable to open {source_url}")
 
 
@@ -73,9 +78,27 @@ class ClosedBackend(FakeBackend):
         self.handles.append(handle)
         return handle
 
-    def open(self, handle, source_url, cancelled) -> bool:
+    def open(self, handle, source_url, cancelled, *, open_timeout_ms=None) -> bool:
         self.open_calls += 1
         return False
+
+
+class ScriptedOpenBackend(FakeBackend):
+    def __init__(
+        self,
+        results: list[bool],
+        frame_batches: list[list[np.ndarray]],
+    ) -> None:
+        super().__init__(frame_batches)
+        self.results = deque(results)
+        self.open_timeouts: list[int | None] = []
+
+    def open(self, handle, source_url, cancelled, *, open_timeout_ms=None) -> bool:
+        self.open_calls += 1
+        self.open_timeouts.append(open_timeout_ms)
+        opened = self.results.popleft() if self.results else True
+        handle.opened = opened and not cancelled()
+        return handle.opened
 
 
 def _service(
@@ -435,6 +458,85 @@ def test_failed_open_does_not_configure_closed_native_handle() -> None:
     service.wait_stopped(1.0)
 
     assert service.status()["capture_stats"]["live"]["open_failures"] >= 1
+
+
+def test_live_reconnect_escalates_open_deadline_then_resets_after_frame() -> None:
+    frame = np.ones((10, 20, 3), dtype=np.uint8)
+    backend = ScriptedOpenBackend(
+        [False, True, True],
+        [[], [frame], [frame]],
+    )
+    service = _service(
+        backend,
+        initial_open_timeout_ms=3000,
+        reconnect_open_timeout_ms=10000,
+    )
+
+    assert service.start()
+    _wait_until(lambda: len(backend.open_timeouts) >= 3)
+    status = service.status()["capture_stats"]["live"]
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+
+    assert backend.open_timeouts[:3] == [3000, 10000, 3000]
+    assert status["open_timeout_escalations"] >= 1
+    assert status["last_open_timeout_ms"] == 3000
+
+
+def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> None:
+    frame = np.ones((10, 20, 3), dtype=np.uint8)
+    backend = ScriptedOpenBackend(
+        [True, False, True],
+        [[frame], [], [frame]],
+    )
+    service = _service(
+        backend,
+        initial_open_timeout_ms=3000,
+        reconnect_open_timeout_ms=10000,
+    )
+
+    assert service.start()
+    _wait_until(
+        lambda: (
+            len(backend.open_timeouts) >= 3
+            and service.status()["capture_stats"]["live"]["frames_received"] >= 2
+        )
+    )
+    status = service.status()["capture_stats"]["live"]
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+
+    assert backend.open_timeouts[:3] == [3000, 3000, 10000]
+    assert status["starts"] >= 2
+    assert status["reconnects"] >= 1
+    assert status["open_failures"] >= 1
+    assert status["open_timeout_escalations"] >= 1
+
+
+def test_opencv_backend_applies_per_attempt_open_deadline() -> None:
+    class NativeCapture:
+        def __init__(self) -> None:
+            self.options: list[int] = []
+
+        def open(self, _source_url, _backend, options) -> bool:
+            self.options = list(options)
+            return True
+
+    native = NativeCapture()
+    backend = OpenCvFfmpegCaptureBackend(
+        CaptureOpenLimiter(1),
+        OpenCvCaptureOptions(open_timeout_ms=3000),
+    )
+
+    assert backend.open(
+        OpenCvCaptureHandle(native),
+        "rtsp://camera/live",
+        lambda: False,
+        open_timeout_ms=10000,
+    )
+
+    option_values = dict(zip(native.options[::2], native.options[1::2]))
+    assert option_values[cv2.CAP_PROP_OPEN_TIMEOUT_MSEC] == 10000
 
 
 def test_close_rejects_active_capture_thread() -> None:
