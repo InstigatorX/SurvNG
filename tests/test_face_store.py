@@ -70,7 +70,7 @@ class FaceStoreTest(unittest.TestCase):
                     box_json, confidence, observed_at, match_confidence,
                     review_status, created_at, candidate_person_id,
                     embedding_blob, embedding_model, recognition_pending
-                ) values (?, 0, ?, 'gate', ?, ?, 0.8, ?, null, 'unknown', ?, ?, ?, ?, ?)
+                ) values (?, 0, ?, 'gate', ?, ?, 0.8, ?, null, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -78,6 +78,7 @@ class FaceStoreTest(unittest.TestCase):
                     str(store.storage_dir / "snapshots" / f"{event_id}.jpg"),
                     json.dumps({"x1": 1, "y1": 2, "x2": 20, "y2": 24}),
                     observed_at,
+                    "confirmed" if person_id is not None else "unknown",
                     observed_at,
                     candidate_person_id,
                     embedding.astype(np.float32).tobytes() if embedding is not None else None,
@@ -732,6 +733,180 @@ class FaceStoreTest(unittest.TestCase):
 
             self.assertEqual(match, (None, None))
 
+    def test_reference_gallery_prefers_embedding_diversity_over_recent_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            person = store.create_person("Alice")
+            vectors = (
+                np.asarray([1.0, 0.0], dtype=np.float32),
+                np.asarray([0.999, 0.001], dtype=np.float32),
+                np.asarray([0.998, 0.002], dtype=np.float32),
+                np.asarray([0.6, 0.8], dtype=np.float32),
+            )
+            ids = [
+                self.insert_observation(
+                    store,
+                    index + 1,
+                    observed_at=f"2026-07-26T12:00:0{index}+00:00",
+                    person_id=person["id"],
+                    embedding=vector,
+                    embedding_model="model-v1",
+                )
+                for index, vector in enumerate(vectors)
+            ]
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set quality_score = 0.8 where person_id = ?",
+                    (person["id"],),
+                )
+                rows = connection.execute(
+                    """select id, person_id, camera_id, confidence, quality_score,
+                        reference_pinned, observed_at, embedding_blob
+                        from face_observations where person_id = ?""",
+                    (person["id"],),
+                ).fetchall()
+
+            selected = store._select_reference_gallery(rows, 2, (2,))
+
+            self.assertEqual(len(selected), 2)
+            self.assertIn(ids[-1], {int(item["id"]) for item in selected})
+
+    def test_pinned_reference_is_retained_when_gallery_is_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            person = store.create_person("Alice")
+            pinned_id = self.insert_observation(
+                store,
+                1,
+                observed_at="2026-07-26T12:00:00+00:00",
+                person_id=person["id"],
+                embedding=np.asarray([0.0, 1.0], dtype=np.float32),
+                embedding_model="model-v1",
+            )
+            self.insert_observation(
+                store,
+                2,
+                observed_at="2026-07-26T12:00:01+00:00",
+                person_id=person["id"],
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v1",
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set reference_pinned = 1 where id = ?",
+                    (pinned_id,),
+                )
+                rows = connection.execute(
+                    """select id, person_id, camera_id, confidence, quality_score,
+                        reference_pinned, observed_at, embedding_blob
+                        from face_observations where person_id = ?""",
+                    (person["id"],),
+                ).fetchall()
+
+            selected = store._select_reference_gallery(rows, 1, (2,))
+
+            self.assertEqual([int(item["id"]) for item in selected], [pinned_id])
+
+    def test_strong_well_separated_match_can_be_auto_identified_without_becoming_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                enabled=True,
+                config=SimpleNamespace(
+                    face_min_size=4,
+                    face_max_references=5,
+                    face_match_threshold=0.4,
+                    face_auto_identify_enabled=True,
+                    face_auto_identify_threshold=0.9,
+                    face_auto_identify_margin=0.5,
+                ),
+                status=lambda: {
+                    "ready": True,
+                    "model_fingerprint": "model-v1",
+                    "embedding_size": 2,
+                },
+                embed=lambda _face: np.asarray([1.0, 0.0], dtype=np.float32),
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            alice = store.create_person("Alice")
+            bob = store.create_person("Bob")
+            for index in range(3):
+                self.insert_observation(
+                    store,
+                    index + 1,
+                    observed_at=f"2026-07-26T12:00:0{index}+00:00",
+                    person_id=alice["id"],
+                    embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                    embedding_model="model-v1",
+                    recognition_pending=0,
+                )
+                self.insert_observation(
+                    store,
+                    index + 10,
+                    observed_at=f"2026-07-26T12:01:0{index}+00:00",
+                    person_id=bob["id"],
+                    embedding=np.asarray([0.0, 1.0], dtype=np.float32),
+                    embedding_model="model-v1",
+                    recognition_pending=0,
+                )
+            target_id = self.insert_observation(
+                store,
+                20,
+                observed_at="2026-07-26T12:02:00+00:00",
+            )
+            checker = np.indices((32, 32)).sum(axis=0) % 2
+            snapshot = store.storage_dir / "snapshots" / "20.jpg"
+            snapshot.parent.mkdir(exist_ok=True)
+            image = np.repeat((checker * 255).astype(np.uint8)[..., None], 3, axis=2)
+            self.assertTrue(cv2.imwrite(str(snapshot), image))
+
+            store._recognize_observation(target_id)
+
+            observation = store.observation(target_id)
+            self.assertEqual(observation["person_id"], alice["id"])
+            self.assertEqual(observation["review_status"], "auto_identified")
+            self.assertTrue(observation["auto_identified"])
+            self.assertFalse(observation["reference_pinned"])
+
+    def test_calibration_uses_confirmed_identity_separation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                config=SimpleNamespace(
+                    face_match_threshold=0.4,
+                    face_auto_identify_threshold=0.55,
+                    face_auto_identify_margin=0.12,
+                ),
+                status=lambda: {"model_fingerprint": "model-v1"},
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            alice = store.create_person("Alice")
+            bob = store.create_person("Bob")
+            for index in range(3):
+                self.insert_observation(
+                    store,
+                    index + 1,
+                    observed_at=f"2026-07-26T12:00:0{index}+00:00",
+                    person_id=alice["id"],
+                    embedding=np.asarray([1.0, 0.02 * index], dtype=np.float32),
+                    embedding_model="model-v1",
+                    recognition_pending=0,
+                )
+                self.insert_observation(
+                    store,
+                    index + 10,
+                    observed_at=f"2026-07-26T12:01:0{index}+00:00",
+                    person_id=bob["id"],
+                    embedding=np.asarray([0.02 * index, 1.0], dtype=np.float32),
+                    embedding_model="model-v1",
+                    recognition_pending=0,
+                )
+
+            result = store.calibration()
+
+            self.assertTrue(result["ready"])
+            self.assertEqual(result["confirmed_samples"], 6)
+            self.assertEqual(result["rank_one_accuracy"], 1.0)
+            self.assertGreaterEqual(result["recommended"]["automatic_threshold"], 0.5)
+
     def test_delete_person_resets_confirmed_observation_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = FaceStore(Path(tmpdir), start_recognition=False)
@@ -782,6 +957,33 @@ class FaceStoreTest(unittest.TestCase):
             self.assertIsNone(store.observation(oldest_known))
             self.assertIsNotNone(store.observation(protected_known))
             self.assertIsNotNone(store.observation(first_unknown))
+
+    def test_pruning_never_removes_a_pinned_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), max_observations=100, start_recognition=False)
+            person = store.create_person("Alice")
+            pinned_id = self.insert_observation(
+                store,
+                1,
+                observed_at="2026-07-26T00:00:01+00:00",
+                person_id=person["id"],
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set reference_pinned = 1 where id = ?",
+                    (pinned_id,),
+                )
+            for event_id in range(2, 102):
+                self.insert_observation(
+                    store,
+                    event_id,
+                    observed_at=f"2026-07-26T00:{event_id // 60:02d}:{event_id % 60:02d}+00:00",
+                )
+
+            with store._lock, store._connect() as connection:
+                self.assertEqual(store._prune_locked(connection), 1)
+
+            self.assertIsNotNone(store.observation(pinned_id))
 
     def test_close_reports_an_unreaped_recognition_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

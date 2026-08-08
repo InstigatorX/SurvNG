@@ -173,20 +173,25 @@ def _inference_worker_main(
 
             engine = OpenVinoDetector(config)
         elif role == "face":
+            from .face_detection import OpenVinoFaceDetector
             from .face_recognition import OpenVinoFaceRecognizer
 
             engine = OpenVinoFaceRecognizer(config)
+            face_detector = OpenVinoFaceDetector(config)
         elif role == "reid":
             from .person_reidentification import OpenVinoAppearanceReidentifier
 
             engine = OpenVinoAppearanceReidentifier(config)
         else:
             raise ValueError(f"unknown inference worker role: {role}")
+        engine_status = engine.status()
+        if role == "face":
+            engine_status["detector"] = face_detector.status()
         connection.send({
             "type": "ready",
             "pid": os.getpid(),
             "role": role,
-            "status": engine.status(),
+            "status": engine_status,
         })
     except BaseException as exc:
         try:
@@ -207,7 +212,7 @@ def _inference_worker_main(
                 connection.send({"id": request_id, "ok": True, "result": {"stopped": True}})
                 return
             try:
-                if operation in {"detect", "embed", "embed_person", "embed_reid"}:
+                if operation in {"detect", "detect_faces", "embed", "embed_person", "embed_reid"}:
                     shape = tuple(int(value) for value in request.get("shape") or ())
                     dtype_name = str(request.get("dtype") or "")
                     byte_count = int(request.get("byte_count") or 0)
@@ -229,6 +234,11 @@ def _inference_worker_main(
                         )
                     elif operation == "embed" and role == "face":
                         result = engine.embed(frame).astype(np.float32).tolist()
+                    elif operation == "detect_faces" and role == "face":
+                        result = face_detector.detect(
+                            frame,
+                            threshold=request.get("confidence_threshold"),
+                        )
                     elif operation == "embed_person" and role == "reid":
                         result = engine.embed(frame).astype(np.float32).tolist()
                     elif operation == "embed_reid" and role == "reid":
@@ -240,6 +250,8 @@ def _inference_worker_main(
                         raise ValueError(f"{operation} is unavailable in the {role} worker")
                 elif operation == "status":
                     result = engine.status()
+                    if role == "face":
+                        result["detector"] = face_detector.status()
                 elif operation == "probe_devices" and role == "object":
                     result = _openvino_devices()
                 elif operation == "inspect_model" and role == "object":
@@ -927,6 +939,13 @@ class InferenceSupervisor:
             "device": self.config.face_recognition_device,
             "model_path": self.config.face_embedding_model_path,
             "landmark_model_path": self.config.face_landmark_model_path,
+            "detector": {
+                "enabled": bool(self.config.face_detection_model_path),
+                "ready": False,
+                "error": "Face inference worker has not started.",
+                "model_path": self.config.face_detection_model_path,
+                "threshold": self.config.face_detection_threshold,
+            },
             "alignment_enabled": False,
             "landmark_input_shape": [],
             "model_fingerprint": "",
@@ -1025,6 +1044,25 @@ class InferenceSupervisor:
         result = self._face.request("embed", frame=face)
         return np.asarray(result, dtype=np.float32)
 
+    def detect_faces(self, frame: np.ndarray) -> list[dict[str, Any]]:
+        if (
+            not self.config.face_recognition_enabled
+            or not self.config.face_detection_model_path
+        ):
+            return []
+        try:
+            return list(
+                self._face.request(
+                    "detect_faces",
+                    frame=frame,
+                    confidence_threshold=self.config.face_detection_threshold,
+                )
+                or []
+            )
+        except Exception as exc:
+            LOGGER.warning("Dedicated face detection unavailable: %s", exc)
+            return []
+
     def embed_person(self, person: np.ndarray) -> np.ndarray:
         result = self._reid.request(
             "embed_person",
@@ -1068,6 +1106,9 @@ class InferenceSupervisor:
         status = self._face.status()
         status["enabled"] = bool(self.config.face_recognition_enabled)
         status["match_threshold"] = self.config.face_match_threshold
+        detector = dict(status.get("detector") or {})
+        detector["threshold"] = self.config.face_detection_threshold
+        status["detector"] = detector
         return status
 
     def reid_status(self) -> dict[str, Any]:
@@ -1132,7 +1173,10 @@ class InferenceSupervisor:
 class IsolatedFaceRecognizer:
     def __init__(self, supervisor: InferenceSupervisor) -> None:
         self.supervisor = supervisor
-        self.config = supervisor.config
+
+    @property
+    def config(self) -> DetectorConfig:
+        return self.supervisor.config
 
     @property
     def enabled(self) -> bool:

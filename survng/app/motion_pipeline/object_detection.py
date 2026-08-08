@@ -312,12 +312,19 @@ def _temporal_consensus(
         if len(track.winning_observations) >= required_by_track[id(track)]
         and any(_eligible_detection(item) for item in track.winning_observations)
     }
+    if confirmed_ids:
+        confirmed_ids.update(
+            id(track)
+            for track in evidence
+            if track.winning_label.strip().lower() == "face"
+            and len(track.winning_observations) >= required_by_track[id(track)]
+        )
 
     quality_by_sample: dict[int, _ImageQuality] = {}
 
     def sample_score(
         item: tuple[int, _RecordedDetectionSample],
-    ) -> tuple[int, int, float, float, float, float]:
+    ) -> tuple[int, int, float, float, float, float, float]:
         sample_index, sample = item
         visible = [
             track
@@ -332,10 +339,19 @@ def _temporal_consensus(
         ]
         quality = _sample_image_quality(sample, visible, sample_index)
         quality_by_sample[sample_index] = quality
+        face_quality = max(
+            (
+                float(track.observations[sample_index].get("face_quality_score") or 0.0)
+                for track in visible
+                if track.winning_label.strip().lower() == "face"
+            ),
+            default=0.0,
+        )
         raw_peak = max((_confidence(detected) for detected in sample.objects if _candidate_detection(detected)), default=0.0)
         return (
             len(admitted_visible),
             len(visible),
+            face_quality,
             sum(track.aggregate_confidence for track in visible),
             quality.score,
             raw_peak,
@@ -355,9 +371,10 @@ def _temporal_consensus(
         confirmed = id(track) in confirmed_ids
         label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
         confirmed = confirmed and label_confirmed_here
+        incident_confirmed = confirmed and not bool(detected.get("auxiliary_detection"))
         enriched = {
             **detected,
-            "incident_eligible": confirmed,
+            "incident_eligible": incident_confirmed,
             "temporal_consensus": confirmed,
             "temporal_sample_offset_seconds": selected.offset,
             "temporal_observations": len(track.winning_observations),
@@ -410,6 +427,9 @@ class MotionObjectDetectorBackend(Protocol):
         frame: Frame,
         confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
+        ...
+
+    def detect_faces(self, frame: Frame) -> list[dict[str, Any]]:
         ...
 
 
@@ -562,10 +582,30 @@ class RecordedMotionObjectDetector:
         )
         objects = self.detector.detect(frame, confidence_threshold=threshold)
         frame_height, frame_width = frame.shape[:2]
+        detect_faces = getattr(self.detector, "detect_faces", None)
+        if callable(detect_faces):
+            dedicated_faces = self._detect_faces_in_people(
+                frame,
+                objects,
+                detect_faces,
+            )
+            objects = self._merge_dedicated_faces(objects, dedicated_faces)
         for detected in objects:
             if isinstance(detected, dict) and detected.get("label"):
                 detected["detection_frame_width"] = int(frame_width)
                 detected["detection_frame_height"] = int(frame_height)
+                if str(detected.get("label") or "").strip().lower() == "face":
+                    box = _box(detected)
+                    if box is not None:
+                        x1, y1, x2, y2 = box
+                        left = max(0, min(frame_width, int(math.floor(x1))))
+                        top = max(0, min(frame_height, int(math.floor(y1))))
+                        right = max(left, min(frame_width, int(math.ceil(x2))))
+                        bottom = max(top, min(frame_height, int(math.ceil(y2))))
+                        quality = _image_quality(frame[top:bottom, left:right])
+                        detected["face_quality_score"] = round(quality.score, 4)
+                        detected["face_sharpness_score"] = round(quality.sharpness, 4)
+                        detected["face_exposure_score"] = round(quality.exposure, 4)
         apply_detection_zones(
             self.camera,
             objects,
@@ -575,7 +615,126 @@ class RecordedMotionObjectDetector:
             bool(getattr(self.detector.config, "require_incident_zone", True)),
             class_thresholds,
         )
+        for detected in objects:
+            if isinstance(detected, dict) and str(
+                detected.get("label") or ""
+            ).strip().lower() == "face":
+                if detected.get("detection_source") == "dedicated_face":
+                    detected["confidence_eligible"] = True
+                detected["incident_eligible"] = False
+                detected["auxiliary_detection"] = True
         return objects
+
+    @staticmethod
+    def _detect_faces_in_people(
+        frame: Frame,
+        objects: list[dict[str, Any]],
+        detect_faces: Callable[[Frame], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Run the 300px face model where CCTV faces retain useful resolution."""
+        frame_height, frame_width = frame.shape[:2]
+        detected_faces: list[dict[str, Any]] = []
+        people = [
+            item
+            for item in objects
+            if isinstance(item, dict)
+            and str(item.get("label") or "").strip().lower() == "person"
+            and _box(item) is not None
+        ]
+        for person in sorted(people, key=_confidence, reverse=True)[:8]:
+            box = _box(person)
+            if box is None:
+                continue
+            x1, y1, x2, y2 = box
+            person_width, person_height = x2 - x1, y2 - y1
+            left = max(0, min(frame_width, int(math.floor(x1 - person_width * 0.08))))
+            right = max(left, min(frame_width, int(math.ceil(x2 + person_width * 0.08))))
+            top = max(0, min(frame_height, int(math.floor(y1 - person_height * 0.05))))
+            bottom = max(top, min(frame_height, int(math.ceil(y1 + person_height * 0.68))))
+            if right - left < 24 or bottom - top < 24:
+                continue
+            for detected in detect_faces(frame[top:bottom, left:right]):
+                if not isinstance(detected, dict):
+                    continue
+                face_box = _box(detected)
+                if face_box is None:
+                    continue
+                fx1, fy1, fx2, fy2 = face_box
+                detected_faces.append(
+                    {
+                        **detected,
+                        "box": {
+                            "x1": fx1 + left,
+                            "y1": fy1 + top,
+                            "x2": fx2 + left,
+                            "y2": fy2 + top,
+                        },
+                        "parent_person_box": person.get("box"),
+                    }
+                )
+        return detected_faces
+
+    @staticmethod
+    def _merge_dedicated_faces(
+        objects: list[dict[str, Any]],
+        dedicated_faces: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Prefer dedicated face boxes while preserving unrelated detector output."""
+        merged = [
+            dict(item)
+            for item in objects
+            if isinstance(item, dict)
+            and str(item.get("label") or "").strip().lower() != "face"
+        ]
+        candidates = [
+            dict(item)
+            for item in dedicated_faces
+            if isinstance(item, dict) and _box(item) is not None
+        ]
+        valid_dedicated: list[dict[str, Any]] = []
+        for item in sorted(candidates, key=_confidence, reverse=True):
+            item_box = _box(item)
+            if item_box is None:
+                continue
+            if any(
+                RecordedMotionObjectDetector._box_iou(item_box, _box(existing)) >= 0.4
+                for existing in valid_dedicated
+            ):
+                continue
+            valid_dedicated.append(item)
+        merged.extend(valid_dedicated)
+        for item in objects:
+            if (
+                not isinstance(item, dict)
+                or str(item.get("label") or "").strip().lower() != "face"
+            ):
+                continue
+            generic_box = _box(item)
+            if generic_box is None:
+                continue
+            overlaps = [
+                RecordedMotionObjectDetector._box_iou(generic_box, _box(face))
+                for face in valid_dedicated
+                if _box(face) is not None
+            ]
+            if max(overlaps, default=0.0) < 0.25:
+                merged.append({**item, "detection_source": "object_detector"})
+        return merged
+
+    @staticmethod
+    def _box_iou(
+        first: tuple[float, float, float, float],
+        second: tuple[float, float, float, float] | None,
+    ) -> float:
+        if second is None:
+            return 0.0
+        ax1, ay1, ax2, ay2 = first
+        bx1, by1, bx2, by2 = second
+        intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(
+            0.0, min(ay2, by2) - max(ay1, by1)
+        )
+        union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - intersection
+        return intersection / union if union > 0 else 0.0
 
     def _read_recorded_frame(
         self,

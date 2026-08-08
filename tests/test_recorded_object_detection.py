@@ -42,6 +42,84 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_dedicated_face_detector_replaces_generic_face_boxes_as_auxiliary_evidence(self) -> None:
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.45,
+                event_class_confidence_thresholds={},
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [
+                    detected("person", 0.9, (10, 5, 80, 95)),
+                    detected("face", 0.8, (28, 12, 52, 40)),
+                ]
+
+            def detect_faces(self, _frame):
+                return [{
+                    "label": "face",
+                    "confidence": 0.75,
+                    "box": {"x1": 23, "y1": 10, "x2": 48, "y2": 38},
+                    "detection_source": "dedicated_face",
+                }]
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            SimpleNamespace(),
+            lambda: None,
+        )
+
+        objects = backend._detect_objects(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        faces = [item for item in objects if item["label"] == "face"]
+        self.assertEqual(len(faces), 1)
+        self.assertEqual(faces[0]["detection_source"], "dedicated_face")
+        self.assertFalse(faces[0]["incident_eligible"])
+        self.assertTrue(faces[0]["confidence_eligible"])
+        self.assertIn("face_quality_score", faces[0])
+
+    def test_auxiliary_faces_are_retained_only_alongside_confirmed_incident_objects(self) -> None:
+        person = detected("person", 0.9, (2, 2, 25, 19))
+        face = {
+            **detected("face", 0.8, (5, 3, 14, 13)),
+            "incident_eligible": False,
+            "auxiliary_detection": True,
+            "detection_source": "dedicated_face",
+            "face_quality_score": 0.8,
+        }
+        samples = [
+            sample(0.0, [dict(person), dict(face)]),
+            sample(0.5, [dict(person), dict(face)]),
+        ]
+
+        _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        retained_face = next(item for item in objects if item["label"] == "face")
+        self.assertTrue(retained_face["temporal_consensus"])
+        self.assertFalse(retained_face["incident_eligible"])
+
+    def test_best_face_quality_selects_temporal_incident_snapshot(self) -> None:
+        person = detected("person", 0.9, (2, 2, 25, 19))
+
+        def face(quality: float) -> dict:
+            return {
+                **detected("face", 0.8, (5, 3, 14, 13)),
+                "incident_eligible": False,
+                "auxiliary_detection": True,
+                "face_quality_score": quality,
+            }
+
+        samples = [
+            sample(0.0, [dict(person), face(0.2)]),
+            sample(0.5, [dict(person), face(0.9)]),
+        ]
+
+        selected, _objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.offset, 0.5)
+
     def test_visual_quality_breaks_ties_between_equally_valid_object_frames(self) -> None:
         checker = np.indices((80, 80)).sum(axis=0) % 2
         sharp = np.repeat((checker * 255).astype(np.uint8)[..., None], 3, axis=2)

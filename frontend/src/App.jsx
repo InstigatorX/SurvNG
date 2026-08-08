@@ -1093,6 +1093,8 @@ function AssistantPanel({ pageContext, timeZone }) {
   const [messages, setMessages] = useState(readAssistantMessages);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState(null);
+  const [calibration, setCalibration] = useState(null);
+  const [calibrating, setCalibrating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
   const [error, setError] = useState("");
@@ -10700,13 +10702,18 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_recognition_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_recognition_enabled"], event.target.checked)} /><span>Recognition enabled</span></label>
           <label>Embedding Model<input value={config.detector?.face_embedding_model_path || ""} onChange={(event) => updateConfig(["detector", "face_embedding_model_path"], event.target.value)} placeholder="face_model/model.xml" /></label>
           <label>Landmark Model<input value={config.detector?.face_landmark_model_path || ""} onChange={(event) => updateConfig(["detector", "face_landmark_model_path"], event.target.value)} placeholder="face_model/landmarks.xml" /></label>
+          <label>Face Detector Model<input value={config.detector?.face_detection_model_path || ""} onChange={(event) => updateConfig(["detector", "face_detection_model_path"], event.target.value)} placeholder="face_detector/model.xml" /></label>
           <label>Recognition Device<select value={config.detector?.face_recognition_device || "AUTO"} onChange={(event) => updateConfig(["detector", "face_recognition_device"], event.target.value)}>
             {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
-          <label>Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_match_threshold ?? 0.4} onChange={(event) => updateConfig(["detector", "face_match_threshold"], Number(event.target.value))} /></label>
+          <label>Face Detection Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.face_detection_threshold ?? 0.6} onChange={(event) => updateConfig(["detector", "face_detection_threshold"], Number(event.target.value))} /></label>
+          <label>Suggestion Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_match_threshold ?? 0.4} onChange={(event) => updateConfig(["detector", "face_match_threshold"], Number(event.target.value))} /></label>
           <label>Minimum Face Size<input type="number" min="16" max="1024" step="8" value={config.detector?.face_min_size ?? 48} onChange={(event) => updateConfig(["detector", "face_min_size"], Number(event.target.value))} /></label>
-          <label>References Per Person<input type="number" min="1" max="200" step="1" value={config.detector?.face_max_references ?? 20} onChange={(event) => updateConfig(["detector", "face_max_references"], Number(event.target.value))} /></label>
+          <label>References Per Person<input type="number" min="1" max="200" step="1" value={config.detector?.face_max_references ?? 20} onChange={(event) => updateConfig(["detector", "face_max_references"], Number(event.target.value))} /><small>SurvNG chooses the clearest, most varied confirmed faces; pinned references are always retained.</small></label>
           <label>Saved face limit<input type="number" min="100" max="100000" step="100" value={config.detector?.face_max_observations ?? 1000} onChange={(event) => updateConfig(["detector", "face_max_observations"], Number(event.target.value))} /><small>Oldest observations are removed first.</small></label>
+          <label className="compact-toggle"><input type="checkbox" checked={config.detector?.face_auto_identify_enabled ?? false} onChange={(event) => updateConfig(["detector", "face_auto_identify_enabled"], event.target.checked)} /><span>Automatically identify very strong matches</span></label>
+          <label>Automatic Match Threshold<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_threshold ?? 0.55} onChange={(event) => updateConfig(["detector", "face_auto_identify_threshold"], Number(event.target.value))} /></label>
+          <label>Minimum Lead Over Next Person<input type="number" min="0" max="1" step="0.01" value={config.detector?.face_auto_identify_margin ?? 0.12} onChange={(event) => updateConfig(["detector", "face_auto_identify_margin"], Number(event.target.value))} /></label>
           </div>
         </details>
 
@@ -11101,6 +11108,27 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
     }
   }
 
+  async function updateReference(pinned) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/faces/observations/${observation.id}/reference`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "Could not update this reference");
+      }
+      await onUpdated?.(pinned ? "Reference pinned" : "Reference unpinned");
+    } catch (requestError) {
+      setError(requestError.message || "Could not update this reference");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="face-review-dialog" role="dialog" aria-modal="true" aria-label="Review face">
@@ -11108,8 +11136,15 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
         <img src={appUrl(`/api/faces/observations/${observation.id}/crop.jpg?padding=0.45`)} alt="Selected face" />
         <div className="face-review-form">
           <div><strong>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
+          <div className="face-match-summary">
+            <span>Face quality <strong>{observation.quality_score != null ? `${Math.round(Number(observation.quality_score) * 100)}%` : "Not scored"}</strong></span>
+            {observation.match_details?.reference_ids?.length ? <span>Match supported by <strong>{observation.match_details.reference_ids.length} strongest references</strong></span> : null}
+            {observation.match_details?.margin != null ? <span>Lead over next person <strong>{Math.round(Number(observation.match_details.margin) * 100)} points</strong></span> : null}
+          </div>
           {observation.candidate_person_id ? <div className="face-enroll-row"><button type="button" disabled={busy} onClick={() => assignPerson(observation.candidate_person_id)}><ScanFace size={16} /> Confirm {observation.candidate_person_name} ({Math.round(Number(observation.candidate_confidence || 0) * 100)}%)</button><button type="button" className="subtle" disabled={busy} onClick={() => assignPerson(null)}><X size={16} /> Reject</button></div> : null}
+          {observation.auto_identified && observation.person_id ? <div className="face-enroll-row"><button type="button" disabled={busy} onClick={() => assignPerson(observation.person_id)}><ShieldCheck size={16} /> Confirm automatic match</button></div> : null}
           <label>Assign to person<select value={observation.person_id || ""} disabled={busy} onChange={(event) => assignPerson(event.target.value)}><option value="">Unknown</option>{people.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</select></label>
+          {observation.person_id && observation.review_status === "confirmed" ? <button type="button" className="subtle" disabled={busy} onClick={() => updateReference(!observation.reference_pinned)}><ShieldCheck size={16} /> {observation.reference_pinned ? "Unpin reference" : "Pin as reference"}</button> : null}
           <div className="face-enroll-row"><input value={newName} disabled={busy} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createPerson(); }} placeholder="New person name" /><button type="button" onClick={createPerson} disabled={busy || !newName.trim()}><UserPlus size={16} /> Enroll</button></div>
           {error ? <span className="save-status error">{error}</span> : null}
         </div>
@@ -11210,6 +11245,20 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
     }
   }
 
+  async function analyzeCalibration() {
+    setCalibrating(true);
+    try {
+      const response = await fetch("/api/faces/calibration");
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not analyze face matching");
+      setCalibration(payload);
+    } catch (error) {
+      setNotice(error.message || "Could not analyze face matching");
+    } finally {
+      setCalibrating(false);
+    }
+  }
+
   return (
     <main className="faces-page">
       <aside className="faces-people-panel">
@@ -11228,7 +11277,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
                 {person.preview_observation_id
                   ? <img src={appUrl(`/api/faces/observations/${person.preview_observation_id}/crop.jpg`)} alt="" />
                   : <span className="face-avatar unknown"><ScanFace size={20} /></span>}
-                <span><strong>{person.name}</strong><small>{person.observation_count} observations</small></span>
+                <span><strong>{person.name}</strong><small>{person.reference_count || 0} trusted · {person.observation_count} total{person.pinned_reference_count ? ` · ${person.pinned_reference_count} pinned` : ""}</small></span>
               </button>
               <button type="button" className="icon-button subtle" onClick={() => deletePerson(person)} title="Delete person" aria-label={`Delete ${person.name}`}><Trash2 size={15} /></button>
             </div>
@@ -11251,6 +11300,12 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
         </div>
         <div className="face-messages">
           {!status?.recognition_ready || status?.recognition?.pending > 0 || status?.recognition?.failed > 0 ? <div className="face-readiness"><Activity size={16} /><span>{status?.recognition_message || "Automatic recognition is not configured."}</span></div> : null}
+          <div className="face-readiness face-calibration">
+            <Gauge size={16} />
+            <span>{calibration?.message || "Measure your confirmed and rejected faces before changing match thresholds."}</span>
+            {calibration?.ready ? <strong>{Math.round(Number(calibration.rank_one_accuracy || 0) * 100)}% identity accuracy · suggest at {Math.round(Number(calibration.recommended?.suggestion_threshold || 0) * 100)}% · automatic at {Math.round(Number(calibration.recommended?.automatic_threshold || 0) * 100)}% with a {Math.round(Number(calibration.recommended?.automatic_margin || 0) * 100)}-point lead</strong> : null}
+            <button type="button" className="subtle" disabled={calibrating} onClick={analyzeCalibration}>{calibrating ? "Analyzing..." : "Analyze matching"}</button>
+          </div>
           {notice ? <div className="save-status">{notice}</div> : null}
         </div>
         <div className="face-observation-grid">

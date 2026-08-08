@@ -4509,6 +4509,20 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   font-size: 11px;
 }
 
+.face-calibration span {
+  flex: 1;
+}
+
+.face-calibration strong {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.face-calibration button {
+  min-height: 28px;
+  white-space: nowrap;
+}
+
 .face-person-list {
   min-height: 0;
   overflow-y: auto;
@@ -4768,6 +4782,26 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .face-review-form span {
   color: var(--muted);
   font-size: 11px;
+}
+
+.face-match-summary {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-muted);
+  padding: 9px 10px;
+}
+
+.face-match-summary span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.face-match-summary strong {
+  color: var(--text);
+  text-align: right;
 }
 
 .face-enroll-row {

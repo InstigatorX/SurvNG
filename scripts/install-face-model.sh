@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-model_dir="${1:-face_model}"
+model_dir="${1:-models/face_model}"
+detector_dir="${2:-models/face_detector}"
 arcface_name="face-recognition-resnet100-arcface-onnx"
 arcface_source="$model_dir/arcfaceresnet100-8.onnx"
 arcface_url="https://storage.openvinotoolkit.org/repositories/open_model_zoo/public/2022.1/face-recognition-resnet100-arcface-onnx/arcfaceresnet100-8.onnx"
 landmark_name="landmarks-regression-retail-0009"
 landmark_url="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/${landmark_name}/FP16"
+detector_name="face-detection-retail-0004"
+detector_url="https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/${detector_name}/FP16"
 
-mkdir -p "$model_dir"
+mkdir -p "$model_dir" "$detector_dir"
 
 if [[ -x ".venv/bin/ovc" ]]; then
   ovc_bin=".venv/bin/ovc"
@@ -28,12 +31,14 @@ rm -f "$arcface_source"
 
 curl -fL --retry 3 -o "$model_dir/${landmark_name}.xml" "$landmark_url/${landmark_name}.xml"
 curl -fL --retry 3 -o "$model_dir/${landmark_name}.bin" "$landmark_url/${landmark_name}.bin"
+curl -fL --retry 3 -o "$detector_dir/${detector_name}.xml" "$detector_url/${detector_name}.xml"
+curl -fL --retry 3 -o "$detector_dir/${detector_name}.bin" "$detector_url/${detector_name}.bin"
 
-for model_xml in "$model_dir/${arcface_name}.xml" "$model_dir/${landmark_name}.xml"; do
+for model_xml in "$model_dir/${arcface_name}.xml" "$model_dir/${landmark_name}.xml" "$detector_dir/${detector_name}.xml"; do
   if ! grep -q '<net ' "$model_xml"; then
     printf 'Downloaded model is not a valid OpenVINO IR: %s\n' "$model_xml" >&2
     exit 1
   fi
 done
 
-printf 'Installed ArcFace embedding and landmark alignment models in %s\n' "$model_dir"
+printf 'Installed ArcFace embedding and landmark models in %s and the dedicated face detector in %s\n' "$model_dir" "$detector_dir"

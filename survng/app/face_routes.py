@@ -27,6 +27,10 @@ class FaceAssignment(BaseModel):
     person_id: int | None = Field(default=None, gt=0)
 
 
+class FaceReferenceUpdate(BaseModel):
+    pinned: bool
+
+
 @dataclass(frozen=True, slots=True)
 class FaceRouteDependencies:
     get_manager: Callable[[], AppManager]
@@ -87,6 +91,11 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     def face_people() -> list[dict[str, Any]]:
         deps.start_observation_sync()
         return with_manager(lambda active: active.faces.people())
+
+    @router.get("/api/faces/calibration")
+    def face_calibration() -> dict[str, Any]:
+        deps.start_observation_sync()
+        return with_manager(lambda active: active.faces.calibration())
 
     @router.post("/api/faces/people")
     def create_face_person(payload: FacePersonCreate) -> dict[str, Any]:
@@ -238,6 +247,25 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             )
 
         return with_manager(crop)
+
+    @router.put("/api/faces/observations/{observation_id}/reference")
+    def update_face_reference(
+        observation_id: int,
+        payload: FaceReferenceUpdate,
+    ) -> dict[str, Any]:
+        def update(active_manager: AppManager) -> dict[str, Any]:
+            try:
+                observation = active_manager.faces.set_reference_pinned(
+                    observation_id,
+                    payload.pinned,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if observation is None:
+                raise HTTPException(status_code=404, detail="face observation not found")
+            return _public_face_observation(observation)
+
+        return with_manager(update)
 
     handlers: dict[str, Callable[..., Any]] = {
         name: value
