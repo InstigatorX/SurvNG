@@ -76,7 +76,58 @@ class CameraStartupCoordinatorTest(unittest.TestCase):
         self.assertTrue(recorders_started.is_set())
         state = coordinator.status()["cameras"]["gate"]
         self.assertEqual(state["phase"], "degraded")
+        self.assertTrue(state["readiness_window_missed"])
+        self.assertEqual(state["recovered_at"], "")
         self.assertGreaterEqual(state["wait_seconds"], 0.02)
+
+    def test_degraded_camera_becomes_ready_after_a_fresh_frame_arrives(self) -> None:
+        frame_ready = threading.Event()
+        coordinator = CameraStartupCoordinator(
+            readiness_timeout_seconds=0.02,
+            recorder_settle_seconds=0.0,
+            poll_interval_seconds=0.005,
+        )
+        coordinator.start([
+            startup_task("gate", capture_ready=frame_ready.is_set),
+        ])
+
+        self.assertTrue(coordinator.wait(timeout=1))
+        self.assertEqual(
+            coordinator.status()["cameras"]["gate"]["phase"],
+            "degraded",
+        )
+
+        frame_ready.set()
+        status = coordinator.status()
+        state = status["cameras"]["gate"]
+        self.assertEqual(state["phase"], "ready")
+        self.assertTrue(state["readiness_window_missed"])
+        self.assertTrue(state["first_frame_at"])
+        self.assertEqual(state["recovered_at"], state["first_frame_at"])
+        self.assertEqual(status["counts"], {"ready": 1})
+
+    def test_recovery_probe_failure_leaves_degraded_status_available(self) -> None:
+        should_fail = threading.Event()
+
+        def capture_ready() -> bool:
+            if should_fail.is_set():
+                raise RuntimeError("capture status unavailable")
+            return False
+
+        coordinator = CameraStartupCoordinator(
+            readiness_timeout_seconds=0.02,
+            recorder_settle_seconds=0.0,
+            poll_interval_seconds=0.005,
+        )
+        coordinator.start([
+            startup_task("gate", capture_ready=capture_ready),
+        ])
+
+        self.assertTrue(coordinator.wait(timeout=1))
+        should_fail.set()
+        status = coordinator.status()
+        self.assertEqual(status["cameras"]["gate"]["phase"], "degraded")
+        self.assertEqual(status["counts"], {"degraded": 1})
 
     def test_one_camera_failure_does_not_block_later_camera(self) -> None:
         second_started = threading.Event()

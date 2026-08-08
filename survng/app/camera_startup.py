@@ -40,10 +40,13 @@ class _CameraStartupState:
     queued_at: str = ""
     started_at: str = ""
     first_frame_at: str = ""
+    recovered_at: str = ""
+    readiness_window_missed: bool = False
     completed_at: str = ""
     wait_seconds: float = 0.0
     total_seconds: float = 0.0
     error: str = ""
+    started_monotonic: float = 0.0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -51,6 +54,8 @@ class _CameraStartupState:
             "queued_at": self.queued_at,
             "started_at": self.started_at,
             "first_frame_at": self.first_frame_at,
+            "recovered_at": self.recovered_at,
+            "readiness_window_missed": self.readiness_window_missed,
             "completed_at": self.completed_at,
             "wait_seconds": round(self.wait_seconds, 3),
             "total_seconds": round(self.total_seconds, 3),
@@ -87,6 +92,8 @@ class CameraStartupCoordinator:
         self._completed = threading.Event()
         self._thread: threading.Thread | None = None
         self._states: dict[str, _CameraStartupState] = {}
+        self._tasks: dict[str, CameraStartupTask] = {}
+        self._generation = 0
         self._admission_complete = False
         self._started_monotonic: float | None = None
         self._completed_monotonic: float | None = None
@@ -107,10 +114,12 @@ class CameraStartupCoordinator:
             self._completed.clear()
             self._admission_complete = False
             queued_at = self._now_iso()
+            self._generation += 1
             self._states = {
                 task.camera_id: _CameraStartupState(queued_at=queued_at)
                 for task in task_snapshot
             }
+            self._tasks = {task.camera_id: task for task in task_snapshot}
             self._started_monotonic = self._monotonic_clock()
             self._completed_monotonic = None
             self._on_complete = on_complete
@@ -151,6 +160,7 @@ class CameraStartupCoordinator:
         return self._completed.wait(timeout)
 
     def status(self) -> dict[str, Any]:
+        self._refresh_recovered_states()
         with self._lock:
             states = {
                 camera_id: state.snapshot()
@@ -231,7 +241,12 @@ class CameraStartupCoordinator:
 
     def _run_task(self, task: CameraStartupTask) -> None:
         started = self._monotonic_clock()
-        self._update(task.camera_id, phase="starting", started_at=self._now_iso())
+        self._update(
+            task.camera_id,
+            phase="starting",
+            started_at=self._now_iso(),
+            started_monotonic=started,
+        )
         ready = False
         try:
             if not task.is_enabled():
@@ -333,6 +348,8 @@ class CameraStartupCoordinator:
             "total_seconds": self._monotonic_clock() - started,
             "error": error,
         }
+        if phase == "degraded":
+            values["readiness_window_missed"] = True
         if wait_seconds is not None:
             values["wait_seconds"] = wait_seconds
         self._update(camera_id, **values)
@@ -352,6 +369,48 @@ class CameraStartupCoordinator:
             state = self._states[camera_id]
             for name, value in values.items():
                 setattr(state, name, value)
+
+    def _refresh_recovered_states(self) -> None:
+        """Promote delayed cameras once their independently retrying capture is ready."""
+        with self._lock:
+            generation = self._generation
+            candidates = [
+                (camera_id, self._tasks.get(camera_id))
+                for camera_id, state in self._states.items()
+                if state.phase == "degraded"
+            ]
+        for camera_id, task in candidates:
+            if task is None:
+                continue
+            try:
+                ready = task.is_enabled() and task.capture_ready()
+            except Exception:
+                ready = False
+            if not ready:
+                continue
+            recovered_at = self._now_iso()
+            recovered_monotonic = self._monotonic_clock()
+            with self._lock:
+                state = self._states.get(camera_id)
+                if (
+                    generation != self._generation
+                    or state is None
+                    or state.phase != "degraded"
+                    or self._tasks.get(camera_id) is not task
+                ):
+                    continue
+                state.phase = "ready"
+                state.first_frame_at = recovered_at
+                state.recovered_at = recovered_at
+                if state.started_monotonic:
+                    state.wait_seconds = max(
+                        state.wait_seconds,
+                        recovered_monotonic - state.started_monotonic,
+                    )
+            LOGGER.info(
+                "camera startup camera=%s phase=ready recovered_after_deadline=true",
+                camera_id,
+            )
 
     def _now_iso(self) -> str:
         return self._wall_clock().isoformat()
