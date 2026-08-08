@@ -204,6 +204,22 @@ def test_policy_reconfiguration_supports_read_only_face_config_proxy() -> None:
     service.faces.reconfigure_max_observations.assert_called_once_with(37)
 
 
+def test_policy_reconfiguration_rolls_back_detector_if_face_store_rejects_it() -> None:
+    service = _lifecycle()
+    previous = service.detector.config.model_copy(deep=True)
+    next_config = previous.model_copy(deep=True)
+    next_config.face_max_observations = 37
+    service.faces.reconfigure_max_observations.side_effect = RuntimeError("database busy")
+
+    with pytest.raises(RuntimeError, match="database busy"):
+        service.reconfigure_policy(next_config)
+
+    assert service.detector.update_runtime_config.call_args_list == [
+        call(next_config),
+        call(previous),
+    ]
+
+
 def test_face_matching_policy_change_refreshes_saved_suggestions() -> None:
     service = _lifecycle()
     next_config = service.detector.config.model_copy(deep=True)
@@ -251,6 +267,7 @@ def test_tracking_swap_failure_restores_previous_and_closes_unbound_sessions() -
         call(old_first),
     ]
     replacement_second.stop.assert_called_once_with()
+    replacement_first.stop.assert_called_once_with()
     next_backfill.close.assert_called_once_with()
     assert service.appearance_backfill is not next_backfill
 

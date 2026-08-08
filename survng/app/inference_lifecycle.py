@@ -219,13 +219,23 @@ class InferenceLifecycle:
     def reconfigure_policy(self, config: DetectorConfig) -> None:
         with self._lock:
             self._ensure_open()
-            previous = self.detector.config
+            previous = self.detector.config.model_copy(deep=True)
             refresh_faces = (
                 previous.face_match_threshold != config.face_match_threshold
                 or previous.face_max_references != config.face_max_references
             )
-            self.detector.update_runtime_config(config)
-            self.faces.reconfigure_max_observations(config.face_max_observations)
+            try:
+                self.detector.update_runtime_config(config)
+                self.faces.reconfigure_max_observations(config.face_max_observations)
+            except BaseException as error:
+                try:
+                    self.detector.update_runtime_config(previous)
+                except BaseException as rollback_error:
+                    raise RuntimeError(
+                        "detector policy rollback failed: "
+                        f"{redact_secret_text(rollback_error)}"
+                    ) from error
+                raise
             if refresh_faces:
                 self.faces.request_match_refresh()
 
@@ -264,9 +274,14 @@ class InferenceLifecycle:
                 if self._auxiliary_started:
                     next_backfill.start()
             except BaseException:
+                rejected_sessions: list[ObjectTrackingSession] = list(
+                    replacements[len(previous_sessions):]
+                )
                 for worker, previous in reversed(previous_sessions):
                     try:
-                        worker.replace_object_tracking_session(previous)
+                        rejected_sessions.append(
+                            worker.replace_object_tracking_session(previous)
+                        )
                     except Exception as error:
                         camera = getattr(worker, "camera", None)
                         LOGGER.error(
@@ -274,7 +289,7 @@ class InferenceLifecycle:
                             getattr(camera, "id", "unknown"),
                             redact_secret_text(error),
                         )
-                self._stop_sessions(replacements[len(previous_sessions):])
+                self._stop_sessions(rejected_sessions)
                 try:
                     self.detector.update_runtime_config(previous_config)
                 except Exception as error:

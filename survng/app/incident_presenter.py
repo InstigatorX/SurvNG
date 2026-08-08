@@ -102,11 +102,16 @@ def _best_incident_event(events: list[dict]) -> dict:
     object_events = [event for event in events if event.get("has_objects")]
     candidates = object_events or events
 
-    def score(event: dict) -> tuple[int, int, float, float, int]:
+    def score(
+        event: dict,
+    ) -> tuple[int, int, float, float, int, float, int, float, int]:
         objects = event.get("objects") or []
         confidences: list[float] = []
         quality_scores: list[float] = []
+        primary_clearances: list[float] = []
+        primary_areas: list[float] = []
         eligible_objects = 0
+        primary_objects = 0
         for item in objects:
             if not isinstance(item, dict):
                 continue
@@ -124,13 +129,29 @@ def _best_incident_event(events: list[dict]) -> dict:
                 quality = float("nan")
             if math.isfinite(quality):
                 quality_scores.append(max(0.0, min(1.0, quality)))
+            if item.get("snapshot_primary_subject") is True:
+                primary_objects += 1
+                for name, target in (
+                    ("snapshot_edge_clearance_ratio", primary_clearances),
+                    ("snapshot_subject_area_ratio", primary_areas),
+                ):
+                    try:
+                        value = float(item.get(name))
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(value):
+                        target.append(max(0.0, value))
             eligible_objects += 1
         best_confidence = max(confidences, default=0.0)
         best_quality = max(quality_scores, default=0.0)
         return (
-            eligible_objects,
+            int(primary_objects > 0),
+            int(bool(primary_clearances)),
+            max(primary_clearances, default=0.0),
+            max(primary_areas, default=0.0),
             int(bool(quality_scores)),
             best_quality,
+            eligible_objects,
             best_confidence,
             int(event.get("id") or 0),
         )

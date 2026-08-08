@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .manager import AppManager
+from .manager_access import ManagerAccessCoordinator
 
 
 class FacePersonCreate(BaseModel):
@@ -36,6 +37,7 @@ class FaceRouteDependencies:
     get_manager: Callable[[], AppManager]
     manager_lock: threading.RLock
     start_observation_sync: Callable[[], None]
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +56,11 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     router = APIRouter()
 
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
-        with deps.manager_lock:
-            active_manager = deps.get_manager()
-        return operation(active_manager)
+        if deps.manager_access is None:
+            with deps.manager_lock:
+                return operation(deps.get_manager())
+        with deps.manager_access.lease(deps.manager_lock, deps.get_manager) as active:
+            return operation(active)
 
     @router.get("/api/faces/status")
     def face_status() -> dict[str, Any]:

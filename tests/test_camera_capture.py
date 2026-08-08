@@ -483,6 +483,31 @@ def test_live_reconnect_escalates_open_deadline_then_resets_after_frame() -> Non
     assert status["last_open_timeout_ms"] == 3000
 
 
+def test_live_reconnect_escalates_when_open_succeeds_without_a_frame() -> None:
+    frame = np.ones((10, 20, 3), dtype=np.uint8)
+    backend = ScriptedOpenBackend(
+        [True, True],
+        [[], [frame]],
+    )
+    service = _service(
+        backend,
+        initial_open_timeout_ms=3000,
+        reconnect_open_timeout_ms=10000,
+    )
+
+    assert service.start()
+    _wait_until(
+        lambda: (
+            len(backend.open_timeouts) >= 2
+            and service.status()["capture_stats"]["live"]["frames_received"] >= 1
+        )
+    )
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+
+    assert backend.open_timeouts[:2] == [3000, 10000]
+
+
 def test_live_recovers_after_relay_restart_without_a_persistent_consumer() -> None:
     frame = np.ones((10, 20, 3), dtype=np.uint8)
     backend = ScriptedOpenBackend(

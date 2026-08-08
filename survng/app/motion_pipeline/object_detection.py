@@ -372,7 +372,7 @@ def _temporal_consensus(
 
     def sample_score(
         item: tuple[int, _RecordedDetectionSample],
-    ) -> tuple[int, int, float, float, int, int, float, float, float, float]:
+    ) -> tuple[int, int, float, float, int, int, float, float, float, float, float]:
         sample_index, sample = item
         visible = [
             track

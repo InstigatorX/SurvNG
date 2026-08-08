@@ -58,6 +58,44 @@ class CameraControlServiceTest(unittest.TestCase):
                 "camera_enabled": {"gate": False},
             })
 
+    def test_legacy_media_state_is_loaded_then_migrated_to_local_state_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            local = root / "database" / "runtime_state.json"
+            legacy = root / "media" / "runtime_state.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text(
+                '{"recording_enabled":{"gate":false},'
+                '"detection_enabled":{"gate":false},'
+                '"camera_enabled":{"gate":true}}',
+                encoding="utf-8",
+            )
+            camera = CameraConfig(
+                id="gate",
+                name="Gate",
+                stream_url="rtsp://camera/main",
+            )
+            worker = Mock()
+            controls = CameraControlService(
+                cameras=[camera],
+                workers={"gate": worker},
+                recording=Mock(),
+                fleet=Mock(),
+                mqtt=Mock(),
+                runtime_monitor=Mock(),
+                state_path=local,
+                legacy_state_paths=(legacy,),
+            )
+
+            self.assertFalse(controls.recording_enabled("gate"))
+            self.assertFalse(controls.detection_enabled("gate"))
+            self.assertFalse(local.exists())
+
+            controls.persist()
+
+            self.assertTrue(local.exists())
+            self.assertIn('"gate": false', local.read_text(encoding="utf-8"))
+
     def test_malformed_persisted_controls_fall_back_to_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "runtime_state.json"
@@ -83,6 +121,44 @@ class CameraControlServiceTest(unittest.TestCase):
 
             self.assertTrue(controls.recording_enabled("gate"))
             recording.set_camera_enabled.assert_not_called()
+
+    def test_failed_recorder_transition_restores_persisted_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime_state.json"
+            controls, _worker, recording, _fleet, _mqtt = control_service(path)
+            recording.set_camera_enabled.side_effect = [RuntimeError("recorder busy"), None]
+
+            with self.assertRaisesRegex(RuntimeError, "recorder busy"):
+                controls.set_recording("gate", False)
+
+            self.assertTrue(controls.recording_enabled("gate"))
+            restored = CameraControlService(
+                cameras=list(controls._cameras.values()),
+                workers=controls._workers,
+                recording=controls._recording,
+                fleet=controls._fleet,
+                mqtt=controls._mqtt,
+                runtime_monitor=controls._runtime_monitor,
+                state_path=path,
+            )
+            self.assertTrue(restored.recording_enabled("gate"))
+            self.assertEqual(
+                recording.set_camera_enabled.call_args_list[-1].args,
+                ("gate", True),
+            )
+
+    def test_failed_detection_transition_restores_persisted_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime_state.json"
+            controls, worker, _recording, _fleet, _mqtt = control_service(path)
+            worker.set_detection_enabled.side_effect = RuntimeError("ONVIF busy")
+
+            with self.assertRaisesRegex(RuntimeError, "ONVIF busy"):
+                controls.set_detection("gate", False)
+
+            self.assertTrue(controls.detection_enabled("gate"))
+            payload = path.read_text(encoding="utf-8")
+            self.assertIn('"gate": true', payload)
 
     def test_apply_filters_removed_cameras_and_rolls_back_failed_persist(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

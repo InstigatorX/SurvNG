@@ -45,6 +45,7 @@ from .face_routes import (
 )
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
 from .manager import AppManager, validate_motion_pipeline_configuration
+from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .media_exports import MediaExportManager
 from .incident_queries import (
@@ -91,6 +92,7 @@ FACE_OBSERVATIONS_SYNC_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD_LOCK = threading.Lock()
 FACE_OBSERVATIONS_SYNC_THREAD: threading.Thread | None = None
 MANAGER_RELOAD_LOCK = threading.RLock()
+MANAGER_ACCESS = ManagerAccessCoordinator()
 APPLICATION_STOPPING = threading.Event()
 CONFIG_PROBE_LIMITER = threading.BoundedSemaphore(2)
 AUDIT_AI_LIMITER = threading.BoundedSemaphore(1)
@@ -404,6 +406,10 @@ def reload_manager(
             refresh_runtime_caches=refresh_runtime_caches,
             storage_error=StorageTasksActiveError,
             ai_error=AiOperationsActiveError,
+            wait_for_manager_idle=lambda active: MANAGER_ACCESS.wait_idle(
+                active,
+                15.0,
+            ),
         ),
     )
     lifecycle.reload(config, manager, effective, persist=persist)
@@ -648,11 +654,13 @@ def _sync_face_observations(limit: int = 5000) -> int:
             return 0
         inserted = 0
         while not APPLICATION_STOPPING.is_set():
-            with MANAGER_RELOAD_LOCK:
-                active_manager = manager
-            inserted += active_manager.faces.ingest_events(
-                active_manager.events.recent(max(1, min(limit, 20000)))
-            )
+            with MANAGER_ACCESS.lease(
+                MANAGER_RELOAD_LOCK,
+                lambda: manager,
+            ) as active_manager:
+                inserted += active_manager.faces.ingest_events(
+                    active_manager.events.recent(max(1, min(limit, 20000)))
+                )
             with MANAGER_RELOAD_LOCK:
                 if manager is active_manager:
                     FACE_OBSERVATIONS_SYNCED = True
@@ -794,6 +802,7 @@ _camera_api_route_bundle = create_camera_api_router(
     CameraApiDependencies(
         get_manager=lambda: manager,
         manager_lock=MANAGER_RELOAD_LOCK,
+        manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_camera_api_route_bundle.router)
@@ -854,6 +863,7 @@ _appearance_route_bundle = create_appearance_router(
     AppearanceRouteDependencies(
         get_manager=lambda: manager,
         manager_lock=MANAGER_RELOAD_LOCK,
+        manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_appearance_route_bundle.router)
@@ -871,6 +881,7 @@ _face_route_bundle = create_face_router(
         get_manager=lambda: manager,
         manager_lock=MANAGER_RELOAD_LOCK,
         start_observation_sync=_start_face_observation_sync,
+        manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_face_route_bundle.router)

@@ -43,6 +43,7 @@ class CameraControlService:
         mqtt: MqttLifecycle,
         runtime_monitor: ApplicationRuntimeMonitor,
         state_path: Path,
+        legacy_state_paths: Sequence[Path] = (),
     ) -> None:
         self._cameras = {camera.id: camera for camera in cameras}
         self._workers = dict(workers)
@@ -53,6 +54,9 @@ class CameraControlService:
         self._mqtt = mqtt
         self._runtime_monitor = runtime_monitor
         self._state_path = state_path
+        self._legacy_state_paths = tuple(
+            path for path in legacy_state_paths if path != state_path
+        )
         self._lock = threading.RLock()
         self._recording_enabled: dict[str, bool] = {}
         self._detection_enabled: dict[str, bool] = {}
@@ -61,21 +65,43 @@ class CameraControlService:
         self._load_persisted_state()
 
     def _load_persisted_state(self) -> None:
+        state_path: Path | None = None
+        for candidate in (self._state_path, *self._legacy_state_paths):
+            try:
+                candidate.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                LOGGER.warning(
+                    "camera control state could not be inspected at %s: %s; using defaults",
+                    candidate,
+                    exc,
+                )
+                return
+            state_path = candidate
+            break
+        if state_path is None:
+            return
         try:
-            if self._state_path.stat().st_size > 1024 * 1024:
+            if state_path.stat().st_size > 1024 * 1024:
                 raise ValueError("camera control state exceeds 1 MiB")
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("camera control state must be an object")
-        except FileNotFoundError:
-            return
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             LOGGER.warning(
                 "camera control state could not be restored from %s: %s; using defaults",
-                self._state_path,
+                state_path,
                 exc,
             )
             return
+
+        if state_path != self._state_path:
+            LOGGER.info(
+                "restored legacy camera control state from %s; next write migrates it to %s",
+                state_path,
+                self._state_path,
+            )
 
         camera_ids = set(self._cameras)
 
@@ -167,11 +193,33 @@ class CameraControlService:
         with self._lock:
             if not self._command_allowed(camera_id):
                 return False
+            previous = self._recording_enabled.get(camera_id, True)
             self._update_preference_locked("recording_enabled", camera_id, enabled)
             should_run = self._camera_enabled[camera_id] and bool(enabled)
-            self._recording.set_camera_enabled(camera_id, should_run)
-            if should_run:
-                self._recording.start_camera(self._cameras[camera_id])
+            try:
+                self._recording.set_camera_enabled(camera_id, should_run)
+                if should_run:
+                    self._recording.start_camera(self._cameras[camera_id])
+            except BaseException:
+                self._restore_preference_locked(
+                    "recording_enabled",
+                    camera_id,
+                    previous,
+                )
+                previous_should_run = self._camera_enabled[camera_id] and previous
+                try:
+                    self._recording.set_camera_enabled(
+                        camera_id,
+                        previous_should_run,
+                    )
+                    if previous_should_run:
+                        self._recording.start_camera(self._cameras[camera_id])
+                except Exception:
+                    LOGGER.exception(
+                        "failed to restore recorder state for %s",
+                        camera_id,
+                    )
+                raise
             self._mqtt.publish_camera_feature_state(camera_id, "recording", bool(enabled))
             self._runtime_monitor.publish_camera_status(camera_id)
             return True
@@ -180,8 +228,17 @@ class CameraControlService:
         with self._lock:
             if not self._command_allowed(camera_id):
                 return False
+            previous = self._detection_enabled.get(camera_id, True)
             self._update_preference_locked("detection_enabled", camera_id, enabled)
-            self._workers[camera_id].set_detection_enabled(enabled)
+            try:
+                self._workers[camera_id].set_detection_enabled(enabled)
+            except BaseException:
+                self._restore_preference_locked(
+                    "detection_enabled",
+                    camera_id,
+                    previous,
+                )
+                raise
             self._mqtt.publish_camera_feature_state(camera_id, "detection", bool(enabled))
             self._runtime_monitor.publish_camera_status(camera_id)
             return True
@@ -295,6 +352,23 @@ class CameraControlService:
         if category == "camera_enabled":
             return self._camera_enabled
         raise ValueError(f"unknown runtime preference category {category!r}")
+
+    def _restore_preference_locked(
+        self,
+        category: str,
+        camera_id: str,
+        enabled: bool,
+    ) -> None:
+        """Restore memory and disk after a runtime transition rejects a change."""
+        self._preference_map(category)[camera_id] = bool(enabled)
+        try:
+            self._persist_locked()
+        except Exception:
+            LOGGER.exception(
+                "failed to persist rolled-back %s state for %s",
+                category,
+                camera_id,
+            )
 
     def _restore_locked(self, snapshot: Mapping[str, Mapping[str, bool]]) -> None:
         self._recording_enabled = dict(snapshot["recording_enabled"])

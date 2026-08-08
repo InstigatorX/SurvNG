@@ -79,6 +79,26 @@ class InferenceSupervisorTest(unittest.TestCase):
         supervisor.stop()
         self.assertTrue(all(process is not None and not process.is_alive() for process in processes))
 
+    def test_multi_worker_status_polling_is_concurrent(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, object_worker_count=2)
+        )
+        self.addCleanup(supervisor.stop)
+        barrier = threading.Barrier(2)
+
+        def synchronized_status() -> dict[str, object]:
+            barrier.wait(timeout=1.0)
+            return supervisor._base_detector_status()
+
+        for worker in supervisor._object_workers:
+            worker.status = Mock(side_effect=synchronized_status)
+        supervisor._reid.status = Mock(return_value=supervisor._base_reid_status())
+
+        status = supervisor.status()
+
+        self.assertEqual(status["object_worker_count"], 2)
+        self.assertEqual(barrier.n_waiting, 0)
+
     def test_object_requests_rotate_across_equally_idle_workers(self) -> None:
         supervisor = InferenceSupervisor(
             DetectorConfig(enabled=False, object_worker_count=2)

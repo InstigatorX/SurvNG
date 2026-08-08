@@ -216,6 +216,36 @@ class CaptureProtocolTest(unittest.TestCase):
         )
         self.assertLessEqual(STOP_GRACE_SECONDS + STOP_FORCE_SECONDS, 15)
 
+    def test_onvif_restart_waits_for_stopping_generation_before_replacing_it(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        stopping = Mock()
+        stopping.is_alive.side_effect = [True, False, False]
+        listener._thread = stopping
+        listener._stop.set()
+        replacement = Mock()
+
+        with patch(
+            "survng.app.onvif_events.threading.Thread",
+            return_value=replacement,
+        ):
+            listener.start()
+
+        stopping.join.assert_called_once_with(timeout=STOP_FORCE_SECONDS)
+        replacement.start.assert_called_once_with()
+        self.assertIs(listener._thread, replacement)
+
+    def test_onvif_restart_rejects_a_generation_that_remains_stuck(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        stopping = Mock()
+        stopping.is_alive.return_value = True
+        listener._thread = stopping
+        listener._stop.set()
+
+        with self.assertRaisesRegex(RuntimeError, "still stopping"):
+            listener.start()
+
+        stopping.join.assert_called_once_with(timeout=STOP_FORCE_SECONDS)
+
     def test_onvif_stop_during_subscribe_closes_generation_once(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
         entered = threading.Event()

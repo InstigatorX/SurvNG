@@ -33,6 +33,18 @@ def camera_performance_health(camera: dict[str, Any]) -> dict[str, Any]:
             "summary": "Camera is intentionally paused",
             "checks": [],
         }
+    if not bool(camera.get("connected")) or not bool(camera.get("frame_fresh")):
+        return {
+            "status": "offline",
+            "summary": "No fresh camera frames are available",
+            "checks": [],
+        }
+    if not bool(camera.get("detection_enabled", True)):
+        return {
+            "status": "paused",
+            "summary": "Object and motion processing are intentionally paused",
+            "checks": [],
+        }
 
     motion = dict(camera.get("motion") or {})
     analysis = dict(motion.get("analysis_runtime") or {})

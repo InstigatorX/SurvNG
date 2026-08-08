@@ -211,11 +211,9 @@ class AppManager:
         self._process_started_monotonic = time.monotonic()
         self._process_started_at = datetime.now(timezone.utc).isoformat()
         self._lifecycle_lock = threading.RLock()
-        # A fresh SurvNG process always starts from the safe, deterministic
-        # operational default. Home-automation policies can reapply their
-        # desired runtime state after MQTT reports that the server is running.
-        # In-process configuration reloads preserve current preferences through
-        # apply_runtime_preferences() before the replacement manager starts.
+        # Camera, recording, and detection preferences are restored by the
+        # control service. In-process reloads explicitly transfer the same
+        # snapshot before the replacement manager starts.
         self._stopping = False
         self._started = False
         self._closed = False
@@ -280,7 +278,8 @@ class AppManager:
             fleet=self.camera_fleet,
             mqtt=self.mqtt,
             runtime_monitor=self.runtime_monitor,
-            state_path=self.storage_dir / "runtime_state.json",
+            state_path=self.database_dir / "runtime_state.json",
+            legacy_state_paths=(self.storage_dir / "runtime_state.json",),
         )
 
     def _tracking_burst_available(self) -> bool:

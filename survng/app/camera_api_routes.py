@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from .go2rtc import Go2RtcError
 from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager
+from .manager_access import ManagerAccessCoordinator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class CameraFeatureState(BaseModel):
 class CameraApiDependencies:
     get_manager: Callable[[], AppManager]
     manager_lock: threading.RLock
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +42,12 @@ class CameraApiRouteBundle:
 def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundle:
     router = APIRouter()
 
-    def manager_snapshot() -> AppManager:
-        """Select one manager generation without leasing its lock to I/O."""
-        with deps.manager_lock:
-            return deps.get_manager()
+    def with_manager_lease(operation: Callable[[AppManager], Any]) -> Any:
+        if deps.manager_access is None:
+            with deps.manager_lock:
+                return operation(deps.get_manager())
+        with deps.manager_access.lease(deps.manager_lock, deps.get_manager) as active:
+            return operation(active)
 
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
         with deps.manager_lock:
@@ -94,7 +98,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 headers={"Cache-Control": "no-store"},
             )
 
-        return response(manager_snapshot())
+        return with_manager_lease(response)
 
     @router.get("/api/cameras/{camera_id}/zone-snapshot.jpg")
     def zone_snapshot(camera_id: str, source: str = "live") -> Response:
@@ -138,7 +142,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 status_code=503, detail="no camera or event snapshot available"
             )
 
-        return response(manager_snapshot())
+        return with_manager_lease(response)
 
     @router.get("/api/cameras/{camera_id}/live-info")
     def live_info(camera_id: str, response: Response, source: str = "live") -> dict[str, Any]:
@@ -164,7 +168,7 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                     "error": str(exc)[:160],
                 }
 
-        return info(manager_snapshot())
+        return with_manager_lease(info)
 
     @router.get("/api/cameras/{camera_id}/stream.mjpg")
     async def stream(
@@ -183,6 +187,9 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
 
         async def frames():
             while not await request.is_disconnected():
+                with deps.manager_lock:
+                    if deps.get_manager().workers.get(camera_id) is not worker:
+                        return
                 image = await asyncio.to_thread(worker.snapshot, source)
                 if image is not None:
                     yield (

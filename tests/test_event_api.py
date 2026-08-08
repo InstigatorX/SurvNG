@@ -374,6 +374,7 @@ class EventApiSerializationTest(unittest.TestCase):
                     "id": "gate",
                     "name": "Gate",
                     "connected": True,
+                    "frame_fresh": True,
                     "recording": True,
                     "recording_timestamp_health": {
                         "main": {
@@ -1308,6 +1309,45 @@ class EventApiSerializationTest(unittest.TestCase):
         ])
 
         self.assertEqual(selected["id"], 11)
+
+    def test_incident_representative_prefers_fully_framed_primary_subject(self) -> None:
+        crowded_clipped = _event_row({
+            "id": 20,
+            "objects_json": json.dumps([
+                {
+                    "label": "person",
+                    "confidence": 0.93,
+                    "incident_eligible": True,
+                    "snapshot_primary_subject": True,
+                    "snapshot_edge_clearance_ratio": 0.0,
+                    "snapshot_subject_area_ratio": 0.01,
+                    "snapshot_quality_score": 0.70,
+                },
+                {
+                    "label": "car",
+                    "confidence": 0.91,
+                    "incident_eligible": True,
+                    "snapshot_primary_subject": False,
+                    "snapshot_quality_score": 0.70,
+                },
+            ]),
+        })
+        clear_subject = _event_row({
+            "id": 21,
+            "objects_json": json.dumps([{
+                "label": "person",
+                "confidence": 0.80,
+                "incident_eligible": True,
+                "snapshot_primary_subject": True,
+                "snapshot_edge_clearance_ratio": 0.08,
+                "snapshot_subject_area_ratio": 0.04,
+                "snapshot_quality_score": 0.82,
+            }]),
+        })
+
+        selected = _best_incident_event([crowded_clipped, clear_subject])
+
+        self.assertEqual(selected["id"], 21)
 
     def test_linked_motion_observation_extends_incident_without_duplicate_event(self) -> None:
         incident = _incident_row("foyer", [{

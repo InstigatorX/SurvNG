@@ -6,6 +6,9 @@ from survng.app.performance_health import camera_performance_health
 def _camera(**overrides):
     camera = {
         "expected_enabled": True,
+        "connected": True,
+        "frame_fresh": True,
+        "detection_enabled": True,
         "capture": {"live": {"observer_calls": 100, "observer_p95_ms": 1.0}},
         "motion": {
             "sample_fps": 5.0,
@@ -87,5 +90,21 @@ def test_new_and_intentionally_paused_cameras_are_not_false_alarms() -> None:
     assert camera_performance_health({"expected_enabled": False}) == {
         "status": "paused",
         "summary": "Camera is intentionally paused",
+        "checks": [],
+    }
+
+
+def test_offline_and_detection_paused_cameras_are_not_reported_healthy() -> None:
+    offline = _camera(connected=False, frame_fresh=False)
+    paused = _camera(detection_enabled=False)
+
+    assert camera_performance_health(offline) == {
+        "status": "offline",
+        "summary": "No fresh camera frames are available",
+        "checks": [],
+    }
+    assert camera_performance_health(paused) == {
+        "status": "paused",
+        "summary": "Object and motion processing are intentionally paused",
         "checks": [],
     }

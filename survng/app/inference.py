@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
 import multiprocessing
@@ -1334,7 +1335,20 @@ class InferenceSupervisor:
         return status
 
     def status(self) -> dict[str, Any]:
-        statuses = [worker.status() for worker in self._object_workers]
+        # Each isolated worker owns its IPC lock and timeout. Poll the bounded
+        # pool concurrently so one unhealthy process costs one timeout window,
+        # rather than multiplying that delay by the configured worker count.
+        with self._config_lock:
+            object_workers = tuple(self._object_workers)
+            reid_worker = self._reid
+        with ThreadPoolExecutor(
+            max_workers=len(object_workers) + 1,
+            thread_name_prefix="inference-status",
+        ) as executor:
+            object_futures = [executor.submit(worker.status) for worker in object_workers]
+            reid_future = executor.submit(reid_worker.status)
+            statuses = [future.result() for future in object_futures]
+            reid_status = reid_future.result()
         status = self._aggregate_object_status(statuses)
         runtime = dict(status.get("runtime") or {})
         isolation = self.isolation_status()
@@ -1344,7 +1358,7 @@ class InferenceSupervisor:
         status["runtime"] = runtime
         status["isolation"] = isolation
         status["configured_device"] = self.config.device
-        status["reid"] = self.reid_status()
+        status["reid"] = self._current_reid_status(reid_status)
         status["workers"] = self.worker_status()
         return status
 

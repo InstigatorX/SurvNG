@@ -17,12 +17,14 @@ from fastapi.responses import FileResponse
 from .camera_routes import match_camera_route
 from .incident_utils import event_snapshot_path, snapshot_media_type
 from .manager import AppManager
+from .manager_access import ManagerAccessCoordinator
 
 
 @dataclass(frozen=True, slots=True)
 class AppearanceRouteDependencies:
     get_manager: Callable[[], AppManager]
     manager_lock: threading.RLock
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,9 +69,11 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
     router = APIRouter()
 
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
-        with deps.manager_lock:
-            active_manager = deps.get_manager()
-        return operation(active_manager)
+        if deps.manager_access is None:
+            with deps.manager_lock:
+                return operation(deps.get_manager())
+        with deps.manager_access.lease(deps.manager_lock, deps.get_manager) as active:
+            return operation(active)
 
     @router.get("/api/events/{event_id}/snapshot.jpg")
     def event_snapshot(event_id: int, download: bool = False) -> FileResponse:

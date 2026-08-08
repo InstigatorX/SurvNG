@@ -88,6 +88,20 @@ class OnvifEventListener:
     def start(self) -> None:
         if not self.camera.onvif.enabled:
             return
+        stopping_thread: threading.Thread | None = None
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                if not self._stop.is_set():
+                    return
+                stopping_thread = self._thread
+        if stopping_thread is not None:
+            if stopping_thread is threading.current_thread():
+                raise RuntimeError("ONVIF listener cannot restart from its stopping worker")
+            stopping_thread.join(timeout=STOP_FORCE_SECONDS)
+            if stopping_thread.is_alive():
+                raise RuntimeError(
+                    f"previous ONVIF generation is still stopping for {self.camera.id}"
+                )
         with self._lifecycle_lock:
             if self._thread is not None and self._thread.is_alive():
                 return

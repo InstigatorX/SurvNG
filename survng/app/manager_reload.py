@@ -25,6 +25,7 @@ class ManagerReloadHooks:
     refresh_runtime_caches: Callable[[], None]
     storage_error: Callable[[list[str]], Exception]
     ai_error: Callable[[dict[str, int]], Exception]
+    wait_for_manager_idle: Callable[[AppManager], bool] = lambda _manager: True
 
 
 class ManagerGenerationLifecycle:
@@ -67,6 +68,10 @@ class ManagerGenerationLifecycle:
             try:
                 preferences = previous_manager.runtime_preferences()
                 self._hooks.stop_prewarmer()
+                if not self._hooks.wait_for_manager_idle(previous_manager):
+                    raise RuntimeError(
+                        "configuration reload timed out waiting for active API requests"
+                    )
                 previous_stop_attempted = True
                 previous_manager.stop_all_with_runtime_preferences()
                 candidate.apply_runtime_preferences(preferences)

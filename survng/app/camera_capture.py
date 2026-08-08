@@ -566,6 +566,8 @@ class CameraCaptureService:
                             if not ok or image is None:
                                 if self._cancelled(stop_event):
                                     break
+                                if not session_received_frame:
+                                    consecutive_open_failures += 1
                                 failure_reason = "stream read failed"
                                 self._increment(source, "read_failures")
                                 self._set_error(source, failure_reason)

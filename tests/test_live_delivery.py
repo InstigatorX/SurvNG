@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from starlette.responses import Response
 
 from survng.app.camera_api_routes import CameraApiDependencies, create_camera_api_router
+from survng.app.manager_access import ManagerAccessCoordinator
 from survng.app.main import live_info, relay_go2rtc_websocket, stream
 from starlette.websockets import WebSocketDisconnect
 
@@ -46,7 +47,11 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             return manager
 
         bundle = create_camera_api_router(
-            CameraApiDependencies(get_manager=get_manager, manager_lock=lock)
+            CameraApiDependencies(
+                get_manager=get_manager,
+                manager_lock=lock,
+                manager_access=ManagerAccessCoordinator(),
+            )
         )
         response = bundle.handlers["snapshot"]("gate", "live")
 
@@ -67,6 +72,7 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
             CameraApiDependencies(
                 get_manager=lambda: manager,
                 manager_lock=threading.RLock(),
+                manager_access=ManagerAccessCoordinator(),
             )
         )
 
