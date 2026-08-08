@@ -234,3 +234,18 @@ def test_motion_state_isolated_callback_failure_and_decision_telemetry() -> None
 
     snapshot["last_result"]["reason"] = "mutated"
     assert state.stats_snapshot()["last_result"]["reason"] == "low_score"
+
+
+def test_motion_state_reports_bounded_analysis_wait_percentiles() -> None:
+    state = CameraMotionState(
+        camera_id="gate",
+        camera_state=CameraRuntimeState(),
+        event_callback=None,
+    )
+
+    for wait_ms in range(1, 101):
+        state.record_analysis_wait(float(wait_ms))
+
+    snapshot = state.stats_snapshot()
+    assert snapshot["analysis_wait_ms_p95"] == 95.0
+    assert snapshot["analysis_wait_ms_p99"] == 99.0

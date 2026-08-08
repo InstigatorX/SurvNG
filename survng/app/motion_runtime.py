@@ -6,6 +6,7 @@ import copy
 import logging
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
@@ -44,6 +45,7 @@ class CameraMotionState:
         self._event_callback = event_callback
         self._lock = threading.Lock()
         self._last_motion_at = ""
+        self._analysis_wait_samples_ms: deque[float] = deque(maxlen=600)
         self._stats: dict[str, Any] = {
             "triggers": 0,
             "bursts": 0,
@@ -138,6 +140,7 @@ class CameraMotionState:
                 float(self._stats["analysis_wait_ms_max"]),
                 wait_ms,
             )
+            self._analysis_wait_samples_ms.append(max(0.0, wait_ms))
 
     def record_decision(
         self,
@@ -173,7 +176,21 @@ class CameraMotionState:
 
     def stats_snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return copy.deepcopy(self._stats)
+            result = copy.deepcopy(self._stats)
+            samples = sorted(self._analysis_wait_samples_ms)
+        result["analysis_wait_ms_p95"] = self._percentile(samples, 0.95)
+        result["analysis_wait_ms_p99"] = self._percentile(samples, 0.99)
+        return result
+
+    @staticmethod
+    def _percentile(values: list[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        index = min(
+            len(values) - 1,
+            max(0, round((len(values) - 1) * percentile)),
+        )
+        return round(float(values[index]), 3)
 
 
 class MotionRuntimeService:

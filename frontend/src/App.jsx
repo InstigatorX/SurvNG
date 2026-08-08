@@ -8132,6 +8132,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         <div className="telemetry-camera-grid">
           {shownCameras.map((camera) => {
             const analysisRuntime = camera.motion?.analysis_runtime || {};
+            const performance = camera.performance || {};
             const analyzed = Number(analysisRuntime.frames_sampled || 0);
             const superseded = Number(analysisRuntime.mailbox_replacements || camera.motion?.analysis_frames_dropped || 0);
             const analysisCoverage = analyzed + superseded ? (analyzed / (analyzed + superseded)) * 100 : null;
@@ -8165,6 +8166,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Object incidents · 1h / 24h</dt><dd>{camera.activity?.last_hour?.object_incidents || 0} / {camera.activity?.last_24h?.object_incidents || 0}</dd></div>
                 <div><dt>Motion triggers · camera / EMA</dt><dd>{camera.onvif?.motion_events || 0} / {camera.motion?.visual_backup_triggers || 0}</dd></div>
                 <div><dt>Enhanced motion coverage</dt><dd>{analysisCoverage == null ? "Not active" : formatCoverage(analysisCoverage)}{superseded ? <small> · {superseded.toLocaleString()} stale skipped</small> : null}</dd></div>
+                <div><dt>Processing health</dt><dd>{performance.summary || "Collecting a representative processing sample"}</dd></div>
                 <div><dt>Event delivery</dt><dd>{eventLoss ? `${eventLoss.toLocaleString()} lost` : "No loss"}</dd></div>
                 <div><dt>Tracking capacity</dt><dd>{camera.tracking?.capacity_timeouts ? `${camera.tracking.capacity_timeouts} skipped` : "No skips"}{camera.tracking?.capacity_waits ? <small> · {camera.tracking.capacity_waits} delayed</small> : null}</dd></div>
                 <div><dt>Camera event connection</dt><dd>{cameraEventStatus}</dd></div>
@@ -8177,6 +8179,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                   <div><dt>Main decoder starts</dt><dd>{Number(camera.capture?.main?.starts || 0).toLocaleString()}</dd></div>
                   <div><dt>Read / open failures</dt><dd>{Number(camera.capture?.live?.read_failures || 0) + Number(camera.capture?.main?.read_failures || 0)} / {Number(camera.capture?.live?.open_failures || 0) + Number(camera.capture?.main?.open_failures || 0)}</dd></div>
                   <div><dt>Capture-to-analysis p95 / p99</dt><dd>{formatMilliseconds(analysisRuntime.capture_to_analysis_p95_ms)} / {formatMilliseconds(analysisRuntime.capture_to_analysis_p99_ms)}</dd></div>
+                  <div><dt>Performance gates</dt><dd>{(performance.checks || []).map((check) => `${check.label}: ${Number(check.value || 0).toFixed(check.unit === "%" ? 1 : 2)}${check.unit}`).join(" · ") || "Waiting for samples"}</dd></div>
                   <div><dt>Analyzed / stale skipped / deferred</dt><dd>{analyzed.toLocaleString()} / {superseded.toLocaleString()} / {Number(analysisRuntime.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
                   <div><dt>Motion passed / rejected / suppressed</dt><dd>{camera.motion?.passed || 0} / {camera.motion?.rejected || 0} / {camera.motion?.suppressed || 0}</dd></div>
                   <div><dt>Event queue peak / evicted / rejected / retry lost</dt><dd>{camera.motion?.event_runtime?.queue_high_water || 0} / {camera.motion?.event_runtime?.evicted || 0} / {camera.motion?.event_runtime?.rejected || 0} / {camera.motion?.event_runtime?.retries_dropped || 0}</dd></div>

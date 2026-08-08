@@ -145,6 +145,7 @@ class MotionAnalysisService:
         self._admission_lock = threading.Lock()
         self._accepting_frames = True
         self._telemetry_lock = threading.Lock()
+        self._telemetry_started_monotonic = time.monotonic()
         self._telemetry: dict[str, Any] = {
             "mailbox_high_water": 0,
             "mailbox_replacements": 0,
@@ -519,6 +520,16 @@ class MotionAnalysisService:
             samples = timing_samples[prefix]
             result[f"{prefix}_p95_ms"] = self._percentile(samples, 0.95)
             result[f"{prefix}_p99_ms"] = self._percentile(samples, 0.99)
+        elapsed_seconds = max(
+            0.001,
+            time.monotonic() - self._telemetry_started_monotonic,
+        )
+        result["copy_mb_per_second"] = round(
+            float(result.get("copy_bytes") or 0)
+            / 1_000_000.0
+            / elapsed_seconds,
+            3,
+        )
         return result
 
     def _record_mailbox_depth(self) -> None:

@@ -124,6 +124,7 @@ class CameraStatusService:
                 self.qualification.illumination_filter_enabled()
             ),
             "frame_width": frame_width,
+            "sample_fps": self.motion_config.sample_fps,
             "camera_mode_background_fps": (
                 self.motion_config.camera_mode_background_fps
             ),

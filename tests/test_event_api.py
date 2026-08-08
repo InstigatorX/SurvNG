@@ -436,6 +436,7 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
             self.assertEqual(payload["cameras"][0]["onvif"]["notifications"], 12)
             self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)
+            self.assertEqual(payload["cameras"][0]["performance"]["status"], "warming_up")
             self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_candidates"], 11)
             self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_triggers"], 4)
             self.assertEqual(payload["cameras"][0]["motion"]["visual_backup_onvif_matches"], 3)

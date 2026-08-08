@@ -384,6 +384,7 @@ class MotionEventCoordinator:
             return {
                 **self._runtime_metrics,
                 "queue_depth": self.queue.qsize(),
+                "queue_capacity": self.queue.maxsize,
                 "retry_queue_depth": len(self.retry_batches),
             }
 

@@ -16,6 +16,7 @@ from fastapi import APIRouter
 
 from .config import AppConfig
 from .manager import AppManager
+from .performance_health import camera_performance_health
 from .process_memory import process_memory_status
 from .telemetry_interruptions import (
     classify_telemetry_interruptions,
@@ -64,7 +65,7 @@ class SystemTelemetryService:
             load_1m = os.getloadavg()[0]
         except OSError:
             load_1m = 0.0
-        return {
+        payload = {
             "instance_id": self.process_instance_id,
             "resources": {
                 "cpu_load_percent": round(
@@ -90,6 +91,7 @@ class SystemTelemetryService:
             "go2rtc": manager.go2rtc_status(),
             "camera_startup": manager.camera_startup_status(),
         }
+        return payload
 
     @staticmethod
     def linux_memory_status() -> dict[str, int | float]:
@@ -404,7 +406,7 @@ class SystemTelemetryService:
         camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
         tracking = status.get("object_tracking") or {}
-        return {
+        payload = {
             "id": camera_id,
             "name": status.get("name") or camera_id,
             "connected": bool(status.get("connected")),
@@ -428,6 +430,7 @@ class SystemTelemetryService:
             },
             "motion": {
                 "mode": motion.get("mode") or "",
+                "sample_fps": float(motion.get("sample_fps") or 0.0),
                 "triggers": int(motion.get("triggers") or 0),
                 "bursts": int(motion.get("bursts") or 0),
                 "passed": int(motion.get("passed") or 0),
@@ -437,6 +440,10 @@ class SystemTelemetryService:
                 "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
                 "analysis_wait_ms_total": round(float(motion.get("analysis_wait_ms_total") or 0.0), 1),
                 "analysis_wait_ms_max": round(float(motion.get("analysis_wait_ms_max") or 0.0), 1),
+                "analysis_wait_ms_p95": round(
+                    float(motion.get("analysis_wait_ms_p95") or 0.0),
+                    1,
+                ),
                 "queue_depth": int(motion.get("queue_depth") or 0),
                 "analysis_runtime": dict(motion.get("analysis_runtime") or {}),
                 "event_runtime": dict(motion.get("event_runtime") or {}),
@@ -488,6 +495,8 @@ class SystemTelemetryService:
                 },
             ),
         }
+        payload["performance"] = camera_performance_health(payload)
+        return payload
 
     def telemetry(
         self, manager: AppManager, config: AppConfig, *, hours: int, camera_id: str
