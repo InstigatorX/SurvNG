@@ -38,6 +38,23 @@ class CameraLifecyclePhase(StrEnum):
     CLOSED = "closed"
 
 
+@dataclass(frozen=True, slots=True)
+class CameraStopTicket:
+    """Identity of one camera generation's idempotent stop transaction."""
+
+    camera_id: str
+    generation: int
+    requested_at_monotonic: float
+
+
+@dataclass(slots=True)
+class _PendingCameraShutdown:
+    ticket: CameraStopTicket
+    errors: list[tuple[str, BaseException]]
+    final_phase: CameraLifecyclePhase
+    failure: str
+
+
 @dataclass(slots=True)
 class CameraRuntimeState:
     """Mutable camera lifecycle state shared through one explicit owner."""
@@ -86,9 +103,7 @@ class CameraLifecycleService:
         # Serialize lifecycle commands without blocking state readers. This may
         # be held across joins and camera I/O; state.lock may not.
         self._operation_lock = threading.Lock()
-        self._pending_shutdown_errors: list[tuple[str, BaseException]] = []
-        self._pending_final_phase = CameraLifecyclePhase.STOPPED
-        self._pending_failure = ""
+        self._pending_shutdown: _PendingCameraShutdown | None = None
 
     def start(self) -> None:
         with self._operation_lock:
@@ -97,6 +112,14 @@ class CameraLifecycleService:
                     return
                 if self.state.phase is CameraLifecyclePhase.CLOSED:
                     raise RuntimeError(f"camera {self.camera_id} is closed")
+                if self.state.phase in {
+                    CameraLifecyclePhase.STARTING,
+                    CameraLifecyclePhase.STOPPING,
+                }:
+                    raise RuntimeError(
+                        f"cannot start camera {self.camera_id} while lifecycle "
+                        f"phase is {self.state.phase.value}"
+                    )
             residual_workers = self._residual_workers()
             if residual_workers:
                 message = (
@@ -155,15 +178,19 @@ class CameraLifecycleService:
         with self._operation_lock:
             self._stop_runtime()
 
-    def request_stop(self) -> None:
+    def request_stop(self) -> CameraStopTicket | None:
         """Broadcast a nonblocking stop request for every owned component."""
         with self._operation_lock:
-            self._request_stop_runtime()
+            return self._request_stop_runtime()
 
-    def wait_stopped(self, deadline: float) -> bool:
+    def wait_stopped(
+        self,
+        deadline: float,
+        ticket: CameraStopTicket | None = None,
+    ) -> bool:
         """Wait for a requested stop using one fleet-owned absolute deadline."""
         with self._operation_lock:
-            return self._wait_stop_runtime(deadline)
+            return self._wait_stop_runtime(deadline, ticket)
 
     def _stop_runtime(
         self,
@@ -171,12 +198,17 @@ class CameraLifecycleService:
         final_phase: CameraLifecyclePhase = CameraLifecyclePhase.STOPPED,
         failure: str = "",
     ) -> None:
-        self._request_stop_runtime(final_phase=final_phase, failure=failure)
+        ticket = self._request_stop_runtime(
+            final_phase=final_phase,
+            failure=failure,
+        )
+        if ticket is None:
+            return
         deadline = time.monotonic() + max(
             MOTION_THREAD_STOP_TIMEOUT_SECONDS,
             CAPTURE_STOP_TIMEOUT_SECONDS,
         )
-        if not self._wait_stop_runtime(deadline):
+        if not self._wait_stop_runtime(deadline, ticket):
             raise RuntimeError(f"camera {self.camera_id} did not stop cleanly")
 
     def _request_stop_runtime(
@@ -184,7 +216,7 @@ class CameraLifecycleService:
         *,
         final_phase: CameraLifecyclePhase = CameraLifecyclePhase.STOPPED,
         failure: str = "",
-    ) -> None:
+    ) -> CameraStopTicket | None:
         shutdown_errors: list[tuple[str, BaseException]] = []
 
         def attempt(label: str, operation: Callable[[], Any]) -> Any:
@@ -202,9 +234,19 @@ class CameraLifecycleService:
 
         with self.state.lock:
             if self.state.phase is CameraLifecyclePhase.CLOSED:
-                return
+                return None
             if self.state.phase is CameraLifecyclePhase.STOPPING:
-                return
+                pending = self._pending_shutdown
+                if pending is None:
+                    raise RuntimeError(
+                        f"camera {self.camera_id} is stopping without a stop ticket"
+                    )
+                return pending.ticket
+            ticket = CameraStopTicket(
+                camera_id=self.camera_id,
+                generation=self.state.generation,
+                requested_at_monotonic=time.monotonic(),
+            )
             self.state.enabled = False
             self.state.accepting_motion_events = False
             self.state.stop_event.set()
@@ -217,15 +259,34 @@ class CameraLifecycleService:
         attempt("ONVIF", self.onvif.request_stop)
         attempt("object tracking", self.tracking.request_stop)
         attempt("motion runtime", self.motion_runtime.request_stop)
-        self._pending_shutdown_errors = shutdown_errors
-        self._pending_final_phase = final_phase
-        self._pending_failure = failure
+        self._pending_shutdown = _PendingCameraShutdown(
+            ticket=ticket,
+            errors=shutdown_errors,
+            final_phase=final_phase,
+            failure=failure,
+        )
+        return ticket
 
-    def _wait_stop_runtime(self, deadline: float) -> bool:
+    def _wait_stop_runtime(
+        self,
+        deadline: float,
+        ticket: CameraStopTicket | None = None,
+    ) -> bool:
         with self.state.lock:
             if self.state.phase is CameraLifecyclePhase.CLOSED:
                 return True
-        shutdown_errors = self._pending_shutdown_errors
+            pending = self._pending_shutdown
+            if pending is None:
+                return self.state.phase is CameraLifecyclePhase.STOPPED
+            expected = ticket or pending.ticket
+            if (
+                expected.camera_id != self.camera_id
+                or expected != pending.ticket
+                or expected.generation != self.state.generation
+                or self.state.phase is not CameraLifecyclePhase.STOPPING
+            ):
+                return False
+        shutdown_errors = pending.errors
 
         def remaining() -> float:
             return max(0.0, deadline - time.monotonic())
@@ -307,11 +368,17 @@ class CameraLifecycleService:
                 raise stop_error from None
             raise stop_error
         with self.state.lock:
+            if (
+                self._pending_shutdown is not pending
+                or self.state.generation != pending.ticket.generation
+                or self.state.phase is not CameraLifecyclePhase.STOPPING
+            ):
+                return False
             self._transition_locked(
-                self._pending_final_phase,
-                failure=self._pending_failure,
+                pending.final_phase,
+                failure=pending.failure,
             )
-        self._pending_shutdown_errors = []
+            self._pending_shutdown = None
         return True
 
     def stop_onvif_events(self) -> None:
@@ -478,6 +545,42 @@ class CameraLifecycleService:
         failure: str = "",
     ) -> None:
         """Record a phase transition while the short-lived state lock is held."""
+        allowed = {
+            CameraLifecyclePhase.STOPPED: {
+                CameraLifecyclePhase.STARTING,
+                CameraLifecyclePhase.STOPPING,
+                CameraLifecyclePhase.FAILED,
+                CameraLifecyclePhase.CLOSED,
+            },
+            CameraLifecyclePhase.STARTING: {
+                CameraLifecyclePhase.RUNNING,
+                CameraLifecyclePhase.STOPPING,
+                CameraLifecyclePhase.FAILED,
+            },
+            CameraLifecyclePhase.RUNNING: {
+                CameraLifecyclePhase.STOPPING,
+                CameraLifecyclePhase.FAILED,
+            },
+            CameraLifecyclePhase.STOPPING: {
+                CameraLifecyclePhase.STOPPED,
+                CameraLifecyclePhase.FAILED,
+            },
+            CameraLifecyclePhase.FAILED: {
+                CameraLifecyclePhase.STARTING,
+                CameraLifecyclePhase.STOPPING,
+                CameraLifecyclePhase.CLOSED,
+            },
+            CameraLifecyclePhase.CLOSED: set(),
+        }
+        if phase is self.state.phase:
+            if failure:
+                self.state.last_failure = redact_secret_text(failure)[:1000]
+            return
+        if phase not in allowed[self.state.phase]:
+            raise RuntimeError(
+                f"invalid camera lifecycle transition for {self.camera_id}: "
+                f"{self.state.phase.value} -> {phase.value}"
+            )
         transitioned_at_monotonic = time.monotonic()
         self.state.last_phase_duration_ms = max(
             0.0,

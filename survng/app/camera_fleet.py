@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .camera_startup import CameraStartupCoordinator, CameraStartupTask
 from .config import CameraConfig
@@ -21,8 +21,8 @@ CAMERA_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 class CameraFleetWorker(Protocol):
     def start(self) -> None: ...
     def stop(self) -> None: ...
-    def request_stop(self) -> None: ...
-    def wait_stopped(self, deadline: float) -> bool: ...
+    def request_stop(self) -> Any | None: ...
+    def wait_stopped(self, deadline: float, ticket: Any | None = None) -> bool: ...
     def active_workers(self) -> list[str]: ...
     def close(self) -> None: ...
     def stop_onvif_events(self) -> None: ...
@@ -284,9 +284,12 @@ class CameraFleetLifecycle:
     ) -> None:
         self._stopping.set()
         failures: list[CameraFleetFailure] = []
+        stop_tickets: dict[str, Any] = {}
         for camera_id, worker in self.workers.items():
             try:
-                worker.request_stop()
+                ticket = worker.request_stop()
+                if ticket is not None:
+                    stop_tickets[camera_id] = ticket
             except Exception as error:
                 failures.append(CameraFleetFailure(camera_id, error))
                 LOGGER.error(
@@ -301,7 +304,10 @@ class CameraFleetLifecycle:
         active: set[str] = set()
         for camera_id, worker in self.workers.items():
             try:
-                if not worker.wait_stopped(deadline):
+                if not worker.wait_stopped(
+                    deadline,
+                    stop_tickets.get(camera_id),
+                ):
                     active.add(camera_id)
             except Exception as error:
                 failures.append(CameraFleetFailure(camera_id, error))

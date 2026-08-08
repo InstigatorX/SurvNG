@@ -120,6 +120,18 @@ def test_shutdown_attempts_and_closes_every_non_timed_out_camera() -> None:
     workers["yard"].close.assert_called_once_with()
 
 
+def test_shutdown_wait_receives_each_workers_generation_ticket() -> None:
+    fleet, workers, _recorder, _startup, _publisher = _fleet()
+    ticket = object()
+    workers["gate"].request_stop.return_value = ticket
+
+    fleet.stop_workers(timeout=1.0)
+
+    deadline, forwarded = workers["gate"].wait_stopped.call_args.args
+    assert deadline > 0
+    assert forwarded is ticket
+
+
 def test_shutdown_does_not_race_close_against_a_timed_out_stop() -> None:
     fleet, workers, _recorder, _startup, _publisher = _fleet()
     workers["gate"].wait_stopped.return_value = False

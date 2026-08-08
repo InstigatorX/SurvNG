@@ -16,7 +16,11 @@ from .camera_capture import (
 )
 from .camera_status import CameraStatusService
 from .camera_media import CameraMediaService
-from .camera_lifecycle import CameraLifecycleService, CameraRuntimeState
+from .camera_lifecycle import (
+    CameraLifecycleService,
+    CameraRuntimeState,
+    CameraStopTicket,
+)
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
 from .onvif_events import OnvifEventListener
@@ -259,11 +263,15 @@ class CameraWorker:
     def stop(self) -> None:
         self.lifecycle.stop()
 
-    def request_stop(self) -> None:
-        self.lifecycle.request_stop()
+    def request_stop(self) -> CameraStopTicket | None:
+        return self.lifecycle.request_stop()
 
-    def wait_stopped(self, deadline: float) -> bool:
-        return self.lifecycle.wait_stopped(deadline)
+    def wait_stopped(
+        self,
+        deadline: float,
+        ticket: CameraStopTicket | None = None,
+    ) -> bool:
+        return self.lifecycle.wait_stopped(deadline, ticket)
 
     def active_workers(self) -> list[str]:
         return self.lifecycle.active_workers()

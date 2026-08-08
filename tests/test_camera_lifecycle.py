@@ -296,6 +296,58 @@ def test_repeated_fleet_stop_wait_preserves_closed_phase() -> None:
     assert owned.state.phase is CameraLifecyclePhase.CLOSED
 
 
+def test_repeated_stop_request_is_idempotent_for_one_generation() -> None:
+    service, owned = _service()
+    service.start()
+
+    first = service.request_stop()
+    second = service.request_stop()
+
+    assert first is not None
+    assert second == first
+    assert first.generation == 1
+    owned.capture.request_stop.assert_called_once_with()
+    owned.onvif.request_stop.assert_called_once_with()
+    owned.motion_runtime.request_stop.assert_called_once_with()
+
+
+def test_start_is_rejected_until_requested_stop_is_completed() -> None:
+    service, owned = _service()
+    service.start()
+    ticket = service.request_stop()
+
+    with pytest.raises(RuntimeError, match="phase is stopping"):
+        service.start()
+
+    assert ticket is not None
+    assert service.wait_stopped(time.monotonic() + 1.0, ticket)
+    service.start()
+    assert owned.state.generation == 2
+
+
+def test_stale_stop_ticket_cannot_finalize_new_generation() -> None:
+    service, owned = _service()
+    service.start()
+    first = service.request_stop()
+    assert first is not None
+    assert service.wait_stopped(time.monotonic() + 1.0, first)
+    service.start()
+
+    assert not service.wait_stopped(time.monotonic() + 1.0, first)
+    assert owned.state.phase is CameraLifecyclePhase.RUNNING
+    assert owned.state.generation == 2
+
+
+def test_invalid_lifecycle_transition_is_rejected_without_state_change() -> None:
+    service, owned = _service()
+    owned.state.phase = CameraLifecyclePhase.RUNNING
+
+    with owned.state.lock, pytest.raises(RuntimeError, match="running -> starting"):
+        service._transition_locked(CameraLifecyclePhase.STARTING)
+
+    assert owned.state.phase is CameraLifecyclePhase.RUNNING
+
+
 def test_close_rejects_running_camera_even_without_visible_worker_threads() -> None:
     service, owned = _service()
     owned.state.phase = CameraLifecyclePhase.RUNNING
