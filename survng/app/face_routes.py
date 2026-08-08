@@ -55,7 +55,8 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
 
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
         with deps.manager_lock:
-            return operation(deps.get_manager())
+            active_manager = deps.get_manager()
+        return operation(active_manager)
 
     @router.get("/api/faces/status")
     def face_status() -> dict[str, Any]:

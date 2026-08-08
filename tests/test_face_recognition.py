@@ -3,7 +3,9 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
+import cv2
 import numpy as np
 
 from survng.app.config import DetectorConfig
@@ -11,6 +13,14 @@ from survng.app.face_recognition import OpenVinoFaceRecognizer
 
 
 class FaceRecognitionTest(unittest.TestCase):
+    def test_small_face_uses_upscaling_interpolation(self) -> None:
+        face = np.zeros((48, 48, 3), dtype=np.uint8)
+        with patch("survng.app.face_recognition.cv2.resize", wraps=cv2.resize) as resize:
+            tensor = OpenVinoFaceRecognizer._image_tensor(face, (128, 128), "NCHW")
+
+        self.assertEqual(tensor.shape, (1, 3, 128, 128))
+        self.assertEqual(resize.call_args.kwargs["interpolation"], cv2.INTER_LINEAR)
+
     def test_image_input_rejects_unsupported_channel_counts(self) -> None:
         with self.assertRaisesRegex(ValueError, "three-channel"):
             OpenVinoFaceRecognizer._image_input([1, 1, 128, 128])

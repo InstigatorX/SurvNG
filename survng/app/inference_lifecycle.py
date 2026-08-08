@@ -219,8 +219,15 @@ class InferenceLifecycle:
     def reconfigure_policy(self, config: DetectorConfig) -> None:
         with self._lock:
             self._ensure_open()
+            previous = self.detector.config
+            refresh_faces = (
+                previous.face_match_threshold != config.face_match_threshold
+                or previous.face_max_references != config.face_max_references
+            )
             self.detector.update_runtime_config(config)
             self.faces.reconfigure_max_observations(config.face_max_observations)
+            if refresh_faces:
+                self.faces.request_match_refresh()
 
     def reconfigure_tracking(self, config: DetectorConfig) -> None:
         """Transactionally replace every camera tracking session and backfill."""
@@ -250,7 +257,6 @@ class InferenceLifecycle:
                     previous = worker.replace_object_tracking_session(replacement)
                     previous_sessions.append((worker, previous))
                 self.detector.update_runtime_config(config)
-                self.face_recognizer.config = self.detector.config
                 self.person_reidentifier.config = self.detector.config.tracking
                 self.tracking_factory = next_factory
                 self.tracking_limiter = next_limiter
@@ -276,7 +282,6 @@ class InferenceLifecycle:
                         "failed to restore detector tracking configuration: %s",
                         redact_secret_text(error),
                     )
-                self.face_recognizer.config = self.detector.config
                 self.person_reidentifier.config = self.detector.config.tracking
                 self.tracking_factory = previous_factory
                 self.tracking_limiter = previous_limiter
@@ -314,7 +319,6 @@ class InferenceLifecycle:
                     self.faces.close()
                 self.detector.reconfigure_roles(config, roles)
                 inference_applied = True
-                self.face_recognizer.config = self.detector.config
                 self.person_reidentifier.config = self.detector.config.tracking
                 if refresh_tracking:
                     self.reconfigure_tracking(config)
@@ -344,7 +348,6 @@ class InferenceLifecycle:
                         )
                 elif refresh_tracking and inference_restored:
                     self._resume_tracking(best_effort=True)
-                self.face_recognizer.config = self.detector.config
                 self.person_reidentifier.config = self.detector.config.tracking
                 if face_queue_stop_attempted:
                     try:

@@ -17,9 +17,11 @@ import numpy as np
 from .face_recognition import OpenVinoFaceRecognizer
 from .inference import INFERENCE_REQUEST_TIMEOUT_SECONDS, InferenceUnavailable
 from .incident_utils import event_snapshot_path, portable_media_path
+from .visual_quality import image_quality
 
 
 LOGGER = logging.getLogger(__name__)
+FACE_QUALITY_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,7 @@ class FaceQuality:
     exposure: float
     contrast: float
     size: float
+    edge_detail: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,37 +63,25 @@ def _face_crop(
 
 def _face_quality(face: np.ndarray, detector_confidence: float) -> FaceQuality:
     if face.size == 0:
-        return FaceQuality(0.0, 0.0, 0.0, 0.0, 0.0)
-    gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY) if face.ndim == 3 else face
-    height, width = gray.shape[:2]
-    if max(height, width) > 256:
-        scale = 256.0 / max(height, width)
-        gray = cv2.resize(
-            gray,
-            (max(1, round(width * scale)), max(1, round(height * scale))),
-            interpolation=cv2.INTER_AREA,
-        )
-    pixels = gray.astype(np.float32, copy=False)
-    laplacian_variance = float(cv2.Laplacian(gray, cv2.CV_32F).var())
-    sharpness = max(0.0, min(1.0, math.log1p(laplacian_variance) / math.log1p(1200.0)))
-    clipped = float(np.mean((pixels <= 4.0) | (pixels >= 251.0)))
-    exposure = max(0.0, min(1.0, 1.0 - clipped))
-    contrast = max(0.0, min(1.0, float(pixels.std()) / 64.0))
+        return FaceQuality(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    height, width = face.shape[:2]
+    visual = image_quality(face, max_dimension=256)
     size = max(0.0, min(1.0, min(height, width) / 160.0))
     confidence = max(0.0, min(1.0, float(detector_confidence)))
     score = (
-        0.35 * sharpness
-        + 0.20 * exposure
-        + 0.15 * contrast
+        0.35 * visual.sharpness
+        + 0.20 * visual.exposure
+        + 0.15 * visual.contrast
         + 0.20 * size
         + 0.10 * confidence
     )
     return FaceQuality(
         round(score, 4),
-        round(sharpness, 4),
-        round(exposure, 4),
-        round(contrast, 4),
+        round(visual.sharpness, 4),
+        round(visual.exposure, 4),
+        round(visual.contrast, 4),
         round(size, 4),
+        round(visual.edge_detail, 4),
     )
 
 
@@ -135,6 +126,7 @@ class FaceStore:
         self._gallery_cache_key: tuple[str, tuple[int, ...], int, int] | None = None
         self._gallery_cache: list[dict[str, Any]] = []
         self._recognition_refill_needed = threading.Event()
+        self._match_refresh_needed = threading.Event()
         self._recognition_stop = threading.Event()
         self._recognition_thread: threading.Thread | None = None
         self._init_db()
@@ -236,6 +228,7 @@ class FaceStore:
                 "recognition_pending": "alter table face_observations add column recognition_pending integer not null default 1",
                 "quality_score": "alter table face_observations add column quality_score real",
                 "quality_json": "alter table face_observations add column quality_json text not null default '{}'",
+                "quality_version": "alter table face_observations add column quality_version integer not null default 0",
                 "reference_pinned": "alter table face_observations add column reference_pinned integer not null default 0",
                 "auto_identified": "alter table face_observations add column auto_identified integer not null default 0",
                 "match_details_json": "alter table face_observations add column match_details_json text not null default '{}'",
@@ -243,6 +236,15 @@ class FaceStore:
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
+            connection.execute(
+                """
+                update face_observations
+                set recognition_pending = 1
+                where quality_version != ? and embedding_blob is not null
+                    and recognition_error = ''
+                """,
+                (FACE_QUALITY_VERSION,),
+            )
             connection.execute(
                 """
                 insert or ignore into face_rejections (observation_id, person_id, created_at)
@@ -541,6 +543,14 @@ class FaceStore:
             LOGGER.exception("Could not refresh unknown face matches")
             return False
 
+    def request_match_refresh(self) -> None:
+        """Refresh saved suggestions asynchronously when the worker is active."""
+        thread = self._recognition_thread
+        if thread is not None and thread.is_alive() and not self._recognition_stop.is_set():
+            self._match_refresh_needed.set()
+            return
+        self._try_refresh_unknown_recognition()
+
     def _recognition_loop(self) -> None:
         references_changed = False
         while True:
@@ -552,8 +562,12 @@ class FaceStore:
                 if self._recognition_refill_needed.is_set():
                     self._recognition_refill_needed.clear()
                     self._queue_pending_recognition()
-                if references_changed and self._try_refresh_unknown_recognition():
-                    references_changed = False
+                if references_changed or self._match_refresh_needed.is_set():
+                    self._match_refresh_needed.clear()
+                    if self._try_refresh_unknown_recognition():
+                        references_changed = False
+                    else:
+                        self._match_refresh_needed.set()
                 continue
             if observation_id is None:
                 self._recognition_queue.task_done()
@@ -680,6 +694,7 @@ class FaceStore:
                         "exposure": quality.exposure,
                         "contrast": quality.contrast,
                         "size": quality.size,
+                        "edge_detail": quality.edge_detail,
                     },
                     separators=(",", ":"),
                 )
@@ -693,7 +708,8 @@ class FaceStore:
                         auto_identified = case when person_id is null and ? then 1 else auto_identified end,
                         candidate_person_id = case when person_id is null and not ? then ? else null end,
                         candidate_confidence = case when person_id is null and not ? then ? else null end,
-                        quality_score = ?, quality_json = ?, match_details_json = ?,
+                        quality_score = ?, quality_json = ?, quality_version = ?,
+                        match_details_json = ?,
                         recognition_error = '', recognized_at = ?, recognition_pending = 0
                     where id = ?
                     """,
@@ -712,6 +728,7 @@ class FaceStore:
                         candidate_confidence,
                         quality.score,
                         quality_payload,
+                        FACE_QUALITY_VERSION,
                         details,
                         now,
                         observation_id,
@@ -1046,13 +1063,31 @@ class FaceStore:
             norm = float(np.linalg.norm(vector))
             if vector.size and math.isfinite(norm) and norm > 1e-9 and np.all(np.isfinite(vector)):
                 embeddings.append((int(row["id"]), int(row["person_id"]), vector / norm))
+        if not embeddings:
+            return {
+                "ready": False,
+                "message": "Confirm at least two people with multiple face observations to calibrate matching.",
+                "confirmed_samples": 0,
+                "rejected_samples": 0,
+            }
+        with self._connect() as connection:
+            gallery = self._reference_gallery(
+                connection,
+                model_fingerprint,
+                max(1, int(getattr(recognizer.config, "face_max_references", 20))),
+                embeddings[0][2].shape,
+            )
+        gallery_embeddings = [
+            (int(row["id"]), int(row["person_id"]), row["_embedding"])
+            for row in gallery
+        ]
         true_scores: list[float] = []
         impostor_scores: list[float] = []
         margins: list[float] = []
         rank_one = 0
         for observation_id, person_id, target in embeddings:
             grouped: dict[int, list[float]] = {}
-            for reference_id, reference_person_id, reference in embeddings:
+            for reference_id, reference_person_id, reference in gallery_embeddings:
                 if reference_id == observation_id:
                     continue
                 grouped.setdefault(reference_person_id, []).append(float(np.dot(target, reference)))
@@ -1074,7 +1109,7 @@ class FaceStore:
 
         rejected_scores: list[float] = []
         references_by_person: dict[int, list[np.ndarray]] = {}
-        for _observation_id, person_id, vector in embeddings:
+        for _observation_id, person_id, vector in gallery_embeddings:
             references_by_person.setdefault(person_id, []).append(vector)
         for row in rejected_rows:
             target = np.frombuffer(row["embedding_blob"], dtype=np.float32)
@@ -1120,7 +1155,11 @@ class FaceStore:
             },
             "message": (
                 "Recommendations are based on leave-one-out comparisons of confirmed faces"
-                + (" and explicit rejected matches." if rejected_scores else "; confirm or reject more suggestions to strengthen calibration.")
+                + (
+                    " and explicit rejected matches."
+                    if rejected_scores
+                    else "; additional varied confirmations will strengthen calibration."
+                )
             ),
         }
 
@@ -1272,7 +1311,7 @@ class FaceStore:
         if observation_id is not None:
             self._invalidate_reference_gallery()
             self._queue_recognition(observation_id)
-            self._try_refresh_unknown_recognition()
+            self.request_match_refresh()
         return next(person for person in self.people() if person["id"] == person_id)
 
     def assign(self, observation_id: int, person_id: int | None) -> dict[str, Any] | None:
@@ -1320,7 +1359,7 @@ class FaceStore:
             self._invalidate_reference_gallery()
         if person_id is not None:
             self._queue_recognition(observation_id)
-        self._try_refresh_unknown_recognition()
+        self.request_match_refresh()
         return self.observation(observation_id)
 
     def set_reference_pinned(
@@ -1342,7 +1381,7 @@ class FaceStore:
                 (1 if pinned else 0, observation_id),
             )
         self._invalidate_reference_gallery()
-        self._try_refresh_unknown_recognition()
+        self.request_match_refresh()
         return self.observation(observation_id)
 
     def delete_person(self, person_id: int) -> bool:
@@ -1368,7 +1407,7 @@ class FaceStore:
         deleted = cursor.rowcount > 0
         if deleted:
             self._invalidate_reference_gallery()
-            self._try_refresh_unknown_recognition()
+            self.request_match_refresh()
         return deleted
 
     def snapshot_path(self, observation_id: int) -> tuple[Path, dict[str, float]] | None:

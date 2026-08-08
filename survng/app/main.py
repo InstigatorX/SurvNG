@@ -643,14 +643,20 @@ app.mount("/static", StaticFiles(directory="survng/static"), name="static")
 
 def _sync_face_observations(limit: int = 5000) -> int:
     global FACE_OBSERVATIONS_SYNCED
-    with MANAGER_RELOAD_LOCK, FACE_OBSERVATIONS_SYNC_LOCK:
+    with FACE_OBSERVATIONS_SYNC_LOCK:
         if FACE_OBSERVATIONS_SYNCED:
             return 0
-        active_manager = manager
-        inserted = active_manager.faces.ingest_events(
-            active_manager.events.recent(max(1, min(limit, 20000)))
-        )
-        FACE_OBSERVATIONS_SYNCED = True
+        inserted = 0
+        while not APPLICATION_STOPPING.is_set():
+            with MANAGER_RELOAD_LOCK:
+                active_manager = manager
+            inserted += active_manager.faces.ingest_events(
+                active_manager.events.recent(max(1, min(limit, 20000)))
+            )
+            with MANAGER_RELOAD_LOCK:
+                if manager is active_manager:
+                    FACE_OBSERVATIONS_SYNCED = True
+                    return inserted
         return inserted
 
 

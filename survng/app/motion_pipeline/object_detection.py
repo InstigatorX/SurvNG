@@ -15,6 +15,7 @@ import numpy as np
 
 from ..config import CameraConfig
 from ..ffmpeg_hw import recorded_frame_hw_args
+from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_detection_zones, detection_threshold
 from .context import Frame
 
@@ -101,56 +102,11 @@ class _TemporalDetectionEvidence:
         return max((_confidence(item) for item in self.winning_observations), default=0.0)
 
 
-@dataclass(frozen=True)
-class _ImageQuality:
-    score: float
-    sharpness: float
-    exposure: float
-    contrast: float
-    edge_detail: float
+_ImageQuality = VisualQuality
 
 
 def _image_quality(frame: Frame) -> _ImageQuality:
-    """Return bounded, non-saturating visual-quality signals.
-
-    Variance of Laplacian alone reaches its ceiling very quickly on textured
-    high-resolution CCTV frames.  Combining it with upper-quartile Sobel edge
-    strength preserves separation between a crisp subject and a motion-blurred
-    subject even when both contain enough texture to look "sharp" to the old
-    absolute threshold.
-    """
-    if frame is None or not getattr(frame, "size", 0):
-        return _ImageQuality(0.0, 0.0, 0.0, 0.0, 0.0)
-    try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-        height, width = gray.shape[:2]
-        largest = max(height, width)
-        if largest > 512:
-            scale = 512.0 / largest
-            gray = cv2.resize(
-                gray,
-                (max(1, round(width * scale)), max(1, round(height * scale))),
-                interpolation=cv2.INTER_AREA,
-            )
-        pixels = gray.astype(np.float32, copy=False)
-        laplacian_variance = float(cv2.Laplacian(gray, cv2.CV_32F).var())
-        gradient_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        gradient_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        gradient = cv2.magnitude(gradient_x, gradient_y)
-        edge_strength = float(np.percentile(gradient, 90.0))
-        laplacian_detail = laplacian_variance / (laplacian_variance + 900.0)
-        edge_detail = edge_strength / (edge_strength + 120.0)
-        sharpness = max(
-            0.0,
-            min(1.0, 0.60 * laplacian_detail + 0.40 * edge_detail),
-        )
-        clipped = float(np.mean((pixels <= 4.0) | (pixels >= 251.0)))
-        exposure = max(0.0, min(1.0, 1.0 - clipped))
-        contrast = max(0.0, min(1.0, float(pixels.std()) / 64.0))
-        score = 0.75 * sharpness + 0.15 * exposure + 0.10 * contrast
-        return _ImageQuality(score, sharpness, exposure, contrast, edge_detail)
-    except (cv2.error, TypeError, ValueError):
-        return _ImageQuality(0.0, 0.0, 0.0, 0.0, 0.0)
+    return image_quality(frame)
 
 
 def _sample_image_quality(

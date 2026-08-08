@@ -68,7 +68,8 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
 
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
         with deps.manager_lock:
-            return operation(deps.get_manager())
+            active_manager = deps.get_manager()
+        return operation(active_manager)
 
     @router.get("/api/events/{event_id}/snapshot.jpg")
     def event_snapshot(event_id: int, download: bool = False) -> FileResponse:

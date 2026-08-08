@@ -40,6 +40,15 @@ def _lifecycle() -> InferenceLifecycle:
     return service
 
 
+class _ReadOnlyFaceRecognizer:
+    def __init__(self, service: InferenceLifecycle) -> None:
+        self._service = service
+
+    @property
+    def config(self):
+        return self._service.detector.config
+
+
 def test_constructor_failure_closes_every_completed_dependency() -> None:
     detector = Mock()
     faces = Mock()
@@ -148,6 +157,7 @@ def test_close_does_not_chain_secret_bearing_dependency_error() -> None:
 
 def test_tracking_reconfiguration_commits_one_coherent_generation() -> None:
     service = _lifecycle()
+    service.face_recognizer = _ReadOnlyFaceRecognizer(service)
     worker = Mock()
     worker.camera.id = "gate"
     previous_session = Mock()
@@ -192,6 +202,26 @@ def test_policy_reconfiguration_supports_read_only_face_config_proxy() -> None:
 
     service.detector.update_runtime_config.assert_called_once_with(next_config)
     service.faces.reconfigure_max_observations.assert_called_once_with(37)
+
+
+def test_face_matching_policy_change_refreshes_saved_suggestions() -> None:
+    service = _lifecycle()
+    next_config = service.detector.config.model_copy(deep=True)
+    next_config.face_match_threshold = 0.47
+
+    service.reconfigure_policy(next_config)
+
+    service.faces.request_match_refresh.assert_called_once_with()
+
+
+def test_unrelated_policy_change_does_not_refresh_saved_face_suggestions() -> None:
+    service = _lifecycle()
+    next_config = service.detector.config.model_copy(deep=True)
+    next_config.confidence_threshold = 0.61
+
+    service.reconfigure_policy(next_config)
+
+    service.faces.request_match_refresh.assert_not_called()
 
 
 def test_tracking_swap_failure_restores_previous_and_closes_unbound_sessions() -> None:
@@ -244,6 +274,7 @@ def test_failed_previous_backfill_retirement_does_not_rollback_committed_state()
 
 def test_role_refresh_rolls_back_inference_and_resumes_tracking() -> None:
     service = _lifecycle()
+    service.face_recognizer = _ReadOnlyFaceRecognizer(service)
     worker = Mock()
     worker.camera.id = "gate"
     service._workers = {"gate": worker}

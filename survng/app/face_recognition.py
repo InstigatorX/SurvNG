@@ -152,7 +152,13 @@ class OpenVinoFaceRecognizer:
 
     @staticmethod
     def _image_tensor(image: np.ndarray, shape: tuple[int, int], layout: str) -> np.ndarray:
-        resized = cv2.resize(image, shape, interpolation=cv2.INTER_AREA)
+        height, width = image.shape[:2]
+        interpolation = (
+            cv2.INTER_AREA
+            if width >= shape[0] and height >= shape[1]
+            else cv2.INTER_LINEAR
+        )
+        resized = cv2.resize(image, shape, interpolation=interpolation)
         tensor = resized.astype(np.float32)
         if layout == "NCHW":
             tensor = np.transpose(tensor, (2, 0, 1))

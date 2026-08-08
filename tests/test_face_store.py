@@ -13,11 +13,24 @@ from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 
-from survng.app.faces import FaceStore
+from survng.app.faces import FaceStore, _face_quality
 from survng.app.inference import InferenceUnavailable
 
 
 class FaceStoreTest(unittest.TestCase):
+    def test_face_quality_preserves_sharpness_separation(self) -> None:
+        coordinates = np.indices((128, 128)) // 8
+        checker = (coordinates.sum(axis=0) % 2 * 255).astype(np.uint8)
+        sharp = np.repeat(checker[..., None], 3, axis=2)
+        blurred = cv2.GaussianBlur(sharp, (11, 11), 0)
+
+        sharp_quality = _face_quality(sharp, 0.9)
+        blurred_quality = _face_quality(blurred, 0.9)
+
+        self.assertLess(sharp_quality.sharpness, 1.0)
+        self.assertGreater(sharp_quality.sharpness, blurred_quality.sharpness)
+        self.assertGreater(sharp_quality.edge_detail, blurred_quality.edge_detail)
+
     def test_observation_limit_reconfigures_and_prunes_without_restarting_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = FaceStore(Path(tmpdir), max_observations=100)
@@ -542,6 +555,44 @@ class FaceStoreTest(unittest.TestCase):
             self.assertEqual(observation["candidate_person_id"], person["id"])
             self.assertEqual(observation["candidate_confidence"], 1.0)
             self.assertEqual(store._recognition_queue.qsize(), 0)
+
+    def test_match_refresh_is_deferred_to_running_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(enabled=True)
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            store._recognition_thread = Mock(is_alive=Mock(return_value=True))
+            store._try_refresh_unknown_recognition = Mock(return_value=True)  # type: ignore[method-assign]
+
+            store.request_match_refresh()
+
+            self.assertTrue(store._match_refresh_needed.is_set())
+            store._try_refresh_unknown_recognition.assert_not_called()
+
+    def test_quality_algorithm_upgrade_requeues_successful_embeddings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            observation_id = self.insert_observation(
+                store,
+                1,
+                observed_at="2026-07-26T12:00:00+00:00",
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v1",
+                recognition_pending=0,
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set quality_version = 0 where id = ?",
+                    (observation_id,),
+                )
+
+            store._init_db()
+
+            with store._connect() as connection:
+                row = connection.execute(
+                    "select recognition_pending from face_observations where id = ?",
+                    (observation_id,),
+                ).fetchone()
+            self.assertEqual(row["recognition_pending"], 1)
 
     def test_rematch_failure_does_not_undo_committed_identity_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
