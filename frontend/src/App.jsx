@@ -1460,29 +1460,11 @@ function useAppEvents(handler) {
 
 function LiveHeaderStats() {
   const [stats, setStats] = useState({
-    motion: "--",
-    objects: "--",
+    resources: null,
     storage: null,
     detector: null,
     cameras: null,
   });
-  const eventRefreshTimer = useRef(null);
-
-  async function loadRecentEvents() {
-    try {
-      const eventResponse = await fetch("/api/events?limit=50");
-      if (!eventResponse.ok) return;
-      const events = await eventResponse.json();
-      if (!Array.isArray(events)) return;
-      setStats((current) => ({
-        ...current,
-        motion: events.filter((event) => event.kind === "motion").length,
-        objects: events.filter(hasDetectedObjects).length,
-      }));
-    } catch {
-      // Keep the last known summary; the next event or interval retries.
-    }
-  }
 
   async function loadSystem() {
     try {
@@ -1491,6 +1473,7 @@ function LiveHeaderStats() {
       const system = await systemResponse.json();
       setStats((current) => ({
         ...current,
+        resources: system.resources || null,
         storage: system.storage || null,
         detector: system.detector || null,
         cameras: system.cameras || null,
@@ -1504,22 +1487,19 @@ function LiveHeaderStats() {
     if (type === "system_state") {
       setStats((current) => ({
         ...current,
+        resources: data.resources || null,
         storage: data.storage || null,
         detector: data.detector || null,
         cameras: data.cameras || null,
       }));
-    } else if (type === "incident") {
-      window.clearTimeout(eventRefreshTimer.current);
-      eventRefreshTimer.current = window.setTimeout(loadRecentEvents, 250);
     }
   });
 
   useEffect(() => {
-    void Promise.all([loadRecentEvents(), loadSystem()]);
-    const timer = window.setInterval(() => void Promise.all([loadRecentEvents(), loadSystem()]), 60_000);
+    void loadSystem();
+    const timer = window.setInterval(() => void loadSystem(), 60_000);
     return () => {
       window.clearInterval(timer);
-      window.clearTimeout(eventRefreshTimer.current);
     };
   }, []);
 
@@ -1532,19 +1512,16 @@ function LiveHeaderStats() {
   const faceWorker = inferenceWorkers.face || {};
   const lastStages = inferenceStages.last_ms || {};
   const averageStages = inferenceStages.average_ms || {};
-  const detectorLoaded = detector.coreml_loaded || detector.openvino_loaded || detector.opencv_loaded;
-  const detectorLabel = detector.enabled
-    ? `${detector.loaded_backend || detector.configured_backend || "det"}${detector.loaded_device ? ` ${detector.loaded_device}` : ""}`
-    : "off";
   const storageLabel = stats.storage ? `${formatBytes(stats.storage.free_bytes)} free` : "--";
+  const memoryLabel = stats.resources ? formatBytes(stats.resources.application_memory_bytes) : "--";
+  const cpuLabel = Number.isFinite(stats.resources?.cpu_load_percent) ? `${stats.resources.cpu_load_percent.toFixed(1)}%` : "--";
   const cameraLabel = stats.cameras ? `${stats.cameras.recording}/${stats.cameras.total} rec` : "--";
 
   return (
-    <div className="header-stats" aria-label="System and recent event summary">
-      <span className="header-stat warn"><Siren size={15} /><small>Motion</small><strong>{stats.motion}</strong></span>
-      <span className="header-stat hot"><Activity size={15} /><small>Objects</small><strong>{stats.objects}</strong></span>
+    <div className="header-stats" aria-label="System summary">
       <span className="header-stat"><HardDrive size={15} /><small>Storage</small><strong>{storageLabel}</strong></span>
-      <span className={`header-stat ${detectorLoaded ? "ok" : "warn"}`}><Gauge size={15} /><small>Detect</small><strong>{detectorLabel}</strong></span>
+      <span className="header-stat"><Monitor size={15} /><small>Memory</small><strong>{memoryLabel}</strong></span>
+      <span className="header-stat"><Activity size={15} /><small>CPU</small><strong>{cpuLabel}</strong></span>
       <span className="header-stat infer-stat" tabIndex={0}>
         <Cpu size={15} /><small>Infer</small><strong>{formatMilliseconds(runtime.last_inference_ms)}</strong>
         <span className="infer-tooltip" role="tooltip">
@@ -1558,12 +1535,10 @@ function LiveHeaderStats() {
             <span className="infer-tooltip-row" key={key}><span>{label}</span><strong>{formatMilliseconds(lastStages[key])}</strong><strong>{formatMilliseconds(averageStages[key])}</strong></span>
           ))}
           <span className="infer-tooltip-foot">1 stream · mmap {detector.mmap_enabled ? "on" : "off"} · cache {detector.cache_enabled ? "on" : "off"} · warm-up {formatMilliseconds(detector.warmup_ms)}</span>
-          <span className="infer-tooltip-foot">object {objectWorker.worker_alive ? `#${objectWorker.worker_pid}` : "offline"} · {objectWorker.configured_device || detector.configured_device || "device"} · gen {objectWorker.generation ?? "--"} · restarts {objectWorker.restart_count ?? 0}{objectWorker.fallback_active ? " · CPU fallback" : ""}</span>
+          <span className="infer-tooltip-foot">object {objectWorker.configured_workers > 1 ? `${objectWorker.alive_workers || 0}/${objectWorker.configured_workers} online` : objectWorker.worker_alive ? `#${objectWorker.worker_pid}` : "offline"} · {objectWorker.configured_device || detector.configured_device || "device"} · {objectWorker.pending_requests || 0} queued · restarts {objectWorker.restart_count ?? 0}{objectWorker.fallback_active ? " · CPU fallback" : ""}</span>
           <span className="infer-tooltip-foot">face {faceWorker.enabled ? (faceWorker.worker_alive ? `#${faceWorker.worker_pid}` : "offline") : "disabled"} · {faceWorker.configured_device || "AUTO"} · gen {faceWorker.generation ?? "--"} · restarts {faceWorker.restart_count ?? 0}{faceWorker.fallback_active ? " · CPU fallback" : ""}</span>
         </span>
       </span>
-      <span className={runtime.queue_depth > 0 ? "header-stat warn" : "header-stat"}><ListTree size={15} /><small>Queue</small><strong>{Number.isFinite(runtime.queue_depth) ? runtime.queue_depth : "--"}</strong></span>
-      <span className="header-stat hot"><Clock3 size={15} /><small>Last Hit</small><strong>{formatAge(runtime.last_detection_age_seconds)}</strong></span>
       <span className="header-stat"><Camera size={15} /><small>Cameras</small><strong>{cameraLabel}</strong></span>
     </div>
   );
@@ -7958,6 +7933,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const lastHour = activity?.last_hour || {};
   const lastDay = activity?.last_24h || {};
   const runtime = data.detector?.runtime || {};
+  const objectWorkers = data.detector?.workers?.object || data.detector?.isolation || {};
   const semantic = data.semantic_search || {};
   const gpu = data.gpu || {};
   const storage = data.system?.storage || {};
@@ -8032,7 +8008,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         </> : <>
           <article><span>Camera Uptime - 2H</span><strong>{formatCoverage(averageAvailability)}</strong><small>Lowest minute {formatCoverage(runtimeTotals.minimumAvailability)} · {runtimeTotals.interruptions ? `${runtimeTotals.interruptions.toLocaleString()} recovered stream issues` : "no stream interruptions"}</small></article>
           <article><span>EMA - 2H</span><strong>{analysisTotal ? formatCoverage(analysisCoverage) : "Not active"}</strong><small>{analysisTotal ? (runtimeTotals.superseded ? `${runtimeTotals.superseded.toLocaleString()} stale frames skipped to stay current` : "Every sampled frame analyzed") : "No EMA samples in this window"}{runtimeTotals.eventLoss ? ` · ${runtimeTotals.eventLoss} events lost` : " · no events lost"}</small></article>
-          <article><span>Object detector response</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{Number(runtime.failed_inferences || 0) ? `${Number(runtime.failed_inferences).toLocaleString()} failures since restart` : "No failures since restart"}</small></article>
+          <article><span>Object detector response</span><strong>{formatMilliseconds(runtime.average_inference_ms)}</strong><small>{objectWorkers.alive_workers || (objectWorkers.worker_alive ? 1 : 0)}/{objectWorkers.configured_workers || 1} workers online · {Number(runtime.failed_inferences || 0) ? `${Number(runtime.failed_inferences).toLocaleString()} failures` : "no failures"}</small></article>
           <article><span>Detection accelerator</span><strong>{gpu.available ? "Available" : "Unavailable"}</strong><small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "Collecting activity"}</small></article>
           <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
           <article><span>Tracking capacity · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{trackingCapacity.active || 0}/{trackingCapacity.limit || 0} baseline · burst to {trackingCapacity.burst_limit || trackingCapacity.limit || 0} · {capacityTotals.waited} waited</small></article>
@@ -8109,7 +8085,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>Host memory available</dt><dd>{formatBytes(memory.available_bytes)} <small>{memory.used_percent || 0}% currently used</small></dd></div>
             <div><dt>SurvNG application memory</dt><dd>{formatBytes(serviceMemory.application_bytes)} <small>app and AI workers</small></dd></div>
             <div><dt>Reclaimable recording cache</dt><dd>{formatBytes(serviceMemory.reclaimable_file_cache_bytes)} <small>released automatically under memory pressure</small></dd></div>
-            <div><dt>Object detector</dt><dd>{runtime.failed_inferences ? `${runtime.failed_inferences} failures` : "Ready"} <small>{formatMilliseconds(runtime.average_inference_ms)} average response</small></dd></div>
+            <div><dt>Object detectors</dt><dd>{objectWorkers.alive_workers || (objectWorkers.worker_alive ? 1 : 0)} / {objectWorkers.configured_workers || 1} online <small>{formatMilliseconds(runtime.average_inference_ms)} average response · {Number(runtime.queue_depth || 0)} queued</small></dd></div>
             <div><dt>GPU</dt><dd>{gpu.available ? "Available" : "Unavailable"} <small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "sampling"}</small></dd></div>
             <div><dt>Local databases</dt><dd>{formatBytes(data.system?.database?.bytes)}</dd></div>
           </dl>
@@ -8123,6 +8099,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
               <div><dt>Allocator trims</dt><dd>{Number(memoryMaintenance.successful_trims || 0).toLocaleString()} <small>{formatBytes(memoryMaintenance.reclaimed_total_bytes)} reclaimed</small></dd></div>
               <div><dt>Threads / open files</dt><dd>{Number(data.system?.process_memory?.threads || 0).toLocaleString()} / {Number(data.system?.process_memory?.file_descriptors || 0).toLocaleString()}</dd></div>
               <div><dt>Detector backend / device</dt><dd>{data.detector?.loaded_backend || "Not loaded"} / {data.detector?.loaded_device || data.detector?.configured_device || "--"}</dd></div>
+              <div><dt>Object detector processes</dt><dd>{(objectWorkers.worker_pids || [objectWorkers.worker_pid]).filter(Boolean).join(", ") || "None"}</dd></div>
+              <div><dt>Per-detector response</dt><dd>{(runtime.workers || []).length ? runtime.workers.map((worker) => `#${worker.index} ${formatMilliseconds(worker.average_inference_ms)} · ${Number(worker.queue_depth || 0)} queued`).join(" · ") : "Waiting for samples"}</dd></div>
               <div><dt>Inference requests / object hits</dt><dd>{Number(runtime.total_inferences || 0).toLocaleString()} / {Number(runtime.object_hit_inferences || 0).toLocaleString()}</dd></div>
             </dl>
           </details>
@@ -10480,6 +10458,12 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>OpenVINO Device<select value={config.detector?.device || "CPU"} onChange={(event) => updateConfig(["detector", "device"], event.target.value)}>
             {deviceOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></label>
+          <label>Parallel detectors<select value={String(config.detector?.object_worker_count ?? 1)} onChange={(event) => updateConfig(["detector", "object_worker_count"], Number(event.target.value))} disabled={detectorBackend !== "openvino"}>
+            <option value="1">1 detector</option>
+            <option value="2">2 detectors</option>
+            <option value="3">3 detectors</option>
+            <option value="4">4 detectors</option>
+          </select><small>Independent OpenVINO workers can process simultaneous camera events. More workers use more accelerator and memory capacity.</small></label>
           <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
           <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label in this many of five event-time frames. Confirmed is recommended and suppresses one-frame false identifications.</small></label>
           <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>

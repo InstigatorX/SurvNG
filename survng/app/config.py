@@ -433,6 +433,7 @@ class ObjectTrackingConfig(BaseModel):
 class DetectorConfig(BaseModel):
     enabled: bool = False
     backend: Literal["openvino", "coreml"] = "openvino"
+    object_worker_count: int = Field(default=1, ge=1, le=4)
     model_path: str = ""
     model_xml: str = ""
     coreml_model_path: str = ""

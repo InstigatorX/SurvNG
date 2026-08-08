@@ -92,6 +92,32 @@ class ApplicationRuntimeMonitorTest(unittest.TestCase):
         self.assertEqual(set(status["workers"]), {"object", "face"})
         self.assertEqual(status["total_rss_bytes"], 850)
 
+    def test_worker_memory_accounts_for_each_object_detector_process(self) -> None:
+        monitor, inference, _events, _state_events = runtime_monitor()
+        inference.semantic_search.status.return_value = {"state": "disabled"}
+        detector = {
+            "workers": {
+                "object": {
+                    "worker_alive": True,
+                    "worker_pid": 41,
+                    "worker_pids": [41, 42],
+                },
+            }
+        }
+        with patch(
+            "survng.app.runtime_monitor.process_memory_status_for_pid",
+            side_effect=lambda pid: {
+                "rss_bytes": pid * 10,
+                "pss_bytes": pid * 5,
+                "threads": 2,
+                "file_descriptors": 3,
+            },
+        ):
+            status = monitor.worker_memory_status(detector_status=detector)
+
+        self.assertEqual(set(status["workers"]), {"object-1", "object-2"})
+        self.assertEqual(status["total_rss_bytes"], 830)
+
     def test_publish_camera_status_uses_one_snapshot(self) -> None:
         status = {"id": "gate", "running": True}
         monitor, _inference, _events, state_events = runtime_monitor(statuses=[status])

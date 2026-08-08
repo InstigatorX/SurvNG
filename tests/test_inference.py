@@ -31,6 +31,10 @@ class InferenceSupervisorTest(unittest.TestCase):
             DetectorConfig(nms_threshold=1.0)
         with self.assertRaises(ValidationError):
             DetectorConfig(backend="unknown")
+        with self.assertRaises(ValidationError):
+            DetectorConfig(object_worker_count=0)
+        with self.assertRaises(ValidationError):
+            DetectorConfig(object_worker_count=5)
 
     def setUp(self) -> None:
         self.supervisor = InferenceSupervisor(DetectorConfig(enabled=False))
@@ -54,6 +58,62 @@ class InferenceSupervisorTest(unittest.TestCase):
 
         result = self.supervisor.detect(np.zeros((24, 32, 3), dtype=np.uint8))
         self.assertEqual(result, [{"status": "detector_unavailable"}])
+
+    def test_multiple_object_workers_start_report_and_stop_independently(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, object_worker_count=2)
+        )
+        self.addCleanup(supervisor.stop)
+
+        self.assertTrue(supervisor.start())
+        status = supervisor.status()
+        isolation = status["isolation"]
+
+        self.assertEqual(isolation["configured_workers"], 2)
+        self.assertEqual(isolation["alive_workers"], 2)
+        self.assertTrue(isolation["all_workers_alive"])
+        self.assertEqual(len(set(isolation["worker_pids"])), 2)
+        self.assertEqual(len(status["runtime"]["workers"]), 2)
+
+        processes = [worker._process for worker in supervisor._object_workers]
+        supervisor.stop()
+        self.assertTrue(all(process is not None and not process.is_alive() for process in processes))
+
+    def test_object_requests_rotate_across_equally_idle_workers(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, object_worker_count=2)
+        )
+        self.addCleanup(supervisor.stop)
+        workers = supervisor._object_workers
+        for index, worker in enumerate(workers):
+            worker.pending_requests = Mock(return_value=0)
+            worker.request = Mock(return_value=[{"worker": index + 1}])
+
+        frame = np.zeros((24, 32, 3), dtype=np.uint8)
+        first = supervisor.detect(frame)
+        second = supervisor.detect(frame)
+
+        self.assertEqual(first, [{"worker": 1}])
+        self.assertEqual(second, [{"worker": 2}])
+        workers[0].request.assert_called_once()
+        workers[1].request.assert_called_once()
+
+    def test_object_request_fails_over_to_another_pool_worker(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, object_worker_count=2)
+        )
+        self.addCleanup(supervisor.stop)
+        first, second = supervisor._object_workers
+        first.pending_requests = Mock(return_value=0)
+        second.pending_requests = Mock(return_value=0)
+        first.request = Mock(side_effect=InferenceUnavailable("worker one unavailable"))
+        second.request = Mock(return_value=[{"label": "person"}])
+
+        result = supervisor.detect(np.zeros((24, 32, 3), dtype=np.uint8))
+
+        self.assertEqual(result, [{"label": "person"}])
+        first.request.assert_called_once()
+        second.request.assert_called_once()
 
     def test_runtime_config_update_reaches_supervisor_and_future_worker_respawns(self) -> None:
         updated = DetectorConfig(
@@ -135,6 +195,22 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertTrue(status["worker_alive"])
         self.assertNotEqual(status["worker_pid"], previous_pid)
         self.assertEqual(self.supervisor.config.nms_threshold, 0.51)
+
+    def test_object_role_reconfiguration_resizes_worker_pool(self) -> None:
+        self.assertTrue(self.supervisor.start())
+        previous_process = self.supervisor._object._process
+        self.assertIsNotNone(previous_process)
+
+        self.supervisor.reconfigure_roles(
+            DetectorConfig(enabled=False, object_worker_count=2),
+            {"object"},
+        )
+
+        isolation = self.supervisor.isolation_status()
+        self.assertEqual(isolation["configured_workers"], 2)
+        self.assertEqual(isolation["alive_workers"], 2)
+        self.assertFalse(previous_process.is_alive())
+        self.assertEqual(self.supervisor.config.object_worker_count, 2)
 
     def test_multi_role_reconfiguration_rolls_back_completed_roles(self) -> None:
         previous = self.supervisor.config.model_copy(deep=True)

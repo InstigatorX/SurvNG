@@ -696,12 +696,33 @@ class AppManager:
         detector_device = str(self.config.detector.device or "")
         object_queue_depth = 0
         detector_ready = True
+        detector_degraded = False
+        object_workers_configured = 0
+        object_workers_alive = 0
         if self.config.detector.enabled:
             try:
                 detector = self.detector_status()
                 runtime = dict(detector.get("runtime") or {})
+                isolation = dict(detector.get("isolation") or {})
                 detector_ready = self._detector_runtime_ready(detector)
-                detector_state = "ready" if detector_ready else "unavailable"
+                object_workers_configured = int(
+                    isolation.get("configured_workers")
+                    or int(bool(isolation.get("enabled")))
+                )
+                object_workers_alive = int(
+                    isolation.get("alive_workers")
+                    or int(bool(isolation.get("worker_alive")))
+                )
+                detector_degraded = bool(
+                    detector_ready
+                    and object_workers_configured > 0
+                    and object_workers_alive < object_workers_configured
+                )
+                detector_state = (
+                    "degraded"
+                    if detector_degraded
+                    else "ready" if detector_ready else "unavailable"
+                )
                 detector_device = str(detector.get("configured_device") or detector_device)
                 object_queue_depth = int(runtime.get("queue_depth") or 0)
             except Exception:
@@ -726,6 +747,8 @@ class AppManager:
         if self._started and not self._stopping:
             if self.config.detector.enabled and not detector_ready:
                 health = "fault"
+            elif detector_degraded:
+                health = "degraded"
             elif startup_active:
                 health = "degraded"
             elif enabled_ids and running_cameras == 0:
@@ -768,6 +791,8 @@ class AppManager:
                 "detector_state": detector_state,
                 "detector_device": detector_device,
                 "object_queue_depth": object_queue_depth,
+                "object_workers_configured": object_workers_configured,
+                "object_workers_alive": object_workers_alive,
                 "retention_state": retention_state,
                 "camera_startup_active": startup_active,
                 "camera_startup_ready": int(startup_counts.get("ready") or 0),

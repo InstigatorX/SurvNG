@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from survng.app.system_telemetry import (
     SystemTelemetryDependencies,
@@ -85,6 +86,31 @@ class SystemTelemetryRouterTest(unittest.TestCase):
         self.assertEqual(endpoint(), {"instance_id": "test"})
         get_manager.assert_called_once_with()
         service.system_status.assert_called_once_with(active_manager)
+
+    def test_system_status_includes_lightweight_cpu_and_application_memory(self) -> None:
+        manager = SimpleNamespace(
+            storage_dir=Path("/tmp"),
+            statuses=Mock(return_value=[]),
+            detector_status=Mock(return_value={}),
+            mqtt_status=Mock(return_value={}),
+            go2rtc_status=Mock(return_value={}),
+            camera_startup_status=Mock(return_value={}),
+        )
+        service = SystemTelemetryService()
+
+        with (
+            patch.object(
+                SystemTelemetryService,
+                "cgroup_memory_status",
+                return_value={"application_bytes": 3_221_225_472},
+            ),
+            patch("survng.app.system_telemetry.os.cpu_count", return_value=8),
+            patch("survng.app.system_telemetry.os.getloadavg", return_value=(2.0, 1.0, 0.5)),
+        ):
+            status = service.system_status(manager)
+
+        self.assertEqual(status["resources"]["application_memory_bytes"], 3_221_225_472)
+        self.assertEqual(status["resources"]["cpu_load_percent"], 25.0)
 
 
 if __name__ == "__main__":

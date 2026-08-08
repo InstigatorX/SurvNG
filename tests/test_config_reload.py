@@ -465,6 +465,30 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["subsystems_restarted"], ["object_inference"])
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_detector_worker_count_restarts_only_object_inference(self) -> None:
+        active = Mock()
+        current = AppConfig()
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.detector.object_worker_count = 2
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_inference.assert_called_once_with(
+            effective.detector,
+            {"object"},
+            refresh_tracking=False,
+        )
+        self.assertEqual(result["subsystems_restarted"], ["object_inference"])
+        self.assertFalse(result["camera_workers_restarted"])
+
     def test_tracking_session_change_rebuilds_only_tracking_sessions(self) -> None:
         active = Mock()
         current = AppConfig()

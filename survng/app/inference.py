@@ -710,6 +710,11 @@ class _InferenceWorker:
                 status[key] = {**child, "ready": False}
         return status
 
+    def pending_requests(self) -> int:
+        """Return pool-routing pressure without waiting for worker IPC."""
+        with self._pending_lock:
+            return self._pending_requests
+
     def isolation_status(self) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
@@ -752,7 +757,12 @@ class InferenceSupervisor:
             config.enabled
             and (config.resolved_model_path() or config.resolved_coreml_model_path())
         )
-        self._object = _InferenceWorker(config, "object", self._base_detector_status())
+        self._object_route_lock = threading.Lock()
+        self._object_route_cursor = 0
+        self._object_workers = self._build_object_workers(config)
+        # Preserve the long-standing primary-worker handle for compatibility
+        # with lifecycle diagnostics and focused tests.
+        self._object = self._object_workers[0]
         self._face = _InferenceWorker(
             config,
             "face",
@@ -765,6 +775,34 @@ class InferenceSupervisor:
             self._base_reid_status(),
             start_enabled=bool(config.tracking.appearance_reid_enabled),
         )
+
+    @staticmethod
+    def _effective_object_worker_count(config: DetectorConfig) -> int:
+        return config.object_worker_count if config.backend == "openvino" else 1
+
+    def _build_object_workers(self, config: DetectorConfig) -> list[_InferenceWorker]:
+        return [
+            _InferenceWorker(config, "object", self._base_detector_status())
+            for _index in range(self._effective_object_worker_count(config))
+        ]
+
+    def _ordered_object_workers(self) -> list[_InferenceWorker]:
+        """Order workers by pressure while rotating equal-load workers fairly."""
+        with self._object_route_lock:
+            count = len(self._object_workers)
+            start = self._object_route_cursor % count
+            ordered = [
+                (start + offset) % count
+                for offset in range(count)
+            ]
+            ordered.sort(
+                key=lambda index: self._object_workers[index].pending_requests()
+            )
+            self._object_route_cursor = (ordered[0] + 1) % count
+            return [self._object_workers[index] for index in ordered]
+
+    def _select_object_worker(self) -> _InferenceWorker:
+        return self._ordered_object_workers()[0]
 
     def _base_detector_status(self) -> dict[str, Any]:
         return {
@@ -820,7 +858,7 @@ class InferenceSupervisor:
             )
         )
         with self._config_lock:
-            for worker in (self._object, self._face, self._reid):
+            for worker in (*self._object_workers, self._face, self._reid):
                 worker.update_config_reference(next_config)
             self.config = next_config
             self.labels = next_labels
@@ -885,20 +923,23 @@ class InferenceSupervisor:
                 for role in ("object", "face", "reid"):
                     if role not in roles:
                         continue
-                    worker, status, start_enabled = role_settings(role)
-                    worker.reconfigure(
-                        next_config,
-                        status,
-                        start_enabled=start_enabled,
-                    )
+                    if role == "object":
+                        self._reconfigure_object_workers(next_config)
+                    else:
+                        worker, status, start_enabled = role_settings(role)
+                        worker.reconfigure(
+                            next_config,
+                            status,
+                            start_enabled=start_enabled,
+                        )
                     completed.append(role)
-                for role, worker in (
-                    ("object", self._object),
-                    ("face", self._face),
-                    ("reid", self._reid),
-                ):
-                    if role not in roles:
+                if "object" not in roles:
+                    for worker in self._object_workers:
                         worker.update_config_reference(next_config)
+                if "face" not in roles:
+                    self._face.update_config_reference(next_config)
+                if "reid" not in roles:
+                    self._reid.update_config_reference(next_config)
             except BaseException as reconfigure_error:
                 apply_supervisor_config(
                     previous_config,
@@ -907,29 +948,127 @@ class InferenceSupervisor:
                 )
                 rollback_failures: list[str] = []
                 for role in reversed(completed):
-                    worker, status, start_enabled = role_settings(role)
                     try:
-                        worker.reconfigure(
-                            previous_config,
-                            status,
-                            start_enabled=start_enabled,
-                        )
+                        if role == "object":
+                            self._reconfigure_object_workers(previous_config)
+                        else:
+                            worker, status, start_enabled = role_settings(role)
+                            worker.reconfigure(
+                                previous_config,
+                                status,
+                                start_enabled=start_enabled,
+                            )
                     except Exception as exc:
                         rollback_failures.append(f"{role}: {exc}")
                         LOGGER.exception("failed to roll back %s inference role", role)
-                for role, worker in (
-                    ("object", self._object),
-                    ("face", self._face),
-                    ("reid", self._reid),
-                ):
-                    if role not in completed:
+                if "object" not in completed:
+                    for worker in self._object_workers:
                         worker.update_config_reference(previous_config)
+                if "face" not in completed:
+                    self._face.update_config_reference(previous_config)
+                if "reid" not in completed:
+                    self._reid.update_config_reference(previous_config)
                 if rollback_failures:
                     raise RuntimeError(
                         "inference rollback incomplete: "
                         + "; ".join(rollback_failures)
                     ) from reconfigure_error
                 raise
+
+    def _reconfigure_object_workers(self, config: DetectorConfig) -> None:
+        """Transactionally apply object-engine settings, including pool size."""
+        expected = self._effective_object_worker_count(config)
+        current = list(self._object_workers)
+        if len(current) == expected:
+            previous_config = current[0].config
+            completed: list[_InferenceWorker] = []
+            try:
+                for worker in current:
+                    worker.reconfigure(
+                        config,
+                        self._base_detector_status(),
+                        start_enabled=True,
+                    )
+                    completed.append(worker)
+            except BaseException as error:
+                rollback_errors: list[BaseException] = []
+                for worker in reversed(completed):
+                    try:
+                        worker.reconfigure(
+                            previous_config,
+                            self._base_detector_status(),
+                            start_enabled=True,
+                        )
+                    except BaseException as rollback_error:
+                        rollback_errors.append(rollback_error)
+                if rollback_errors:
+                    raise RuntimeError(
+                        "object inference pool rollback failed: "
+                        + "; ".join(str(item) for item in rollback_errors)
+                    ) from error
+                raise
+            return
+
+        previous_config = current[0].config
+        stopped: list[_InferenceWorker] = []
+        try:
+            for worker in reversed(current):
+                worker.stop()
+                stopped.append(worker)
+        except BaseException as stop_error:
+            restore_errors: list[BaseException] = []
+            for worker in reversed(stopped):
+                try:
+                    if not worker.start():
+                        raise InferenceUnavailable(
+                            worker.isolation_status().get("last_error")
+                            or "object inference worker failed to restore after stop failure"
+                        )
+                except BaseException as restore_error:
+                    restore_errors.append(restore_error)
+            if restore_errors:
+                raise RuntimeError(
+                    "object inference pool stop rollback failed: "
+                    + "; ".join(str(item) for item in restore_errors)
+                ) from stop_error
+            raise
+        replacements = [
+            _InferenceWorker(config, "object", self._base_detector_status())
+            for _index in range(expected)
+        ]
+        try:
+            for worker in replacements:
+                if not worker.start():
+                    raise InferenceUnavailable(
+                        worker.isolation_status().get("last_error")
+                        or "object inference worker failed to start"
+                    )
+        except BaseException as error:
+            for worker in reversed(replacements):
+                try:
+                    worker.stop()
+                except Exception:
+                    LOGGER.exception("replacement object inference cleanup failed")
+            restore_errors: list[BaseException] = []
+            for worker in current:
+                worker.update_config_reference(previous_config)
+                try:
+                    if not worker.start():
+                        raise InferenceUnavailable(
+                            worker.isolation_status().get("last_error")
+                            or "object inference worker failed to restore"
+                        )
+                except BaseException as restore_error:
+                    restore_errors.append(restore_error)
+            if restore_errors:
+                raise RuntimeError(
+                    "object inference pool restore failed: "
+                    + "; ".join(str(item) for item in restore_errors)
+                ) from error
+            raise
+        self._object_workers = replacements
+        self._object = replacements[0]
+        self._object_route_cursor = 0
 
     def _base_face_status(self) -> dict[str, Any]:
         return {
@@ -984,18 +1123,24 @@ class InferenceSupervisor:
         }
 
     def start(self) -> bool:
-        object_ready = self._object.start()
+        object_ready = True
+        for worker in self._object_workers:
+            object_ready = worker.start() and object_ready
         face_ready = self._face.start()
         reid_ready = self._reid.start()
         return object_ready and face_ready and reid_ready
 
     def stop(self) -> None:
         failures: list[tuple[str, BaseException]] = []
-        for role, worker in (
+        workers = [
             ("reid", self._reid),
             ("face", self._face),
-            ("object", self._object),
-        ):
+            *(
+                (f"object-{index + 1}", worker)
+                for index, worker in reversed(list(enumerate(self._object_workers)))
+            ),
+        ]
+        for role, worker in workers:
             try:
                 worker.stop()
             except BaseException as exc:
@@ -1027,18 +1172,26 @@ class InferenceSupervisor:
         frame: np.ndarray,
         confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
-        try:
-            return list(
-                self._object.request(
-                    "detect",
-                    frame=frame,
-                    confidence_threshold=confidence_threshold,
+        unavailable: list[str] = []
+        for worker in self._ordered_object_workers():
+            try:
+                return list(
+                    worker.request(
+                        "detect",
+                        frame=frame,
+                        confidence_threshold=confidence_threshold,
+                    )
+                    or []
                 )
-                or []
-            )
-        except Exception as exc:
-            LOGGER.error("Isolated object detection unavailable: %s", exc)
-            return [{"status": "detector_unavailable", "error": str(exc)}]
+            except InferenceUnavailable as exc:
+                unavailable.append(str(exc))
+                continue
+            except Exception as exc:
+                LOGGER.error("Isolated object detection unavailable: %s", exc)
+                return [{"status": "detector_unavailable", "error": str(exc)}]
+        error = "; ".join(dict.fromkeys(unavailable)) or "all object inference workers unavailable"
+        LOGGER.error("Isolated object detection unavailable: %s", error)
+        return [{"status": "detector_unavailable", "error": error}]
 
     def embed(self, face: np.ndarray) -> np.ndarray:
         result = self._face.request("embed", frame=face)
@@ -1080,13 +1233,116 @@ class InferenceSupervisor:
         )
         return np.asarray(result, dtype=np.float32)
 
+    @staticmethod
+    def _aggregate_object_status(statuses: list[dict[str, Any]]) -> dict[str, Any]:
+        if not statuses:
+            return {}
+        status = dict(statuses[0])
+        runtimes = [dict(item.get("runtime") or {}) for item in statuses]
+        total_inferences = sum(int(item.get("total_inferences") or 0) for item in runtimes)
+
+        def average(key: str) -> float | None:
+            values = [float(item[key]) for item in runtimes if item.get(key) is not None]
+            return round(sum(values) / len(values), 2) if values else None
+
+        latest_runtime = max(
+            runtimes,
+            key=lambda item: str(item.get("last_inference_at") or ""),
+            default={},
+        )
+        latest_detection = max(
+            runtimes,
+            key=lambda item: str(item.get("last_detection_at") or ""),
+            default={},
+        )
+        stage_names = {
+            str(name)
+            for runtime in runtimes
+            for name in dict((runtime.get("stages") or {}).get("average_ms") or {})
+        }
+        candidate_names = {
+            str(name)
+            for runtime in runtimes
+            for name in dict((runtime.get("candidates") or {}).get("average") or {})
+        }
+        runtime = {
+            "last_inference_ms": latest_runtime.get("last_inference_ms"),
+            "average_inference_ms": average("average_inference_ms"),
+            "detection_fps": round(sum(float(item.get("detection_fps") or 0.0) for item in runtimes), 2),
+            "queue_depth": sum(int(item.get("queue_depth") or 0) for item in runtimes),
+            "pending_frames": sum(int(item.get("pending_frames") or 0) for item in runtimes),
+            "active_inferences": sum(int(item.get("active_inferences") or 0) for item in runtimes),
+            "last_inference_at": latest_runtime.get("last_inference_at") or "",
+            "last_detection_at": latest_detection.get("last_detection_at") or "",
+            "last_detection_age_seconds": latest_detection.get("last_detection_age_seconds"),
+            "last_detection_labels": list(latest_detection.get("last_detection_labels") or []),
+            "total_inferences": total_inferences,
+            "failed_inferences": sum(int(item.get("failed_inferences") or 0) for item in runtimes),
+            "object_hit_inferences": sum(int(item.get("object_hit_inferences") or 0) for item in runtimes),
+            "stages": {
+                "last_ms": dict((latest_runtime.get("stages") or {}).get("last_ms") or {}),
+                "average_ms": {
+                    name: (
+                        round(sum(values) / len(values), 2)
+                        if (values := [
+                            float(value)
+                            for item in runtimes
+                            if (value := dict((item.get("stages") or {}).get("average_ms") or {}).get(name)) is not None
+                        ])
+                        else None
+                    )
+                    for name in stage_names
+                },
+                "percentiles_ms": dict(
+                    (latest_runtime.get("stages") or {}).get("percentiles_ms") or {}
+                ),
+            },
+            "candidates": {
+                "last": dict((latest_runtime.get("candidates") or {}).get("last") or {}),
+                "average": {
+                    name: (
+                        round(sum(values) / len(values), 1)
+                        if (values := [
+                            float(value)
+                            for item in runtimes
+                            if (value := dict((item.get("candidates") or {}).get("average") or {}).get(name)) is not None
+                        ])
+                        else None
+                    )
+                    for name in candidate_names
+                },
+            },
+            "workers": [
+                {
+                    "index": index + 1,
+                    "last_inference_ms": item.get("last_inference_ms"),
+                    "average_inference_ms": item.get("average_inference_ms"),
+                    "detection_fps": item.get("detection_fps"),
+                    "queue_depth": item.get("queue_depth"),
+                    "active_inferences": item.get("active_inferences"),
+                    "total_inferences": item.get("total_inferences"),
+                    "failed_inferences": item.get("failed_inferences"),
+                }
+                for index, item in enumerate(runtimes)
+            ],
+        }
+        status["runtime"] = runtime
+        status["openvino_loaded"] = any(bool(item.get("openvino_loaded")) for item in statuses)
+        status["opencv_loaded"] = any(bool(item.get("opencv_loaded")) for item in statuses)
+        status["coreml_loaded"] = any(bool(item.get("coreml_loaded")) for item in statuses)
+        status["object_worker_count"] = len(statuses)
+        return status
+
     def status(self) -> dict[str, Any]:
-        status = self._object.status()
+        statuses = [worker.status() for worker in self._object_workers]
+        status = self._aggregate_object_status(statuses)
         runtime = dict(status.get("runtime") or {})
-        pending = self._object.isolation_status()["pending_requests"]
+        isolation = self.isolation_status()
+        pending = isolation["pending_requests"]
         runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
         runtime["pending_frames"] = runtime["queue_depth"]
         status["runtime"] = runtime
+        status["isolation"] = isolation
         status["configured_device"] = self.config.device
         status["reid"] = self.reid_status()
         status["workers"] = self.worker_status()
@@ -1094,9 +1350,10 @@ class InferenceSupervisor:
 
     def cached_object_status(self) -> dict[str, Any]:
         """Read the last object-worker status without IPC from scheduling hot paths."""
-        status = self._object.cached_status()
+        statuses = [worker.cached_status() for worker in self._object_workers]
+        status = self._aggregate_object_status(statuses)
         runtime = dict(status.get("runtime") or {})
-        pending = self._object.isolation_status()["pending_requests"]
+        pending = self.isolation_status()["pending_requests"]
         runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
         runtime["pending_frames"] = runtime["queue_depth"]
         status["runtime"] = runtime
@@ -1142,7 +1399,7 @@ class InferenceSupervisor:
     def probe_devices(self) -> dict[str, Any]:
         try:
             return dict(
-                self._object.request(
+                self._select_object_worker().request(
                     "probe_devices",
                     timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
                 )
@@ -1154,17 +1411,47 @@ class InferenceSupervisor:
     def inspect_model(self, path: str) -> dict[str, Any]:
         try:
             return dict(
-                self._object.request("inspect_model", path=path, timeout=10.0) or {}
+                self._select_object_worker().request(
+                    "inspect_model", path=path, timeout=10.0
+                ) or {}
             )
         except Exception as exc:
             return {"input_shape": [], "output_shapes": [], "error": str(exc)}
 
     def isolation_status(self) -> dict[str, Any]:
-        return self._object.isolation_status()
+        instances = [worker.isolation_status() for worker in self._object_workers]
+        alive = [item for item in instances if item.get("worker_alive")]
+        errors = [str(item.get("last_error") or "") for item in instances]
+        return {
+            "enabled": any(bool(item.get("enabled")) for item in instances),
+            "role": "object",
+            "configured_device": self.config.device,
+            "worker_pid": alive[0].get("worker_pid") if alive else None,
+            "worker_pids": [item.get("worker_pid") for item in alive],
+            "worker_alive": bool(alive),
+            "all_workers_alive": len(alive) == len(instances),
+            "configured_workers": len(instances),
+            "alive_workers": len(alive),
+            "generation": max((int(item.get("generation") or 0) for item in instances), default=0),
+            "restart_count": sum(int(item.get("restart_count") or 0) for item in instances),
+            "crash_count": sum(int(item.get("crash_count") or 0) for item in instances),
+            "last_exit_code": next((item.get("last_exit_code") for item in reversed(instances) if item.get("last_exit_code") is not None), None),
+            "last_exit_at": max((str(item.get("last_exit_at") or "") for item in instances), default=""),
+            "last_error": "; ".join(dict.fromkeys(error for error in errors if error)),
+            "pending_requests": sum(int(item.get("pending_requests") or 0) for item in instances),
+            "fallback_active": any(bool(item.get("fallback_active")) for item in instances),
+            "fallback_seconds_remaining": max((float(item.get("fallback_seconds_remaining") or 0.0) for item in instances), default=0.0),
+            "request_timeout_seconds": INFERENCE_REQUEST_TIMEOUT_SECONDS,
+            "max_frame_bytes": MAX_INFERENCE_FRAME_BYTES,
+            "instances": [
+                {"index": index + 1, **item}
+                for index, item in enumerate(instances)
+            ],
+        }
 
     def worker_status(self) -> dict[str, dict[str, Any]]:
         return {
-            "object": self._object.isolation_status(),
+            "object": self.isolation_status(),
             "face": self._face.isolation_status(),
             "reid": self._reid.isolation_status(),
         }

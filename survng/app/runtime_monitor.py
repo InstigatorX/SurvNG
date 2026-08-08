@@ -136,22 +136,25 @@ class ApplicationRuntimeMonitor:
         for role, worker in workers.items():
             if not isinstance(worker, dict) or not worker.get("worker_alive"):
                 continue
-            pid = int(worker.get("worker_pid") or 0)
-            if pid <= 0 or pid in seen_pids:
-                continue
-            seen_pids.add(pid)
-            memory = process_memory_status_for_pid(pid)
-            rss = int(memory.get("rss_bytes") or 0)
-            pss = int(memory.get("pss_bytes") or 0)
-            result[str(role)] = {
-                "pid": pid,
-                "rss_bytes": rss,
-                "pss_bytes": pss,
-                "threads": int(memory.get("threads") or 0),
-                "file_descriptors": int(memory.get("file_descriptors") or 0),
-            }
-            total_rss += rss
-            total_pss += pss
+            pids = worker.get("worker_pids") or [worker.get("worker_pid")]
+            for index, raw_pid in enumerate(pids):
+                pid = int(raw_pid or 0)
+                if pid <= 0 or pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                memory = process_memory_status_for_pid(pid)
+                rss = int(memory.get("rss_bytes") or 0)
+                pss = int(memory.get("pss_bytes") or 0)
+                key = str(role) if len(pids) == 1 else f"{role}-{index + 1}"
+                result[key] = {
+                    "pid": pid,
+                    "rss_bytes": rss,
+                    "pss_bytes": pss,
+                    "threads": int(memory.get("threads") or 0),
+                    "file_descriptors": int(memory.get("file_descriptors") or 0),
+                }
+                total_rss += rss
+                total_pss += pss
         return {
             "total_rss_bytes": total_rss,
             "total_pss_bytes": total_pss,

@@ -156,6 +156,37 @@ class ManagerLifecycleTest(unittest.TestCase):
 
         self.assertFalse(AppManager._detector_runtime_ready(status))
 
+    def test_mqtt_server_health_degrades_when_part_of_detector_pool_is_offline(self) -> None:
+        manager = manager_with_mocks()
+        manager.config = AppConfig(
+            cameras=manager.config.cameras,
+            detector={"enabled": True, "device": "GPU", "object_worker_count": 2},
+        )
+        manager._started = True
+        manager._process_started_monotonic = time.monotonic()
+        manager._process_started_at = "2026-08-08T00:00:00+00:00"
+        manager.statuses = Mock(return_value=[])
+        manager.detector_status = Mock(return_value={
+            "enabled": True,
+            "loaded_backend": "openvino",
+            "openvino_loaded": True,
+            "runtime": {"queue_depth": 1},
+            "isolation": {
+                "enabled": True,
+                "worker_alive": True,
+                "configured_workers": 2,
+                "alive_workers": 1,
+            },
+        })
+        manager.recorder.retention_status.return_value = {"state": "idle"}
+
+        server = manager._mqtt_server_status()
+
+        self.assertEqual(server["state"]["health"], "degraded")
+        self.assertEqual(server["metrics"]["detector_state"], "degraded")
+        self.assertEqual(server["metrics"]["object_workers_configured"], 2)
+        self.assertEqual(server["metrics"]["object_workers_alive"], 1)
+
     def test_mqtt_reconfiguration_does_not_touch_camera_workers_or_recorders(self) -> None:
         manager = manager_with_mocks()
         previous = manager.mqtt

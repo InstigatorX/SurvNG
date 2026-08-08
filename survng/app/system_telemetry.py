@@ -55,8 +55,23 @@ class SystemTelemetryService:
         storage_path.mkdir(parents=True, exist_ok=True)
         usage = shutil.disk_usage(storage_path)
         cameras = manager.statuses()
+        service_memory = self.cgroup_memory_status()
+        application_memory_bytes = int(service_memory.get("application_bytes") or 0)
+        if application_memory_bytes <= 0:
+            application_memory_bytes = int(process_memory_status().get("rss_bytes") or 0)
+        cpu_count = os.cpu_count() or 1
+        try:
+            load_1m = os.getloadavg()[0]
+        except OSError:
+            load_1m = 0.0
         return {
             "instance_id": self.process_instance_id,
+            "resources": {
+                "cpu_load_percent": round(
+                    min(100.0, max(0.0, (load_1m / cpu_count) * 100.0)), 1
+                ),
+                "application_memory_bytes": application_memory_bytes,
+            },
             "storage": {
                 "total_bytes": usage.total,
                 "used_bytes": usage.used,
@@ -224,20 +239,20 @@ class SystemTelemetryService:
 
     def gpu_status(self, detector: dict[str, Any]) -> dict[str, object]:
         workers = detector.get("workers") or {}
-        pids = (
-            tuple(
-                sorted(
-                    {
-                        int(worker.get("worker_pid") or 0)
-                        for worker in workers.values()
-                        if isinstance(worker, dict)
-                        and worker.get("worker_alive")
-                        and int(worker.get("worker_pid") or 0) > 0
-                    }
+        worker_pids: set[int] = set()
+        if isinstance(workers, dict):
+            for worker in workers.values():
+                if not isinstance(worker, dict) or not worker.get("worker_alive"):
+                    continue
+                candidates = worker.get("worker_pids") or [worker.get("worker_pid")]
+                worker_pids.update(
+                    int(pid)
+                    for pid in candidates
+                    if pid is not None and int(pid) > 0
                 )
-            )
-            if isinstance(workers, dict)
-            else ()
+        pids = (
+            tuple(sorted(worker_pids))
+            if isinstance(workers, dict) else ()
         )
         engines: dict[str, int] = {}
         allocated_bytes = 0

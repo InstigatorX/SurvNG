@@ -306,6 +306,38 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(status["driver"], "i915")
         self.assertTrue(status["sample_ready"])
 
+    def test_gpu_status_samples_every_object_worker_process(self) -> None:
+        detector = {
+            "workers": {
+                "object": {
+                    "worker_pid": 41,
+                    "worker_pids": [41, 42],
+                    "worker_alive": True,
+                },
+            },
+        }
+        service = SystemTelemetryService()
+        with (
+            patch.object(
+                SystemTelemetryService,
+                "drm_worker_counters",
+                return_value={
+                    "engines": {},
+                    "allocated_bytes": 0,
+                    "resident_bytes": 0,
+                    "driver": "i915",
+                },
+            ) as counters,
+            patch.object(SystemTelemetryService, "read_integer", return_value=None),
+        ):
+            status = service.gpu_status(detector)
+
+        self.assertEqual(status["worker_pids"], [41, 42])
+        self.assertEqual(
+            {call.args[0] for call in counters.call_args_list},
+            {41, 42},
+        )
+
     def test_telemetry_combines_history_with_runtime_camera_counters(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
