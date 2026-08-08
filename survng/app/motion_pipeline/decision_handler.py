@@ -12,7 +12,7 @@ from ..domain_events import IncidentCreated, ObjectDetected
 from .context import Frame
 
 
-MotionDetectionProvider = Callable[[datetime], tuple[Frame | None, list[dict[str, Any]], str]]
+MotionDetectionProvider = Callable[[datetime], Any]
 MotionSnapshotWriter = Callable[[Frame, datetime], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
 MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
@@ -201,6 +201,16 @@ class MotionEventStore(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def refine_event_evidence(
+        self,
+        event_id: int,
+        *,
+        snapshot_path: str,
+        recording_path: str,
+        objects_json: str,
+    ) -> dict[str, Any] | None:
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class MotionDecisionOutcome:
@@ -210,6 +220,8 @@ class MotionDecisionOutcome:
     detected_objects: tuple[dict[str, Any], ...] = ()
     rejection_reason: str = ""
     motion_correlation: dict[str, Any] | None = None
+    refinement_pending: bool = False
+    processing_timing: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -218,6 +230,8 @@ class MotionDecisionOutcome:
             "object_detected": self.object_detected,
             "rejection_reason": self.rejection_reason,
             "motion_correlation": self.motion_correlation,
+            "refinement_pending": self.refinement_pending,
+            "processing_timing": self.processing_timing,
         }
 
 
@@ -231,11 +245,13 @@ class MotionDecisionHandler:
         detection_provider: MotionDetectionProvider,
         snapshot_writer: MotionSnapshotWriter,
         object_serializer: MotionObjectSerializer,
+        initial_detection_provider: MotionDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
         self.detection_provider = detection_provider
+        self.initial_detection_provider = initial_detection_provider
         self.snapshot_writer = snapshot_writer
         self.object_serializer = object_serializer
         self.event_callback = event_callback
@@ -250,18 +266,79 @@ class MotionDecisionHandler:
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome:
+        return self._handle_with_provider(
+            self.initial_detection_provider or self.detection_provider,
+            topic,
+            message,
+            event_at,
+            qualification,
+            require_eligible_object=require_eligible_object,
+            require_motion_correlation=require_motion_correlation,
+        )
+
+    def refine(
+        self,
+        topic: str,
+        message: str,
+        event_at: datetime,
+        qualification: dict[str, Any],
+        *,
+        existing_event_id: int | None,
+        require_eligible_object: bool = False,
+        require_motion_correlation: bool = False,
+    ) -> MotionDecisionOutcome:
+        """Run delayed evidence and atomically enrich or create the incident."""
+        return self._handle_with_provider(
+            self.detection_provider,
+            topic,
+            message,
+            event_at,
+            qualification,
+            existing_event_id=existing_event_id,
+            require_eligible_object=require_eligible_object,
+            require_motion_correlation=require_motion_correlation,
+        )
+
+    def _handle_with_provider(
+        self,
+        provider: MotionDetectionProvider,
+        topic: str,
+        message: str,
+        event_at: datetime,
+        qualification: dict[str, Any],
+        *,
+        existing_event_id: int | None = None,
+        require_eligible_object: bool = False,
+        require_motion_correlation: bool = False,
+    ) -> MotionDecisionOutcome:
         detection_started = time.monotonic()
-        frame, objects, recording_path = self.detection_provider(event_at)
+        detection_started_epoch = time.time()
+        provider_result = provider(event_at)
+        frame, objects, recording_path = provider_result
         processed_at = datetime.now(timezone.utc)
         normalized_event_at = (
             event_at.replace(tzinfo=timezone.utc)
             if event_at.tzinfo is None
             else event_at.astimezone(timezone.utc)
         )
-        qualification["object_detection_duration_ms"] = round(
+        workflow_ms = round(
             (time.monotonic() - detection_started) * 1000,
             3,
         )
+        qualification["object_detection_workflow_ms"] = workflow_ms
+        timings = getattr(provider_result, "timings_ms", None)
+        if isinstance(timings, dict):
+            qualification["object_detection_phases_ms"] = {
+                str(key): round(max(0.0, float(value)), 3)
+                for key, value in timings.items()
+                if isinstance(value, (int, float)) and math.isfinite(float(value))
+            }
+        received_at_epoch = qualification.get("trigger_received_at_epoch")
+        if isinstance(received_at_epoch, (int, float)):
+            qualification["decision_queue_wait_ms"] = round(
+                max(0.0, (detection_started_epoch - float(received_at_epoch)) * 1000.0),
+                3,
+            )
         qualification["processed_at"] = processed_at.isoformat()
         qualification["event_processing_delay_seconds"] = round(
             max(0.0, (processed_at - normalized_event_at).total_seconds()),
@@ -269,6 +346,11 @@ class MotionDecisionHandler:
         )
         if frame is None:
             objects = [{"status": "no_recorded_frame"}]
+        processing_timing = {
+            "workflow_ms": workflow_ms,
+            "decision_queue_wait_ms": qualification.get("decision_queue_wait_ms"),
+            "phases_ms": qualification.get("object_detection_phases_ms", {}),
+        }
 
         detection_completed = frame is not None and not detection_failure(objects)
 
@@ -309,30 +391,43 @@ class MotionDecisionHandler:
                 else "no_eligible_object"
             )
             return MotionDecisionOutcome(
-                event_id=None,
+                event_id=existing_event_id,
                 snapshot_path=snapshot_path,
                 object_detected=False if detection_completed else None,
                 detected_objects=tuple(eligible_objects),
                 rejection_reason=rejection_reason,
                 motion_correlation=correlation,
+                refinement_pending=bool(
+                    getattr(provider_result, "refinement_pending", False)
+                ),
+                processing_timing=processing_timing,
             )
 
         stored_objects = [
             *objects,
             {"status": "motion_qualification", "motion_qualification": qualification},
         ]
-        event = self.events.add_event(
-            camera_id=self.camera_id,
-            kind="motion",
-            topic=topic,
-            message=message,
-            snapshot_path=snapshot_path,
-            recording_path=recording_path,
-            objects_json=self.object_serializer(stored_objects),
-            created_at=event_at.isoformat(),
-        )
-        event_id = int(event["id"])
-        if self.event_callback:
+        if existing_event_id is None:
+            event = self.events.add_event(
+                camera_id=self.camera_id,
+                kind="motion",
+                topic=topic,
+                message=message,
+                snapshot_path=snapshot_path,
+                recording_path=recording_path,
+                objects_json=self.object_serializer(stored_objects),
+                created_at=event_at.isoformat(),
+            )
+            event_id = int(event["id"])
+        else:
+            event_id = int(existing_event_id)
+            self.events.refine_event_evidence(
+                event_id,
+                snapshot_path=snapshot_path,
+                recording_path=recording_path,
+                objects_json=self.object_serializer(stored_objects),
+            )
+        if self.event_callback and existing_event_id is None:
             self._publish(
                 "incident",
                 IncidentCreated(
@@ -362,6 +457,10 @@ class MotionDecisionHandler:
             object_detected=bool(eligible_objects) if detection_completed else None,
             detected_objects=tuple(eligible_objects),
             motion_correlation=correlation,
+            refinement_pending=bool(
+                getattr(provider_result, "refinement_pending", False)
+            ),
+            processing_timing=processing_timing,
         )
 
     def record_audit(
@@ -430,12 +529,14 @@ class MotionDecisionHandlerFactory:
         camera_id: str,
         detection_provider: MotionDetectionProvider,
         snapshot_writer: MotionSnapshotWriter,
+        initial_detection_provider: MotionDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
     ) -> MotionDecisionHandler:
         return MotionDecisionHandler(
             camera_id=camera_id,
             events=self.events,
             detection_provider=detection_provider,
+            initial_detection_provider=initial_detection_provider,
             snapshot_writer=snapshot_writer,
             object_serializer=self.object_serializer,
             event_callback=event_callback,

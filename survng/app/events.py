@@ -2291,6 +2291,60 @@ class EventStore:
             ).fetchone()
         return dict(updated) if updated is not None else None
 
+    def refine_event_evidence(
+        self,
+        event_id: int,
+        *,
+        snapshot_path: str,
+        recording_path: str,
+        objects_json: str,
+    ) -> dict[str, Any] | None:
+        """Atomically replace delayed evidence without losing tracking state."""
+        try:
+            replacement = json.loads(objects_json or "[]")
+        except (TypeError, ValueError):
+            replacement = []
+        if not isinstance(replacement, list):
+            replacement = []
+        replacement = [item for item in replacement if isinstance(item, dict)]
+        portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
+        portable_recording = portable_media_path(self.storage_dir, recording_path)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select objects_json, snapshot_path, recording_path from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                existing = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                existing = []
+            preserved = [
+                item
+                for item in existing
+                if isinstance(item, dict) and item.get("status") == "object_tracking"
+            ] if isinstance(existing, list) else []
+            merged_json = json.dumps([*replacement, *preserved], separators=(",", ":"))
+            conn.execute(
+                """
+                update events
+                set snapshot_path = ?, recording_path = ?, objects_json = ?
+                where id = ?
+                """,
+                (
+                    portable_snapshot or str(row["snapshot_path"] or ""),
+                    portable_recording or str(row["recording_path"] or ""),
+                    merged_json,
+                    event_id,
+                ),
+            )
+            updated = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated) if updated is not None else None
+
     def update_object_tracking(
         self,
         event_id: int,

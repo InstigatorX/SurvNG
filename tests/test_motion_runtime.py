@@ -28,6 +28,9 @@ def _runtime() -> tuple[MotionRuntimeService, SimpleNamespace]:
     decisions = Mock()
     decisions.running.return_value = False
     decisions.wait_stopped.return_value = True
+    incidents = Mock()
+    incidents.running.return_value = False
+    incidents.wait_stopped.return_value = True
     ingress = Mock()
     qualification = Mock()
     evidence = Mock()
@@ -38,6 +41,7 @@ def _runtime() -> tuple[MotionRuntimeService, SimpleNamespace]:
         events=events,
         analysis=analysis,
         decisions=decisions,
+        incidents=incidents,
         ingress=ingress,
         qualification=qualification,
         evidence=evidence,
@@ -49,6 +53,7 @@ def _runtime() -> tuple[MotionRuntimeService, SimpleNamespace]:
         events=events,
         analysis=analysis,
         decisions=decisions,
+        incidents=incidents,
         ingress=ingress,
         qualification=qualification,
         evidence=evidence,

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 from .motion import MotionQualificationResult
 from .motion_analysis_service import MotionAnalysisService
 from .motion_decisions import MotionDecisionOrchestrator
+from .motion_incidents import MotionIncidentService
 from .motion_events import MotionEventCoordinator
 from .motion_ingress import MotionEventIngressService
 from .motion_pipeline import MotionEvidenceRepository, MotionPipeline
@@ -204,6 +205,7 @@ class MotionRuntimeService:
         events: MotionEventCoordinator,
         analysis: MotionAnalysisService,
         decisions: MotionDecisionOrchestrator,
+        incidents: MotionIncidentService,
         ingress: MotionEventIngressService,
         qualification: MotionQualificationService,
         evidence: MotionEvidenceRepository,
@@ -214,6 +216,7 @@ class MotionRuntimeService:
         self.events = events
         self.analysis = analysis
         self.decisions = decisions
+        self.incidents = incidents
         self.ingress = ingress
         self.qualification = qualification
         self.evidence = evidence
@@ -239,6 +242,7 @@ class MotionRuntimeService:
             self.events.clear()
             self._stop_event = stop_event
             try:
+                self.incidents.start(stop_event)
                 self.analysis.start(stop_event)
                 self.decisions.start(stop_event)
             except BaseException as start_error:
@@ -246,12 +250,17 @@ class MotionRuntimeService:
                 stop_event.set()
                 self._attempt(self.analysis.request_stop, rollback_errors)
                 self._attempt(self.decisions.request_stop, rollback_errors)
+                self._attempt(self.incidents.request_stop, rollback_errors)
                 self._attempt(
                     lambda: self.decisions.wait_stopped(1.0),
                     rollback_errors,
                 )
                 self._attempt(
                     lambda: self.analysis.wait_stopped(1.0),
+                    rollback_errors,
+                )
+                self._attempt(
+                    lambda: self.incidents.wait_stopped(1.0),
                     rollback_errors,
                 )
                 self._stop_event = None
@@ -274,6 +283,7 @@ class MotionRuntimeService:
             stop_event.set()
         self._attempt(self.analysis.request_stop, failures)
         self._attempt(self.decisions.request_stop, failures)
+        self._attempt(self.incidents.request_stop, failures)
         self._raise_failures("request stop", failures)
 
     def wait_stopped(
@@ -304,7 +314,14 @@ class MotionRuntimeService:
                 )),
                 failures,
             )
-            workers_stopped = decision_stopped and analysis_stopped
+            refinement_stopped = self._attempt_result(
+                lambda: self.incidents.wait_stopped(min(
+                    max(0.0, decision_timeout),
+                    max(0.0, deadline - time.monotonic()),
+                )),
+                failures,
+            )
+            workers_stopped = decision_stopped and analysis_stopped and refinement_stopped
             if workers_stopped and not failures:
                 self._attempt(self.analysis.reset, failures)
                 self._attempt(self.evidence.clear, failures)
@@ -329,6 +346,8 @@ class MotionRuntimeService:
             workers.append("motion events")
         if self.analysis.running():
             workers.append("motion analysis")
+        if self.incidents.running():
+            workers.append("motion refinement")
         return workers
 
     def close(self) -> None:

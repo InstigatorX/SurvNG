@@ -133,6 +133,8 @@ def _stress_runtime() -> tuple[CameraLifecycleService, SimpleNamespace]:
         state=state,
     )
     incidents = Mock()
+    incidents.running.return_value = False
+    incidents.wait_stopped.return_value = True
     decisions = MotionDecisionOrchestrator(
         camera_id="gate",
         events=events,
@@ -156,6 +158,7 @@ def _stress_runtime() -> tuple[CameraLifecycleService, SimpleNamespace]:
         events=events,
         analysis=analysis,
         decisions=decisions,
+        incidents=incidents,
         ingress=ingress,
         qualification=qualification,
         evidence=evidence,

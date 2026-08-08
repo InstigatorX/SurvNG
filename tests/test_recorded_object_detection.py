@@ -586,6 +586,61 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(objects[0]["temporal_observations"], 2)
         self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 8.0)
 
+    def test_initial_detection_defers_sparse_late_stages_and_reports_phase_timings(self) -> None:
+        event_epoch = 1_800_000_000.0
+        requested_offsets: list[float] = []
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "none"
+
+            def recording_at(self, _camera_id: str, epoch: float):
+                requested_offsets.append(round(epoch - event_epoch, 1))
+                return {"path": "sample.mp4", "start_epoch": epoch}
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return []
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            Recorder(),
+            lambda: None,
+        )
+        with (
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(
+                backend,
+                "_read_recorded_frame",
+                return_value=np.zeros((20, 20, 3), dtype=np.uint8),
+            ),
+        ):
+            result = backend.detect_initial(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertTrue(result.refinement_pending)
+        self.assertTrue(requested_offsets)
+        self.assertTrue(all(offset <= 1.0 for offset in requested_offsets))
+        self.assertNotIn(4.0, requested_offsets)
+        self.assertEqual(
+            set(result.timings_ms),
+            {
+                "recording_wait_ms",
+                "frame_decode_ms",
+                "detector_request_ms",
+                "detection_enrichment_ms",
+                "temporal_confirmation_wait_ms",
+                "workflow_ms",
+            },
+        )
+
     def test_detector_uses_one_followup_stage_to_replace_clipped_cover_frame(self) -> None:
         event_epoch = 1_800_000_000.0
         requested_offsets: list[float] = []

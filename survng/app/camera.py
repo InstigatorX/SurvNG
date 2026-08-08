@@ -18,6 +18,7 @@ from .camera_status import CameraStatusService
 from .camera_media import CameraMediaService
 from .camera_lifecycle import (
     CameraLifecycleService,
+    CameraLifecyclePhase,
     CameraRuntimeState,
     CameraStopTicket,
 )
@@ -96,6 +97,10 @@ class CameraWorker:
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
+            stop_requested=lambda: (
+                self._stop.is_set()
+                and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
+            ),
         )
         self.media = CameraMediaService(
             camera=camera,
@@ -121,6 +126,9 @@ class CameraWorker:
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,
             detection_provider=lambda event_at: self._recorded_motion_frame(event_at),
+            initial_detection_provider=(
+                lambda event_at: self._recorded_motion_frame(event_at, initial=True)
+            ),
             snapshot_writer=lambda frame, event_at: self._write_snapshot(frame, event_at),
             event_callback=(
                 self.motion_state.publish_event if event_callback is not None else None
@@ -198,6 +206,7 @@ class CameraWorker:
             events=self.motion_events,
             analysis=self.motion_analysis,
             decisions=self.motion_decisions,
+            incidents=self.motion_incidents,
             ingress=self.motion_ingress,
             qualification=self.motion_qualification,
             evidence=self.motion_evidence,
@@ -407,7 +416,11 @@ class CameraWorker:
     def _recorded_motion_frame(
         self,
         event_at: datetime,
-    ) -> tuple[Any | None, list[dict[str, Any]], str]:
+        *,
+        initial: bool = False,
+    ) -> Any:
+        if initial:
+            return self.media.detect_initial_recorded_motion(event_at)
         return self.media.detect_recorded_motion(event_at)
 
     def _write_snapshot(self, frame: Any, event_at: datetime | None = None) -> str:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
+import copy
 import logging
+import queue
 import threading
 from typing import Any, Callable, Protocol
 
@@ -26,6 +29,18 @@ class MotionDecisionProcessor(Protocol):
         require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome: ...
 
+    def refine(
+        self,
+        topic: str,
+        message: str,
+        event_at: datetime,
+        qualification: dict[str, Any],
+        *,
+        existing_event_id: int | None,
+        require_eligible_object: bool = False,
+        require_motion_correlation: bool = False,
+    ) -> MotionDecisionOutcome: ...
+
 
 TrackingPrewarmer = Callable[[], object | None]
 ImageReader = Callable[[str], np.ndarray | None]
@@ -35,6 +50,19 @@ TrackingStarter = Callable[
     [int, datetime, list[dict[str, Any]], np.ndarray | None],
     bool | None,
 ]
+RefinementCallback = Callable[[MotionDecisionOutcome], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _RefinementJob:
+    topic: str
+    message: str
+    event_at: datetime
+    qualification: dict[str, Any]
+    existing_event_id: int | None
+    require_eligible_object: bool
+    require_motion_correlation: bool
+    callback: RefinementCallback | None
 
 
 class MotionIncidentService:
@@ -68,6 +96,17 @@ class MotionIncidentService:
         self._last_prewarm_failure: dict[str, Any] | None = None
         self._handoff_failures = 0
         self._last_handoff_failure: dict[str, Any] | None = None
+        self._refinement_queue: queue.Queue[_RefinementJob | None] = queue.Queue(maxsize=8)
+        self._refinement_thread: threading.Thread | None = None
+        self._refinement_stop: threading.Event | None = None
+        self._refinements_queued = 0
+        self._refinements_completed = 0
+        self._refinements_dropped = 0
+        self._refinement_failures = 0
+        self._timing_samples = 0
+        self._timing_totals_ms: dict[str, float] = {}
+        self._timing_counts: dict[str, int] = {}
+        self._last_timing_ms: dict[str, float] = {}
 
     def status(self) -> dict[str, Any]:
         with self._status_lock:
@@ -84,7 +123,63 @@ class MotionIncidentService:
                     if self._last_handoff_failure is not None
                     else None
                 ),
+                "refinements_queued": self._refinements_queued,
+                "refinements_completed": self._refinements_completed,
+                "refinements_dropped": self._refinements_dropped,
+                "refinement_failures": self._refinement_failures,
+                "refinement_queue_depth": self._refinement_queue.qsize(),
+                "refinement_worker_alive": bool(
+                    self._refinement_thread and self._refinement_thread.is_alive()
+                ),
+                "object_detection_timing": {
+                    "samples": self._timing_samples,
+                    "last_ms": dict(self._last_timing_ms),
+                    "average_ms": {
+                        key: round(value / max(1, self._timing_counts.get(key, 0)), 3)
+                        for key, value in self._timing_totals_ms.items()
+                    },
+                },
             }
+
+    def start(self, stop_event: threading.Event) -> None:
+        if self._refinement_thread is not None and self._refinement_thread.is_alive():
+            return
+        self._refinement_stop = stop_event
+        thread = threading.Thread(
+            target=self._run_refinements,
+            name=f"motion-refine-{self.camera_id}",
+            daemon=False,
+        )
+        self._refinement_thread = thread
+        thread.start()
+
+    def request_stop(self) -> None:
+        try:
+            self._refinement_queue.put_nowait(None)
+        except queue.Full:
+            try:
+                self._refinement_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._refinement_queue.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def wait_stopped(self, timeout: float) -> bool:
+        thread = self._refinement_thread
+        if thread is None:
+            return True
+        thread.join(max(0.0, timeout))
+        if thread.is_alive():
+            return False
+        self._refinement_thread = None
+        self._refinement_stop = None
+        self._clear_refinements()
+        return True
+
+    def running(self) -> bool:
+        return bool(self._refinement_thread and self._refinement_thread.is_alive())
 
     def _record_prewarm_failure(self, error: Exception) -> None:
         error_text = redact_secret_text(error)[:500]
@@ -121,6 +216,7 @@ class MotionIncidentService:
         *,
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
+        refinement_callback: RefinementCallback | None = None,
     ) -> MotionDecisionOutcome:
         try:
             if self.tracking_enabled():
@@ -145,13 +241,32 @@ class MotionIncidentService:
             require_eligible_object=require_eligible_object,
             require_motion_correlation=require_motion_correlation,
         )
+        self._record_timing(outcome)
+        if outcome.refinement_pending:
+            self._queue_refinement(
+                _RefinementJob(
+                    topic=topic,
+                    message=message,
+                    event_at=event_at,
+                    qualification=copy.deepcopy(qualification),
+                    existing_event_id=outcome.event_id,
+                    require_eligible_object=require_eligible_object,
+                    require_motion_correlation=require_motion_correlation,
+                    callback=refinement_callback,
+                )
+            )
+        if not outcome.refinement_pending:
+            self._handoff(outcome, event_at)
+        return outcome
+
+    def _handoff(self, outcome: MotionDecisionOutcome, event_at: datetime) -> None:
         if outcome.event_id is None or not outcome.object_detected:
-            return outcome
+            return
 
         try:
             detected_objects = list(outcome.detected_objects)
             if not self.has_trackable_objects(detected_objects):
-                return outcome
+                return
             initial_frame = None
             if outcome.snapshot_path:
                 initial_frame = self.image_reader(outcome.snapshot_path)
@@ -162,7 +277,7 @@ class MotionIncidentService:
                 initial_frame,
             )
             if started is None:
-                return outcome
+                return
             if not started:
                 self._record_handoff_failure(
                     outcome.event_id,
@@ -187,4 +302,76 @@ class MotionIncidentService:
                 type(error).__name__,
                 redact_secret_text(error)[:500],
             )
-        return outcome
+
+    def _queue_refinement(self, job: _RefinementJob) -> None:
+        try:
+            self._refinement_queue.put_nowait(job)
+        except queue.Full:
+            with self._status_lock:
+                self._refinements_dropped += 1
+            LOGGER.warning("motion refinement queue full for %s", self.camera_id)
+            return
+        with self._status_lock:
+            self._refinements_queued += 1
+
+    def _run_refinements(self) -> None:
+        while True:
+            stop = self._refinement_stop
+            if stop is None or stop.is_set():
+                return
+            try:
+                job = self._refinement_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if job is None or stop.is_set():
+                return
+            try:
+                outcome = self.decision_processor.refine(
+                    job.topic,
+                    job.message,
+                    job.event_at,
+                    copy.deepcopy(job.qualification),
+                    existing_event_id=job.existing_event_id,
+                    require_eligible_object=job.require_eligible_object,
+                    require_motion_correlation=job.require_motion_correlation,
+                )
+                self._record_timing(outcome)
+                self._handoff(outcome, job.event_at)
+                if job.callback is not None and not stop.is_set():
+                    job.callback(outcome)
+                with self._status_lock:
+                    self._refinements_completed += 1
+            except Exception:
+                with self._status_lock:
+                    self._refinement_failures += 1
+                LOGGER.exception("motion refinement failed for %s", self.camera_id)
+
+    def _record_timing(self, outcome: MotionDecisionOutcome) -> None:
+        timing = outcome.processing_timing
+        if not isinstance(timing, dict):
+            return
+        flattened: dict[str, float] = {}
+        for key in ("workflow_ms", "decision_queue_wait_ms"):
+            value = timing.get(key)
+            if isinstance(value, (int, float)):
+                flattened[key] = max(0.0, float(value))
+        phases = timing.get("phases_ms")
+        if isinstance(phases, dict):
+            for key, value in phases.items():
+                if isinstance(value, (int, float)):
+                    flattened[str(key)] = max(0.0, float(value))
+        if not flattened:
+            return
+        with self._status_lock:
+            self._timing_samples += 1
+            self._last_timing_ms = dict(flattened)
+            for key, value in flattened.items():
+                self._timing_totals_ms[key] = self._timing_totals_ms.get(key, 0.0) + value
+                self._timing_counts[key] = self._timing_counts.get(key, 0) + 1
+
+    def _clear_refinements(self) -> None:
+        while True:
+            try:
+                self._refinement_queue.get_nowait()
+            except queue.Empty:
+                return

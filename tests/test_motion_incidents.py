@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from unittest.mock import Mock
+import threading
 
 import numpy as np
 
@@ -279,3 +280,45 @@ def test_prewarm_failure_does_not_prevent_detection_or_persistence() -> None:
     assert status["prewarm_failures"] == 1
     assert status["last_prewarm_failure"]["error_type"] == "RuntimeError"
     assert status["handoff_failures"] == 0
+
+
+def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="initial.webp",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    decision.refine.return_value = refined
+    tracking.start.return_value = True
+    image_reader.return_value = np.ones((20, 20, 3), dtype=np.uint8)
+    completed = threading.Event()
+    stop = threading.Event()
+    service.start(stop)
+
+    outcome = service.process(
+        "adaptive/visual_backup",
+        "motion",
+        datetime.now(timezone.utc),
+        {"accepted": True},
+        require_eligible_object=True,
+        refinement_callback=lambda value: completed.set() if value is refined else None,
+    )
+
+    assert outcome is initial
+    assert completed.wait(1.0)
+    decision.refine.assert_called_once()
+    assert decision.refine.call_args.kwargs["existing_event_id"] is None
+    tracking.start.assert_called_once()
+    assert service.status()["refinements_completed"] == 1
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+    assert not service.running()

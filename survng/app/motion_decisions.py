@@ -300,6 +300,7 @@ class MotionDecisionOrchestrator:
                 else "adaptive" if adaptive_only else "camera"
             ),
             "retry_count": max((item.retry_count for item in triggers), default=0),
+            "trigger_received_at_epoch": received_at,
             "would_suppress": bool(mode in AUDITED_MODES and not result.accepted),
         }
         effective_accepted = bool(
@@ -497,6 +498,18 @@ class MotionDecisionOrchestrator:
                     or suppression_verification_candidate
                 ),
                 require_motion_correlation=visual_backup,
+                refinement_callback=lambda refined: self._record_refined_outcome(
+                    refined,
+                    decision_id=decision_id,
+                    event_at=event_at,
+                    mode=mode,
+                    sensitivity=sensitivity,
+                    result=result,
+                    trigger_count=len(triggers),
+                    visual_backup=visual_backup,
+                    borderline_candidate=borderline_candidate,
+                    suppression_verification_candidate=suppression_verification_candidate,
+                ),
             ).as_dict()
             event_id = outcome.get("event_id")
             if event_id is not None:
@@ -540,7 +553,7 @@ class MotionDecisionOrchestrator:
                     )
                 self._audit_recorder.record_audit(
                     event_id=int(event_id) if event_id is not None else None,
-                    decision_id=decision_id if event_id is None else "",
+                    decision_id=decision_id,
                     snapshot_path=audit_snapshot_path,
                     event_at=event_at,
                     mode=mode,
@@ -553,6 +566,7 @@ class MotionDecisionOrchestrator:
                     features={
                         **audit_features(result),
                         "suppression_verification": suppression_verification_candidate,
+                        "object_detection_timing": outcome.get("processing_timing"),
                     },
                 )
         except Exception:
@@ -562,6 +576,61 @@ class MotionDecisionOrchestrator:
         else:
             self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
+
+    def _record_refined_outcome(
+        self,
+        refined: Any,
+        *,
+        decision_id: str,
+        event_at: datetime,
+        mode: str,
+        sensitivity: str,
+        result: MotionQualificationResult,
+        trigger_count: int,
+        visual_backup: bool,
+        borderline_candidate: bool,
+        suppression_verification_candidate: bool,
+    ) -> None:
+        outcome = refined.as_dict()
+        event_id = outcome.get("event_id")
+        object_outcome = outcome.get("object_detected")
+        found_object = object_outcome is True
+        if event_id is not None:
+            self._state.set_active_incident_event_id(int(event_id))
+        if found_object:
+            self._state.increment_stat("late_object_rescues", 1)
+            if borderline_candidate:
+                self._state.increment_stat("borderline_rescues", 1)
+            if suppression_verification_candidate:
+                self._state.increment_stat("suppression_verification_rescues", 1)
+        correlation = outcome.get("motion_correlation")
+        reason = str(outcome.get("rejection_reason") or result.reason)
+        features = {
+            **audit_features(result),
+            "late_object_refinement": True,
+            "motion_correlation": correlation,
+            "suppression_verification": suppression_verification_candidate,
+            "object_detection_timing": outcome.get("processing_timing"),
+        }
+        if visual_backup:
+            features["visual_backup_original_reason"] = result.reason
+            reason = str(outcome.get("rejection_reason") or "visual_backup_trigger")
+        if visual_backup or (mode in AUDITED_MODES and not result.accepted):
+            self._audit_recorder.record_audit(
+                event_id=int(event_id) if event_id is not None else None,
+                decision_id=decision_id,
+                snapshot_path=str(outcome.get("snapshot_path") or ""),
+                event_at=event_at,
+                mode=mode,
+                sensitivity=sensitivity,
+                score=result.score,
+                threshold=result.threshold,
+                reason=reason,
+                object_detected=object_outcome,
+                trigger_count=trigger_count,
+                features=features,
+                category="visual_backup" if visual_backup else "qualification",
+            )
 
     def _record_visual_backup_audit(
         self,
@@ -592,7 +661,7 @@ class MotionDecisionOrchestrator:
             self._qualification.reset_event_state_runtime()
         self._audit_recorder.record_audit(
             event_id=int(event_id) if event_id is not None else None,
-            decision_id=decision_id if event_id is None else "",
+            decision_id=decision_id,
             snapshot_path=str(outcome.get("snapshot_path") or ""),
             event_at=event_at,
             mode=mode,
@@ -606,6 +675,7 @@ class MotionDecisionOrchestrator:
                 **audit_features(result),
                 "visual_backup_original_reason": result.reason,
                 "motion_correlation": correlation,
+                "object_detection_timing": outcome.get("processing_timing"),
             },
             category="visual_backup",
         )

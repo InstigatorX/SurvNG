@@ -53,6 +53,24 @@ class _RecordedDetectionSample:
     recording_path: str
 
 
+@dataclass(frozen=True)
+class RecordedDetectionResult:
+    """Recorded evidence plus truthful phase timings for one sampling pass."""
+
+    frame: Frame | None
+    objects: list[dict[str, Any]]
+    recording_path: str
+    timings_ms: dict[str, float]
+    refinement_pending: bool = False
+
+    def __iter__(self):
+        # Preserve the historical three-value provider contract for callers
+        # that do not need refinement or timing metadata.
+        yield self.frame
+        yield self.objects
+        yield self.recording_path
+
+
 @dataclass
 class _TemporalDetectionEvidence:
     observations: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -519,6 +537,7 @@ class MotionRecordingProvider(Protocol):
 
 
 LiveFrameProvider = Callable[[], Frame | None]
+StopRequested = Callable[[], bool]
 
 
 class RecordedMotionObjectDetector:
@@ -530,21 +549,65 @@ class RecordedMotionObjectDetector:
         detector: MotionObjectDetectorBackend,
         recorder: MotionRecordingProvider,
         live_frame_provider: LiveFrameProvider,
+        stop_requested: StopRequested = lambda: False,
     ) -> None:
         self.camera = camera
         self.detector = detector
         self.recorder = recorder
         self.live_frame_provider = live_frame_provider
+        self.stop_requested = stop_requested
 
-    def detect(self, event_at: datetime) -> tuple[Frame | None, list[dict[str, Any]], str]:
+    def detect(self, event_at: datetime) -> RecordedDetectionResult:
+        return self._detect(
+            event_at,
+            stages=RECORDED_EVENT_FRAME_STAGES,
+            retry_seconds=RECORDED_EVENT_RETRY_SECONDS,
+            allow_representative_refinement=True,
+            refinement_pending=False,
+        )
+
+    def detect_initial(self, event_at: datetime) -> RecordedDetectionResult:
+        """Evaluate immediate evidence without occupying the decision worker.
+
+        The later +4/+8/+12-second pass is deliberately left to the bounded
+        refinement worker.  This keeps camera trigger admission responsive
+        while retaining delayed object discovery.
+        """
+        return self._detect(
+            event_at,
+            stages=RECORDED_EVENT_FRAME_STAGES[:1],
+            retry_seconds=4.0,
+            allow_representative_refinement=False,
+            refinement_pending=True,
+        )
+
+    def _detect(
+        self,
+        event_at: datetime,
+        *,
+        stages: tuple[tuple[float, ...], ...],
+        retry_seconds: float,
+        allow_representative_refinement: bool,
+        refinement_pending: bool,
+    ) -> RecordedDetectionResult:
+        workflow_started = time.monotonic()
+        timing = {
+            "recording_wait_ms": 0.0,
+            "frame_decode_ms": 0.0,
+            "detector_request_ms": 0.0,
+            "detection_enrichment_ms": 0.0,
+            "temporal_confirmation_wait_ms": 0.0,
+        }
         event_epoch = event_at.timestamp()
-        initial_offsets = RECORDED_EVENT_FRAME_STAGES[0]
+        initial_offsets = stages[0]
         newest_needed = event_epoch + max(initial_offsets) + RECORDED_EVENT_SETTLE_SECONDS
         wait_seconds = max(0.0, newest_needed - time.time())
         if wait_seconds > 0:
-            time.sleep(min(wait_seconds, 3.0))
+            slept = min(wait_seconds, 3.0)
+            time.sleep(slept)
+            timing["temporal_confirmation_wait_ms"] += slept * 1000.0
 
-        deadline = time.monotonic() + max(0.0, RECORDED_EVENT_RETRY_SECONDS)
+        deadline = time.monotonic() + max(0.0, retry_seconds)
         refinement_deadline: float | None = None
         samples_by_offset: dict[float, _RecordedDetectionSample] = {}
         default_required = max(
@@ -564,14 +627,25 @@ class RecordedMotionObjectDetector:
             ).items()
         }
 
-        for stage_index, stage_offsets in enumerate(RECORDED_EVENT_FRAME_STAGES):
+        for stage_index, stage_offsets in enumerate(stages):
             while True:
+                if self.stop_requested():
+                    return self._result(
+                        None,
+                        [{"status": "cancelled"}],
+                        "",
+                        timing,
+                        workflow_started,
+                        refinement_pending=False,
+                    )
                 stage_deadline = min(
                     deadline,
                     refinement_deadline
                     if refinement_deadline is not None
                     else deadline,
                 )
+                recording_missing = False
+                future_sample = False
                 for sample_offset in stage_offsets:
                     if sample_offset in samples_by_offset:
                         continue
@@ -579,22 +653,32 @@ class RecordedMotionObjectDetector:
                         break
                     target_epoch = event_epoch + sample_offset
                     if target_epoch + RECORDED_EVENT_SETTLE_SECONDS > time.time():
+                        future_sample = True
                         continue
+                    lookup_started = time.monotonic()
                     row = self.recorder.recording_at(self.camera.id, target_epoch)
+                    timing["recording_wait_ms"] += (
+                        time.monotonic() - lookup_started
+                    ) * 1000.0
                     if row is None:
+                        recording_missing = True
                         continue
                     start_epoch = row.get("start_epoch")
                     if start_epoch is None:
                         continue
                     frame_offset = max(0.0, target_epoch - float(start_epoch))
+                    decode_started = time.monotonic()
                     frame = self._read_recorded_frame(
                         Path(str(row["path"])),
                         frame_offset,
                         deadline=stage_deadline,
                     )
+                    timing["frame_decode_ms"] += (
+                        time.monotonic() - decode_started
+                    ) * 1000.0
                     if frame is None:
                         continue
-                    objects = self._detect_objects(frame)
+                    objects = self._detect_objects(frame, timing=timing)
                     samples_by_offset[sample_offset] = _RecordedDetectionSample(
                         offset=sample_offset,
                         frame=frame,
@@ -619,7 +703,11 @@ class RecordedMotionObjectDetector:
                         # one existing +4 second stage looking for a better frame.
                         # This is bounded and does not wait through the full
                         # tracking lifecycle or add a second inference pipeline.
-                        if stage_index == 0 and _representative_needs_refinement(objects):
+                        representative_needs_refinement = bool(
+                            stage_index == 0
+                            and _representative_needs_refinement(objects)
+                        )
+                        if allow_representative_refinement and representative_needs_refinement:
                             refinement_deadline = min(
                                 deadline,
                                 time.monotonic()
@@ -636,7 +724,16 @@ class RecordedMotionObjectDetector:
                                 self.camera.id,
                                 max(stage_offsets),
                             )
-                        return selected.frame, objects, selected.recording_path
+                        return self._result(
+                            selected.frame,
+                            objects,
+                            selected.recording_path,
+                            timing,
+                            workflow_started,
+                            refinement_pending=bool(
+                                refinement_pending and representative_needs_refinement
+                            ),
+                        )
                 if all(offset in samples_by_offset for offset in stage_offsets):
                     break
                 remaining = deadline - time.monotonic()
@@ -647,7 +744,14 @@ class RecordedMotionObjectDetector:
                     )
                 if remaining <= 0:
                     break
-                time.sleep(min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining))
+                slept = min(RECORDED_EVENT_RETRY_INTERVAL_SECONDS, remaining)
+                time.sleep(slept)
+                wait_key = (
+                    "recording_wait_ms"
+                    if recording_missing and not future_sample
+                    else "temporal_confirmation_wait_ms"
+                )
+                timing[wait_key] += slept * 1000.0
             if (
                 refinement_deadline is not None
                 and time.monotonic() >= refinement_deadline
@@ -662,20 +766,77 @@ class RecordedMotionObjectDetector:
                 default_required,
                 class_confirmations,
             )
-            return selected.frame, objects, selected.recording_path
+            return self._result(
+                selected.frame,
+                objects,
+                selected.recording_path,
+                timing,
+                workflow_started,
+                refinement_pending=refinement_pending,
+            )
 
         fallback = self.live_frame_provider()
         if fallback is None:
-            return None, [{"status": "no_recorded_frame"}], ""
-        objects = self._detect_objects(fallback)
+            return self._result(
+                None,
+                [{"status": "no_recorded_frame"}],
+                "",
+                timing,
+                workflow_started,
+                refinement_pending=refinement_pending,
+            )
+        objects = self._detect_objects(fallback, timing=timing)
         if objects:
             for detected in objects:
                 detected["frame_source"] = "live_fallback"
                 detected["recording_status"] = "no_recorded_frame"
-            return fallback, objects, ""
-        return fallback, [{"status": "no_recorded_frame", "frame_source": "live_fallback"}], ""
+            return self._result(
+                fallback,
+                objects,
+                "",
+                timing,
+                workflow_started,
+                refinement_pending=refinement_pending,
+            )
+        return self._result(
+            fallback,
+            [{"status": "no_recorded_frame", "frame_source": "live_fallback"}],
+            "",
+            timing,
+            workflow_started,
+            refinement_pending=refinement_pending,
+        )
 
-    def _detect_objects(self, frame: Frame) -> list[dict[str, Any]]:
+    @staticmethod
+    def _result(
+        frame: Frame | None,
+        objects: list[dict[str, Any]],
+        recording_path: str,
+        timing: dict[str, float],
+        workflow_started: float,
+        *,
+        refinement_pending: bool,
+    ) -> RecordedDetectionResult:
+        normalized = {key: round(max(0.0, value), 3) for key, value in timing.items()}
+        normalized["workflow_ms"] = round(
+            max(0.0, (time.monotonic() - workflow_started) * 1000.0),
+            3,
+        )
+        return RecordedDetectionResult(
+            frame=frame,
+            objects=objects,
+            recording_path=recording_path,
+            timings_ms=normalized,
+            refinement_pending=refinement_pending,
+        )
+
+    def _detect_objects(
+        self,
+        frame: Frame,
+        *,
+        timing: dict[str, float] | None = None,
+    ) -> list[dict[str, Any]]:
+        enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
         class_thresholds = dict(
             getattr(
@@ -690,7 +851,11 @@ class RecordedMotionObjectDetector:
             configured_threshold,
             class_thresholds,
         )
+        detector_started = time.monotonic()
         objects = self.detector.detect(frame, confidence_threshold=threshold)
+        detector_ms = (time.monotonic() - detector_started) * 1000.0
+        if timing is not None:
+            timing["detector_request_ms"] += detector_ms
         frame_height, frame_width = frame.shape[:2]
         detect_faces = getattr(self.detector, "detect_faces", None)
         if callable(detect_faces):
@@ -733,6 +898,11 @@ class RecordedMotionObjectDetector:
                     detected["confidence_eligible"] = True
                 detected["incident_eligible"] = False
                 detected["auxiliary_detection"] = True
+        if timing is not None:
+            timing["detection_enrichment_ms"] += max(
+                0.0,
+                (time.monotonic() - enrichment_started) * 1000.0 - detector_ms,
+            )
         return objects
 
     @staticmethod
@@ -942,10 +1112,12 @@ class RecordedMotionObjectDetectorFactory:
         self,
         camera: CameraConfig,
         live_frame_provider: LiveFrameProvider,
+        stop_requested: StopRequested = lambda: False,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
             camera=camera,
             detector=self.detector,
             recorder=self.recorder,
             live_frame_provider=live_frame_provider,
+            stop_requested=stop_requested,
         )
