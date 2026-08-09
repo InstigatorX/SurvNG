@@ -109,6 +109,29 @@ export function incidentDetailQuery(incident) {
   }).toString();
 }
 
+export function incidentMosaicEvents(incident) {
+  if (!Array.isArray(incident?.events)) return [];
+  return incident.events
+    .map((event, index) => {
+      const parsedEpoch = new Date(event?.created_at || 0).getTime();
+      return { event, index, epoch: Number.isFinite(parsedEpoch) ? parsedEpoch : Number.POSITIVE_INFINITY };
+    })
+    .sort((left, right) => left.epoch - right.epoch || left.index - right.index)
+    .map(({ event }) => event);
+}
+
+export function incidentMosaicPage(events, page, pageSize = 6) {
+  const items = Array.isArray(events) ? events : [];
+  const size = Math.max(1, Math.floor(Number(pageSize) || 6));
+  const pageCount = Math.max(1, Math.ceil(items.length / size));
+  const pageIndex = Math.max(0, Math.min(pageCount - 1, Math.floor(Number(page) || 0)));
+  return {
+    items: items.slice(pageIndex * size, (pageIndex + 1) * size),
+    page: pageIndex,
+    pageCount,
+  };
+}
+
 export function incidentIndexForEvent(incidents, event) {
   if (!Array.isArray(incidents) || !event) return -1;
   return incidents.findIndex((incident) => (

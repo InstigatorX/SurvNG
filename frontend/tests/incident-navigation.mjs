@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -18,6 +18,18 @@ assert.equal(adjacentIncident([incidents[0]], incidents[0], 1), null);
 assert.equal(incidentDetailQuery(incidents[0]), "event_ids=101%2C102&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [{ id: 101 }, { id: 101 }, { id: "bad" }] }), "event_ids=101&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [] }), "");
+
+const mosaicEvents = incidentMosaicEvents({ events: [
+  { id: 3, created_at: "2026-08-08T12:00:03Z" },
+  { id: 1, created_at: "2026-08-08T12:00:01Z" },
+  { id: 2, created_at: "2026-08-08T12:00:02Z" },
+  { id: 4, created_at: "invalid" },
+] });
+assert.deepEqual(mosaicEvents.map((event) => event.id), [1, 2, 3, 4]);
+assert.deepEqual(incidentMosaicEvents({}), []);
+assert.deepEqual(incidentMosaicPage(mosaicEvents, 0, 2), { items: mosaicEvents.slice(0, 2), page: 0, pageCount: 2 });
+assert.deepEqual(incidentMosaicPage(mosaicEvents, 99, 2), { items: mosaicEvents.slice(2), page: 1, pageCount: 2 });
+assert.deepEqual(incidentMosaicPage([], 0), { items: [], page: 0, pageCount: 1 });
 
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);

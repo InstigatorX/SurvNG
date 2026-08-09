@@ -95,7 +95,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePoint } from "./zoneGeometry.mjs";
@@ -2626,6 +2626,10 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const motionObservations = incident.motion_observations || [];
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
   const [selectedPreview, setSelectedPreview] = useState(null);
+  const [workspaceView, setWorkspaceView] = useState(() => {
+    try { return window.sessionStorage.getItem("survng.incidentWorkspaceView.v1") === "mosaic" ? "mosaic" : "focus"; } catch { return "focus"; }
+  });
+  const [mosaicPageIndex, setMosaicPageIndex] = useState(0);
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
   const [snapshotZoom, setSnapshotZoom] = useState({ scale: 1, x: 0, y: 0 });
@@ -2633,6 +2637,10 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const snapshotZoomRef = useRef(snapshotZoom);
   const panGestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false });
   const preview = selectedPreview || incident;
+  const mosaicEvents = useMemo(() => incidentMosaicEvents(incident), [incident]);
+  const mosaic = useMemo(() => incidentMosaicPage(mosaicEvents, mosaicPageIndex), [mosaicEvents, mosaicPageIndex]);
+  const canShowMosaic = desktopWorkspace && expanded && mosaicEvents.length > 1;
+  const activeWorkspaceView = canShowMosaic ? workspaceView : "focus";
   const trackingPreview = incidentTrackingSource(preview, incident) || preview;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
@@ -2659,9 +2667,14 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   useEffect(() => {
     setSelectedPreview(null);
+    setMosaicPageIndex(0);
     setSubEventsOpen(false);
     setInlineVideoActive(false);
   }, [incident.id]);
+
+  useEffect(() => {
+    try { window.sessionStorage.setItem("survng.incidentWorkspaceView.v1", workspaceView); } catch { /* Session preference is optional. */ }
+  }, [workspaceView]);
 
   useEffect(() => {
     setInlineVideoActive(false);
@@ -2671,6 +2684,10 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   useEffect(() => {
     if (expanded && replayRequest > 0) setInlineVideoActive(true);
   }, [expanded, replayRequest]);
+
+  useEffect(() => {
+    if (activeWorkspaceView === "mosaic") setInlineVideoActive(false);
+  }, [activeWorkspaceView]);
 
   useEffect(() => {
     if (!expanded || !onPreviewChange) return;
@@ -2787,6 +2804,20 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
     });
   }
 
+  function selectWorkspaceView(view) {
+    setWorkspaceView(view);
+    if (view === "mosaic") {
+      setInlineVideoActive(false);
+      resetSnapshotZoom();
+    }
+  }
+
+  function selectMosaicEvent(event) {
+    setSelectedPreview(event);
+    setInlineVideoActive(false);
+    setWorkspaceView("focus");
+  }
+
   return (
     <article
       className={`incident-card ${hasDetectedObjects(incident) ? "has-objects" : ""} ${expanded ? "expanded" : ""} ${selected ? "selected" : ""}`}
@@ -2799,58 +2830,97 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
     >
       <div
         ref={previewRef}
-        className={`incident-preview ${desktopWorkspace && expanded ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
-        onClick={openPreview}
+        className={`incident-preview ${activeWorkspaceView === "mosaic" ? "mosaic-view" : ""} ${desktopWorkspace && expanded && activeWorkspaceView === "focus" ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
+        onClick={activeWorkspaceView === "focus" ? openPreview : (event) => event.stopPropagation()}
         onDoubleClick={(pointerEvent) => {
           if (!desktopWorkspace || !expanded) return;
           pointerEvent.preventDefault();
           pointerEvent.stopPropagation();
           resetSnapshotZoom();
         }}
-        onWheel={onPreviewWheel}
-        onPointerDown={onPreviewPointerDown}
-        onPointerMove={onPreviewPointerMove}
-        onPointerUp={onPreviewPointerUp}
-        onPointerCancel={onPreviewPointerUp}
-        aria-label={expanded ? "Play selected event video" : "Expand incident"}
-        title={desktopWorkspace && expanded ? (snapshotZoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll to zoom. Click to play event video.") : undefined}
+        onWheel={activeWorkspaceView === "focus" ? onPreviewWheel : undefined}
+        onPointerDown={activeWorkspaceView === "focus" ? onPreviewPointerDown : undefined}
+        onPointerMove={activeWorkspaceView === "focus" ? onPreviewPointerMove : undefined}
+        onPointerUp={activeWorkspaceView === "focus" ? onPreviewPointerUp : undefined}
+        onPointerCancel={activeWorkspaceView === "focus" ? onPreviewPointerUp : undefined}
+        aria-label={activeWorkspaceView === "mosaic" ? "Incident event mosaic" : expanded ? "Play selected event video" : "Expand incident"}
+        title={desktopWorkspace && expanded && activeWorkspaceView === "focus" ? (snapshotZoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll to zoom. Click to play event video.") : undefined}
       >
-        <SnapshotImage
-          event={preview}
-          alt="incident snapshot"
-          layerStyle={desktopWorkspace && expanded ? { transform: `translate3d(${snapshotZoom.x}px, ${snapshotZoom.y}px, 0) scale(${snapshotZoom.scale})` } : null}
-          showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
-          showTracking={false}
-          incidentEligibleOnly={!expanded}
-          thumbnail={!desktopWorkspace || !expanded}
-          onImageSize={expanded && onImageSize ? (size) => onImageSize({
-            ...size,
-            eventId: Number(preview.representative_event_id || preview.id),
-          }) : undefined}
-        >
-          {!desktopWorkspace || !expanded ? (
-            <div className="incident-snapshot-hud">
-              <div className="incident-snapshot-main">
-                <strong>{incident.camera_id}</strong>
-                <time>{expanded ? previewTimeText : timeText}</time>
+        {activeWorkspaceView === "mosaic" ? (
+          <div className={`incident-mosaic incident-mosaic-${mosaic.items.length}`} role="group" aria-label={`Events ${mosaic.page * 6 + 1} through ${mosaic.page * 6 + mosaic.items.length} of ${mosaicEvents.length}`}>
+            {mosaic.items.map((event, index) => {
+              const eventLabels = incidentLabels(event);
+              const eventTrigger = incidentTriggerLabel(event);
+              return (
+                <button
+                  type="button"
+                  className="incident-mosaic-tile"
+                  key={`${event.id || "event"}-${index}`}
+                  onClick={(clickEvent) => { clickEvent.stopPropagation(); selectMosaicEvent(event); }}
+                  aria-label={`Focus event at ${formatTimeOnly(event.created_at || incident.created_at, timeZone)}`}
+                >
+                  <SnapshotImage event={event} alt="incident event snapshot" className="incident-mosaic-snapshot" progressive thumbnail allowObjectFocus={false} showAnnotations showTracking={false}>
+                    <div className="incident-mosaic-hud">
+                      <time>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</time>
+                      <div className="pill-row compact"><IncidentObjectBadges labels={eventLabels} /></div>
+                      <span className={`incident-trigger-source trigger-${eventTrigger.toLowerCase()}`}>{eventTrigger}</span>
+                    </div>
+                  </SnapshotImage>
+                </button>
+              );
+            })}
+            {mosaic.pageCount > 1 ? (
+              <div className="incident-mosaic-pager" onClick={(event) => event.stopPropagation()}>
+                <button type="button" onClick={() => setMosaicPageIndex((page) => Math.max(0, page - 1))} disabled={mosaic.page === 0} aria-label="Previous mosaic events"><ChevronLeft size={15} /></button>
+                <span>{mosaic.page + 1} / {mosaic.pageCount}</span>
+                <button type="button" onClick={() => setMosaicPageIndex((page) => Math.min(mosaic.pageCount - 1, page + 1))} disabled={mosaic.page >= mosaic.pageCount - 1} aria-label="Next mosaic events"><ChevronRight size={15} /></button>
               </div>
-              <div className="pill-row compact incident-labels">
-                <IncidentObjectBadges labels={labels} />
+            ) : null}
+          </div>
+        ) : (
+          <SnapshotImage
+            event={preview}
+            alt="incident snapshot"
+            layerStyle={desktopWorkspace && expanded ? { transform: `translate3d(${snapshotZoom.x}px, ${snapshotZoom.y}px, 0) scale(${snapshotZoom.scale})` } : null}
+            showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
+            showTracking={false}
+            incidentEligibleOnly={!expanded}
+            thumbnail={!desktopWorkspace || !expanded}
+            onImageSize={expanded && onImageSize ? (size) => onImageSize({
+              ...size,
+              eventId: Number(preview.representative_event_id || preview.id),
+            }) : undefined}
+          >
+            {!desktopWorkspace || !expanded ? (
+              <div className="incident-snapshot-hud">
+                <div className="incident-snapshot-main">
+                  <strong>{incident.camera_id}</strong>
+                  <time>{expanded ? previewTimeText : timeText}</time>
+                </div>
+                <div className="pill-row compact incident-labels">
+                  <IncidentObjectBadges labels={labels} />
+                </div>
               </div>
-            </div>
-          ) : null}
-          <IncidentClipLayer
-            event={incident}
-            trackingEvent={trackingPreview}
-            active={expanded && inlineVideoActive}
-            analysisMode={analysisMode}
-            onAnalysisStats={onAnalysisStats}
-            onEnded={() => setInlineVideoActive(false)}
-          />
-          {desktopWorkspace
-            ? (!expanded ? <span className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} aria-label={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`}>{triggerLabel}</span> : null)
-            : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
-        </SnapshotImage>
+            ) : null}
+            <IncidentClipLayer
+              event={incident}
+              trackingEvent={trackingPreview}
+              active={expanded && inlineVideoActive}
+              analysisMode={analysisMode}
+              onAnalysisStats={onAnalysisStats}
+              onEnded={() => setInlineVideoActive(false)}
+            />
+            {desktopWorkspace
+              ? (!expanded ? <span className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} aria-label={`${triggerTitle}. ${countText}`} title={`${triggerTitle} · ${countText}`}>{triggerLabel}</span> : null)
+              : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
+          </SnapshotImage>
+        )}
+        {canShowMosaic ? (
+          <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
+            <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
+            <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button>
+          </div>
+        ) : null}
       </div>
       {expanded && showSubEvents ? (
         <div className="incident-meta">
@@ -2967,8 +3037,8 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
   const objectTracks = incidentTracking?.tracks || [];
   const faces = faceEvent?.faces || [];
-  const zones = incidentZones(incident);
-  const eventId = Number(incident.representative_event_id || incident.id);
+  const zones = incidentZones(inspectedEvent);
+  const eventId = Number(inspectedEvent.representative_event_id || inspectedEvent.id);
   const before = Number(appConfig?.event_clip_before_seconds ?? 5);
   const after = Number(appConfig?.event_clip_after_seconds ?? 5);
   const window = incidentClipWindow(incident, before, after);
@@ -2977,7 +3047,7 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
   return (
     <aside className="incident-inspector">
       <div className="incident-inspector-head">
-        <div><strong>{incident.camera_id}</strong><time>{formatDateTime(incident.created_at, timeZone)}</time></div>
+        <div><strong>{incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
       </div>
       <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
       <section className="incident-replay-analysis">
@@ -3033,7 +3103,7 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
         <h3>Incident</h3>
         <dl>
           <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
-          <div><dt>Trigger</dt><dd>{incidentTriggerLabel(incident)}</dd></div>
+          <div><dt>Selected trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
           <div><dt>Additional motion</dt><dd>{incident.motion_observation_count || incident.motion_observations?.length || 0}</dd></div>
           <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
           <div><dt>Start</dt><dd>{formatTimeOnly(incident.start_at || incident.created_at, timeZone)}</dd></div>
@@ -3043,7 +3113,7 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
       </section>
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
-        {incident.snapshot_path && eventSnapshotDownloadUrl(incident) ? <a href={eventSnapshotDownloadUrl(incident)}><Download size={15} /> Snapshot</a> : null}
+        {inspectedEvent.snapshot_path && eventSnapshotDownloadUrl(inspectedEvent) ? <a href={eventSnapshotDownloadUrl(inspectedEvent)}><Download size={15} /> Snapshot</a> : null}
       </div>
     </aside>
   );
