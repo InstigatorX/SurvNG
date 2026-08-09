@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from ..config import CameraConfig
+from ..face_candidates import FaceCandidate, FaceCandidateSample, collect_face_candidates
 from ..ffmpeg_hw import recorded_frame_hw_args
 from ..visual_quality import VisualQuality, image_quality
 from ..zones import apply_detection_zones, detection_threshold
@@ -62,6 +63,7 @@ class RecordedDetectionResult:
     recording_path: str
     timings_ms: dict[str, float]
     refinement_pending: bool = False
+    face_candidates: tuple[FaceCandidate, ...] = ()
 
     def __iter__(self):
         # Preserve the historical three-value provider contract for callers
@@ -784,6 +786,7 @@ class RecordedMotionObjectDetector:
                             refinement_pending=bool(
                                 refinement_pending and representative_needs_refinement
                             ),
+                            face_candidates=self._face_candidates(samples),
                         )
                 if all(offset in samples_by_offset for offset in stage_offsets):
                     break
@@ -824,6 +827,7 @@ class RecordedMotionObjectDetector:
                 timing,
                 workflow_started,
                 refinement_pending=refinement_pending,
+                face_candidates=self._face_candidates(samples),
             )
 
         fallback = self.live_frame_provider()
@@ -835,6 +839,9 @@ class RecordedMotionObjectDetector:
                 timing,
                 workflow_started,
                 refinement_pending=refinement_pending,
+                face_candidates=collect_face_candidates((
+                    FaceCandidateSample(0.0, fallback, tuple(objects)),
+                )),
             )
         objects = self._detect_objects(fallback, timing=timing)
         if objects:
@@ -859,6 +866,19 @@ class RecordedMotionObjectDetector:
         )
 
     @staticmethod
+    def _face_candidates(
+        samples: list[_RecordedDetectionSample],
+    ) -> tuple[FaceCandidate, ...]:
+        return collect_face_candidates(
+            FaceCandidateSample(
+                offset_seconds=sample.offset,
+                frame=sample.frame,
+                objects=tuple(sample.objects),
+            )
+            for sample in samples
+        )
+
+    @staticmethod
     def _result(
         frame: Frame | None,
         objects: list[dict[str, Any]],
@@ -867,6 +887,7 @@ class RecordedMotionObjectDetector:
         workflow_started: float,
         *,
         refinement_pending: bool,
+        face_candidates: tuple[FaceCandidate, ...] = (),
     ) -> RecordedDetectionResult:
         normalized = {key: round(max(0.0, value), 3) for key, value in timing.items()}
         normalized["workflow_ms"] = round(
@@ -879,6 +900,7 @@ class RecordedMotionObjectDetector:
             recording_path=recording_path,
             timings_ms=normalized,
             refinement_pending=refinement_pending,
+            face_candidates=face_candidates,
         )
 
     def _detect_objects(
