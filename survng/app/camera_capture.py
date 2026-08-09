@@ -178,6 +178,124 @@ class SourceStartResult:
     started: bool
 
 
+class LatestFrameObserver:
+    """Run one potentially slow observer behind a latest-only mailbox."""
+
+    def __init__(
+        self,
+        *,
+        camera_id: str,
+        observer: Callable[[CapturedFrame], None],
+        on_result: Callable[[str, float, float, BaseException | None], None],
+        monotonic_clock: Callable[[], float],
+    ) -> None:
+        self.camera_id = camera_id
+        self._observer = observer
+        self._on_result = on_result
+        self._monotonic_clock = monotonic_clock
+        self._condition = threading.Condition()
+        self._stop = False
+        self._pending: CapturedFrame | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        with self._condition:
+            if self._thread is not None and self._thread.is_alive():
+                if self._stop:
+                    raise RuntimeError(
+                        f"capture observer is still stopping for {self.camera_id}"
+                    )
+                return
+            self._stop = False
+            self._pending = None
+            thread = threading.Thread(
+                target=self._run,
+                name=f"camera-{self.camera_id}-observer",
+                daemon=False,
+            )
+            self._thread = thread
+            thread.start()
+
+    def submit(self, frame: CapturedFrame) -> tuple[bool, bool]:
+        with self._condition:
+            if self._stop or self._thread is None or not self._thread.is_alive():
+                return False, False
+            replaced = self._pending is not None
+            self._pending = frame
+            self._condition.notify()
+            return True, replaced
+
+    def request_stop(self) -> None:
+        with self._condition:
+            self._stop = True
+            self._pending = None
+            self._condition.notify_all()
+
+    def wait_stopped(self, timeout: float) -> bool:
+        with self._condition:
+            thread = self._thread
+        if thread is None:
+            return True
+        if thread is threading.current_thread():
+            return False
+        thread.join(timeout=max(0.0, timeout))
+        stopped = not thread.is_alive()
+        if stopped:
+            with self._condition:
+                if self._thread is thread:
+                    self._thread = None
+        return stopped
+
+    def running(self) -> bool:
+        with self._condition:
+            return self._thread is not None and self._thread.is_alive()
+
+    def pending(self) -> bool:
+        with self._condition:
+            return self._pending is not None
+
+    def thread(self) -> threading.Thread | None:
+        with self._condition:
+            return self._thread
+
+    def close(self) -> None:
+        if self.running():
+            raise RuntimeError(
+                f"capture observer is still running for {self.camera_id}"
+            )
+
+    def _run(self) -> None:
+        try:
+            while True:
+                with self._condition:
+                    while self._pending is None and not self._stop:
+                        self._condition.wait()
+                    if self._stop:
+                        return
+                    frame = self._pending
+                    self._pending = None
+                if frame is None:
+                    continue
+                started = self._monotonic_clock()
+                wait_ms = max(
+                    0.0,
+                    (started - frame.captured_at_monotonic) * 1000.0,
+                )
+                error: BaseException | None = None
+                try:
+                    self._observer(frame)
+                except BaseException as exc:
+                    error = exc
+                duration_ms = max(
+                    0.0,
+                    (self._monotonic_clock() - started) * 1000.0,
+                )
+                self._on_result(frame.source, wait_ms, duration_ms, error)
+        finally:
+            with self._condition:
+                self._pending = None
+
+
 class CameraCaptureService:
     """Own both capture sources, their latest frames, and native lifecycle."""
 
@@ -202,7 +320,6 @@ class CameraCaptureService:
         self.camera_id = camera_id
         self._source_url = source_url
         self.backend = backend
-        self._frame_observer = frame_observer
         self._source_started_observer = source_started_observer
         self._source_stopped_observer = source_stopped_observer
         self._wall_clock = wall_clock
@@ -238,6 +355,20 @@ class CameraCaptureService:
             "live": deque(maxlen=600),
             "main": deque(maxlen=600),
         }
+        self._observer_waits_ms: dict[str, deque[float]] = {
+            "live": deque(maxlen=600),
+            "main": deque(maxlen=600),
+        }
+        self._observer_dispatch = (
+            LatestFrameObserver(
+                camera_id=camera_id,
+                observer=frame_observer,
+                on_result=self._record_observer_result,
+                monotonic_clock=monotonic_clock,
+            )
+            if frame_observer is not None
+            else None
+        )
         self._stats: dict[str, dict[str, int | float]] = {
             source: {
                 "frames_received": 0,
@@ -254,6 +385,11 @@ class CameraCaptureService:
                 "frame_transfer_count": 0,
                 "frame_transfer_bytes": 0,
                 "observer_calls": 0,
+                "observer_submissions": 0,
+                "observer_frames_replaced": 0,
+                "observer_wait_total_ms": 0.0,
+                "observer_wait_last_ms": 0.0,
+                "observer_wait_max_ms": 0.0,
                 "observer_total_ms": 0.0,
                 "observer_last_ms": 0.0,
                 "observer_max_ms": 0.0,
@@ -282,7 +418,21 @@ class CameraCaptureService:
                         f"cannot restart capture for {self.camera_id} while "
                         f"sources are stopping: {', '.join(sorted(lingering))}"
                     )
+                if (
+                    self._observer_dispatch is not None
+                    and self._observer_dispatch.running()
+                ):
+                    raise RuntimeError(
+                        f"cannot restart capture for {self.camera_id} while "
+                        "observer is stopping"
+                    )
             self._stop.clear()
+        if self._observer_dispatch is not None:
+            try:
+                self._observer_dispatch.start()
+            except BaseException:
+                self._stop.set()
+                raise
         return self.ensure_source("live").running
 
     def ensure_source(self, source: str) -> SourceStartResult:
@@ -361,6 +511,8 @@ class CameraCaptureService:
 
     def request_stop(self) -> None:
         self._stop.set()
+        if self._observer_dispatch is not None:
+            self._observer_dispatch.request_stop()
         with self._lock:
             stops = tuple(
                 stop_event
@@ -388,6 +540,15 @@ class CameraCaptureService:
                 label = f"{source}#{suffix}"
                 suffix += 1
             alive[label] = thread
+        if (
+            self._observer_dispatch is not None
+            and not self._observer_dispatch.wait_stopped(
+                max(0.0, deadline - self._monotonic_clock())
+            )
+        ):
+            observer_thread = self._observer_dispatch.thread()
+            if observer_thread is not None:
+                alive["observer"] = observer_thread
         with self._lock:
             for thread, (source, stop_event) in tuple(self._all_threads.items()):
                 if thread.is_alive():
@@ -420,6 +581,8 @@ class CameraCaptureService:
                 f"capture sources still running for {self.camera_id}: "
                 f"{', '.join(sorted(alive))}"
             )
+        if self._observer_dispatch is not None:
+            self._observer_dispatch.close()
 
     def status(self) -> dict[str, object]:
         now = self._monotonic_clock()
@@ -450,6 +613,20 @@ class CameraCaptureService:
                     durations,
                     0.99,
                 )
+                observer_waits = sorted(self._observer_waits_ms[source])
+                capture_stats[source]["observer_wait_average_ms"] = round(
+                    float(capture_stats[source]["observer_wait_total_ms"])
+                    / max(1, observer_calls),
+                    3,
+                )
+                capture_stats[source]["observer_wait_p95_ms"] = self._percentile(
+                    observer_waits,
+                    0.95,
+                )
+                capture_stats[source]["observer_wait_p99_ms"] = self._percentile(
+                    observer_waits,
+                    0.99,
+                )
             live = self._frames.get("live")
             main = self._frames.get("main")
             return {
@@ -465,6 +642,16 @@ class CameraCaptureService:
                 ),
                 "last_error": self._last_live_error,
                 "main_error": self._errors.get("main", ""),
+                "observer_running": (
+                    self._observer_dispatch.running()
+                    if self._observer_dispatch is not None
+                    else False
+                ),
+                "observer_pending": (
+                    self._observer_dispatch.pending()
+                    if self._observer_dispatch is not None
+                    else False
+                ),
                 "stream_dimensions": {
                     source: dict(dimensions)
                     for source, dimensions in self._dimensions.items()
@@ -682,48 +869,51 @@ class CameraCaptureService:
             self._stats[source]["frames_received"] += 1
             self._stats[source]["frame_transfer_count"] += 1
             self._stats[source]["frame_transfer_bytes"] += int(stored_image.nbytes)
-        if self._frame_observer is not None:
-            observer_started = self._monotonic_clock()
-            try:
-                self._frame_observer(CapturedFrame(
-                    source=frame.source,
-                    # Share the capture service's stable stored-frame ownership.
-                    # The observer may retain this array after the callback;
-                    # subsequent frames replace the container, not its image.
-                    image=frame.image,
-                    captured_at_epoch=frame.captured_at_epoch,
-                    captured_at_monotonic=frame.captured_at_monotonic,
-                    captured_at_iso=frame.captured_at_iso,
-                    width=frame.width,
-                    height=frame.height,
-                    sequence=frame.sequence,
-                ))
-            except Exception:
-                failures = self._increment(source, "observer_errors")
-                if failures == 1 or failures % 100 == 0:
-                    LOGGER.exception(
-                        "capture frame observer failed for %s/%s "
-                        "(failures=%s)",
-                    self.camera_id,
-                    source,
-                    failures,
-                )
-            finally:
-                observer_ms = max(
-                    0.0,
-                    (self._monotonic_clock() - observer_started) * 1000.0,
-                )
+        if self._observer_dispatch is not None:
+            accepted, replaced = self._observer_dispatch.submit(frame)
+            if accepted:
                 with self._lock:
-                    stats = self._stats[source]
-                    stats["observer_calls"] += 1
-                    stats["observer_total_ms"] += observer_ms
-                    stats["observer_last_ms"] = observer_ms
-                    stats["observer_max_ms"] = max(
-                        float(stats["observer_max_ms"]),
-                        observer_ms,
-                    )
-                    self._observer_durations_ms[source].append(observer_ms)
+                    self._stats[source]["observer_submissions"] += 1
+                    if replaced:
+                        self._stats[source]["observer_frames_replaced"] += 1
         return True
+
+    def _record_observer_result(
+        self,
+        source: str,
+        wait_ms: float,
+        observer_ms: float,
+        error: BaseException | None,
+    ) -> None:
+        failures = 0
+        with self._lock:
+            stats = self._stats[source]
+            stats["observer_calls"] += 1
+            stats["observer_wait_total_ms"] += wait_ms
+            stats["observer_wait_last_ms"] = wait_ms
+            stats["observer_wait_max_ms"] = max(
+                float(stats["observer_wait_max_ms"]),
+                wait_ms,
+            )
+            stats["observer_total_ms"] += observer_ms
+            stats["observer_last_ms"] = observer_ms
+            stats["observer_max_ms"] = max(
+                float(stats["observer_max_ms"]),
+                observer_ms,
+            )
+            self._observer_durations_ms[source].append(observer_ms)
+            self._observer_waits_ms[source].append(wait_ms)
+            if error is not None:
+                stats["observer_errors"] += 1
+                failures = int(stats["observer_errors"])
+        if error is not None and (failures == 1 or failures % 100 == 0):
+            LOGGER.error(
+                "capture frame observer failed for %s/%s (failures=%s): %s",
+                self.camera_id,
+                source,
+                failures,
+                redact_secret_text(error),
+            )
 
     @staticmethod
     def _percentile(values: list[float], percentile: float) -> float:

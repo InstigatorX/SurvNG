@@ -271,7 +271,7 @@ def test_frame_observer_failure_does_not_reconnect_healthy_source() -> None:
     service = _service(backend, frame_observer=fail)
     assert service.start()
     _wait_until(
-        lambda: service.status()["capture_stats"]["live"]["observer_errors"] >= 2
+        lambda: service.status()["capture_stats"]["live"]["observer_errors"] >= 1
     )
     status = service.status()
     service.request_stop()
@@ -283,7 +283,8 @@ def test_frame_observer_failure_does_not_reconnect_healthy_source() -> None:
     assert status["capture_stats"]["live"]["frame_copy_bytes"] == 0
     assert status["capture_stats"]["live"]["frame_transfer_count"] >= 2
     assert status["capture_stats"]["live"]["frame_transfer_bytes"] >= 1200
-    assert status["capture_stats"]["live"]["observer_calls"] >= 2
+    assert status["capture_stats"]["live"]["observer_calls"] >= 1
+    assert status["capture_stats"]["live"]["observer_submissions"] >= 2
     assert status["capture_stats"]["live"]["observer_p99_ms"] >= 0.0
 
 
@@ -351,10 +352,15 @@ def test_frame_observer_runs_without_capture_lock_held() -> None:
     service = _service(frame_observer=observe)
     with service._lock:
         service._stop.clear()
+    assert service._observer_dispatch is not None
+    service._observer_dispatch.start()
 
     assert service._publish_frame(
         "live", np.ones((10, 20, 3), dtype=np.uint8)
     )
+    _wait_until(lambda: bool(observed_status))
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
     assert observed_status
 
 
@@ -363,9 +369,12 @@ def test_frame_observer_receives_stable_stored_frame_ownership() -> None:
     service = _service(frame_observer=observed.append)
     with service._lock:
         service._stop.clear()
+    assert service._observer_dispatch is not None
+    service._observer_dispatch.start()
     source = np.ones((10, 20, 3), dtype=np.uint8)
 
     assert service._publish_frame("live", source)
+    _wait_until(lambda: len(observed) == 1)
 
     assert len(observed) == 1
     assert int(observed[0].image[0, 0, 0]) == 1
@@ -380,6 +389,62 @@ def test_frame_observer_receives_stable_stored_frame_ownership() -> None:
     assert independent.image.flags.writeable
     independent.image.fill(7)
     assert int(observed[0].image[0, 0, 0]) == 1
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
+
+
+def test_blocked_observer_never_holds_capture_source_thread_open() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def observe(_frame: CapturedFrame) -> None:
+        entered.set()
+        assert release.wait(1.0)
+
+    backend = FakeBackend([[np.ones((10, 20, 3), dtype=np.uint8)]])
+    service = _service(backend, frame_observer=observe)
+    assert service.start()
+    assert entered.wait(1.0)
+
+    service.request_stop()
+    alive = service.wait_stopped(0.02)
+
+    assert set(alive) == {"observer"}
+    assert service.status()["live_running"] is False
+
+    release.set()
+    assert service.wait_stopped(1.0) == {}
+    service.close()
+
+
+def test_observer_mailbox_replaces_backlog_with_latest_frame() -> None:
+    observed: list[int] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def observe(frame: CapturedFrame) -> None:
+        observed.append(frame.sequence)
+        if len(observed) == 1:
+            entered.set()
+            assert release.wait(1.0)
+
+    service = _service(frame_observer=observe)
+    with service._lock:
+        service._stop.clear()
+    assert service._observer_dispatch is not None
+    service._observer_dispatch.start()
+
+    assert service._publish_frame("live", np.full((2, 2, 3), 1, dtype=np.uint8))
+    assert entered.wait(1.0)
+    assert service._publish_frame("live", np.full((2, 2, 3), 2, dtype=np.uint8))
+    assert service._publish_frame("live", np.full((2, 2, 3), 3, dtype=np.uint8))
+    assert service.status()["capture_stats"]["live"]["observer_frames_replaced"] == 1
+
+    release.set()
+    _wait_until(lambda: len(observed) == 2)
+    assert observed == [1, 3]
+    service.request_stop()
+    assert service.wait_stopped(1.0) == {}
 
 
 def test_repeated_start_stop_leaves_no_capture_generations() -> None:

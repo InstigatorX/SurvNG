@@ -63,7 +63,7 @@ def camera_performance_health(camera: dict[str, Any]) -> dict[str, Any]:
         float(event_runtime.get("queue_high_water") or 0) / queue_capacity * 100.0,
     )
     definitions = (
-        ("capture_observer_p95_ms", "Capture handoff latency", float(live.get("observer_p95_ms") or 0.0), "ms", 5.0, 15.0),
+        ("capture_observer_p95_ms", "Capture handoff latency", float(live.get("observer_wait_p95_ms") or live.get("observer_p95_ms") or 0.0), "ms", 5.0, 15.0),
         ("capture_to_analysis_p95_ms", "Capture-to-analysis latency", float(analysis.get("capture_to_analysis_p95_ms") or 0.0), "ms", max(250.0, sample_interval_ms * 1.5), max(750.0, sample_interval_ms * 3.0)),
         ("analysis_wait_p95_ms", "EMA capacity wait", float(motion.get("analysis_wait_ms_p95") or 0.0), "ms", max(250.0, sample_interval_ms * 2.0), max(1000.0, sample_interval_ms * 5.0)),
         ("mailbox_replacement_percent", "Stale-frame replacement rate", replacement_percent, "%", 35.0, 70.0),
