@@ -45,6 +45,8 @@ class CameraMotionState:
         self.camera_state = camera_state
         self._event_callback = event_callback
         self._lock = threading.Lock()
+        self._ingress_idle = threading.Condition(camera_state.lock)
+        self._ingress_by_generation: dict[int, int] = {}
         self._last_motion_at = ""
         self._analysis_wait_samples_ms: deque[float] = deque(maxlen=600)
         self._stats: dict[str, Any] = {
@@ -109,6 +111,44 @@ class CameraMotionState:
     def accepting_events(self) -> bool:
         with self.camera_state.lock:
             return self.camera_state.accepting_motion_events
+
+    def begin_ingress(self) -> int | None:
+        """Atomically admit one callback into the active camera generation."""
+        with self._ingress_idle:
+            if (
+                not self.camera_state.accepting_motion_events
+                or not self.camera_state.detection_enabled
+            ):
+                return None
+            generation = self.camera_state.generation
+            self._ingress_by_generation[generation] = (
+                self._ingress_by_generation.get(generation, 0) + 1
+            )
+            return generation
+
+    def end_ingress(self, generation: int) -> None:
+        with self._ingress_idle:
+            remaining = self._ingress_by_generation.get(generation, 0) - 1
+            if remaining > 0:
+                self._ingress_by_generation[generation] = remaining
+            else:
+                self._ingress_by_generation.pop(generation, None)
+            if not self._ingress_by_generation:
+                self._ingress_idle.notify_all()
+
+    def wait_ingress_idle(self, timeout: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._ingress_idle:
+            while self._ingress_by_generation:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._ingress_idle.wait(remaining)
+            return True
+
+    def ingress_in_flight(self) -> int:
+        with self._ingress_idle:
+            return sum(self._ingress_by_generation.values())
 
     def active_incident_event_id(self) -> int | None:
         with self.camera_state.lock:
@@ -330,7 +370,18 @@ class MotionRuntimeService:
                 )),
                 failures,
             )
-            workers_stopped = decision_stopped and analysis_stopped and refinement_stopped
+            ingress_stopped = self._attempt_result(
+                lambda: self.ingress.wait_idle(
+                    max(0.0, deadline - time.monotonic())
+                ),
+                failures,
+            )
+            workers_stopped = (
+                decision_stopped
+                and analysis_stopped
+                and refinement_stopped
+                and ingress_stopped
+            )
             if workers_stopped and not failures:
                 self._attempt(self.analysis.reset, failures)
                 self._attempt(self.evidence.clear, failures)
@@ -357,6 +408,8 @@ class MotionRuntimeService:
             workers.append("motion analysis")
         if self.incidents.running():
             workers.append("motion refinement")
+        if self.ingress.in_flight():
+            workers.append("motion ingress")
         return workers
 
     def close(self) -> None:
@@ -410,6 +463,7 @@ class MotionRuntimeService:
             "active_workers": self.active_workers(),
             "event_worker_running": self.decisions.running(),
             "event_queue_depth": self.events.queue.qsize(),
+            "event_ingress_in_flight": self.ingress.in_flight(),
             "retry_queue_depth": self.events.retry_queue_depth(),
             "events": self.events.runtime_status(),
             "generation_clean": self._generation_clean,

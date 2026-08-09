@@ -23,8 +23,10 @@ class MotionIngressQualification(Protocol):
 
 
 class MotionIngressState(Protocol):
-    def accepting_events(self) -> bool: ...
-    def detection_enabled(self) -> bool: ...
+    def begin_ingress(self) -> int | None: ...
+    def end_ingress(self, generation: int) -> None: ...
+    def wait_ingress_idle(self, timeout: float) -> bool: ...
+    def ingress_in_flight(self) -> int: ...
     def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
     def set_last_motion_at(self, value: str) -> None: ...
     def increment_stat(self, name: str, amount: int = 1) -> None: ...
@@ -54,41 +56,52 @@ class MotionEventIngressService:
         message: str = "",
         event_at: datetime | None = None,
     ) -> None:
-        if not self.state.accepting_events() or not self.state.detection_enabled():
+        generation = self.state.begin_ingress()
+        if generation is None:
             return
-        received_at = self.epoch_now()
-        receipt_time = datetime.fromtimestamp(received_at, timezone.utc)
-        self.state.set_last_motion_at(receipt_time.isoformat())
-        normalized_event_at = self._utc(event_at or receipt_time)
-        normalized_topic = topic.lower()
-        manual = normalized_topic.startswith("manual")
+        try:
+            received_at = self.epoch_now()
+            receipt_time = datetime.fromtimestamp(received_at, timezone.utc)
+            self.state.set_last_motion_at(receipt_time.isoformat())
+            normalized_event_at = self._utc(event_at or receipt_time)
+            normalized_topic = topic.lower()
+            manual = normalized_topic.startswith("manual")
 
-        self.qualification.observe_event(
-            topic, message, normalized_event_at, received_at
-        )
-        if self.qualification.settings()[0] == "adaptive" and not manual:
-            # Camera notices remain diagnostic evidence in visual-trigger mode,
-            # but cannot create object-detection jobs.
-            return
-        if priority_motion_topic(topic):
-            self.events.remember_priority(received_at)
-        if not manual:
-            self.events.remember_camera_motion(received_at)
+            self.qualification.observe_event(
+                topic, message, normalized_event_at, received_at
+            )
+            if self.qualification.settings()[0] == "adaptive" and not manual:
+                # Camera notices remain diagnostic evidence in visual-trigger mode,
+                # but cannot create object-detection jobs.
+                return
+            if priority_motion_topic(topic):
+                self.events.remember_priority(received_at)
+            if not manual:
+                self.events.remember_camera_motion(received_at)
 
-        self.state.publish_event(
-            "motion",
-            MotionObserved(
-                camera_id=self.camera_id,
-                timestamp=normalized_event_at.isoformat(),
-                source="manual" if manual else "onvif",
-            ).to_payload(),
-        )
-        self.enqueue(MotionTrigger(
-            topic=topic,
-            message=message,
-            event_at=normalized_event_at,
-            received_at=received_at,
-        ))
+            self.state.publish_event(
+                "motion",
+                MotionObserved(
+                    camera_id=self.camera_id,
+                    timestamp=normalized_event_at.isoformat(),
+                    source="manual" if manual else "onvif",
+                ).to_payload(),
+            )
+            self.enqueue(MotionTrigger(
+                topic=topic,
+                message=message,
+                event_at=normalized_event_at,
+                received_at=received_at,
+            ))
+        finally:
+            self.state.end_ingress(generation)
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait until every callback admitted for this generation has returned."""
+        return self.state.wait_ingress_idle(timeout)
+
+    def in_flight(self) -> int:
+        return self.state.ingress_in_flight()
 
     def enqueue(
         self,

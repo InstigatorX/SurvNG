@@ -32,6 +32,8 @@ def _runtime() -> tuple[MotionRuntimeService, SimpleNamespace]:
     incidents.running.return_value = False
     incidents.wait_stopped.return_value = True
     ingress = Mock()
+    ingress.wait_idle.return_value = True
+    ingress.in_flight.return_value = 0
     qualification = Mock()
     evidence = Mock()
     pipelines = (("qualification", Mock()), ("fusion", Mock()))
@@ -106,6 +108,60 @@ def test_successful_stop_resets_owned_generation_state() -> None:
     owned.evidence.clear.assert_called_once_with()
     owned.qualification.reset_runtime.assert_called_once_with()
     owned.events.reset.assert_called_once_with()
+
+
+def test_stop_does_not_reset_generation_while_admitted_ingress_is_active() -> None:
+    runtime, owned = _runtime()
+    runtime.start(threading.Event())
+    ingress_entered = threading.Event()
+    release_ingress = threading.Event()
+    result: list[bool] = []
+
+    def wait_idle(_timeout: float) -> bool:
+        ingress_entered.set()
+        return release_ingress.wait(1.0)
+
+    owned.ingress.wait_idle.side_effect = wait_idle
+    waiter = threading.Thread(
+        target=lambda: result.append(runtime.wait_stopped(
+            analysis_timeout=1.0,
+            decision_timeout=1.0,
+        ))
+    )
+    waiter.start()
+    assert ingress_entered.wait(1.0)
+    owned.events.reset.assert_not_called()
+
+    release_ingress.set()
+    waiter.join(1.0)
+    assert not waiter.is_alive()
+    assert result == [True]
+    owned.events.reset.assert_called_once_with()
+
+
+def test_motion_state_admission_drains_the_generation_that_was_accepted() -> None:
+    camera_state = CameraRuntimeState(
+        enabled=True,
+        detection_enabled=True,
+        accepting_motion_events=True,
+        generation=7,
+    )
+    state = CameraMotionState(
+        camera_id="gate",
+        camera_state=camera_state,
+        event_callback=None,
+    )
+
+    generation = state.begin_ingress()
+    assert generation == 7
+    with camera_state.lock:
+        camera_state.accepting_motion_events = False
+        camera_state.generation = 8
+
+    assert not state.wait_ingress_idle(0.001)
+    state.end_ingress(generation)
+    assert state.wait_ingress_idle(0.1)
+    assert state.ingress_in_flight() == 0
 
 
 def test_stuck_worker_preserves_generation_state_for_diagnosis() -> None:

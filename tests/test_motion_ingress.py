@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
+
+import pytest
 
 from survng.app.motion_ingress import MotionEventIngressService
 
@@ -16,6 +19,11 @@ def _service(
     owned.events.enqueue.return_value = True
     owned.state.accepting_events.return_value = accepting
     owned.state.detection_enabled.return_value = detection_enabled
+    owned.state.begin_ingress.return_value = (
+        1 if accepting and detection_enabled else None
+    )
+    owned.state.wait_ingress_idle.return_value = True
+    owned.state.ingress_in_flight.return_value = 0
     owned.state.publish_event = owned.publish_event
     owned.state.set_last_motion_at = owned.set_last_motion_at
     owned.state.increment_stat = owned.increment_stat
@@ -62,6 +70,7 @@ def test_camera_notice_is_normalized_observed_published_and_enqueued() -> None:
     assert trigger.topic == "onvif/person"
     assert trigger.event_at == normalized
     assert trigger.received_at == 1_700_000_000.0
+    owned.state.end_ingress.assert_called_once_with(1)
 
 
 def test_adaptive_mode_retains_camera_evidence_without_queuing_detection() -> None:
@@ -98,6 +107,41 @@ def test_disabled_or_stopped_ingress_has_no_side_effects() -> None:
         owned.observe_event.assert_not_called()
         owned.events.enqueue.assert_not_called()
         owned.set_last_motion_at.assert_not_called()
+        owned.state.end_ingress.assert_not_called()
+
+
+def test_admitted_callback_is_counted_until_qualification_returns() -> None:
+    service, owned = _service()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def observe(*_args: object) -> None:
+        entered.set()
+        assert release.wait(1.0)
+
+    owned.qualification.observe_event.side_effect = observe
+    thread = threading.Thread(
+        target=service.handle,
+        args=("onvif/motion", "motion"),
+    )
+    thread.start()
+    assert entered.wait(1.0)
+    owned.state.end_ingress.assert_not_called()
+
+    release.set()
+    thread.join(1.0)
+    assert not thread.is_alive()
+    owned.state.end_ingress.assert_called_once_with(1)
+
+
+def test_failed_qualification_always_releases_ingress_admission() -> None:
+    service, owned = _service()
+    owned.qualification.observe_event.side_effect = RuntimeError("failed")
+
+    with pytest.raises(RuntimeError, match="failed"):
+        service.handle("onvif/motion", "motion")
+
+    owned.state.end_ingress.assert_called_once_with(1)
 
 
 def test_enqueue_reports_trigger_and_drop_stats_through_injected_counter() -> None:
