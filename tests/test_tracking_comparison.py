@@ -40,7 +40,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
 
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("ultralytics_deepocsort", ByteTrackObjectTracker)
+        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         runner = TrackingComparisonRunner(
             config=ObjectTrackingConfig(min_confirmations=1, excluded_labels=["face"]),
             detector=DetectorWithFace(),
@@ -58,7 +58,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
     def test_runs_both_engines_on_the_same_detections_and_reports_metrics(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("ultralytics_deepocsort", ByteTrackObjectTracker)
+        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         config = ObjectTrackingConfig(min_confirmations=1, sample_fps=2.0)
         runner = TrackingComparisonRunner(
             config=config,
@@ -88,7 +88,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
     def test_rejects_an_empty_or_unreadable_frame_sequence(self) -> None:
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("ultralytics_deepocsort", ByteTrackObjectTracker)
+        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         runner = TrackingComparisonRunner(
             config=ObjectTrackingConfig(),
             detector=Detector(),
@@ -110,7 +110,7 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
 
         registry = ObjectTrackerRegistry()
         registry.register("survng_hybrid", ByteTrackObjectTracker)
-        registry.register("ultralytics_deepocsort", ByteTrackObjectTracker)
+        registry.register("ultralytics_fasttrack", ByteTrackObjectTracker)
         runner = TrackingComparisonRunner(
             config=ObjectTrackingConfig(
                 reid_enabled=True,

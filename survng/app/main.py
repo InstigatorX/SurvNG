@@ -71,7 +71,7 @@ from .semantic_routes import (
     SemanticRouteDependencies,
     create_semantic_router,
 )
-from .object_tracking import ultralytics_deepocsort_dependency_status
+from .object_tracking import ultralytics_fasttrack_dependency_status
 from .operations_routes import OperationsRouteDependencies, create_operations_router
 from .tracking_comparison import TrackingComparisonRunner, sampled_video_frames
 from .system_telemetry import (
@@ -837,7 +837,7 @@ _detection_route_bundle = create_detection_router(
         ensure_event_clip=lambda *args, **kwargs: (
             _recording_media_runtime._ensure_event_clip(*args, **kwargs)
         ),
-        dependency_status=lambda: ultralytics_deepocsort_dependency_status(),
+        dependency_status=lambda: ultralytics_fasttrack_dependency_status(),
         comparison_runner=lambda *args, **kwargs: TrackingComparisonRunner(
             *args, **kwargs
         ),

@@ -20,6 +20,7 @@ from survng.app.object_tracking import (
     ObjectTrackingSession,
     _rescale_detection_boxes,
     ultralytics_deepocsort_dependency_status,
+    ultralytics_fasttrack_dependency_status,
 )
 
 
@@ -72,6 +73,14 @@ class UltralyticsDependencyStatusTest(unittest.TestCase):
 
         self.assertFalse(status["available"])
         self.assertIn("does not include Deep OC-SORT", status["reason"])
+
+    @patch("survng.app.object_tracking.importlib.util.find_spec", return_value=object())
+    @patch("survng.app.object_tracking.version", return_value="8.4.115")
+    def test_fasttrack_dependency_is_available(self, _version, _find_spec) -> None:
+        status = ultralytics_fasttrack_dependency_status()
+
+        self.assertTrue(status["available"])
+        self.assertEqual(status["reason"], "")
 
 
 class ByteTrackObjectTrackerTest(unittest.TestCase):

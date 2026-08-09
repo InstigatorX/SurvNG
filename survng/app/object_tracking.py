@@ -277,6 +277,13 @@ def ultralytics_deepocsort_dependency_status() -> dict[str, Any]:
     )
 
 
+def ultralytics_fasttrack_dependency_status() -> dict[str, Any]:
+    return _ultralytics_tracking_dependency_status(
+        tracker_name="FastTrack",
+        module_name="ultralytics.trackers.fast_tracker",
+    )
+
+
 def _build_ultralytics_deepocsort(
     config: ObjectTrackingConfig,
     high_confidence_threshold: float,
@@ -284,6 +291,15 @@ def _build_ultralytics_deepocsort(
     from .ultralytics_tracking import UltralyticsDeepOCSortObjectTracker
 
     return UltralyticsDeepOCSortObjectTracker(config, high_confidence_threshold)
+
+
+def _build_ultralytics_fasttrack(
+    config: ObjectTrackingConfig,
+    high_confidence_threshold: float,
+) -> ObjectTrackerBackend:
+    from .ultralytics_tracking import UltralyticsFastTrackObjectTracker
+
+    return UltralyticsFastTrackObjectTracker(config, high_confidence_threshold)
 
 
 class ObjectTrackerRegistry:
@@ -967,10 +983,11 @@ def build_builtin_object_tracker_registry() -> ObjectTrackerRegistry:
     # Compatibility alias for configurations created before the tracker gained
     # SurvNG-specific geometry and appearance association.
     registry.register("bytetrack", ByteTrackObjectTracker)
-    # Deep OC-SORT is registered for the bounded offline Compare workflow.
+    # Ultralytics alternatives are registered for bounded offline comparisons.
     # User configuration normalizes optional upstream trackers back to Hybrid,
     # so production sessions cannot select this implementation.
     registry.register("ultralytics_deepocsort", _build_ultralytics_deepocsort)
+    registry.register("ultralytics_fasttrack", _build_ultralytics_fasttrack)
     return registry
 
 

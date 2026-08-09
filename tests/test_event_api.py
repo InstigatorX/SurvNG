@@ -600,7 +600,7 @@ class EventApiSerializationTest(unittest.TestCase):
         limiter = SimpleNamespace(acquire=Mock(return_value=True), release=Mock())
         comparison = {
             "frames_processed": 4,
-            "engines": {"survng_hybrid": {}, "ultralytics_deepocsort": {}},
+            "engines": {"survng_hybrid": {}, "ultralytics_fasttrack": {}},
         }
         runner = SimpleNamespace(run=Mock(return_value=comparison))
 
@@ -608,7 +608,7 @@ class EventApiSerializationTest(unittest.TestCase):
             patch.object(main, "config", active_config),
             patch.object(main, "manager", active_manager),
             patch.object(main, "TRACKING_COMPARISON_LIMITER", limiter),
-            patch.object(main, "ultralytics_deepocsort_dependency_status", return_value={"available": True, "reason": ""}),
+            patch.object(main, "ultralytics_fasttrack_dependency_status", return_value={"available": True, "reason": ""}),
             patch.object(
                 main._recording_media_runtime,
                 "_ensure_event_clip",
@@ -671,13 +671,13 @@ class EventApiSerializationTest(unittest.TestCase):
             main.manager = replacement
             return {
                 "frames_processed": 1,
-                "engines": {"survng_hybrid": {}, "ultralytics_deepocsort": {}},
+                "engines": {"survng_hybrid": {}, "ultralytics_fasttrack": {}},
             }
 
         with (
             patch.object(main, "config", active_config),
             patch.object(main, "manager", active_manager),
-            patch.object(main, "ultralytics_deepocsort_dependency_status", return_value={"available": True, "reason": ""}),
+            patch.object(main, "ultralytics_fasttrack_dependency_status", return_value={"available": True, "reason": ""}),
             patch.object(
                 main._recording_media_runtime,
                 "_ensure_event_clip",
@@ -695,7 +695,7 @@ class EventApiSerializationTest(unittest.TestCase):
     def test_tracking_comparison_rejects_missing_optional_backend_without_work(self) -> None:
         with patch.object(
             main,
-            "ultralytics_deepocsort_dependency_status",
+            "ultralytics_fasttrack_dependency_status",
             return_value={"available": False, "reason": "not installed"},
         ):
             with self.assertRaises(HTTPException) as unavailable:

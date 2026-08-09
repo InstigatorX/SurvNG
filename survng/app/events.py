@@ -20,6 +20,7 @@ class EventStore:
         "survng_hybrid",
         "ultralytics_botsort",
         "ultralytics_deepocsort",
+        "ultralytics_fasttrack",
         "inconclusive",
     }
 

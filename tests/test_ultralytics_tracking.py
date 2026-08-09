@@ -14,7 +14,10 @@ ULTRALYTICS_AVAILABLE = (
 )
 
 if ULTRALYTICS_AVAILABLE:
-    from survng.app.ultralytics_tracking import UltralyticsDeepOCSortObjectTracker
+    from survng.app.ultralytics_tracking import (
+        UltralyticsDeepOCSortObjectTracker,
+        UltralyticsFastTrackObjectTracker,
+    )
 
 
 def detection(
@@ -86,6 +89,26 @@ class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
 
         native = tracker._tracker.tracked_stracks[0]
         np.testing.assert_allclose(native.curr_feat, np.asarray([0.6, 0.8], dtype=np.float32))
+
+    def test_mixed_reid_model_dimensions_are_padded_across_frames(self) -> None:
+        tracker = UltralyticsDeepOCSortObjectTracker(self.config(
+            reid_enabled=True,
+            reid_model_path="person-reid.xml",
+            vehicle_reid_enabled=True,
+            vehicle_reid_model_path="vehicle-reid.xml",
+        ), 0.7)
+        tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80), (1.0, 0.0)),
+        ], 10.0, confirm_new=True)
+
+        tracked = tracker.update([
+            detection("person", 0.9, (12, 10, 42, 80), (1.0, 0.0)),
+            detection("car", 0.9, (100, 10, 180, 80), (1.0, 0.0, 0.0, 0.0)),
+        ], 10.5)
+
+        self.assertEqual(tracker._feature_dimension, 4)
+        self.assertEqual(tracker._tracker.tracked_stracks[0].smooth_feat.size, 4)
+        self.assertIn("person", {item["label"] for item in tracked})
 
     def test_reid_can_recover_a_far_person_when_proximity_is_disabled(self) -> None:
         tracker = UltralyticsDeepOCSortObjectTracker(self.config(
@@ -194,6 +217,26 @@ class UltralyticsDeepOCSortObjectTrackerTest(unittest.TestCase):
             {item["label"]: item["track_id"] for item in later},
             {"person": 1, "car": 2},
         )
+
+
+@unittest.skipUnless(ULTRALYTICS_AVAILABLE, "optional Ultralytics tracker is not installed")
+class UltralyticsFastTrackObjectTrackerTest(unittest.TestCase):
+    def test_preserves_identity_through_short_occlusion(self) -> None:
+        config = ObjectTrackingConfig(
+            min_confirmations=1,
+            lost_timeout_seconds=3.0,
+            sample_fps=3.0,
+        )
+        tracker = UltralyticsFastTrackObjectTracker(config, 0.7)
+        first = tracker.update([
+            detection("person", 0.9, (10, 10, 40, 80)),
+        ], 10.0, confirm_new=True)
+        tracker.update([], 10.333)
+        recovered = tracker.update([
+            detection("person", 0.9, (14, 10, 44, 80)),
+        ], 10.667)
+
+        self.assertEqual(recovered[0]["track_id"], first[0]["track_id"])
 
 
 if __name__ == "__main__":

@@ -3,13 +3,14 @@
 SurvNG uses one production tracker and one offline comparison engine:
 
 - **SurvNG Hybrid** (`survng_hybrid`) is the default.
-- **Deep OC-SORT** (`ultralytics_deepocsort`) is used only by the incident
+- **FastTrack** (`ultralytics_fasttrack`) is used only by the incident
   Compare workflow.
 
-Both engines receive the same OpenVINO detections and available SurvNG person
-and vehicle embeddings. Compare never changes the production tracker. Historic
-BoT-SORT comparison verdicts remain readable, but BoT-SORT is no longer offered
-for production or new comparisons.
+Both engines receive the same OpenVINO detections. Hybrid also receives the
+available SurvNG person and vehicle embeddings; FastTrack intentionally tests a
+lightweight motion-and-occlusion strategy. Compare never changes the production
+tracker. Historic BoT-SORT and Deep OC-SORT verdicts remain readable, but those
+engines are no longer offered for production or new comparisons.
 
 ## Why SurvNG Hybrid is the default
 
@@ -42,9 +43,9 @@ index, related-incident suggestions, and cross-camera investigation features.
 This keeps live tracking and later incident intelligence on the same identity
 evidence and model thresholds.
 
-Deep OC-SORT can consume the same embeddings during Compare, but installing it
-does not improve the ReID models themselves. Hybrid already provides the
-SurvNG-specific appearance recovery and indexing behavior without Ultralytics.
+FastTrack does not replace or improve the ReID models. Hybrid provides the
+SurvNG-specific appearance recovery and indexing behavior; FastTrack is a
+deliberately independent comparison of motion continuity and occlusion handling.
 
 ### It has a smaller and more predictable runtime footprint
 
@@ -69,14 +70,13 @@ The implementation is maintained and regression-tested with SurvNG's event,
 recording, zone, replay, and persistence behavior. It does not depend on private
 tracker internals from another package.
 
-## Why Compare uses Deep OC-SORT
+## Why Compare uses FastTrack
 
-Deep OC-SORT supplies a meaningfully different benchmark. Its
-observation-centric recovery repairs motion state after missed observations and
-occlusions, while adaptive appearance association can consume SurvNG's existing
-person and vehicle embeddings. The adapter keeps classes isolated, gives every
-comparison independent IDs, converts retention to the configured sample rate,
-and disables camera-motion compensation for fixed cameras.
+FastTrack supplies a meaningfully different benchmark. It extends a ByteTrack-
+style association path with explicit occlusion detection, bounded motion-state
+rollback, temporary search-box enlargement, and reappearance handling. The
+adapter keeps classes isolated, gives every comparison independent IDs, and
+converts its frame-based retention windows to SurvNG's configured sample rate.
 
 ## How Compare works
 
@@ -84,11 +84,11 @@ The incident viewer's **Compare** action is an offline diagnostic:
 
 1. SurvNG decodes a bounded 30-second recording window beginning at the event.
 2. OpenVINO object detection and appearance extraction run once.
-3. The identical timestamped detections and embeddings are sent to Hybrid and
-   Deep OC-SORT.
+3. The identical timestamped detections are sent to Hybrid and FastTrack;
+   Hybrid additionally receives SurvNG's available appearance embeddings.
 4. SurvNG renders both paths over the same recording and reports their tracker
    time, track count, observations, and extra-ID fragmentation signal.
-5. You review the videos and record **Hybrid**, **Deep OC-SORT**, or **No clear
+5. You review the videos and record **Hybrid**, **FastTrack**, or **No clear
    winner**.
 
 An extra track ID is only a fragmentation warning; without hand-labeled ground
@@ -111,7 +111,7 @@ Use **SurvNG Hybrid** when you want the normal recommended configuration:
 - direct integration with stored tracks and cross-camera intelligence; and
 - stable configuration that SurvNG owns and tests end to end.
 
-Production always uses Hybrid. Install the optional Deep OC-SORT comparison
+Production always uses Hybrid. Install the optional FastTrack comparison
 runtime with:
 
 ```bash
@@ -124,6 +124,6 @@ patch releases on the reviewed 8.4.x tracker API line.
 ## Practical conclusion
 
 Hybrid is purpose-built for how SurvNG obtains, timestamps, stores, and reviews
-detections. Deep OC-SORT is an offline diagnostic benchmark, not an automatic
+detections. FastTrack is an offline diagnostic benchmark, not an automatic
 production upgrade. Accumulated side-by-side evidence helps expose difficult
 camera scenes without allowing a comparison to alter runtime behavior.

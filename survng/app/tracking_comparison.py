@@ -24,7 +24,7 @@ from .zones import apply_detection_zones
 
 TRACKING_COMPARISON_IMPLEMENTATIONS = (
     "survng_hybrid",
-    "ultralytics_deepocsort",
+    "ultralytics_fasttrack",
 )
 
 

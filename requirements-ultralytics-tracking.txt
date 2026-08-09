@@ -1,4 +1,4 @@
-# Optional Deep OC-SORT backend for offline incident comparisons. Production
+# Optional FastTrack backend for offline incident comparisons. Production
 # tracking remains SurvNG Hybrid and does not require PyTorch or Ultralytics.
 ultralytics==8.4.115
 lap>=0.5.12,<0.6

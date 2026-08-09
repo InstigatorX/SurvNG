@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from ultralytics.trackers.deep_oc_sort import DeepOCSORT, DeepOCSortTrack
+from ultralytics.trackers.fast_tracker import FASTTracker, FastSTrack
 from ultralytics.trackers.utils.stracks import parse_bboxes
 
 from .config import ObjectTrackingConfig
@@ -108,6 +109,50 @@ class _ClassAwareDeepOCSORT(DeepOCSORT):
         ]
 
 
+class _ClassAwareFASTTracker(FASTTracker):
+    """FastTrack with per-session IDs and class-separated geometry."""
+
+    def __init__(self, args: Any) -> None:
+        super().__init__(args)
+
+        class SessionFastSTrack(FastSTrack):
+            _session_count = 0
+
+            @classmethod
+            def next_id(cls) -> int:
+                cls._session_count += 1
+                return cls._session_count
+
+            @classmethod
+            def reset_id(cls) -> None:
+                cls._session_count = 0
+
+        self._session_track_type = SessionFastSTrack
+
+    def init_track(
+        self,
+        results: Any,
+        img: np.ndarray | None = None,
+    ) -> list[FastSTrack]:
+        if len(results) == 0:
+            return []
+        boxes = parse_bboxes(results)
+        return [
+            self._session_track_type(
+                xywh,
+                score,
+                cls,
+                history_len=self._history_len,
+            )
+            for xywh, score, cls in zip(
+                boxes,
+                results.conf,
+                results.cls,
+                strict=True,
+            )
+        ]
+
+
 class _UltralyticsObjectTrackerAdapter:
     """Translate an upstream tracker into SurvNG's timestamped track contract."""
 
@@ -144,7 +189,7 @@ class _UltralyticsObjectTrackerAdapter:
             record = self._records.get(track_id)
             if record is not None and record.label != str(detection["label"]):
                 raise RuntimeError(
-                    f"Deep OC-SORT associated track {track_id} across object classes"
+                    f"Ultralytics tracker associated track {track_id} across object classes"
                 )
             if record is None:
                 if len(self._records) >= self.config.max_tracks_per_session:
@@ -268,23 +313,48 @@ class _UltralyticsObjectTrackerAdapter:
             cls=np.asarray(classes, dtype=np.float32),
         )
 
-    @staticmethod
     def _features(
+        self,
         usable: list[tuple[dict[str, Any], Box]],
     ) -> np.ndarray | None:
+        if not usable:
+            return None
         vectors = [
             _appearance(detection.get("_tracking_embedding"))
             for detection, _box_value in usable
         ]
-        dimension = max((vector.size for vector in vectors if vector is not None), default=0)
+        dimension = max(
+            getattr(self, "_feature_dimension", 0),
+            max((vector.size for vector in vectors if vector is not None), default=0),
+        )
         if dimension <= 0:
             return None
+        if dimension > getattr(self, "_feature_dimension", 0):
+            self._resize_native_features(dimension)
+            self._feature_dimension = dimension
         return np.stack([
             np.pad(vector, (0, dimension - vector.size))
             if vector is not None and vector.size <= dimension
             else np.zeros(dimension, dtype=np.float32)
             for vector in vectors
         ])
+
+    def _resize_native_features(self, dimension: int) -> None:
+        """Keep mixed person/vehicle ReID vectors matrix-compatible."""
+        for collection_name in (
+            "tracked_stracks",
+            "lost_stracks",
+            "removed_stracks",
+        ):
+            for track in getattr(self._tracker, collection_name, []):
+                for attribute in ("curr_feat", "smooth_feat"):
+                    vector = getattr(track, attribute, None)
+                    if isinstance(vector, np.ndarray) and vector.size < dimension:
+                        setattr(
+                            track,
+                            attribute,
+                            np.pad(vector, (0, dimension - vector.size)),
+                        )
 
     @staticmethod
     def _first_seen(detection: dict[str, Any], captured_at: float) -> float:
@@ -342,3 +412,39 @@ class UltralyticsDeepOCSortObjectTracker(_UltralyticsObjectTrackerAdapter):
         ))
         self._records = {}
         self._class_ids = {}
+        self._feature_dimension = 0
+
+
+class UltralyticsFastTrackObjectTracker(_UltralyticsObjectTrackerAdapter):
+    """Offline comparison adapter for Ultralytics' occlusion-aware FastTrack."""
+
+    def __init__(
+        self,
+        config: ObjectTrackingConfig,
+        high_confidence_threshold: float,
+    ) -> None:
+        self.config = config
+        self.high_confidence_threshold = max(
+            config.low_confidence_threshold,
+            float(high_confidence_threshold),
+        )
+        track_buffer = ceil(config.sample_fps * config.lost_timeout_seconds)
+        self._tracker = _ClassAwareFASTTracker(SimpleNamespace(
+            track_high_thresh=self.high_confidence_threshold,
+            track_low_thresh=config.low_confidence_threshold,
+            new_track_thresh=self.high_confidence_threshold,
+            track_buffer=max(1, track_buffer),
+            match_thresh=0.8,
+            fuse_score=True,
+            reset_velocity_offset_occ=5,
+            reset_pos_offset_occ=3,
+            enlarge_bbox_occ=1.1,
+            dampen_motion_occ=0.5,
+            active_occ_to_lost_thresh=max(2, int(round(config.sample_fps * 3.0))),
+            occ_cover_thresh=0.7,
+            occ_reappear_window=max(1, int(round(config.sample_fps * 10.0))),
+            init_iou_suppress=0.7,
+        ))
+        self._records = {}
+        self._class_ids = {}
+        self._feature_dimension = 0

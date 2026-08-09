@@ -379,6 +379,7 @@ class ObjectTrackingConfig(BaseModel):
             "bytetrack",
             "ultralytics_botsort",
             "ultralytics_deepocsort",
+            "ultralytics_fasttrack",
         }:
             return "survng_hybrid"
         return implementation

@@ -34,7 +34,7 @@ TRACKING_COMPARISON_MAX_DURATION_SECONDS = 30.0
 
 class TrackingComparisonVerdictRequest(BaseModel):
     verdict: str = Field(
-        pattern=r"^(survng_hybrid|ultralytics_botsort|ultralytics_deepocsort|inconclusive)$"
+        pattern=r"^(survng_hybrid|ultralytics_botsort|ultralytics_deepocsort|ultralytics_fasttrack|inconclusive)$"
     )
 
 
