@@ -94,7 +94,7 @@ import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigat
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
-import { liveCustomGridMetrics, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera } from "./liveCustomLayout.mjs";
+import { liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -1671,7 +1671,7 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false, resizing = false, aspectSnapped = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -1829,7 +1829,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
 
   return (
     <article
-      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""}`}
+      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       style={customLayout ? customStyle : layout ? {
         left: `${layout.x}px`,
@@ -1963,6 +1963,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
         aria-label={`Resize ${camera.name}`}
         {...resizeHandleProps}
       /> : null}
+      {resizing ? <span className="camera-resize-hint">{aspectSnapped ? "Fit video" : "Free size"}</span> : null}
     </article>
   );
 }
@@ -4543,6 +4544,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [customLayoutValue, setCustomLayoutValue] = useStoredState("survng.liveCustomLayout.v1", "{}");
   const [customOrderPreview, setCustomOrderPreview] = useState(null);
   const [customSizePreview, setCustomSizePreview] = useState({});
+  const [resizingCameraId, setResizingCameraId] = useState("");
   const [dragCameraId, setDragCameraId] = useState("");
   const [dragOverCameraId, setDragOverCameraId] = useState("");
   const customOrderPreviewRef = useRef(null);
@@ -4780,12 +4782,16 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     const startX = event.clientX;
     const startY = event.clientY;
     let latest = start;
+    setResizingCameraId(cameraId);
+    document.documentElement.classList.add("camera-layout-resizing");
     event.currentTarget.setPointerCapture?.(event.pointerId);
     const onMove = (moveEvent) => {
-      latest = resizeLiveCamera(
+      latest = resizeLiveCameraToAspect(
         start,
-        Math.round((moveEvent.clientX - startX) / customGridMetrics.columnWidth),
-        Math.round((moveEvent.clientY - startY) / customGridMetrics.rowHeight),
+        moveEvent.clientX - startX,
+        moveEvent.clientY - startY,
+        customGridMetrics,
+        liveCameraAspects[cameraId],
       );
       setCustomSizePreview((current) => ({ ...current, [cameraId]: latest }));
     };
@@ -4793,14 +4799,22 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onEnd);
+      window.removeEventListener("blur", onEnd);
       const sizes = { ...customLayout.sizes, ...customSizePreview, [cameraId]: latest };
       saveCustomLayout(customOrderPreviewRef.current || customLayout.order, sizes);
       setCustomSizePreview({});
+      setResizingCameraId("");
+      document.documentElement.classList.remove("camera-layout-resizing");
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd, { once: true });
     window.addEventListener("pointercancel", onEnd, { once: true });
+    window.addEventListener("blur", onEnd, { once: true });
   }
+
+  useEffect(() => () => {
+    document.documentElement.classList.remove("camera-layout-resizing");
+  }, []);
 
   useEffect(() => {
     incidentFeedCacheRef.current.clear();
@@ -4981,7 +4995,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
         <div
           ref={liveCameraGridRef}
           className={`camera-grid live-camera-grid${normalizedLayoutMode === "custom" ? " custom-layout" : liveCameraLayoutReady ? " viewport-layout" : ""}`}
-          style={normalizedLayoutMode === "custom" ? { "--custom-row-height": `${customGridMetrics.rowHeight}px` } : undefined}
+          style={normalizedLayoutMode === "custom" ? { "--custom-pack-row-height": `${customGridMetrics.packRowHeight}px` } : undefined}
         >
           {liveDefaultsReady ? displayedCameras.map((camera, index) => (
             <CameraTile
@@ -4993,13 +5007,21 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               onAspectChange={updateLiveCameraAspect}
               layout={normalizedLayoutMode === "auto" ? liveCameraLayoutById.get(camera.id) : null}
               customLayout={normalizedLayoutMode === "custom"}
-              customStyle={normalizedLayoutMode === "custom" ? {
-                gridColumn: `span ${(customSizePreview[camera.id] || customLayout.sizes[camera.id]).columns}`,
-                gridRow: `span ${(customSizePreview[camera.id] || customLayout.sizes[camera.id]).rows}`,
-              } : undefined}
+              customStyle={normalizedLayoutMode === "custom" ? (() => {
+                const size = customSizePreview[camera.id] || customLayout.sizes[camera.id];
+                const measuredAspect = Number(liveCameraAspects[camera.id]);
+                const placement = liveCustomTilePlacement(size, customGridMetrics, measuredAspect);
+                return {
+                  gridColumn: `span ${placement.columns}`,
+                  gridRow: `span ${placement.packedRows}`,
+                  height: `${placement.height}px`,
+                };
+              })() : undefined}
               startDelayMs={index * 450}
               dragging={dragCameraId === camera.id}
               dragOver={dragOverCameraId === camera.id && dragCameraId !== camera.id}
+              resizing={resizingCameraId === camera.id}
+              aspectSnapped={Boolean((customSizePreview[camera.id] || customLayout.sizes[camera.id]).aspectLocked)}
               dragHandleProps={normalizedLayoutMode === "custom" ? {
                 draggable: true,
                 onDragStart: (event) => {

@@ -1,4 +1,7 @@
 const COLUMN_COUNT = 12;
+const ROW_COUNT = 4;
+const GRID_GAP = 8;
+const PACK_ROW_HEIGHT = 2;
 
 function defaultSize(camera, aspectOverrides = {}) {
   const aspect = Number(aspectOverrides[camera?.id]);
@@ -31,7 +34,8 @@ export function readLiveCustomLayout(rawValue, cameras, aspectOverrides = {}) {
     const saved = parsed.sizes?.[id] || {};
     sizes[id] = {
       columns: clampInteger(saved.columns, 2, COLUMN_COUNT, fallback.columns),
-      rows: clampInteger(saved.rows, 1, 4, fallback.rows),
+      rows: clampInteger(saved.rows, 1, ROW_COUNT, fallback.rows),
+      aspectLocked: saved.aspectLocked === true,
     };
   }
   return { version: 1, order, sizes };
@@ -51,15 +55,86 @@ export function moveLiveCamera(order, sourceId, targetId) {
 export function resizeLiveCamera(size, columnDelta, rowDelta) {
   return {
     columns: clampInteger(Number(size?.columns) + Number(columnDelta || 0), 2, COLUMN_COUNT, 3),
-    rows: clampInteger(Number(size?.rows) + Number(rowDelta || 0), 1, 4, 1),
+    rows: clampInteger(Number(size?.rows) + Number(rowDelta || 0), 1, ROW_COUNT, 1),
+    aspectLocked: false,
   };
 }
 
-export function liveCustomGridMetrics(width, height, gap = 8) {
+function spanPixels(count, unit, gap = GRID_GAP) {
+  return count * unit + Math.max(0, count - 1) * gap;
+}
+
+export function resizeLiveCameraToAspect(
+  size,
+  pixelDeltaX,
+  pixelDeltaY,
+  metrics,
+  aspect,
+) {
+  const ratio = Number(aspect);
+  if (!(ratio > 0)) {
+    return resizeLiveCamera(
+      size,
+      Math.round(Number(pixelDeltaX || 0) / Math.max(1, metrics?.columnWidth || 1)),
+      Math.round(Number(pixelDeltaY || 0) / Math.max(1, metrics?.rowHeight || 1)),
+    );
+  }
+  const gap = Math.max(0, Number(metrics?.gap) || GRID_GAP);
+  const columnWidth = Math.max(1, Number(metrics?.columnWidth) || 1);
+  const rowHeight = Math.max(1, Number(metrics?.rowHeight) || 1);
+  const desiredWidth = Math.max(
+    spanPixels(2, columnWidth, gap),
+    spanPixels(Number(size?.columns) || 3, columnWidth, gap) + Number(pixelDeltaX || 0),
+  );
+  const desiredHeight = Math.max(
+    rowHeight,
+    spanPixels(Number(size?.rows) || 1, rowHeight, gap) + Number(pixelDeltaY || 0),
+  );
+  let best = null;
+  const maximumHeight = spanPixels(ROW_COUNT, rowHeight, gap);
+  for (let columns = 2; columns <= COLUMN_COUNT; columns += 1) {
+    const width = spanPixels(columns, columnWidth, gap);
+    const height = width / ratio;
+    if (height > maximumHeight + 0.5) continue;
+    const rows = clampInteger(
+      Math.ceil((height + gap) / (rowHeight + gap)),
+      1,
+      ROW_COUNT,
+      Number(size?.rows) || 1,
+    );
+    const score = Math.hypot(width - desiredWidth, height - desiredHeight);
+    if (!best || score < best.score) best = { columns, rows, score };
+  }
+  return {
+    columns: best?.columns || 3,
+    rows: best?.rows || 1,
+    aspectLocked: true,
+  };
+}
+
+export function liveCustomGridMetrics(width, height, gap = GRID_GAP) {
   const safeWidth = Math.max(0, Number(width) || 0);
   const safeHeight = Math.max(0, Number(height) || 0);
   return {
     columnWidth: Math.max(1, (safeWidth - gap * (COLUMN_COUNT - 1)) / COLUMN_COUNT),
-    rowHeight: Math.max(90, (safeHeight - gap * 3) / 4),
+    rowHeight: Math.max(90, (safeHeight - gap * (ROW_COUNT - 1)) / ROW_COUNT),
+    packRowHeight: PACK_ROW_HEIGHT,
+    gap,
   };
+}
+
+export function liveCustomTilePlacement(size, metrics, aspect) {
+  const gap = Math.max(0, Number(metrics?.gap) || GRID_GAP);
+  const columnWidth = Math.max(1, Number(metrics?.columnWidth) || 1);
+  const logicalRowHeight = Math.max(1, Number(metrics?.rowHeight) || 1);
+  const packRowHeight = Math.max(1, Number(metrics?.packRowHeight) || PACK_ROW_HEIGHT);
+  const columns = clampInteger(size?.columns, 2, COLUMN_COUNT, 3);
+  const rows = clampInteger(size?.rows, 1, ROW_COUNT, 1);
+  const measuredAspect = Number(aspect);
+  const width = spanPixels(columns, columnWidth, gap);
+  const height = size?.aspectLocked === true && measuredAspect > 0
+    ? width / measuredAspect
+    : spanPixels(rows, logicalRowHeight, gap);
+  const packedRows = Math.max(1, Math.ceil((height + gap) / (packRowHeight + gap)));
+  return { columns, packedRows, height };
 }
