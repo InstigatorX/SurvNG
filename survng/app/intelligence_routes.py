@@ -234,7 +234,7 @@ class IntelligenceService:
     def motion_audit(self, limit: int=24, offset: int=0, camera_id: str='', outcome: str='all', category: str='all') -> dict:
         if outcome not in {'all', 'object', 'clear', 'not_run'}:
             raise HTTPException(status_code=400, detail='invalid motion audit outcome')
-        if category not in {'all', 'qualification', 'visual_backup'}:
+        if category not in {'all', 'qualification', 'visual_backup', 'active_followup'}:
             raise HTTPException(status_code=400, detail='invalid motion audit category')
         with self.deps.manager_lock:
             active_manager = self.deps.get_manager()
@@ -419,6 +419,8 @@ class IntelligenceService:
                 continue
             if audit.get('category') == 'visual_backup':
                 category = 'visual_backup'
+            elif audit.get('category') == 'active_followup':
+                category = 'possible_miss' if audit.get('object_detected') != 1 else 'recognized_incident'
             elif audit.get('object_detected') == 0:
                 category = 'possible_miss'
             elif not linked_event_id:

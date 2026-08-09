@@ -143,3 +143,68 @@ def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> Non
     qualification.qualify_burst.assert_not_called()
     assert not events.adaptive_trigger_pending
     assert events.active_triggers is None
+
+
+def test_active_followup_requires_correlated_object_and_records_audit() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    events.adaptive_trigger_pending = True
+    now = datetime.now(timezone.utc)
+    result = MotionQualificationResult(
+        True,
+        0.82,
+        0.48,
+        "active_event_new_motion",
+        3,
+        {
+            "active_event_followup": True,
+            "active_event_followup_anchor": 1,
+            "motion_regions": [[0.55, 0.55, 0.85, 0.9]],
+        },
+    )
+    trigger = MotionTrigger(
+        topic="adaptive/active_followup",
+        message="new credible motion during active EMA event",
+        event_at=now,
+        received_at=now.timestamp(),
+        prequalified=result,
+    )
+    batch = MotionTriggerBatch((trigger,))
+    qualification = Mock()
+    qualification.settings.return_value = ("adaptive", "balanced", 320)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    qualification.with_pipeline_telemetry.return_value = result
+    incidents = Mock()
+    incidents.process.return_value = Mock(as_dict=Mock(return_value={
+        "event_id": None,
+        "object_detected": False,
+        "snapshot_path": "followup.webp",
+        "rejection_reason": "no_object_detected",
+        "motion_correlation": {"required": True},
+    }))
+    audit = Mock()
+    state = Mock()
+    state.active_incident_event_id.return_value = 42
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=audit,
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification,
+        incidents=incidents,
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
+    )
+
+    orchestrator._process_batch(batch, threading.Event())
+
+    process_kwargs = incidents.process.call_args.kwargs
+    assert process_kwargs["require_eligible_object"] is True
+    assert process_kwargs["require_motion_correlation"] is True
+    audit_kwargs = audit.record_audit.call_args.kwargs
+    assert audit_kwargs["category"] == "active_followup"
+    assert audit_kwargs["related_event_id"] == 42
+    assert audit_kwargs["object_detected"] is False
+    state.increment_stat.assert_any_call("active_followup_no_object", 1)
+    assert not events.adaptive_trigger_pending

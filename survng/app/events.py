@@ -1063,6 +1063,18 @@ class EventStore:
                 "analysis_frames_dropped": int(motion.get("analysis_frames_dropped") or 0),
                 "analysis_runtime": motion.get("analysis_runtime") or {},
                 "event_runtime": motion.get("event_runtime") or {},
+                "active_followup_candidates": int(
+                    motion.get("active_followup_candidates") or 0
+                ),
+                "active_followup_triggers": int(
+                    motion.get("active_followup_triggers") or 0
+                ),
+                "active_followup_objects": int(
+                    motion.get("active_followup_objects") or 0
+                ),
+                "active_followup_no_object": int(
+                    motion.get("active_followup_no_object") or 0
+                ),
                 "tracking_active": bool(tracking.get("active")),
             }
         payload = json.dumps(
@@ -1302,6 +1314,10 @@ class EventStore:
                 "event_rejections": 0,
                 "event_retry_drops": 0,
                 "analysis_frames_sampled": 0,
+                "active_followup_candidates": 0,
+                "active_followup_triggers": 0,
+                "active_followup_objects": 0,
+                "active_followup_no_object": 0,
                 "camera_availability_total": 0.0,
                 "camera_availability_samples": 0,
                 "expected_cameras": 0,
@@ -1371,6 +1387,18 @@ class EventStore:
                     "event_evictions": int(event_runtime.get("evicted") or 0),
                     "event_rejections": int(event_runtime.get("rejected") or 0),
                     "event_retry_drops": int(event_runtime.get("retries_dropped") or 0),
+                    "active_followup_candidates": int(
+                        item.get("active_followup_candidates") or 0
+                    ),
+                    "active_followup_triggers": int(
+                        item.get("active_followup_triggers") or 0
+                    ),
+                    "active_followup_objects": int(
+                        item.get("active_followup_objects") or 0
+                    ),
+                    "active_followup_no_object": int(
+                        item.get("active_followup_no_object") or 0
+                    ),
                 }
                 previous = previous_counters.get(selected_id)
                 if previous is not None:
@@ -1417,6 +1445,16 @@ class EventStore:
                 "main_capture_starts": int(bucket["main_capture_starts"]),
                 "analysis_frames_dropped": int(bucket["analysis_frames_dropped"]),
                 "analysis_frames_sampled": analyzed,
+                "active_followup_candidates": int(
+                    bucket["active_followup_candidates"]
+                ),
+                "active_followup_triggers": int(
+                    bucket["active_followup_triggers"]
+                ),
+                "active_followup_objects": int(bucket["active_followup_objects"]),
+                "active_followup_no_object": int(
+                    bucket["active_followup_no_object"]
+                ),
                 "analysis_coverage_percent": (
                     round((analyzed / analysis_total) * 100.0, 3)
                     if analysis_total else None

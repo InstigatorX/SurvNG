@@ -250,6 +250,10 @@ class MotionDecisionOrchestrator:
             item.topic == "adaptive/visual_backup" for item in triggers
         )
         visual_backup = adaptive_only and visual_backup_queued
+        active_followup_queued = any(
+            item.topic == "adaptive/active_followup" for item in triggers
+        )
+        active_followup = adaptive_only and active_followup_queued
         if visual_backup_queued and not visual_backup:
             matched_camera_at = self._events.latest_camera_motion()
             if self._analysis.record_visual_camera_match(matched_camera_at):
@@ -297,6 +301,8 @@ class MotionDecisionOrchestrator:
             "trigger_source": (
                 "visual_backup"
                 if visual_backup
+                else "active_followup"
+                if active_followup
                 else "adaptive" if adaptive_only else "camera"
             ),
             "retry_count": max((item.retry_count for item in triggers), default=0),
@@ -356,6 +362,7 @@ class MotionDecisionOrchestrator:
             result=result,
             qualification=qualification,
             visual_backup=visual_backup,
+            active_followup=active_followup,
             borderline_candidate=borderline_candidate,
             suppression_verification_candidate=suppression_verification_candidate,
         )
@@ -482,6 +489,7 @@ class MotionDecisionOrchestrator:
         result: MotionQualificationResult,
         qualification: dict[str, Any],
         visual_backup: bool,
+        active_followup: bool,
         borderline_candidate: bool,
         suppression_verification_candidate: bool,
     ) -> None:
@@ -494,10 +502,11 @@ class MotionDecisionOrchestrator:
                 qualification,
                 require_eligible_object=bool(
                     visual_backup
+                    or active_followup
                     or borderline_candidate
                     or suppression_verification_candidate
                 ),
-                require_motion_correlation=visual_backup,
+                require_motion_correlation=visual_backup or active_followup,
                 refinement_callback=lambda refined: self._record_refined_outcome(
                     refined,
                     decision_id=decision_id,
@@ -507,6 +516,7 @@ class MotionDecisionOrchestrator:
                     result=result,
                     trigger_count=len(triggers),
                     visual_backup=visual_backup,
+                    active_followup=active_followup,
                     borderline_candidate=borderline_candidate,
                     suppression_verification_candidate=suppression_verification_candidate,
                 ),
@@ -544,6 +554,18 @@ class MotionDecisionOrchestrator:
                     event_id=event_id,
                     object_outcome=object_outcome,
                     found_object=found_object,
+                )
+            elif active_followup:
+                self._record_active_followup_audit(
+                    triggers=triggers,
+                    decision_id=decision_id,
+                    event_at=event_at,
+                    mode=mode,
+                    sensitivity=sensitivity,
+                    result=result,
+                    outcome=outcome,
+                    event_id=event_id,
+                    object_outcome=object_outcome,
                 )
             elif mode in AUDITED_MODES and not result.accepted:
                 audit_snapshot_path = str(outcome.get("snapshot_path") or "")
@@ -589,6 +611,7 @@ class MotionDecisionOrchestrator:
         result: MotionQualificationResult,
         trigger_count: int,
         visual_backup: bool,
+        active_followup: bool,
         borderline_candidate: bool,
         suppression_verification_candidate: bool,
     ) -> None:
@@ -617,7 +640,9 @@ class MotionDecisionOrchestrator:
         if visual_backup:
             features["visual_backup_original_reason"] = result.reason
             reason = str(outcome.get("rejection_reason") or "visual_backup_trigger")
-        if visual_backup or (mode in AUDITED_MODES and not result.accepted):
+        elif active_followup:
+            reason = str(outcome.get("rejection_reason") or "active_event_followup")
+        if visual_backup or active_followup or (mode in AUDITED_MODES and not result.accepted):
             self._audit_recorder.record_audit(
                 event_id=int(event_id) if event_id is not None else None,
                 decision_id=decision_id,
@@ -631,8 +656,57 @@ class MotionDecisionOrchestrator:
                 object_detected=object_outcome,
                 trigger_count=trigger_count,
                 features=features,
-                category="visual_backup" if visual_backup else "qualification",
+                category=(
+                    "visual_backup"
+                    if visual_backup
+                    else "active_followup"
+                    if active_followup
+                    else "qualification"
+                ),
             )
+
+    def _record_active_followup_audit(
+        self,
+        *,
+        triggers: MotionTriggerBatch,
+        decision_id: str,
+        event_at: datetime,
+        mode: str,
+        sensitivity: str,
+        result: MotionQualificationResult,
+        outcome: dict[str, Any],
+        event_id: Any,
+        object_outcome: Any,
+    ) -> None:
+        correlation = outcome.get("motion_correlation")
+        if not bool(outcome.get("refinement_pending")):
+            if object_outcome is True:
+                self._state.increment_stat("active_followup_objects", 1)
+            elif object_outcome is False:
+                self._state.increment_stat("active_followup_no_object", 1)
+        self._audit_recorder.record_audit(
+            event_id=int(event_id) if event_id is not None else None,
+            related_event_id=(
+                None if event_id is not None else self._state.active_incident_event_id()
+            ),
+            decision_id=decision_id,
+            snapshot_path=str(outcome.get("snapshot_path") or ""),
+            event_at=event_at,
+            mode=mode,
+            sensitivity=sensitivity,
+            score=result.score,
+            threshold=result.threshold,
+            reason=str(outcome.get("rejection_reason") or "active_event_followup"),
+            object_detected=object_outcome,
+            trigger_count=len(triggers),
+            features={
+                **audit_features(result),
+                "motion_correlation": correlation,
+                "object_detection_timing": outcome.get("processing_timing"),
+                "object_activity_attribution": outcome.get("object_activity"),
+            },
+            category="active_followup",
+        )
 
     def _record_visual_backup_audit(
         self,

@@ -269,6 +269,10 @@ class EventStoreTest(unittest.TestCase):
                             "rejected": analysis_drops // 2,
                             "retries_dropped": analysis_drops // 3,
                         },
+                        "active_followup_candidates": frames_sampled // 10,
+                        "active_followup_triggers": frames_sampled // 20,
+                        "active_followup_objects": frames_sampled // 50,
+                        "active_followup_no_object": frames_sampled // 25,
                     },
                     "object_tracking": {"active": False},
                 }]
@@ -306,6 +310,10 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(history[-1]["main_capture_starts"], 3)
             self.assertEqual(history[-1]["analysis_frames_dropped"], 5)
             self.assertEqual(history[-1]["analysis_frames_sampled"], 100)
+            self.assertEqual(history[-1]["active_followup_candidates"], 10)
+            self.assertEqual(history[-1]["active_followup_triggers"], 5)
+            self.assertEqual(history[-1]["active_followup_objects"], 2)
+            self.assertEqual(history[-1]["active_followup_no_object"], 4)
             self.assertEqual(history[-1]["analysis_coverage_percent"], 95.238)
             self.assertEqual(history[-1]["camera_availability_percent"], 100.0)
             self.assertEqual(history[-1]["unavailable_cameras"], 0)

@@ -214,6 +214,11 @@ An audit category of visual_backup means the camera stayed silent and the conser
 backup path invoked object detection. Judge both whether the visible motion was credible and whether
 the detector correctly found an incident-eligible object; do not describe it as filtered motion.
 
+An audit category of active_followup means EMA was already handling one credible motion episode and
+then found a persistent, spatially distinct motion track. SurvNG invoked one bounded follow-up at
+that later timestamp and required any detected object to correlate with the new motion area. Judge
+the later evidence anchor independently without treating the original active motion as a duplicate.
+
 An audit can represent motion suppressed before object detection or a decision that proceeded
 because it qualified, bypassed validation, was rescued as borderline, used legacy audit/off behavior,
 or was selected for suppression verification. Use decision_outcome.object_detection_ran and

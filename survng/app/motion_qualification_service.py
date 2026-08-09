@@ -346,6 +346,8 @@ class MotionQualificationService:
         features = dict(scoring.features)
         features.update({
             "event_state_phase": processed.event_state.phase.value,
+            "event_state_key": processed.event_state.event_key,
+            "event_state_started_at": processed.event_state.started_at,
             "event_state_transition": processed.event_state.transition_reason,
             "event_state_consecutive_accepts": processed.event_state.consecutive_accepts,
             "event_state_consecutive_rejects": processed.event_state.consecutive_rejects,

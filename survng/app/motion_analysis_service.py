@@ -13,6 +13,11 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
+from .active_motion_followup import (
+    ActiveMotionFollowupAction,
+    ActiveMotionFollowupDecision,
+    ActiveMotionFollowupPolicy,
+)
 from .motion import MotionQualificationResult, preprocess_motion_frame
 from .config import MotionQualificationConfig
 from .domain_events import MotionObserved
@@ -114,6 +119,7 @@ class MotionAnalysisService:
         self.events = events
         self.evidence = evidence
         self.visual_backup = visual_backup
+        self.active_motion_followup = ActiveMotionFollowupPolicy()
         self.audit_recorder = audit_recorder
         self.debug_store = debug_store
         self.config = config
@@ -260,6 +266,7 @@ class MotionAnalysisService:
         self.clear_queue()
         with self._visual_lock:
             self.visual_backup.reset()
+        self.active_motion_followup.reset()
 
     def schedule(self, captured_at: float, stop_event: threading.Event) -> None:
         self._enqueue_latest(captured_at, stop_event)
@@ -428,6 +435,7 @@ class MotionAnalysisService:
         self.limiter.cancel(self.camera_id)
         with self._visual_lock:
             self.visual_backup.reset()
+        self.active_motion_followup.reset()
         self.events.reset_timebase()
         with self._telemetry_lock:
             self._telemetry["clock_discontinuity_resets"] += 1
@@ -876,6 +884,15 @@ class MotionAnalysisService:
             require_primary_trigger=True,
         )
         self.last_continuous_result = fused
+        followup = self.active_motion_followup.consider(
+            fused,
+            captured_at,
+            credible_motion=result.accepted,
+        )
+        self._record_active_followup_decision(followup)
+        if followup.admitted:
+            self._enqueue_active_motion_followup(fused, followup, captured_at)
+            return
         if (
             self._stopping()
             or not fused.accepted
@@ -903,6 +920,76 @@ class MotionAnalysisService:
             self.events.defer_adaptive(captured_at)
             return
         self._publish_motion(event_at, "adaptive")
+
+    def _enqueue_active_motion_followup(
+        self,
+        result: MotionQualificationResult,
+        decision: ActiveMotionFollowupDecision,
+        captured_at: float,
+    ) -> None:
+        if self._stopping():
+            return
+        features = {
+            **result.features,
+            "active_event_followup": True,
+            "active_event_followup_anchor": decision.anchor_index,
+            "active_event_followup_track_id": decision.track_id,
+            "active_event_followup_region": (
+                list(decision.region) if decision.region is not None else None
+            ),
+            "active_event_followup_maximum_overlap": round(
+                decision.maximum_overlap,
+                5,
+            ),
+            "active_event_followup_center_distance": round(
+                decision.nearest_center_distance,
+                5,
+            ),
+        }
+        followup_result = MotionQualificationResult(
+            accepted=True,
+            score=result.score,
+            threshold=result.threshold,
+            reason="active_event_new_motion",
+            frame_count=result.frame_count,
+            features=features,
+            telemetry=dict(result.telemetry),
+        )
+        event_at = datetime.fromtimestamp(captured_at, timezone.utc)
+        queued = self._enqueue_trigger(MotionTrigger(
+            topic="adaptive/active_followup",
+            message="new credible motion during active EMA event",
+            event_at=event_at,
+            received_at=captured_at,
+            prequalified=followup_result,
+        ))
+        if not queued:
+            self.state.increment_stat("active_followup_queue_rejected", 1)
+            return
+        if not self.active_motion_followup.commit(
+            decision,
+            captured_at,
+            result.features.get("motion_regions"),
+        ):
+            # Admission is serialized on the analysis worker, so this should
+            # only be possible during a reset/clock discontinuity. Preserve
+            # the already queued evidence rather than attempting to remove it.
+            self.state.increment_stat("active_followup_commit_races", 1)
+        self.state.increment_stat("active_followup_triggers", 1)
+        self._publish_motion(event_at, "active_followup")
+
+    def _record_active_followup_decision(
+        self,
+        decision: ActiveMotionFollowupDecision,
+    ) -> None:
+        stat = {
+            ActiveMotionFollowupAction.CANDIDATE: "active_followup_candidates",
+            ActiveMotionFollowupAction.DUPLICATE: "active_followup_deduplicated",
+            ActiveMotionFollowupAction.RATE_LIMITED: "active_followup_rate_limited",
+            ActiveMotionFollowupAction.EPISODE_LIMIT: "active_followup_episode_limited",
+        }.get(decision.action)
+        if stat is not None:
+            self.state.increment_stat(stat, 1)
 
     def consider_visual_backup(
         self,

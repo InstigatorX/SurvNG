@@ -575,6 +575,65 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
     assert telemetry["cached_derivative_reuse_bytes"] == 90 * 160 * 2
 
 
+def test_adaptive_analysis_anchors_new_track_during_active_event() -> None:
+    raw = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
+    activation = MotionQualificationResult(
+        True,
+        0.8,
+        0.48,
+        "qualified",
+        3,
+        {
+            "event_state_phase": "active",
+            "event_state_key": "gate:100000",
+            "event_state_transition": "activation_threshold",
+            "motion_region_track_id": 1,
+            "motion_regions": [[0.05, 0.05, 0.25, 0.2]],
+        },
+    )
+    active_new_track = MotionQualificationResult(
+        False,
+        0.82,
+        0.48,
+        "event_state_active",
+        3,
+        {
+            "event_state_phase": "active",
+            "event_state_key": "gate:100000",
+            "event_state_transition": "active_confirmed",
+            "motion_region_track_id": 7,
+            "motion_regions": [[0.55, 0.55, 0.85, 0.9]],
+        },
+    )
+    stats = Mock()
+    service = _service(_hooks(
+        run_pipeline=Mock(return_value=raw),
+        with_source_evidence=Mock(side_effect=[activation, active_new_track]),
+        increment_stat=stats,
+        trigger_mode="adaptive",
+    ))
+    with service.frame_lock:
+        service.color_frames.extend([
+            (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
+            (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
+        ])
+
+    service.analyze_continuous(100.0)
+    service.analyze_continuous(103.0)
+
+    first = service.events.next_trigger(timeout=0.01)
+    second = service.events.next_trigger(timeout=0.01)
+    assert first is not None and first.topic == "adaptive/motion"
+    assert second is not None and second.topic == "adaptive/active_followup"
+    assert second.event_at.timestamp() == 103.0
+    assert second.prequalified is not None
+    assert second.prequalified.accepted
+    assert second.prequalified.reason == "active_event_new_motion"
+    assert second.prequalified.features["active_event_followup_track_id"] == 7
+    stats.assert_any_call("active_followup_candidates", 1)
+    stats.assert_any_call("active_followup_triggers", 1)
+
+
 def test_request_stop_replaces_pending_work_with_sentinel() -> None:
     service = _service(_hooks())
     service.queue.put_nowait(100.0)

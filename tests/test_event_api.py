@@ -224,7 +224,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
-    def test_motion_audit_endpoint_filters_visual_backup_category(self) -> None:
+    def test_motion_audit_endpoint_filters_named_categories(self) -> None:
         events = SimpleNamespace(motion_audits=Mock(return_value=([], 0)))
         active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"))
         with patch.object(main, "manager", active_manager):
@@ -237,6 +237,18 @@ class EventApiSerializationTest(unittest.TestCase):
             camera_id="",
             outcome="all",
             category="visual_backup",
+        )
+        events.motion_audits.reset_mock()
+        with patch.object(main, "manager", active_manager):
+            main._intelligence_route_bundle.service.motion_audit(
+                category="active_followup"
+            )
+        events.motion_audits.assert_called_once_with(
+            limit=24,
+            offset=0,
+            camera_id="",
+            outcome="all",
+            category="active_followup",
         )
         with self.assertRaises(HTTPException):
             main._intelligence_route_bundle.service.motion_audit(category="unexpected")

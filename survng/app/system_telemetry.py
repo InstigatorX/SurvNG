@@ -456,6 +456,27 @@ class SystemTelemetryService:
                 "visual_backup_uncorrelated_objects": int(
                     motion.get("visual_backup_uncorrelated_objects") or 0
                 ),
+                "active_followup_candidates": int(
+                    motion.get("active_followup_candidates") or 0
+                ),
+                "active_followup_triggers": int(
+                    motion.get("active_followup_triggers") or 0
+                ),
+                "active_followup_objects": int(
+                    motion.get("active_followup_objects") or 0
+                ),
+                "active_followup_no_object": int(
+                    motion.get("active_followup_no_object") or 0
+                ),
+                "active_followup_deduplicated": int(
+                    motion.get("active_followup_deduplicated") or 0
+                ),
+                "active_followup_rate_limited": int(
+                    motion.get("active_followup_rate_limited") or 0
+                ),
+                "active_followup_episode_limited": int(
+                    motion.get("active_followup_episode_limited") or 0
+                ),
             },
             "tracking": {
                 "active": bool(tracking.get("active")),

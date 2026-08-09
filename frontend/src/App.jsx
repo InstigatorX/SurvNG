@@ -8229,6 +8229,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         <div className="telemetry-trend-grid two-column">
           <TelemetryTrend title="Frames analyzed · 2 hours" description="100% is ideal; isolated tiny dips are normally harmless" history={runtimeShort} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "analysis_coverage_percent", label: "Coverage", className: "rate" }]} />
           <TelemetryTrend title="Frames analyzed · 7 days" description="Long-term 15-minute coverage" history={runtimeLong} timeZone={timeZone} maximum={100} valueFormatter={formatCoverage} series={[{ key: "analysis_coverage_percent", label: "Coverage", className: "rate" }]} />
+          <TelemetryTrend title="New motion during events · 2 hours" description="Credible new regions considered, checked, and confirmed by object detection" history={runtimeShort} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "active_followup_candidates", label: "Considered", className: "secondary" }, { key: "active_followup_triggers", label: "Checked", className: "warning" }, { key: "active_followup_objects", label: "Object found", className: "rate" }]} />
+          <TelemetryTrend title="New motion during events · 7 days" description="Long-term follow-up workload and useful detections" history={runtimeLong} timeZone={timeZone} valueFormatter={(value) => Math.round(value).toLocaleString()} series={[{ key: "active_followup_candidates", label: "Considered", className: "secondary" }, { key: "active_followup_triggers", label: "Checked", className: "warning" }, { key: "active_followup_objects", label: "Object found", className: "rate" }]} />
         </div>
       </section>
 
@@ -9254,6 +9256,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             <label>Category<select value={auditCategory} onChange={(event) => { setAuditCategory(event.target.value); setAuditPage(0); }}>
               <option value="all">All categories</option>
               <option value="visual_backup">Visual backup</option>
+              <option value="active_followup">Active-event follow-up</option>
               <option value="qualification">Filtered motion</option>
             </select></label>
           </div>
@@ -9270,7 +9273,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         </section>
         <section className="bento-card config-editor settings-panel motion-audit-panel">
           <div className="section-head">
-            <div><h2>{auditCategory === "visual_backup" ? "Visual Backup" : auditCategory === "qualification" ? "Filtered Motion" : "Motion Decisions"}</h2><p>Qualifier decisions, backup triggers, and detector outcomes</p></div>
+            <div><h2>{auditCategory === "visual_backup" ? "Visual Backup" : auditCategory === "active_followup" ? "Active-Event Follow-Up" : auditCategory === "qualification" ? "Filtered Motion" : "Motion Decisions"}</h2><p>Qualifier decisions, backup triggers, and detector outcomes</p></div>
             <button onClick={() => loadMotionAudit(auditPage)} disabled={auditLoading}><RefreshCcw className={auditLoading ? "spin" : ""} size={16} /> Refresh</button>
           </div>
           <MotionAuditViewer
@@ -9816,6 +9819,7 @@ function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
 
 function motionAuditOutcome(item) {
   const visualBackup = item.category === "visual_backup";
+  const activeFollowup = item.category === "active_followup";
   if (item.reason === "illumination_change") return { label: "Filtered · light or shadow change", className: "not-run" };
   if (item.features?.illumination_verification_probe) return { label: item.object_detected ? "Light filter check · object rescued" : "Light filter check · no object", className: item.object_detected ? "object" : "clear" };
   if (item.interpretation?.category === "visual_backup_scene_learning") return { label: "Visual backup · scene learning", className: "not-run" };
@@ -9823,9 +9827,9 @@ function motionAuditOutcome(item) {
   if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
   if (item.interpretation?.category === "duplicate_event_cooldown") return { label: "Duplicate · cooldown", className: "not-run" };
   if (item.interpretation?.category === "filtered_before_object_detection") return { label: "Filtered before detection", className: "not-run" };
-  if (item.object_detected === true) return { label: visualBackup ? "Visual backup · object found" : "Object found", className: "object" };
-  if (item.object_detected === false) return { label: visualBackup ? "Visual backup · no object" : "No object", className: "clear" };
-  return { label: visualBackup ? "Visual backup · incomplete" : "Not run", className: "not-run" };
+  if (item.object_detected === true) return { label: visualBackup ? "Visual backup · object found" : activeFollowup ? "Active follow-up · object found" : "Object found", className: "object" };
+  if (item.object_detected === false) return { label: visualBackup ? "Visual backup · no object" : activeFollowup ? "Active follow-up · no object" : "No object", className: "clear" };
+  return { label: visualBackup ? "Visual backup · incomplete" : activeFollowup ? "Active follow-up · incomplete" : "Not run", className: "not-run" };
 }
 
 function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, error, timeZone, onOpen }) {
@@ -11228,6 +11232,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
             <span>Capture-to-analysis p95 {formatMilliseconds(status.motion_qualification.analysis_runtime?.capture_to_analysis_p95_ms)} · preprocessing p99 {formatMilliseconds(status.motion_qualification.analysis_runtime?.preprocess_p99_ms)} · {formatBytes(status.motion_qualification.analysis_runtime?.copy_bytes || 0)} copied for motion analysis</span>
             <span>Light and shadow filtering {status.motion_qualification.illumination_filter_enabled ? "enabled" : "measuring only"} · {status.motion_qualification.illumination_evaluations || 0} evaluated · {status.motion_qualification.illumination_candidates || 0} likely illumination changes · {status.motion_qualification.illumination_filtered || 0} filtered</span>
             <span>{status.motion_qualification.validation_failures || 0} validator errors · {status.motion_qualification.validation_fail_opens || 0} allowed through safely</span>
+            <span>{status.motion_qualification.active_followup_triggers || 0} active-event follow-ups · {status.motion_qualification.active_followup_objects || 0} found an object · {status.motion_qualification.active_followup_no_object || 0} found none · {status.motion_qualification.active_followup_episode_limited || 0} held by the episode limit</span>
             {missingCameraTrigger ? <span className="motion-runtime-warning">{visualBackupEnabled ? "ONVIF is disabled, so the conservative visual backup is the only automatic trigger. Restore ONVIF for primary coverage." : "ONVIF is disabled. Camera-triggered mode has no automatic trigger source; only manual tests can run object detection."}</span> : null}
             {missingMotionNotices ? <span className="motion-runtime-warning">{visualBackupEnabled ? "No recognized ONVIF motion notices since this worker started. Strong persistent visual motion can still invoke the backup detector path." : "No recognized ONVIF motion notices since this worker started. In this mode, visual analysis alone cannot create an incident."}</span> : null}
             {visualBackupEnabled ? <>

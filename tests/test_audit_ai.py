@@ -145,6 +145,7 @@ class AuditAiTest(unittest.TestCase):
         self.assertIn("operator-owned safety settings", SYSTEM_PROMPT)
         self.assertIn("starts only after the initial detector decision", SYSTEM_PROMPT)
         self.assertIn("audit category of visual_backup", SYSTEM_PROMPT)
+        self.assertIn("audit category of active_followup", SYSTEM_PROMPT)
 
     def test_audit_prompt_is_neutral_about_decision_outcome(self) -> None:
         prompt = audit_analysis_prompt('{"decision_outcome":{"object_detection_ran":true}}')
