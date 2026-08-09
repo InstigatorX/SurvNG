@@ -41,14 +41,15 @@ export function readLiveCustomLayout(rawValue, cameras, aspectOverrides = {}) {
   return { version: 1, order, sizes };
 }
 
-export function moveLiveCamera(order, sourceId, targetId) {
+export function moveLiveCamera(order, sourceId, targetId, position = "before") {
   const source = String(sourceId || "");
   const target = String(targetId || "");
   if (!source || !target || source === target || !order.includes(source) || !order.includes(target)) {
     return [...order];
   }
   const next = order.filter((id) => id !== source);
-  next.splice(next.indexOf(target), 0, source);
+  const targetIndex = next.indexOf(target);
+  next.splice(targetIndex + (position === "after" ? 1 : 0), 0, source);
   return next;
 }
 

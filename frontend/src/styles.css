@@ -1683,6 +1683,31 @@ p {
   cursor: grabbing;
 }
 
+html.camera-layout-dragging,
+html.camera-layout-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.camera-drag-ghost {
+  position: fixed !important;
+  z-index: 10000 !important;
+  top: 0 !important;
+  left: 0 !important;
+  margin: 0 !important;
+  opacity: .72;
+  pointer-events: none !important;
+  filter: saturate(.8);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .5), 0 0 0 2px rgba(94, 234, 212, .72) !important;
+  will-change: transform;
+}
+
+.camera-drag-ghost .camera-resize-handle,
+.camera-drag-ghost .tile-controls {
+  display: none !important;
+}
+
 .camera-resize-handle {
   position: absolute;
   z-index: 9;

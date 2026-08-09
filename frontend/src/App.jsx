@@ -1671,7 +1671,7 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dropProps = {}, dragHandleProps = {}, dragging = false, dragOver = false, resizing = false, aspectSnapped = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, dragging = false, dragOver = false, resizing = false, aspectSnapped = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -1831,13 +1831,13 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
     <article
       className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
+      data-camera-id={camera.id}
       style={customLayout ? customStyle : layout ? {
         left: `${layout.x}px`,
         top: `${layout.y}px`,
         width: `${layout.width}px`,
         height: `${layout.height}px`,
       } : undefined}
-      {...dropProps}
     >
       <div
         className="video-frame camera-open-target"
@@ -1893,7 +1893,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
             <h2>{camera.name}</h2>
           </div>
           <div className="tile-controls" aria-label={`${camera.name} controls`}>
-            {dragHandleProps.draggable ? <button
+            {dragHandleProps.onPointerDown ? <button
               type="button"
               className="tile-control-button icon-only camera-drag-handle"
               title="Drag to move camera"
@@ -4548,7 +4548,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [dragCameraId, setDragCameraId] = useState("");
   const [dragOverCameraId, setDragOverCameraId] = useState("");
   const customOrderPreviewRef = useRef(null);
-  const customDragCommittedRef = useRef(false);
+  const customMoveCleanupRef = useRef(null);
   const liveCameraGridRef = useRef(null);
   const [liveCameraGridSize, setLiveCameraGridSize] = useState({ width: 0, height: 0 });
   const [liveCameraAspects, setLiveCameraAspects] = useState({});
@@ -4767,12 +4767,109 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     setCustomLayoutValue(JSON.stringify({ version: 1, order, sizes }));
   }
 
-  function previewCustomMove(sourceId, targetId) {
-    setCustomOrderPreview((current) => {
-      const next = moveLiveCamera(current || customLayout.order, sourceId, targetId);
-      customOrderPreviewRef.current = next;
-      return next;
-    });
+  function beginCustomMove(event, cameraId) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    customMoveCleanupRef.current?.(false);
+    const source = String(cameraId);
+    const originalOrder = [...customLayout.order];
+    let latestOrder = originalOrder;
+    let changed = false;
+    const sourceTile = event.currentTarget.closest(".camera-tile");
+    const sourceRect = sourceTile?.getBoundingClientRect();
+    const offsetX = sourceRect ? event.clientX - sourceRect.left : 24;
+    const offsetY = sourceRect ? event.clientY - sourceRect.top : 20;
+    const ghost = sourceTile?.cloneNode(true);
+    if (ghost && sourceRect) {
+      ghost.classList.add("camera-drag-ghost");
+      ghost.classList.remove("dragging", "drag-over", "motion-active");
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.style.width = `${sourceRect.width}px`;
+      ghost.style.height = `${sourceRect.height}px`;
+      ghost.style.transform = `translate3d(${event.clientX - offsetX}px, ${event.clientY - offsetY}px, 0)`;
+      document.body.appendChild(ghost);
+    }
+    setDragCameraId(source);
+    setCustomOrderPreview(originalOrder);
+    customOrderPreviewRef.current = originalOrder;
+    document.documentElement.classList.add("camera-layout-dragging");
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    const targetAt = (moveEvent) => {
+      const direct = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest?.(".camera-tile[data-camera-id]");
+      if (direct && direct.dataset.cameraId !== source) return direct;
+      const grid = liveCameraGridRef.current;
+      const gridRect = grid?.getBoundingClientRect();
+      if (!gridRect || moveEvent.clientX < gridRect.left || moveEvent.clientX > gridRect.right
+        || moveEvent.clientY < gridRect.top || moveEvent.clientY > gridRect.bottom) return null;
+      let nearest = null;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      for (const tile of grid.querySelectorAll(".camera-tile[data-camera-id]")) {
+        if (tile.dataset.cameraId === source) continue;
+        const rect = tile.getBoundingClientRect();
+        const distance = Math.hypot(
+          moveEvent.clientX - (rect.left + rect.width / 2),
+          moveEvent.clientY - (rect.top + rect.height / 2),
+        );
+        if (distance < nearestDistance) {
+          nearest = tile;
+          nearestDistance = distance;
+        }
+      }
+      return nearest;
+    };
+
+    const onMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      if (ghost) {
+        ghost.style.transform = `translate3d(${moveEvent.clientX - offsetX}px, ${moveEvent.clientY - offsetY}px, 0)`;
+      }
+      const target = targetAt(moveEvent);
+      const targetId = String(target?.dataset.cameraId || "");
+      if (!targetId) {
+        setDragOverCameraId("");
+        return;
+      }
+      const rect = target.getBoundingClientRect();
+      const verticalIntent = Math.abs(moveEvent.clientY - (rect.top + rect.height / 2)) > rect.height * 0.2;
+      const position = verticalIntent
+        ? (moveEvent.clientY >= rect.top + rect.height / 2 ? "after" : "before")
+        : (moveEvent.clientX >= rect.left + rect.width / 2 ? "after" : "before");
+      const next = moveLiveCamera(latestOrder, source, targetId, position);
+      if (next.some((id, index) => id !== latestOrder[index])) {
+        latestOrder = next;
+        changed = latestOrder.some((id, index) => id !== originalOrder[index]);
+        customOrderPreviewRef.current = latestOrder;
+        setCustomOrderPreview(latestOrder);
+      }
+      setDragOverCameraId(targetId);
+    };
+
+    let finished = false;
+    const finish = (commit) => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
+      window.removeEventListener("blur", onPointerCancel);
+      ghost?.remove();
+      document.documentElement.classList.remove("camera-layout-dragging");
+      if (commit && changed) saveCustomLayout(latestOrder, customLayout.sizes);
+      setCustomOrderPreview(null);
+      customOrderPreviewRef.current = null;
+      setDragCameraId("");
+      setDragOverCameraId("");
+      if (customMoveCleanupRef.current === finish) customMoveCleanupRef.current = null;
+    };
+    const onPointerUp = () => finish(true);
+    const onPointerCancel = () => finish(false);
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+    window.addEventListener("pointercancel", onPointerCancel, { once: true });
+    window.addEventListener("blur", onPointerCancel, { once: true });
+    customMoveCleanupRef.current = finish;
   }
 
   function beginCustomResize(event, cameraId) {
@@ -4813,7 +4910,10 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   }
 
   useEffect(() => () => {
+    customMoveCleanupRef.current?.(false);
     document.documentElement.classList.remove("camera-layout-resizing");
+    document.documentElement.classList.remove("camera-layout-dragging");
+    document.querySelectorAll(".camera-drag-ghost").forEach((ghost) => ghost.remove());
   }, []);
 
   useEffect(() => {
@@ -5023,53 +5123,10 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
               resizing={resizingCameraId === camera.id}
               aspectSnapped={Boolean((customSizePreview[camera.id] || customLayout.sizes[camera.id]).aspectLocked)}
               dragHandleProps={normalizedLayoutMode === "custom" ? {
-                draggable: true,
-                onDragStart: (event) => {
-                  setDragCameraId(camera.id);
-                  customDragCommittedRef.current = false;
-                  customOrderPreviewRef.current = customLayout.order;
-                  setCustomOrderPreview(customLayout.order);
-                  event.dataTransfer.effectAllowed = "move";
-                  event.dataTransfer.setData("text/plain", camera.id);
-                  const tile = event.currentTarget.closest(".camera-tile");
-                  if (tile) event.dataTransfer.setDragImage(tile, tile.clientWidth / 2, 28);
-                },
-                onDragEnd: () => {
-                  if (!customDragCommittedRef.current) setCustomOrderPreview(null);
-                  customDragCommittedRef.current = false;
-                  customOrderPreviewRef.current = null;
-                  setDragCameraId("");
-                  setDragOverCameraId("");
-                },
+                onPointerDown: (event) => beginCustomMove(event, camera.id),
               } : {}}
               resizeHandleProps={normalizedLayoutMode === "custom" ? {
                 onPointerDown: (event) => beginCustomResize(event, camera.id),
-              } : {}}
-              dropProps={normalizedLayoutMode === "custom" ? {
-                onDragOver: (event) => {
-                  if (!dragCameraId || dragCameraId === camera.id) return;
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "move";
-                  setDragOverCameraId(camera.id);
-                },
-                onDragEnter: (event) => {
-                  if (!dragCameraId || dragCameraId === camera.id) return;
-                  event.preventDefault();
-                  previewCustomMove(dragCameraId, camera.id);
-                },
-                onDragLeave: (event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setDragOverCameraId("");
-                },
-                onDrop: (event) => {
-                  event.preventDefault();
-                  const sourceId = event.dataTransfer.getData("text/plain") || dragCameraId;
-                  const order = moveLiveCamera(customOrderPreviewRef.current || customLayout.order, sourceId, camera.id);
-                  customDragCommittedRef.current = true;
-                  saveCustomLayout(order, { ...customLayout.sizes, ...customSizePreview });
-                  setCustomOrderPreview(null);
-                  setDragCameraId("");
-                  setDragOverCameraId("");
-                },
               } : {}}
             />
           )) : null}
