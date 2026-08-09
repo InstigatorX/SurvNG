@@ -10,6 +10,11 @@ from typing import Any, Callable, Protocol
 from ..detector import detection_failure
 from ..domain_events import IncidentCreated, ObjectDetected
 from ..object_activity import AttributionMode, ObjectActivityAttributor
+from ..object_motion import (
+    MAXIMUM_MOVEMENT_RATIO,
+    MINIMUM_MOVEMENT_RATIO,
+    temporal_object_motion_evidence,
+)
 from .context import Frame
 
 
@@ -21,29 +26,6 @@ MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
 
 LOGGER = logging.getLogger(__name__)
 MOTION_REGION_MARGIN_RATIO = 0.035
-TEMPORAL_OBJECT_MOVEMENT_RATIO = 0.02
-MINIMUM_TEMPORAL_OBJECT_MOVEMENT_RATIO = 0.003
-TEMPORAL_OBJECT_BOX_MOVEMENT_SCALE = 0.04
-
-
-def _detection_box_ratio(
-    detected: dict[str, Any],
-    frame: Frame,
-) -> tuple[float, float, float, float] | None:
-    box = detected.get("box")
-    if not isinstance(box, dict):
-        return None
-    try:
-        height, width = frame.shape[:2]
-        x1 = float(box["x1"]) / width
-        y1 = float(box["y1"]) / height
-        x2 = float(box["x2"]) / width
-        y2 = float(box["y2"]) / height
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
-        return None
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return x1, y1, x2, y2
 
 
 def _intersects_motion_region(
@@ -67,22 +49,6 @@ def _intersects_motion_region(
     return False
 
 
-def _temporal_movement_threshold(
-    box: tuple[float, float, float, float] | None,
-) -> float:
-    if box is None:
-        return TEMPORAL_OBJECT_MOVEMENT_RATIO
-    x1, y1, x2, y2 = box
-    object_diagonal = math.hypot(x2 - x1, y2 - y1)
-    return min(
-        TEMPORAL_OBJECT_MOVEMENT_RATIO,
-        max(
-            MINIMUM_TEMPORAL_OBJECT_MOVEMENT_RATIO,
-            object_diagonal * TEMPORAL_OBJECT_BOX_MOVEMENT_SCALE,
-        ),
-    )
-
-
 def motion_correlated_objects(
     frame: Frame,
     objects: list[dict[str, Any]],
@@ -99,25 +65,18 @@ def motion_correlated_objects(
     temporal_path_matches = 0
     new_appearance_matches = 0
     stationary_spatial_rejections = 0
+    height, width = frame.shape[:2]
     for detected in objects:
-        box = _detection_box_ratio(detected, frame)
-        spatial = bool(box is not None and _intersects_motion_region(box, regions))
-        try:
-            displacement = float(detected.get("temporal_center_displacement_ratio") or 0.0)
-        except (TypeError, ValueError):
-            displacement = 0.0
-        try:
-            path = float(detected.get("temporal_center_path_ratio") or 0.0)
-        except (TypeError, ValueError):
-            path = 0.0
-        movement_threshold = _temporal_movement_threshold(box)
-        temporal_evidence_available = bool(
-            int(detected.get("temporal_track_observations") or 0) >= 2
+        evidence = temporal_object_motion_evidence(
+            detected,
+            frame_width=width,
+            frame_height=height,
         )
-        newly_appeared = bool(detected.get("temporal_newly_appeared"))
-        temporal = displacement >= movement_threshold
-        spatial_fallback = spatial and not temporal_evidence_available
-        appearance_match = spatial and newly_appeared
+        box = evidence.normalized_box
+        spatial = bool(box is not None and _intersects_motion_region(box, regions))
+        temporal = evidence.displacement_ratio >= evidence.movement_threshold
+        spatial_fallback = spatial and not evidence.temporal_evidence_available
+        appearance_match = spatial and evidence.newly_appeared
         # A short recorded sequence can begin and end at nearly the same point
         # while a real object walks through the EMA region.  Permit that only
         # when spatial evidence also agrees and the travelled path is well
@@ -125,8 +84,8 @@ def motion_correlated_objects(
         # still cannot explain unrelated motion beside or behind it.
         spatial_path = bool(
             spatial
-            and temporal_evidence_available
-            and path >= max(0.01, movement_threshold * 2.5)
+            and evidence.temporal_evidence_available
+            and evidence.path_ratio >= evidence.path_threshold
         )
         motion_correlated = bool(
             temporal or spatial_path or spatial_fallback or appearance_match
@@ -139,8 +98,14 @@ def motion_correlated_objects(
             "spatial" if spatial_fallback else
             "none"
         )
-        detected["motion_correlation_threshold"] = round(movement_threshold, 5)
-        detected["motion_temporal_evidence_available"] = temporal_evidence_available
+        detected["motion_correlation_threshold"] = round(
+            evidence.movement_threshold,
+            5,
+        )
+        detected["motion_correlation_eligible"] = motion_correlated
+        detected["motion_temporal_evidence_available"] = (
+            evidence.temporal_evidence_available
+        )
         if motion_correlated:
             correlated.append(detected)
             spatial_matches += int(spatial)
@@ -151,7 +116,19 @@ def motion_correlated_objects(
             # Preserve the detection as diagnostic evidence without allowing
             # an unrelated stationary object to become an incident label.
             detected["incident_eligible"] = False
-            stationary_spatial_rejections += int(spatial and temporal_evidence_available)
+            existing_reasons = detected.get("incident_ineligible_reasons")
+            reasons = (
+                [str(value) for value in existing_reasons]
+                if isinstance(existing_reasons, list)
+                else [str(existing_reasons)] if existing_reasons else []
+            )
+            detected["incident_ineligible_reasons"] = list(dict.fromkeys([
+                *reasons,
+                "object_not_motion_correlated",
+            ]))
+            stationary_spatial_rejections += int(
+                spatial and evidence.temporal_evidence_available
+            )
     return correlated, {
         "required": True,
         "motion_region_count": len(regions),
@@ -162,8 +139,8 @@ def motion_correlated_objects(
         "temporal_path_match_count": temporal_path_matches,
         "new_appearance_match_count": new_appearance_matches,
         "stationary_spatial_rejection_count": stationary_spatial_rejections,
-        "minimum_temporal_movement_ratio": TEMPORAL_OBJECT_MOVEMENT_RATIO,
-        "adaptive_minimum_temporal_movement_ratio": MINIMUM_TEMPORAL_OBJECT_MOVEMENT_RATIO,
+        "minimum_temporal_movement_ratio": MAXIMUM_MOVEMENT_RATIO,
+        "adaptive_minimum_temporal_movement_ratio": MINIMUM_MOVEMENT_RATIO,
         "region_margin_ratio": MOTION_REGION_MARGIN_RATIO,
     }
 
@@ -267,10 +244,7 @@ class MotionDecisionHandler:
         return self.activity_attributor.status()
 
     def reconfigure_activity_attribution(self, mode: AttributionMode) -> None:
-        if (
-            self.activity_attributor is not None
-            and self.activity_attributor.mode != "off"
-        ):
+        if self.activity_attributor is not None:
             self.activity_attributor.reconfigure(mode)
 
     def handle(
@@ -372,7 +346,10 @@ class MotionDecisionHandler:
         detection_completed = frame is not None and not detection_failure(objects)
 
         activity_summary: dict[str, Any] | None = None
-        if self.activity_attributor is not None:
+        if (
+            self.activity_attributor is not None
+            and self.activity_attributor.mode != "off"
+        ):
             admissions = self.activity_attributor.admit(
                 objects,
                 qualification,
@@ -394,6 +371,27 @@ class MotionDecisionHandler:
             activity_summary = {
                 "mode": self.activity_attributor.mode,
                 "observed": len(activity_objects),
+                "detector_admitted": sum(
+                    admission.detector_eligible for admission in admissions
+                    if admission.observation.get("label")
+                ),
+                "zone_rejected": sum(
+                    admission.observation.get("confidence_eligible") is not False
+                    and admission.observation.get("zone_eligible") is False
+                    for admission in admissions
+                    if admission.observation.get("label")
+                ),
+                "confidence_rejected": sum(
+                    admission.observation.get("confidence_eligible") is False
+                    for admission in admissions
+                    if admission.observation.get("label")
+                ),
+                "temporal_rejected": sum(
+                    admission.observation.get("zone_eligible") is not False
+                    and admission.observation.get("temporal_eligible") is False
+                    for admission in admissions
+                    if admission.observation.get("label")
+                ),
                 "active": sum(item["role"] == "active" for item in activity_objects),
                 "scene_context": sum(
                     item["role"] == "scene_context" for item in activity_objects
@@ -402,6 +400,10 @@ class MotionDecisionHandler:
                     item["role"] == "indeterminate" for item in activity_objects
                 ),
                 "admitted": sum(bool(item["admitted"]) for item in activity_objects),
+                "scene_context_suppressed": sum(
+                    item["reason"] == "stationary_scene_context"
+                    for item in activity_objects
+                ),
                 "objects": activity_objects,
             }
             qualification["object_activity_attribution"] = activity_summary

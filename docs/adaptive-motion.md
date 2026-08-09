@@ -70,6 +70,17 @@ Each detection zone can independently enable **Exclude from EMA**. Motion inside
 
 EMA exclusion does not change the zone's object behavior. An Incident zone can exclude nuisance motion while continuing to admit matching objects, and an Ignore zone suppresses matching object incidents without excluding EMA unless both settings are selected. For a dedicated EMA-only polygon, select **No object effect** and enable **Exclude from EMA**. Motion crossing out of an excluded polygon becomes eligible at the boundary. The rasterized mask is cached per camera and resolution and rebuilt automatically when zone geometry changes.
 
+## Stationary objects and scene context
+
+SurvNG deliberately keeps two complementary controls separate:
+
+- **EMA stationary-motion filtering** runs on the low-resolution visual-analysis feed before object detection. It rejects confined outline shimmer, centroid oscillation, and persistent scene motion. Light, Standard, and Strong change how much movement may still be considered stationary; Strong can also reject unusually slow or distant travel.
+- **Repeated scene context** runs after high-resolution temporal object detection. It distinguishes an object that moved, appeared, or entered a zone from an object repeatedly observed at the same location across incidents. In enforcement mode, proven scene context remains stored as evidence but does not label the incident. Uncertain evidence fails open.
+
+The global controls live together under **Admin > General > Object Detection > Stationary objects & scene context**. Cameras can inherit or override both policies. Fixed zones remain explicit and independent: **Ignore** affects matching object classes, while **Exclude from EMA** affects all visual motion in the polygon because EMA has no object-class information.
+
+Object confidence and confirmation are separate from activity. They establish that a label is credible and repeatable; they do not establish that the object caused the event. Visual-backup correlation adds one further causal check by requiring an admitted object to move across detector samples or explain the EMA motion region.
+
 ## CPU and queue behavior
 
 Only enabled visual processors consume analysis time. Camera + visual backup and Visual-triggered modes continuously run the selected qualification pipeline; the adaptive processor remains the recommended default. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded scheduling queues replace stale pending requests with the newest request.

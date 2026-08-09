@@ -101,9 +101,14 @@ def apply_detection_zones(
             detected["zone_matches"] = []
             detected.pop("zone_point", None)
             detected["incident_eligible"] = False
+            detected["zone_eligible"] = False
             label = str(detected.get("label") or "")
             if class_confidence_thresholds is None:
                 detected["incident_eligible"] = bool(label)
+                detected["zone_eligible"] = bool(label)
+                detected["zone_admission_reason"] = (
+                    "full_frame" if label else "missing_label"
+                )
                 continue
             threshold = class_confidence_threshold(
                 label,
@@ -120,6 +125,10 @@ def apply_detection_zones(
             detected["confidence_threshold"] = threshold
             detected["confidence_eligible"] = confidence_eligible
             detected["incident_eligible"] = confidence_eligible
+            detected["zone_eligible"] = confidence_eligible
+            detected["zone_admission_reason"] = (
+                "full_frame" if confidence_eligible else "below_confidence"
+            )
         return objects
 
     has_incident_zones = any(zone.behavior == "incident" for zone in zones)
@@ -134,6 +143,7 @@ def apply_detection_zones(
         detected["zone_matches"] = []
         detected.pop("zone_point", None)
         detected["incident_eligible"] = False
+        detected["zone_eligible"] = False
         label = str(detected.get("label") or "")
         label_threshold = class_confidence_threshold(
             label,
@@ -191,5 +201,14 @@ def apply_detection_zones(
             # object at its zone-specific threshold, while objects elsewhere
             # must still satisfy the detector's normal confidence threshold.
             eligible = admitted or meets_default
-        detected["incident_eligible"] = bool(not ignored and eligible)
+        zone_eligible = bool(not ignored and eligible)
+        detected["incident_eligible"] = zone_eligible
+        detected["zone_eligible"] = zone_eligible
+        detected["zone_admission_reason"] = (
+            "ignored_zone" if ignored else
+            "incident_zone" if admitted else
+            "full_frame" if eligible else
+            "outside_incident_zone" if zone_required and has_incident_zones else
+            "below_confidence"
+        )
     return objects

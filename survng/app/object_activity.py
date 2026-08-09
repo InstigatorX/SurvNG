@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import math
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Iterable, Literal, Mapping
+
+from .object_motion import TemporalObjectMotionEvidence, temporal_object_motion_evidence
 
 
 AttributionMode = Literal["off", "shadow", "enforce"]
@@ -96,10 +97,21 @@ class ObjectIncidentAdmission:
         stored["activity_evidence"] = self.attribution.evidence.as_dict()
         stored["activity_counterfactual_suppressed"] = self.counterfactual_suppressed
         stored["activity_admission_reason"] = self.reason
+        stored["activity_eligible"] = self.admitted
         if not self.admitted:
             stored["incident_eligible"] = False
             if self.counterfactual_suppressed:
                 stored["incident_ineligible_reason"] = "stationary_scene_context"
+                existing = stored.get("incident_ineligible_reasons")
+                reasons = (
+                    [str(value) for value in existing]
+                    if isinstance(existing, list)
+                    else [str(existing)] if existing else []
+                )
+                stored["incident_ineligible_reasons"] = list(dict.fromkeys([
+                    *reasons,
+                    "stationary_scene_context",
+                ]))
         return stored
 
     @property
@@ -129,9 +141,6 @@ class ObjectActivityAttributor:
 
     STABLE_DISPLACEMENT_RATIO = 0.0025
     STABLE_PATH_RATIO = 0.006
-    MINIMUM_MOVEMENT_RATIO = 0.003
-    MAXIMUM_MOVEMENT_RATIO = 0.02
-    MOVEMENT_BOX_SCALE = 0.04
     CONTEXT_MEMORY_TTL_SECONDS = 2 * 60 * 60
     CONTEXT_MEMORY_MAX_ENTRIES = 128
     CONTEXT_MEMORY_MIN_IOU = 0.72
@@ -147,6 +156,10 @@ class ObjectActivityAttributor:
             "indeterminate": 0,
             "counterfactual_suppressions": 0,
             "enforced_suppressions": 0,
+            "zone_rejections": 0,
+            "confidence_rejections": 0,
+            "temporal_rejections": 0,
+            "detector_admissions": 0,
         }
         self._reasons: dict[str, int] = {}
         self._context_memory: list[_SceneContextEntry] = []
@@ -217,47 +230,21 @@ class ObjectActivityAttributor:
                 qualification,
                 reasons=("not_object_detection",),
             )
-        displacement = self._finite(observation.get("temporal_center_displacement_ratio"))
-        path = self._finite(observation.get("temporal_center_path_ratio"))
-        track_observations = self._integer(observation.get("temporal_track_observations"))
-        pretrigger = self._integer(observation.get("temporal_pretrigger_observations"))
-        posttrigger = self._integer(observation.get("temporal_posttrigger_observations"))
-        # Older persisted detections predate the exact counters. Their bounded
-        # first/last offsets still provide a conservative replay signal.
-        first_offset = self._finite_signed(
-            observation.get("temporal_first_observation_offset_seconds")
-        )
-        last_offset = self._finite_signed(
-            observation.get("temporal_last_observation_offset_seconds")
-        )
-        if pretrigger == 0 and first_offset is not None and first_offset < 0.0:
-            pretrigger = 1
-        if posttrigger == 0 and last_offset is not None and last_offset >= 0.0:
-            posttrigger = 1
-        robust_appearance = bool(observation.get("temporal_robust_new_appearance"))
-        zone_entry = bool(observation.get("temporal_zone_entry"))
-        movement_threshold = self._movement_threshold(observation)
-        credible_movement = bool(
-            displacement >= movement_threshold
-            or path >= max(0.01, movement_threshold * 2.5)
-        )
+        motion = temporal_object_motion_evidence(observation)
         stable = bool(
             observation.get("temporal_consensus") is True
-            and track_observations >= 2
-            and pretrigger >= 1
-            and posttrigger >= 1
-            and displacement <= self.STABLE_DISPLACEMENT_RATIO
-            and path <= self.STABLE_PATH_RATIO
-            and not robust_appearance
-            and not zone_entry
+            and motion.stable(
+                maximum_displacement_ratio=self.STABLE_DISPLACEMENT_RATIO,
+                maximum_path_ratio=self.STABLE_PATH_RATIO,
+                require_trigger_span=True,
+            )
         )
         stable_observation = bool(
             observation.get("temporal_consensus") is True
-            and track_observations >= 2
-            and displacement <= self.STABLE_DISPLACEMENT_RATIO
-            and path <= self.STABLE_PATH_RATIO
-            and not robust_appearance
-            and not zone_entry
+            and motion.stable(
+                maximum_displacement_ratio=self.STABLE_DISPLACEMENT_RATIO,
+                maximum_path_ratio=self.STABLE_PATH_RATIO,
+            )
         )
         memory_match, memory_sightings, memory_age = self._context_memory_evidence(
             observation,
@@ -265,15 +252,21 @@ class ObjectActivityAttributor:
             observed_at_epoch=observed_at_epoch,
         )
         ema_overlap = self._ema_overlap(observation, qualification)
-        if credible_movement:
+        if motion.credible_movement:
             role = ObjectActivityRole.ACTIVE
-            confidence = self._bounded(0.72 + min(0.25, displacement * 4.0 + path * 2.0))
+            confidence = self._bounded(
+                0.72
+                + min(
+                    0.25,
+                    motion.displacement_ratio * 4.0 + motion.path_ratio * 2.0,
+                )
+            )
             reasons = ("credible_temporal_movement",)
-        elif robust_appearance:
+        elif motion.robust_new_appearance:
             role = ObjectActivityRole.ACTIVE
             confidence = 0.88
             reasons = ("robust_new_appearance",)
-        elif zone_entry:
+        elif motion.zone_entry:
             role = ObjectActivityRole.ACTIVE
             confidence = 0.86
             reasons = ("zone_entry",)
@@ -287,23 +280,15 @@ class ObjectActivityAttributor:
             reasons = ("repeated_stable_scene_context",)
         else:
             role = ObjectActivityRole.INDETERMINATE
-            confidence = 0.35 if track_observations >= 2 else 0.15
+            confidence = 0.35 if motion.track_observations >= 2 else 0.15
             reasons = ("insufficient_causal_evidence",)
         result = self._result(
             observation,
             role,
             confidence,
             qualification,
-            displacement=displacement,
-            path=path,
-            movement_threshold=movement_threshold,
-            track_observations=track_observations,
-            pretrigger=pretrigger,
-            posttrigger=posttrigger,
-            robust_appearance=robust_appearance,
-            zone_entry=zone_entry,
+            motion=motion,
             ema_overlap=ema_overlap,
-            credible_movement=credible_movement,
             stable=stable,
             memory_match=memory_match,
             memory_sightings=memory_sightings,
@@ -321,10 +306,12 @@ class ObjectActivityAttributor:
                 observation,
                 event_key=event_key,
                 invalidate_location=bool(
-                    robust_appearance
-                    or zone_entry
-                    or displacement >= max(0.02, movement_threshold * 2.0)
-                    or path >= max(0.04, movement_threshold * 4.0)
+                    motion.robust_new_appearance
+                    or motion.zone_entry
+                    or motion.displacement_ratio
+                    >= max(0.02, motion.movement_threshold * 2.0)
+                    or motion.path_ratio
+                    >= max(0.04, motion.movement_threshold * 4.0)
                 ),
             )
         return result
@@ -336,41 +323,34 @@ class ObjectActivityAttributor:
         confidence: float,
         qualification: Mapping[str, Any],
         *,
-        displacement: float = 0.0,
-        path: float = 0.0,
-        movement_threshold: float = MINIMUM_MOVEMENT_RATIO,
-        track_observations: int = 0,
-        pretrigger: int = 0,
-        posttrigger: int = 0,
-        robust_appearance: bool = False,
-        zone_entry: bool = False,
+        motion: TemporalObjectMotionEvidence | None = None,
         ema_overlap: bool | None = None,
-        credible_movement: bool = False,
         stable: bool = False,
         memory_match: bool = False,
         memory_sightings: int = 0,
         memory_age: float | None = None,
         reasons: tuple[str, ...] = (),
     ) -> ObjectActivityAttribution:
+        motion = motion or temporal_object_motion_evidence(observation)
         overlap = self._ema_overlap(observation, qualification) if ema_overlap is None else ema_overlap
         return ObjectActivityAttribution(
             observation=dict(observation),
             role=role,
             confidence=self._bounded(confidence),
             evidence=ObjectActivityEvidence(
-                displacement_ratio=displacement,
-                path_ratio=path,
-                movement_threshold=movement_threshold,
-                track_observations=track_observations,
-                pretrigger_observations=pretrigger,
-                posttrigger_observations=posttrigger,
-                robust_new_appearance=robust_appearance,
-                zone_entry=zone_entry,
+                displacement_ratio=motion.displacement_ratio,
+                path_ratio=motion.path_ratio,
+                movement_threshold=motion.movement_threshold,
+                track_observations=motion.track_observations,
+                pretrigger_observations=motion.pretrigger_observations,
+                posttrigger_observations=motion.posttrigger_observations,
+                robust_new_appearance=motion.robust_new_appearance,
+                zone_entry=motion.zone_entry,
                 ema_region_overlap=overlap,
                 # Main/substream registration is not currently calibrated.
                 # Keep overlap diagnostic until an explicit mapping exists.
                 ema_alignment_reliable=False,
-                credible_movement=credible_movement,
+                credible_movement=motion.credible_movement,
                 stable_across_trigger=stable,
                 scene_context_memory_match=memory_match,
                 scene_context_memory_sightings=memory_sightings,
@@ -511,6 +491,14 @@ class ObjectActivityAttributor:
                     continue
                 self._counts["evaluated"] += 1
                 self._counts[result.role.value] += 1
+                if result.observation.get("incident_eligible") is not False:
+                    self._counts["detector_admissions"] += 1
+                elif result.observation.get("confidence_eligible") is False:
+                    self._counts["confidence_rejections"] += 1
+                elif result.observation.get("zone_eligible") is False:
+                    self._counts["zone_rejections"] += 1
+                elif result.observation.get("temporal_eligible") is False:
+                    self._counts["temporal_rejections"] += 1
                 counterfactual = bool(
                     result.observation.get("incident_eligible") is not False
                     and result.role is ObjectActivityRole.SCENE_CONTEXT
@@ -521,25 +509,6 @@ class ObjectActivityAttributor:
                         self._counts["enforced_suppressions"] += 1
                 for reason in result.evidence.reasons:
                     self._reasons[reason] = self._reasons.get(reason, 0) + 1
-
-    @classmethod
-    def _movement_threshold(cls, observation: Mapping[str, Any]) -> float:
-        box = observation.get("box")
-        try:
-            width = float(observation.get("detection_frame_width") or 0.0)
-            height = float(observation.get("detection_frame_height") or 0.0)
-            if not isinstance(box, Mapping) or width <= 0 or height <= 0:
-                raise ValueError
-            diagonal = math.hypot(
-                (float(box["x2"]) - float(box["x1"])) / width,
-                (float(box["y2"]) - float(box["y1"])) / height,
-            )
-        except (KeyError, TypeError, ValueError):
-            return cls.MAXIMUM_MOVEMENT_RATIO
-        return min(
-            cls.MAXIMUM_MOVEMENT_RATIO,
-            max(cls.MINIMUM_MOVEMENT_RATIO, diagonal * cls.MOVEMENT_BOX_SCALE),
-        )
 
     @staticmethod
     def _normalized_box(
@@ -610,29 +579,6 @@ class ObjectActivityAttributor:
             if min(x2, rx2) > max(x1, rx1) and min(y2, ry2) > max(y1, ry1):
                 return True
         return False
-
-    @staticmethod
-    def _finite(value: object) -> float:
-        try:
-            result = float(value or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-        return max(0.0, result) if math.isfinite(result) else 0.0
-
-    @staticmethod
-    def _finite_signed(value: object) -> float | None:
-        try:
-            result = float(value)
-        except (TypeError, ValueError):
-            return None
-        return result if math.isfinite(result) else None
-
-    @staticmethod
-    def _integer(value: object) -> int:
-        try:
-            return max(0, int(value or 0))
-        except (TypeError, ValueError):
-            return 0
 
     @staticmethod
     def _bounded(value: float) -> float:

@@ -818,12 +818,19 @@ class AppManager:
     def reconfigure_image_storage(self, config: ImageStorageConfig) -> None:
         self.image_writer.reconfigure(config)
 
-    def reconfigure_detector_policy(self, config: DetectorConfig) -> None:
+    def reconfigure_detector_policy(self, config: AppConfig) -> None:
         """Apply policy-only detector settings without disturbing camera workers."""
-        self.inference.reconfigure_policy(config)
+        self.inference.reconfigure_policy(config.detector)
+        cameras = {camera.id: camera for camera in config.cameras}
         for worker in self.camera_fleet.workers.values():
+            camera = cameras.get(worker.camera.id)
+            mode = (
+                config.detector.object_activity_attribution
+                if camera is None or camera.object_activity_attribution == "inherit"
+                else camera.object_activity_attribution
+            )
             worker.reconfigure_object_activity_attribution(
-                config.object_activity_attribution
+                mode
             )
 
     def reconfigure_object_tracking(self, config: DetectorConfig) -> None:

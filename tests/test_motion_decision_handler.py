@@ -25,6 +25,44 @@ class RecordingEventStore:
 
 
 class MotionDecisionHandlerTest(unittest.TestCase):
+    def test_disabled_object_activity_does_not_evaluate_or_learn(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        detected = {
+            "label": "car",
+            "confidence": 0.91,
+            "incident_eligible": True,
+            "box": {"x1": 10, "y1": 10, "x2": 40, "y2": 40},
+            "detection_frame_width": 100,
+            "detection_frame_height": 100,
+            "temporal_consensus": True,
+            "temporal_track_observations": 4,
+            "temporal_center_displacement_ratio": 0.001,
+            "temporal_center_path_ratio": 0.003,
+        }
+        attributor = ObjectActivityAttributor("off")
+        handler = MotionDecisionHandler(
+            camera_id="front-door",
+            events=events,
+            detection_provider=lambda _event_at: (frame, [detected], "recording.mp4"),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.webp",
+            object_serializer=json.dumps,
+            activity_attributor=attributor,
+        )
+
+        outcome = handler.handle(
+            "onvif/motion",
+            "motion",
+            datetime(2026, 8, 8, 5, 0, tzinfo=timezone.utc),
+            {},
+        )
+
+        self.assertIsNone(outcome.object_activity)
+        self.assertEqual(attributor.status()["evaluated"], 0)
+        self.assertEqual(attributor.status()["scene_context_memory_entries"], 0)
+        stored = json.loads(events.payload["objects_json"])
+        self.assertNotIn("activity_role", stored[0])
+
     def test_object_activity_context_is_persisted_but_not_incident_eligible(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)

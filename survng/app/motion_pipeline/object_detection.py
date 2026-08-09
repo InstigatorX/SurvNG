@@ -459,10 +459,21 @@ def _temporal_consensus(
         label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
         confirmed = confirmed and label_confirmed_here
         incident_confirmed = confirmed and not bool(detected.get("auxiliary_detection"))
+        zone_eligible = any(
+            _eligible_detection(item) for item in track.winning_observations
+        )
         edge_clearance, subject_area = _normalized_box_metrics(detected, selected.frame)
         enriched = {
             **detected,
             "incident_eligible": incident_confirmed,
+            "zone_eligible": zone_eligible,
+            "temporal_eligible": incident_confirmed,
+            "incident_ineligible_reasons": (
+                [] if incident_confirmed else
+                ["auxiliary_detection"] if detected.get("auxiliary_detection") else
+                ["outside_incident_zone"] if not zone_eligible else
+                ["temporal_unconfirmed"]
+            ),
             "temporal_consensus": confirmed,
             "temporal_sample_offset_seconds": selected.offset,
             "temporal_observations": len(track.winning_observations),

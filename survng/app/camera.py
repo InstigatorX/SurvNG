@@ -135,10 +135,14 @@ class CameraWorker:
                 self.motion_state.publish_event if event_callback is not None else None
             ),
             activity_attributor=ObjectActivityAttributor(
-                mode=getattr(
-                    motion_object_detector_factory.detector.config,
-                    "object_activity_attribution",
-                    "enforce",
+                mode=(
+                    getattr(
+                        motion_object_detector_factory.detector.config,
+                        "object_activity_attribution",
+                        "enforce",
+                    )
+                    if camera.object_activity_attribution == "inherit"
+                    else camera.object_activity_attribution
                 )
             ),
         )

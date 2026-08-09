@@ -152,6 +152,8 @@ class DetectionZoneTest(unittest.TestCase):
 
         self.assertEqual(objects[0]["zones"], ["Lower Driveway"])
         self.assertFalse(objects[0]["incident_eligible"])
+        self.assertFalse(objects[0]["zone_eligible"])
+        self.assertEqual(objects[0]["zone_admission_reason"], "ignored_zone")
 
     def test_no_object_effect_zone_does_not_change_incident_eligibility(self) -> None:
         self.camera.zones[0].behavior = "none"
@@ -242,6 +244,7 @@ class DetectionZoneTest(unittest.TestCase):
 
         self.assertFalse(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["confidence_threshold"], 0.7)
+        self.assertEqual(objects[0]["zone_admission_reason"], "below_confidence")
         self.assertTrue(objects[1]["incident_eligible"])
         self.assertEqual(objects[1]["confidence_threshold"], 0.45)
 

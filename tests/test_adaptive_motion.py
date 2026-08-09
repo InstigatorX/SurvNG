@@ -863,7 +863,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
 
         self.assertGreater(long.debug.values["background_learning_rates"][-1], short_rate)
 
-    def test_ignore_zone_filters_overlapping_components(self) -> None:
+    def test_object_ignore_zone_does_not_filter_ema_components(self) -> None:
         zones = [{
             "name": "tree",
             "enabled": True,
@@ -881,8 +881,8 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             configuration={"motion_zones": zones},
         )
 
-        self.assertFalse(result.scoring.accepted)
-        self.assertGreater(result.debug.values["blob_rejections"]["zone"], 0)
+        self.assertTrue(result.scoring.accepted)
+        self.assertEqual(result.debug.values["blob_rejections"]["zone"], 0)
 
     def test_background_and_tracks_are_isolated_per_camera_pipeline(self) -> None:
         other = MotionPipelineFactory(build_builtin_motion_registry()).create(
@@ -963,7 +963,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             first.dominant_track.accumulated_score,
         )
 
-    def test_blob_reports_only_the_zone_it_overlaps(self) -> None:
+    def test_object_incident_zones_do_not_influence_ema_blob_scoring(self) -> None:
         zones = [
             {
                 "name": "left",
@@ -982,8 +982,9 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         result = self.process(moving_subject_frames(4), configuration={"motion_zones": zones})
 
         self.assertTrue(result.blobs)
-        self.assertTrue(all("right" not in blob.zone_names for blob in result.blobs))
-        self.assertTrue(any(blob.zone_names == ("left",) for blob in result.blobs))
+        self.assertTrue(all(blob.zone_names == () for blob in result.blobs))
+        self.assertTrue(all(blob.zone_overlap == 0.0 for blob in result.blobs))
+        self.assertTrue(all(blob.ignored_zone_overlap == 0.0 for blob in result.blobs))
 
 
 if __name__ == "__main__":

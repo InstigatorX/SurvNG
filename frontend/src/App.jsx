@@ -1012,6 +1012,7 @@ function defaultCamera(cameras, seed = {}) {
       live_days: seed.retention?.live_days ?? null,
     },
     require_incident_zone: seed.require_incident_zone ?? null,
+    object_activity_attribution: seed.object_activity_attribution || "inherit",
     motion_qualification: {
       mode: seed.motion_qualification?.mode || "inherit",
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
@@ -1078,7 +1079,7 @@ const assistantTrackingAssessments = {
 const assistantSettingLabels = {
   analysis_preset: "Motion analysis style",
   sensitivity: "Motion sensitivity",
-  stationary_object_tolerance: "Parked-object suppression",
+  stationary_object_tolerance: "EMA stationary-motion filtering",
   frame_width: "Motion analysis image size",
   borderline_rescue_enabled: "Second look at borderline motion",
   borderline_margin: "Borderline motion range",
@@ -7967,9 +7968,13 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
     total.sceneContext += Number(status.scene_context || 0);
     total.indeterminate += Number(status.indeterminate || 0);
     total.enforced += Number(status.enforced_suppressions || 0);
+    total.detectorAdmissions += Number(status.detector_admissions || 0);
+    total.confidenceRejections += Number(status.confidence_rejections || 0);
+    total.zoneRejections += Number(status.zone_rejections || 0);
+    total.temporalRejections += Number(status.temporal_rejections || 0);
     if (status.mode) total.modes.add(status.mode);
     return total;
-  }, { evaluated: 0, active: 0, sceneContext: 0, indeterminate: 0, enforced: 0, modes: new Set() });
+  }, { evaluated: 0, active: 0, sceneContext: 0, indeterminate: 0, enforced: 0, detectorAdmissions: 0, confidenceRejections: 0, zoneRejections: 0, temporalRejections: 0, modes: new Set() });
   const selectedCapture = selected?.capture || {};
   const selectedReadFailures = [selectedCapture.live, selectedCapture.main]
     .reduce((total, source) => total + Number(source?.read_failures || 0), 0);
@@ -8124,6 +8129,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             <div><dt>Top labels · 24h</dt><dd>{topLabels.length ? topLabels.map(([label, count]) => `${label} ${count}`).join(" · ") : "None"}</dd></div>
             <div><dt>Activity attribution · since restart</dt><dd>{activityAttribution.evaluated.toLocaleString()} checked <small>{activityAttribution.active.toLocaleString()} active · {activityAttribution.sceneContext.toLocaleString()} scene context · {activityAttribution.indeterminate.toLocaleString()} uncertain</small></dd></div>
             <div><dt>Context prevented from labeling incidents</dt><dd>{activityAttribution.enforced.toLocaleString()} <small>{activityAttribution.modes.size ? [...activityAttribution.modes].join(" / ").replaceAll("_", " ") : "waiting for detections"}</small></dd></div>
+            <div><dt>Object admission · since restart</dt><dd>{activityAttribution.detectorAdmissions.toLocaleString()} detector-eligible <small>{activityAttribution.confidenceRejections.toLocaleString()} low confidence · {activityAttribution.zoneRejections.toLocaleString()} zone-rejected · {activityAttribution.temporalRejections.toLocaleString()} unconfirmed · {activityAttribution.enforced.toLocaleString()} scene context</small></dd></div>
           </dl>
           {!selected ? <div className="telemetry-semantic-subsection">
             <header><strong>Semantic search</strong><small>Local visual search indexing</small></header>
@@ -8154,6 +8160,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             const eventLoss = Number(camera.motion?.event_runtime?.evicted || 0)
               + Number(camera.motion?.event_runtime?.rejected || 0)
               + Number(camera.motion?.event_runtime?.retries_dropped || 0);
+            const objectActivity = camera.object_tracking?.object_activity_attribution || {};
             const onvifIssues = Number(camera.onvif?.poll_errors || 0) + Number(camera.onvif?.poll_timeouts || 0) + Number(camera.onvif?.renewal_errors || 0);
             const expected = camera.expected_enabled ?? (camera.lifecycle?.enabled !== false);
             const fresh = camera.connected && (camera.frame_fresh ?? Number(camera.last_frame_age_seconds || 0) <= 5);
@@ -8193,6 +8200,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                   <div><dt>Performance gates</dt><dd>{(performance.checks || []).map((check) => `${check.label}: ${Number(check.value || 0).toFixed(check.unit === "%" ? 1 : 2)}${check.unit}`).join(" · ") || "Waiting for samples"}</dd></div>
                   <div><dt>Analyzed / stale skipped / deferred</dt><dd>{analyzed.toLocaleString()} / {superseded.toLocaleString()} / {Number(analysisRuntime.analysis_slot_deferrals || 0).toLocaleString()}</dd></div>
                   <div><dt>Motion passed / rejected / suppressed</dt><dd>{camera.motion?.passed || 0} / {camera.motion?.rejected || 0} / {camera.motion?.suppressed || 0}</dd></div>
+                  <div><dt>Object admission / confidence / zone / confirmation / context</dt><dd>{Number(objectActivity.detector_admissions || 0).toLocaleString()} / {Number(objectActivity.confidence_rejections || 0).toLocaleString()} / {Number(objectActivity.zone_rejections || 0).toLocaleString()} / {Number(objectActivity.temporal_rejections || 0).toLocaleString()} / {Number(objectActivity.enforced_suppressions || 0).toLocaleString()}</dd></div>
                   <div><dt>Event queue peak / evicted / rejected / retry lost</dt><dd>{camera.motion?.event_runtime?.queue_high_water || 0} / {camera.motion?.event_runtime?.evicted || 0} / {camera.motion?.event_runtime?.rejected || 0} / {camera.motion?.event_runtime?.retries_dropped || 0}</dd></div>
                   <div><dt>ONVIF notices / renewals / issues</dt><dd>{camera.onvif?.notifications || 0} / {camera.onvif?.renewals || 0} / {onvifIssues}</dd></div>
                   <div><dt>Tracking waits / longest / timeouts</dt><dd>{camera.tracking?.capacity_waits || 0} / {Number(camera.tracking?.capacity_wait_seconds_max || 0).toFixed(1)}s / {camera.tracking?.capacity_timeouts || 0}</dd></div>
@@ -9265,6 +9273,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   <option value="true">Zones</option>
                   <option value="false">Zones + Full Frame</option>
                 </select><small>Ignore zones always suppress their matching object classes.</small></label>
+                <label>Repeated scene context<select value={selectedCamera.object_activity_attribution || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["object_activity_attribution"], event.target.value)}>
+                  <option value="inherit">Use global ({config.detector?.object_activity_attribution === "shadow" ? "Observe" : config.detector?.object_activity_attribution === "off" ? "Off" : "Prevent labels"})</option>
+                  <option value="enforce">Prevent false incident labels</option>
+                  <option value="shadow">Observe only</option>
+                  <option value="off">Off</option>
+                </select><small>Controls whether stable objects repeatedly seen in one location can remain evidence without labeling the incident.</small></label>
               </div>
               <div className="field-row stream-field-row">
                 <div className="stream-field">
@@ -9327,12 +9341,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     <option value="balanced">Balanced</option>
                     <option value="low">Low</option>
                   </select></label>
-                  <label>Parked-object suppression<select value={selectedCamera.motion_qualification?.stationary_object_tolerance || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "stationary_object_tolerance"], event.target.value)}>
+                  <label>EMA stationary-motion filtering<select value={selectedCamera.motion_qualification?.stationary_object_tolerance || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "stationary_object_tolerance"], event.target.value)}>
                     <option value="inherit">Use global setting</option>
                     <option value="low">Light</option>
                     <option value="balanced">Standard</option>
                     <option value="high">Strong</option>
-                  </select><small>Controls how aggressively outline shimmer and reflections around parked objects are ignored. Strong may ignore unusually slow or distant movement.</small></label>
+                  </select><small>Controls how aggressively EMA rejects confined outline shimmer and reflections before object detection. Strong may ignore unusually slow or distant movement.</small></label>
                   <label>Light and shadow filtering<select value={selectedCamera.motion_qualification?.illumination_filter_enabled == null ? "" : String(selectedCamera.motion_qualification.illumination_filter_enabled)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "illumination_filter_enabled"], event.target.value === "" ? null : event.target.value === "true")}><option value="">Use global setting</option><option value="true">Enabled</option><option value="false">Disabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection.</small></label>
                   <label>Analysis Width<select value={selectedCamera.motion_qualification?.frame_width ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "frame_width"], event.target.value ? Number(event.target.value) : null)}>
                     <option value="">Use global setting</option>
@@ -9725,7 +9739,7 @@ function Mog2TrackOverlay({ tracks, bounds }) {
 
 const motionAiSettingLabels = {
   analysis_preset: "Motion analysis method",
-  stationary_object_tolerance: "Parked-object suppression",
+  stationary_object_tolerance: "EMA stationary-motion filtering",
 };
 
 function formatMotionAiValue(setting, value) {
@@ -10491,11 +10505,6 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           </select><small>Independent OpenVINO workers can process simultaneous camera events. More workers use more accelerator and memory capacity.</small></label>
           <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" value={config.detector?.confidence_threshold ?? 0.45} onChange={(event) => updateConfig(["detector", "confidence_threshold"], Number(event.target.value))} /></label>
           <label>Object confirmation<select value={String(config.detector?.event_confirmation_frames ?? 2)} onChange={(event) => updateConfig(["detector", "event_confirmation_frames"], Number(event.target.value))}><option value="1">Immediate (1 frame)</option><option value="2">Confirmed (2 frames)</option><option value="3">Strong (3 frames)</option><option value="4">Very strict (4 frames)</option><option value="5">Maximum (5 frames)</option></select><small>Requires the same label in this many of five event-time frames. Confirmed is recommended and suppresses one-frame false identifications.</small></label>
-          <label>Repeated stationary objects<select value={config.detector?.object_activity_attribution || "enforce"} onChange={(event) => updateConfig(["detector", "object_activity_attribution"], event.target.value)}>
-            <option value="enforce">Prevent false incident labels</option>
-            <option value="shadow">Observe without changing incidents</option>
-            <option value="off">Off</option>
-          </select><small>After the same object stays in the same place across several incidents, keep it as evidence without treating it as the cause. Moving or uncertain objects remain eligible.</small></label>
           <label>Incident eligibility<select value={String(config.detector?.require_incident_zone ?? true)} onChange={(event) => updateConfig(["detector", "require_incident_zone"], event.target.value === "true")}>
             <option value="true">Zones</option>
             <option value="false">Zones + Full Frame</option>
@@ -10529,6 +10538,22 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
               </div>)}
             </div> : <span className="settings-help">Select a model with class metadata to configure per-object overrides.</span>}
           </details>
+        </section>
+
+        <section className="detection-settings-card detection-feature-card wide-card">
+          <header className="detection-settings-card-head">
+            <div className="detection-settings-card-icon"><Activity size={18} /></div>
+            <div><h3>Stationary objects &amp; scene context</h3><p>Separate visual-motion filtering from object-level incident attribution.</p></div>
+          </header>
+          <div className="detection-field-grid">
+            <label>EMA stationary-motion filtering<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Light</option><option value="balanced">Standard</option><option value="high">Strong</option></select><small>Runs before object detection. It rejects confined outline shimmer and stationary foreground motion; Strong may ignore unusually slow or distant travel.</small></label>
+            <label>Repeated scene context<select value={config.detector?.object_activity_attribution || "enforce"} onChange={(event) => updateConfig(["detector", "object_activity_attribution"], event.target.value)}>
+              <option value="enforce">Prevent false incident labels</option>
+              <option value="shadow">Observe without changing incidents</option>
+              <option value="off">Off</option>
+            </select><small>Runs after object detection. Repeated stable objects remain stored as evidence without being treated as the cause; moving or uncertain objects remain eligible.</small></label>
+            <div className="detection-settings-subhead"><strong>Fixed areas remain explicit</strong><small>Object Ignore zones suppress only their matching classes. “Exclude from EMA” independently removes all visual motion in that polygon.</small></div>
+          </div>
         </section>
 
         <section className="detection-settings-card">
@@ -10656,7 +10681,6 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <summary>Advanced motion tuning</summary>
           <div className="field-row">
           <label>Sensitivity<select value={config.motion_qualification?.sensitivity || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "sensitivity"], event.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="low">Low</option></select></label>
-          <label>Parked-object suppression<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Light</option><option value="balanced">Standard</option><option value="high">Strong</option></select><small>Controls how aggressively outline shimmer and reflections around parked objects are ignored. Strong may ignore unusually slow or distant movement.</small></label>
           <label>Light and shadow filtering<select value={String(config.motion_qualification?.illumination_filter_enabled ?? false)} onChange={(event) => updateConfig(["motion_qualification", "illumination_filter_enabled"], event.target.value === "true")}><option value="false">Disabled</option><option value="true">Enabled</option></select><small>Ignores clear moving illumination while uncertain motion continues to object detection. Disabled still records evidence for evaluation.</small></label>
           <label>Analysis Width<select value={config.motion_qualification?.frame_width ?? 320} onChange={(event) => updateConfig(["motion_qualification", "frame_width"], Number(event.target.value))}><option value="320">320 px</option><option value="480">480 px</option><option value="640">640 px</option><option value="720">720 px</option><option value="800">800 px</option></select></label>
           <label>Sample FPS<input type="number" min="2" max="10" step="1" value={config.motion_qualification?.sample_fps ?? 5} onChange={(event) => updateConfig(["motion_qualification", "sample_fps"], Number(event.target.value))} /></label>

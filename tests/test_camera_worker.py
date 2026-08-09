@@ -204,6 +204,23 @@ def seed_capture_frame(
 
 
 class CameraWorkerTest(unittest.TestCase):
+    def test_scene_context_policy_uses_camera_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(
+                CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url="rtsp://camera/main",
+                    object_activity_attribution="shadow",
+                ),
+                Path(tmpdir),
+            )
+
+        self.assertEqual(
+            worker.motion_decision_handler.activity_status()["mode"],
+            "shadow",
+        )
+
     def test_illumination_filter_uses_global_and_camera_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             inherited = make_worker(

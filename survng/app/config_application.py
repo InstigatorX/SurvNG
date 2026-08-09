@@ -31,7 +31,7 @@ class ConfigurableRuntime(Protocol):
     def reconfigure_semantic_search(self, config: Any) -> None: ...
     def reconfigure_inference(self, config: Any, roles: set[str], *, refresh_tracking: bool) -> None: ...
     def reconfigure_object_tracking(self, config: Any) -> None: ...
-    def reconfigure_detector_policy(self, config: Any) -> None: ...
+    def reconfigure_detector_policy(self, config: AppConfig) -> None: ...
 
 
 class StorageTasksActiveError(RuntimeError):
@@ -50,6 +50,7 @@ def manager_owned_config(config: AppConfig) -> dict:
         payload.pop(field, None)
     for camera in payload.get("cameras", []):
         camera.pop("retention", None)
+        camera.pop("object_activity_attribution", None)
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
@@ -85,6 +86,13 @@ class TargetedConfigApplication:
             image_changed = "image_storage" in changes
             semantic_changed = "semantic_search" in changes
             policy_changed = any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_HOT_POLICY_FIELDS)
+            policy_changed = policy_changed or {
+                camera.id: camera.object_activity_attribution
+                for camera in current.cameras
+            } != {
+                camera.id: camera.object_activity_attribution
+                for camera in incoming.cameras
+            }
             tracking_changed = any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_SESSION_FIELDS)
             roles: set[str] = set()
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_OBJECT_ENGINE_FIELDS): roles.add("object")
@@ -107,7 +115,7 @@ class TargetedConfigApplication:
                     (semantic_changed, "semantic_search", lambda c: runtime.reconfigure_semantic_search(c.semantic_search), lambda c: runtime.reconfigure_semantic_search(c.semantic_search)),
                     (bool(roles), "inference", lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh), lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh)),
                     (tracking_changed and not refresh, "tracking", lambda c: runtime.reconfigure_object_tracking(c.detector), lambda c: runtime.reconfigure_object_tracking(c.detector)),
-                    (policy_changed, "policy", lambda c: runtime.reconfigure_detector_policy(c.detector), lambda c: runtime.reconfigure_detector_policy(c.detector)),
+                    (policy_changed, "policy", runtime.reconfigure_detector_policy, runtime.reconfigure_detector_policy),
                 ]
                 for changed, name, forward, _rollback in steps:
                     if changed:

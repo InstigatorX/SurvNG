@@ -436,9 +436,35 @@ class ConfigReloadTest(unittest.TestCase):
             effective, result = main.apply_config_update(incoming)
 
         reload.assert_not_called()
-        active.reconfigure_detector_policy.assert_called_once_with(effective.detector)
+        active.reconfigure_detector_policy.assert_called_once_with(effective)
         self.assertEqual(result["apply_mode"], "hot")
         self.assertIn("detector_policy", result["hot_updated"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_camera_scene_context_policy_hot_applies_without_restarting_cameras(self) -> None:
+        active = Mock()
+        current = AppConfig.model_validate({
+            "cameras": [{
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsp://example.invalid/main",
+            }],
+        })
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].object_activity_attribution = "shadow"
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_detector_policy.assert_called_once_with(effective)
+        self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
     def test_detector_engine_change_restarts_only_object_inference(self) -> None:
@@ -638,8 +664,8 @@ class ConfigReloadTest(unittest.TestCase):
                 main.apply_config_update(incoming)
 
         self.assertEqual(active.reconfigure_detector_policy.call_args_list, [
-            unittest.mock.call(incoming.detector),
-            unittest.mock.call(current.detector),
+            unittest.mock.call(incoming),
+            unittest.mock.call(current),
         ])
         self.assertEqual(save.call_count, 2)
         self.assertIs(main.config, current)

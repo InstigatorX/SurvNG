@@ -516,47 +516,6 @@ class EmaZoneExclusionStage:
         return context
 
 
-def _motion_zones(
-    configuration: Mapping[str, Any], width: int, height: int
-) -> tuple[np.ndarray, np.ndarray, tuple[tuple[str, np.ndarray], ...]]:
-    included = np.zeros((height, width), dtype=np.uint8)
-    ignored = np.zeros((height, width), dtype=np.uint8)
-    named_included: list[tuple[str, np.ndarray]] = []
-    raw_zones = configuration.get("motion_zones", [])
-    if not isinstance(raw_zones, list):
-        return included, ignored, ()
-    for raw in raw_zones:
-        if not isinstance(raw, Mapping) or not raw.get("enabled", True):
-            continue
-        points = raw.get("points", [])
-        if not isinstance(points, list) or len(points) < 3:
-            continue
-        polygon = np.asarray(
-            [
-                [
-                    round(float(point.get("x", 0.0)) * (width - 1)),
-                    round(float(point.get("y", 0.0)) * (height - 1)),
-                ]
-                for point in points
-                if isinstance(point, Mapping)
-            ],
-            dtype=np.int32,
-        )
-        if len(polygon) < 3:
-            continue
-        behavior = raw.get("behavior")
-        if behavior == "none":
-            continue
-        is_ignored = behavior == "ignore"
-        target = ignored if is_ignored else included
-        cv2.fillPoly(target, [polygon], 255)
-        if not is_ignored:
-            zone_mask = np.zeros((height, width), dtype=np.uint8)
-            cv2.fillPoly(zone_mask, [polygon], 255)
-            named_included.append((str(raw.get("name") or "zone"), zone_mask))
-    return included, ignored, tuple(named_included)
-
-
 class ConnectedComponentBlobStage:
     def __init__(self, stage_id: str, edge_margin_ratio: float = 0.06) -> None:
         self._stage_id = stage_id
@@ -572,7 +531,6 @@ class ConnectedComponentBlobStage:
             return context
         height, width = context.processed_frame_history[0].shape[:2]
         frame_area = max(1, width * height)
-        included_zone, ignored_zone, named_zones = _motion_zones(context.configuration, width, height)
         history: list[MotionFrameBlobs] = []
         for index, mask in enumerate(context.motion_mask_history):
             effective_mask = (
@@ -597,20 +555,7 @@ class ConnectedComponentBlobStage:
                     continue
                 cx, cy = centroids[label]
                 box_area = max(1, int(box_width) * int(box_height))
-                included_overlap = float(
-                    np.count_nonzero(component & (included_zone[y:y + box_height, x:x + box_width] > 0))
-                ) / component_pixels
-                ignored_overlap = float(
-                    np.count_nonzero(component & (ignored_zone[y:y + box_height, x:x + box_width] > 0))
-                ) / component_pixels
                 edge_distance = min(cx / width, cy / height, (width - cx) / width, (height - cy) / height)
-                overlapping_zone_names = tuple(
-                    name
-                    for name, zone_mask in named_zones
-                    if np.count_nonzero(
-                        component & (zone_mask[y:y + box_height, x:x + box_width] > 0)
-                    ) > 0
-                )
                 blobs.append(MotionBlob(
                     box=(x / width, y / height, (x + box_width) / width, (y + box_height) / height),
                     centroid=(float(cx) / width, float(cy) / height),
@@ -621,9 +566,14 @@ class ConnectedComponentBlobStage:
                     aspect_ratio=float(box_width) / max(1.0, float(box_height)),
                     average_motion_intensity=float(np.mean(intensity[y:y + box_height, x:x + box_width][component])),
                     edge_distance=float(edge_distance),
-                    zone_overlap=included_overlap,
-                    ignored_zone_overlap=ignored_overlap,
-                    zone_names=overlapping_zone_names,
+                    # Detection-zone behavior belongs exclusively to object
+                    # incident policy. EMA exclusions are applied earlier by
+                    # EmaZoneExclusionStage from the explicit
+                    # ``exclude_from_ema`` flag, where class-blind pixel
+                    # suppression is visible and intentional.
+                    zone_overlap=0.0,
+                    ignored_zone_overlap=0.0,
+                    zone_names=(),
                 ))
             changed = int(cv2.countNonZero(effective_mask))
             history.append(MotionFrameBlobs(
