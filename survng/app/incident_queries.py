@@ -237,6 +237,14 @@ class IncidentQueryService:
                         "name": name,
                         "status": status,
                         "confidence": round(score, 4),
+                        "candidate_count": max(
+                            1,
+                            int((observation.get("consensus") or {}).get("candidate_count") or 1),
+                        ),
+                        "agreement_count": max(
+                            0,
+                            int((observation.get("consensus") or {}).get("agreement_count") or 0),
+                        ),
                     }
             return sorted(
                 summaries.values(),

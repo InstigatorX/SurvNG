@@ -370,6 +370,21 @@ class EventApiSerializationTest(unittest.TestCase):
                     "evidence_count": 245,
                     "queue_depth": 2,
                 }),
+                faces=SimpleNamespace(
+                    stats=Mock(return_value={
+                        "observations": 30,
+                        "candidate_frames": 72,
+                        "temporal_tracks": 20,
+                        "multi_frame_tracks": 18,
+                        "consensus_tracks": 12,
+                        "average_candidates_per_track": 3.6,
+                    }),
+                    recognition_status=Mock(return_value={
+                        "queue_depth": 2,
+                        "pending": 3,
+                        "failed": 1,
+                    }),
+                ),
                 statuses=Mock(return_value=[{
                     "id": "gate",
                     "name": "Gate",
@@ -434,6 +449,8 @@ class EventApiSerializationTest(unittest.TestCase):
             self.assertEqual(payload["activity"], activity)
             self.assertEqual(payload["semantic_search"]["state"], "ready")
             self.assertEqual(payload["semantic_search"]["event_count"], 120)
+            self.assertEqual(payload["face_recognition"]["candidate_frames"], 72)
+            self.assertEqual(payload["face_recognition"]["consensus_tracks"], 12)
             self.assertEqual(payload["cameras"][0]["activity"]["last_24h"]["events"], 2)
             self.assertEqual(payload["cameras"][0]["onvif"]["notifications"], 12)
             self.assertEqual(payload["cameras"][0]["motion"]["rejected"], 2)

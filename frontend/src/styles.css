@@ -5010,6 +5010,17 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding: 3px 6px;
 }
 
+.face-frame-count {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: white;
+  font-size: 10px;
+  padding: 3px 6px;
+}
+
 .overlay {
   position: fixed;
   inset: 0;

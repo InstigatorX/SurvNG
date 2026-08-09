@@ -3091,7 +3091,7 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
         {faces.length ? faces.map((face, index) => (
           <button type="button" className={`inspector-face ${face.status || "unknown"}`} key={`${face.status}-${face.name}-${index}`} onClick={() => onFaceOpen(face)}>
             <strong>{face.name || "Unknown"}</strong>
-            <span>{Math.round(Number(face.confidence || 0) * 100)}%</span>
+            <span>{Math.round(Number(face.confidence || 0) * 100)}%{Number(face.candidate_count || 0) > 1 ? ` · ${face.candidate_count} frames` : ""}</span>
           </button>
         )) : <p>No recognized faces.</p>}
       </section>
@@ -8094,6 +8094,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
   const runtime = data.detector?.runtime || {};
   const objectWorkers = data.detector?.workers?.object || data.detector?.isolation || {};
   const semantic = data.semantic_search || {};
+  const faceRecognition = data.face_recognition || {};
   const gpu = data.gpu || {};
   const storage = data.system?.storage || {};
   const memory = data.system?.memory || {};
@@ -8297,6 +8298,15 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
               <div><dt>Search evidence</dt><dd>{Number(semantic.evidence_count || 0).toLocaleString()} <small>whole images and object crops</small></dd></div>
               <div><dt>Queue / evidence added since restart</dt><dd>{Number(semantic.queue_depth || 0).toLocaleString()} / {Number(semantic.indexed_since_start || 0).toLocaleString()}</dd></div>
               {semantic.error || semantic.reason ? <div><dt>Last issue</dt><dd>{semantic.error || semantic.reason}</dd></div> : null}
+            </dl>
+          </div> : null}
+          {!selected ? <div className="telemetry-semantic-subsection">
+            <header><strong>Face recognition</strong><small>Best-frame collection and identity consensus</small></header>
+            <dl className="telemetry-details">
+              <div><dt>Canonical faces</dt><dd>{Number(faceRecognition.observations || 0).toLocaleString()} <small>one review item per face track</small></dd></div>
+              <div><dt>Candidate frames retained</dt><dd>{Number(faceRecognition.candidate_frames || 0).toLocaleString()} <small>{Number(faceRecognition.average_candidates_per_track || 0).toFixed(1)} per temporal track</small></dd></div>
+              <div><dt>Multi-frame tracks</dt><dd>{Number(faceRecognition.multi_frame_tracks || 0).toLocaleString()} <small>{Number(faceRecognition.consensus_tracks || 0).toLocaleString()} with identity agreement</small></dd></div>
+              <div><dt>Recognition queue</dt><dd>{Number(faceRecognition.recognition?.queue_depth || 0).toLocaleString()} <small>{Number(faceRecognition.recognition?.pending || 0).toLocaleString()} pending · {Number(faceRecognition.recognition?.failed || 0).toLocaleString()} failed</small></dd></div>
             </dl>
           </div> : null}
         </section>
@@ -11337,6 +11347,7 @@ function FaceReviewDialog({ observation, people, timeZone, onClose, onUpdated })
           <div><strong>{observation.person_name || "Unknown face"}</strong><span>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</span></div>
           <div className="face-match-summary">
             <span>Face quality <strong>{observation.quality_score != null ? `${Math.round(Number(observation.quality_score) * 100)}%` : "Not scored"}</strong></span>
+            {Number(observation.consensus?.candidate_count || 0) > 1 ? <span>Selected from <strong>{observation.consensus.candidate_count} incident frames</strong>{Number(observation.consensus?.agreement_count || 0) > 1 ? ` · ${observation.consensus.agreement_count} agreed on identity` : ""}</span> : null}
             {observation.match_details?.reference_ids?.length ? <span>Match supported by <strong>{observation.match_details.reference_ids.length} strongest references</strong></span> : null}
             {observation.match_details?.margin != null ? <span>Lead over next person <strong>{Math.round(Number(observation.match_details.margin) * 100)} points</strong></span> : null}
           </div>
@@ -11522,6 +11533,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
                 <small>{observation.camera_id} · {formatDateTime(observation.observed_at, timeZone)}</small>
               </span>
               <span className="face-confidence">{observation.candidate_confidence != null ? `${Math.round(Number(observation.candidate_confidence) * 100)}% match` : `${Math.round(Number(observation.confidence || 0) * 100)}%`}</span>
+              {Number(observation.consensus?.candidate_count || 0) > 1 ? <span className="face-frame-count">Best of {observation.consensus.candidate_count} frames</span> : null}
             </button>
           ))}
         </div>

@@ -507,6 +507,17 @@ class SystemTelemetryService:
         camera_statuses = manager.statuses()
         detector = manager.detector_status()
         semantic_search = manager.semantic_search_status()
+        face_recognition = {}
+        faces = getattr(manager, "faces", None)
+        if faces is not None:
+            try:
+                face_recognition = {
+                    **faces.stats(),
+                    "recognition": faces.recognition_status(),
+                }
+            except Exception:
+                LOGGER.exception("could not collect face-recognition telemetry")
+                face_recognition = {"error": "Face telemetry is temporarily unavailable."}
         gpu = self.gpu_status(detector)
         activity = manager.events.telemetry_activity(hours=hours)
         selected_camera_id = str(camera_id or "").strip()[:128]
@@ -587,6 +598,7 @@ class SystemTelemetryService:
             },
             "detector": detector,
             "semantic_search": semantic_search,
+            "face_recognition": face_recognition,
             "gpu": gpu,
             "history": history,
             "runtime_history": persisted["runtime"],

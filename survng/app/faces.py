@@ -1230,7 +1230,7 @@ class FaceStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -1243,12 +1243,40 @@ class FaceStore:
                 """
             ).fetchone()
             people = connection.execute("select count(*) from face_people").fetchone()[0]
+            candidate_rows = connection.execute(
+                "select count(*) from face_observations where candidate_track_id != ''"
+            ).fetchone()[0]
+            track_rows = connection.execute(
+                """
+                select consensus_json from face_observations
+                where canonical = 1 and candidate_track_id != ''
+                """
+            ).fetchall()
+        consensus_tracks = 0
+        multi_frame_tracks = 0
+        candidate_total = 0
+        for track_row in track_rows:
+            try:
+                consensus = json.loads(track_row["consensus_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                consensus = {}
+            count = max(1, int(consensus.get("candidate_count") or 1))
+            candidate_total += count
+            multi_frame_tracks += int(count > 1)
+            consensus_tracks += int(int(consensus.get("agreement_count") or 0) >= 2)
         return {
             "people": int(people or 0),
             "observations": int(row["observations"] or 0),
             "unknown": int(row["unknown"] or 0),
             "known": int(row["known"] or 0),
             "suggested": int(row["suggested"] or 0),
+            "candidate_frames": int(candidate_rows or 0),
+            "temporal_tracks": len(track_rows),
+            "multi_frame_tracks": multi_frame_tracks,
+            "consensus_tracks": consensus_tracks,
+            "average_candidates_per_track": round(
+                candidate_total / len(track_rows), 2
+            ) if track_rows else 0.0,
         }
 
     def calibration(self) -> dict[str, Any]:
@@ -1480,6 +1508,7 @@ class FaceStore:
                     f"""
                     select o.id as observation_id, o.event_id, o.person_id, o.confidence, o.match_confidence,
                         o.candidate_person_id, o.candidate_confidence,
+                        o.candidate_track_id, o.consensus_json,
                         p.name as person_name, candidate.name as candidate_person_name
                     from face_observations o
                     left join face_people p on p.id = o.person_id
@@ -1489,7 +1518,13 @@ class FaceStore:
                     """,
                     chunk,
                 ).fetchall()
-                observations.extend(dict(row) for row in rows)
+                for row in rows:
+                    item = dict(row)
+                    try:
+                        item["consensus"] = json.loads(item.pop("consensus_json") or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        item["consensus"] = {}
+                    observations.append(item)
         return observations
 
     def create_person(self, name: str, observation_id: int | None = None, notes: str = "") -> dict[str, Any]:
