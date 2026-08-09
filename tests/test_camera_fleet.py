@@ -149,6 +149,54 @@ def test_shutdown_wait_receives_each_workers_generation_ticket() -> None:
     assert forwarded is ticket
 
 
+def test_fleet_shutdown_waits_for_in_progress_direct_camera_start() -> None:
+    fleet, workers, _recorder, _startup, _publisher = _fleet()
+    start_entered = threading.Event()
+    release_start = threading.Event()
+    stop_signaled = threading.Event()
+
+    def start() -> None:
+        start_entered.set()
+        assert release_start.wait(1.0)
+
+    workers["gate"].start.side_effect = start
+    workers["gate"].request_stop.side_effect = stop_signaled.set
+    starter = threading.Thread(target=lambda: fleet.start_camera("gate"))
+    stopper = threading.Thread(target=lambda: fleet.stop_workers(timeout=1.0))
+    starter.start()
+    assert start_entered.wait(1.0)
+    stopper.start()
+    assert not stop_signaled.wait(0.02)
+
+    release_start.set()
+    starter.join(1.0)
+    stopper.join(1.0)
+    assert not starter.is_alive()
+    assert not stopper.is_alive()
+    workers["gate"].request_stop.assert_called_once_with()
+
+
+def test_stop_workers_cancels_startup_before_signaling_camera_workers() -> None:
+    fleet, workers, _recorder, startup, _publisher = _fleet()
+    order: list[str] = []
+    startup.cancel.side_effect = lambda: order.append("cancel") or True
+    workers["gate"].request_stop.side_effect = lambda: order.append("stop")
+
+    fleet.stop_workers(timeout=1.0)
+
+    assert order[:2] == ["cancel", "stop"]
+
+
+def test_stopped_fleet_rejects_new_admission_and_direct_camera_start() -> None:
+    fleet, workers, _recorder, _startup, _publisher = _fleet()
+    fleet.stop_workers(timeout=1.0)
+
+    assert not fleet.start_camera("gate")
+    with pytest.raises(RuntimeError, match="stopping"):
+        fleet.start_admission(())
+    workers["gate"].start.assert_not_called()
+
+
 def test_shutdown_does_not_race_close_against_a_timed_out_stop() -> None:
     fleet, workers, _recorder, _startup, _publisher = _fleet()
     workers["gate"].wait_stopped.return_value = False

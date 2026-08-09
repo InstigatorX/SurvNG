@@ -93,6 +93,10 @@ class CameraFleetLifecycle:
         self.recorder = recorder
         self.startup = startup
         self._state_publisher = state_publisher
+        # Serialize fleet mutations and teardown without burdening status reads.
+        # This is re-entrant because quiesce is a transaction composed from the
+        # same public cancellation and ONVIF-release operations.
+        self._operation_lock = threading.RLock()
         self._stopping = threading.Event()
         self._cameras_by_id = {camera.id: camera for camera in self.cameras}
         self._state_lock = threading.Lock()
@@ -115,29 +119,38 @@ class CameraFleetLifecycle:
         return self._cameras_by_id.get(camera_id)
 
     def set_camera_enabled(self, camera_id: str, enabled: bool) -> bool:
-        with self._state_lock:
-            if camera_id not in self._camera_enabled:
+        with self._operation_lock:
+            if self._stopping.is_set():
                 return False
-            self._camera_enabled[camera_id] = bool(enabled)
-            return True
+            with self._state_lock:
+                if camera_id not in self._camera_enabled:
+                    return False
+                self._camera_enabled[camera_id] = bool(enabled)
+                return True
 
     def camera_enabled(self, camera_id: str) -> bool:
         with self._state_lock:
             return self._camera_enabled.get(camera_id, False)
 
     def start_camera(self, camera_id: str) -> bool:
-        worker = self.workers.get(camera_id)
-        if worker is None or self._stopping.is_set():
-            return False
-        worker.start()
-        return True
+        with self._operation_lock:
+            worker = self.workers.get(camera_id)
+            if (
+                worker is None
+                or self._stopping.is_set()
+                or camera_id in self._closed_workers
+            ):
+                return False
+            worker.start()
+            return True
 
     def stop_camera(self, camera_id: str) -> bool:
-        worker = self.workers.get(camera_id)
-        if worker is None or self._stopping.is_set():
-            return False
-        worker.stop()
-        return True
+        with self._operation_lock:
+            worker = self.workers.get(camera_id)
+            if worker is None or self._stopping.is_set():
+                return False
+            worker.stop()
+            return True
 
     def prepare_startup(
         self,
@@ -148,48 +161,51 @@ class CameraFleetLifecycle:
         recording_is_enabled: Callable[[str], bool] | None = None,
     ) -> tuple[CameraStartupTask, ...]:
         """Apply immutable preferences and build one admission generation."""
-        self._stopping.clear()
-        camera_preferences = {
-            camera.id: bool(camera_enabled.get(camera.id, True))
-            for camera in self.cameras
-        }
-        with self._state_lock:
-            self._camera_enabled = dict(camera_preferences)
-        recording_preferences = {
-            camera.id: bool(recording_enabled.get(camera.id, True))
-            for camera in self.cameras
-        }
-        recording_predicate = recording_is_enabled or (
-            lambda camera_id: recording_preferences[camera_id]
-        )
-        detection_preferences = {
-            camera.id: bool(detection_enabled.get(camera.id, True))
-            for camera in self.cameras
-        }
-        tasks: list[CameraStartupTask] = []
-        for camera in self.cameras:
-            worker = self.workers[camera.id]
-            self.recorder.set_camera_enabled(
-                camera.id,
-                camera_preferences[camera.id] and recording_preferences[camera.id],
+        with self._operation_lock:
+            if self._closed_workers:
+                raise RuntimeError("closed camera fleet cannot prepare a new startup")
+            self._stopping.clear()
+            camera_preferences = {
+                camera.id: bool(camera_enabled.get(camera.id, True))
+                for camera in self.cameras
+            }
+            with self._state_lock:
+                self._camera_enabled = dict(camera_preferences)
+            recording_preferences = {
+                camera.id: bool(recording_enabled.get(camera.id, True))
+                for camera in self.cameras
+            }
+            recording_predicate = recording_is_enabled or (
+                lambda camera_id: recording_preferences[camera_id]
             )
-            worker.set_detection_enabled(detection_preferences[camera.id])
-            tasks.append(CameraStartupTask(
-                camera_id=camera.id,
-                is_enabled=lambda camera_id=camera.id: self._admission_enabled(
-                    camera_id
-                ),
-                start_camera=worker.start,
-                capture_ready=worker.live_capture_ready,
-                start_recorders=lambda camera=camera: self._start_recorders(
-                    camera,
-                    recording_predicate,
-                ),
-                publish_state=lambda camera_id=camera.id: (
-                    self._publish_current_state(camera_id)
-                ),
-            ))
-        return tuple(tasks)
+            detection_preferences = {
+                camera.id: bool(detection_enabled.get(camera.id, True))
+                for camera in self.cameras
+            }
+            tasks: list[CameraStartupTask] = []
+            for camera in self.cameras:
+                worker = self.workers[camera.id]
+                self.recorder.set_camera_enabled(
+                    camera.id,
+                    camera_preferences[camera.id] and recording_preferences[camera.id],
+                )
+                worker.set_detection_enabled(detection_preferences[camera.id])
+                tasks.append(CameraStartupTask(
+                    camera_id=camera.id,
+                    is_enabled=lambda camera_id=camera.id: self._admission_enabled(
+                        camera_id
+                    ),
+                    start_camera=worker.start,
+                    capture_ready=worker.live_capture_ready,
+                    start_recorders=lambda camera=camera: self._start_recorders(
+                        camera,
+                        recording_predicate,
+                    ),
+                    publish_state=lambda camera_id=camera.id: (
+                        self._publish_current_state(camera_id)
+                    ),
+                ))
+            return tuple(tasks)
 
     def _publish_state(self, camera_id: str, enabled: bool) -> None:
         self._state_publisher.publish_camera_state(camera_id, enabled)
@@ -206,7 +222,10 @@ class CameraFleetLifecycle:
         *,
         on_complete: Callable[[], None] | None = None,
     ) -> None:
-        self.startup.start(tasks, on_complete=on_complete)
+        with self._operation_lock:
+            if self._stopping.is_set():
+                raise RuntimeError("camera fleet is stopping")
+            self.startup.start(tasks, on_complete=on_complete)
 
     def wait(self, timeout: float | None = None) -> bool:
         return self.startup.wait(timeout)
@@ -220,77 +239,98 @@ class CameraFleetLifecycle:
         return {**self.startup.status(), **lifecycle}
 
     def cancel_admission(self) -> None:
+        with self._operation_lock:
+            self._cancel_admission_locked()
+
+    def _cancel_admission_locked(self) -> None:
         self._stopping.set()
         if not self.startup.cancel():
             raise RuntimeError("camera startup coordinator did not stop")
 
     def release_onvif(self, *, timeout: float | None = None) -> None:
-        failures: list[CameraFleetFailure] = []
-        stop_tickets: dict[str, Any] = {}
-        for camera_id, worker in self.workers.items():
-            try:
-                stop_tickets[camera_id] = worker.request_onvif_stop()
-            except Exception as error:
-                failures.append(CameraFleetFailure(camera_id, error))
-        deadline = time.monotonic() + max(
-            0.0,
-            ONVIF_RELEASE_TIMEOUT_SECONDS if timeout is None else timeout,
-        )
-        active: set[str] = set()
-        for camera_id, worker in self.workers.items():
-            try:
-                if not worker.wait_onvif_stopped(
-                    deadline,
-                    stop_tickets.get(camera_id),
-                ):
-                    active.add(camera_id)
-            except Exception as error:
-                failures.append(CameraFleetFailure(camera_id, error))
-                active.add(camera_id)
-        with self._residual_lock:
-            self._onvif_residuals = set(active)
-        failures.extend(CameraFleetFailure(
-            camera_id,
-            RuntimeError("ONVIF release timed out"),
-        ) for camera_id in active)
-        if failures:
-            raise CameraFleetOperationError(
-                "ONVIF release",
-                failures,
-                residual_camera_ids=active,
+        with self._operation_lock:
+            failures: list[CameraFleetFailure] = []
+            stop_tickets: dict[str, Any] = {}
+            for camera_id, worker in self.workers.items():
+                try:
+                    stop_tickets[camera_id] = worker.request_onvif_stop()
+                except Exception as error:
+                    failures.append(CameraFleetFailure(camera_id, error))
+            deadline = time.monotonic() + max(
+                0.0,
+                ONVIF_RELEASE_TIMEOUT_SECONDS if timeout is None else timeout,
             )
+            active: set[str] = set()
+            for camera_id, worker in self.workers.items():
+                try:
+                    if not worker.wait_onvif_stopped(
+                        deadline,
+                        stop_tickets.get(camera_id),
+                    ):
+                        active.add(camera_id)
+                except Exception as error:
+                    failures.append(CameraFleetFailure(camera_id, error))
+                    active.add(camera_id)
+            with self._residual_lock:
+                self._onvif_residuals = set(active)
+            failures.extend(CameraFleetFailure(
+                camera_id,
+                RuntimeError("ONVIF release timed out"),
+            ) for camera_id in active)
+            if failures:
+                raise CameraFleetOperationError(
+                    "ONVIF release",
+                    failures,
+                    residual_camera_ids=active,
+                )
 
     def quiesce_onvif(self, *, timeout: float | None = None) -> None:
         """Stop new admission before releasing every existing subscription."""
-        try:
-            self.cancel_admission()
-        except Exception as error:
-            # Admission may still be inside CameraLifecycle.start() while
-            # holding its operation lock. Do not attempt ONVIF or camera stop
-            # work until the coordinator and all of its workers have joined.
-            residuals = set(self.workers)
-            with self._residual_lock:
-                self._shutdown_residuals = set(residuals)
-            raise CameraFleetOperationError(
-                "startup cancellation",
-                [CameraFleetFailure("startup admission", error)],
-                residual_camera_ids=residuals,
-            ) from None
-        try:
-            self.release_onvif(timeout=timeout)
-        except CameraFleetOperationError as error:
-            raise CameraFleetOperationError(
-                "ONVIF quiescence",
-                error.failures,
-                residual_camera_ids=error.residual_camera_ids,
-            ) from None
+        with self._operation_lock:
+            try:
+                self._cancel_admission_locked()
+            except Exception as error:
+                # Admission may still be inside CameraLifecycle.start(). Do
+                # not touch listeners or workers until its coordinator joins.
+                residuals = set(self.workers)
+                with self._residual_lock:
+                    self._shutdown_residuals = set(residuals)
+                raise CameraFleetOperationError(
+                    "startup cancellation",
+                    [CameraFleetFailure("startup admission", error)],
+                    residual_camera_ids=residuals,
+                ) from None
+            try:
+                self.release_onvif(timeout=timeout)
+            except CameraFleetOperationError as error:
+                raise CameraFleetOperationError(
+                    "ONVIF quiescence",
+                    error.failures,
+                    residual_camera_ids=error.residual_camera_ids,
+                ) from None
 
     def stop_workers(
         self,
         *,
         timeout: float | None = None,
     ) -> None:
+        with self._operation_lock:
+            self._stop_workers_locked(timeout=timeout)
+
+    def _stop_workers_locked(self, *, timeout: float | None = None) -> None:
         self._stopping.set()
+        if not self.startup.cancel():
+            residuals = set(self.workers)
+            with self._residual_lock:
+                self._shutdown_residuals = set(residuals)
+            raise CameraFleetOperationError(
+                "startup cancellation",
+                [CameraFleetFailure(
+                    "startup admission",
+                    RuntimeError("camera startup coordinator did not stop"),
+                )],
+                residual_camera_ids=residuals,
+            )
         failures: list[CameraFleetFailure] = []
         stop_tickets: dict[str, Any] = {}
         for camera_id, worker in self.workers.items():
