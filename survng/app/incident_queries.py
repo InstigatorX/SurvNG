@@ -23,6 +23,7 @@ from .incident_presenter import (
 )
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_snapshot_path
 from .manager import AppManager
+from .manager_access import ManagerAccessCoordinator, manager_generation_lease
 
 
 def _motion_audit_row(row: dict[str, Any], storage_dir: Path) -> dict[str, Any]:
@@ -506,6 +507,7 @@ class IncidentQueryService:
 class IncidentQueryDependencies:
     get_manager: Callable[[], AppManager]
     manager_lock: threading.RLock
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,9 +523,12 @@ def create_incident_query_router(
     router = APIRouter()
 
     def with_manager(operation: Callable[[AppManager], Any]) -> Any:
-        with dependencies.manager_lock:
-            active_manager = dependencies.get_manager()
-        return operation(active_manager)
+        with manager_generation_lease(
+            dependencies.manager_access,
+            dependencies.manager_lock,
+            dependencies.get_manager,
+        ) as active_manager:
+            return operation(active_manager)
 
     @router.get("/api/events")
     def events(limit: int = 100) -> list[dict[str, Any]]:

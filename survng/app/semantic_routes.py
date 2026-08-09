@@ -10,6 +10,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from .manager_access import ManagerAccessCoordinator, manager_generation_lease
+
 
 class SemanticSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
@@ -25,6 +27,7 @@ class SemanticSearchRequest(BaseModel):
 class SemanticRouteDependencies:
     get_manager: Callable[[], Any]
     manager_lock: threading.RLock
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,60 +41,63 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
 
     @router.get("/api/semantic-search/status")
     def semantic_search_status() -> dict[str, Any]:
-        with deps.manager_lock:
-            return deps.get_manager().semantic_search_status()
+        with manager_generation_lease(
+            deps.manager_access, deps.manager_lock, deps.get_manager
+        ) as active_manager:
+            return active_manager.semantic_search_status()
 
     @router.post("/api/semantic-search")
     def semantic_search(request: SemanticSearchRequest) -> dict[str, Any]:
-        with deps.manager_lock:
-            active_manager = deps.get_manager()
+        with manager_generation_lease(
+            deps.manager_access, deps.manager_lock, deps.get_manager
+        ) as active_manager:
             maximum = min(request.limit, active_manager.config.semantic_search.max_results)
             semantic_service = active_manager.semantic_search
             event_store = active_manager.events
             base_path = active_manager.config.base_path
-        try:
-            hits = semantic_service.search_text(
-                request.query,
-                camera_ids=request.camera_ids,
-                object_labels=request.object_labels,
-                start_at=request.start_at,
-                end_at=request.end_at,
-                limit=maximum * 4,
-                minimum_score=request.minimum_score,
-            )
-        except (RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        best_by_event: dict[int, Any] = {}
-        for hit in hits:
-            best_by_event.setdefault(hit.event_id, hit)
-            if len(best_by_event) >= maximum:
-                break
-        event_rows = {
-            int(row["id"]): {
-                "id": int(row["id"]),
-                "camera_id": str(row.get("camera_id") or ""),
-                "kind": str(row.get("kind") or ""),
-                "created_at": str(row.get("created_at") or ""),
+            try:
+                hits = semantic_service.search_text(
+                    request.query,
+                    camera_ids=request.camera_ids,
+                    object_labels=request.object_labels,
+                    start_at=request.start_at,
+                    end_at=request.end_at,
+                    limit=maximum * 4,
+                    minimum_score=request.minimum_score,
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            best_by_event: dict[int, Any] = {}
+            for hit in hits:
+                best_by_event.setdefault(hit.event_id, hit)
+                if len(best_by_event) >= maximum:
+                    break
+            event_rows = {
+                int(row["id"]): {
+                    "id": int(row["id"]),
+                    "camera_id": str(row.get("camera_id") or ""),
+                    "kind": str(row.get("kind") or ""),
+                    "created_at": str(row.get("created_at") or ""),
+                }
+                for row in event_store.get_many(list(best_by_event))
             }
-            for row in event_store.get_many(list(best_by_event))
-        }
-        results = []
-        for event_id, hit in best_by_event.items():
-            event = event_rows.get(event_id)
-            if event is None:
-                continue
-            results.append({
-                "score": round(hit.score, 6),
-                "evidence": {
-                    "source_kind": hit.source_kind,
-                    "source_key": hit.source_key,
-                    "object_label": hit.object_label,
-                    "bbox": hit.bbox,
-                },
-                "event": event,
-                "snapshot_url": f"{base_path}/api/events/{event_id}/snapshot.jpg",
-            })
-        return {"query": request.query.strip(), "count": len(results), "results": results}
+            results = []
+            for event_id, hit in best_by_event.items():
+                event = event_rows.get(event_id)
+                if event is None:
+                    continue
+                results.append({
+                    "score": round(hit.score, 6),
+                    "evidence": {
+                        "source_kind": hit.source_kind,
+                        "source_key": hit.source_key,
+                        "object_label": hit.object_label,
+                        "bbox": hit.bbox,
+                    },
+                    "event": event,
+                    "snapshot_url": f"{base_path}/api/events/{event_id}/snapshot.jpg",
+                })
+            return {"query": request.query.strip(), "count": len(results), "results": results}
 
     return SemanticRouteBundle(
         router=router,

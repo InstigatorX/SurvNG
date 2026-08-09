@@ -719,6 +719,7 @@ _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(
         get_manager=lambda: manager,
         manager_lock=MANAGER_RELOAD_LOCK,
+        manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_semantic_route_bundle.router)
@@ -762,6 +763,7 @@ _incident_query_bundle = create_incident_query_router(
     IncidentQueryDependencies(
         get_manager=lambda: manager,
         manager_lock=MANAGER_RELOAD_LOCK,
+        manager_access=MANAGER_ACCESS,
     ),
     INCIDENT_QUERIES,
 )
@@ -844,6 +846,7 @@ _detection_route_bundle = create_detection_router(
         sample_video_frames=lambda *args, **kwargs: sampled_video_frames(
             *args, **kwargs
         ),
+        manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_detection_route_bundle.router)
@@ -944,6 +947,8 @@ _recording_route_bundle = create_recording_router(
             active_manager=active_manager,
             **kwargs,
         ),
+        manager_lock=MANAGER_RELOAD_LOCK,
+        manager_access=MANAGER_ACCESS,
     )
 )
 app.include_router(_recording_route_bundle.router)

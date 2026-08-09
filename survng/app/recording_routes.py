@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from .incident_presenter import (
 )
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_epoch
 from .media_exports import MediaExportManager
+from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .recording_media import (
     hls_map_transition,
     playback_segment_duration,
@@ -72,6 +74,8 @@ class RecordingRouteDependencies:
     recording_file_response: Callable[[Path, str], FileResponse]
     event_clip_window: Callable[..., tuple[float, float]]
     ensure_event_clip: Callable[..., Path]
+    manager_lock: threading.RLock | None = None
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +133,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
     router = APIRouter()
 
     @router.get("/api/cameras/{camera_id}/recordings")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recordings(camera_id: str, limit: int = 200, source: str = "main") -> list[dict]:
         active_manager = _require_recording_camera(deps, camera_id)
         rows = deps.recording_rows(
@@ -141,6 +146,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/cameras/{camera_id}/recordings/events")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_events(camera_id: str, limit: int = 1000, source: str = "main") -> list[dict]:
         active_manager = _require_recording_camera(deps, camera_id)
         rows = deps.recording_rows(
@@ -166,6 +172,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/cameras/{camera_id}/recordings/day")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_day(
         camera_id: str,
         start_epoch: float,
@@ -215,6 +222,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/recordings/grid/day")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_grid_day(
         start_epoch: float,
         end_epoch: float,
@@ -319,6 +327,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/recordings/grid/updates")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_grid_updates(
         start_epoch: float,
         end_epoch: float,
@@ -398,6 +407,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.post("/api/exports", status_code=202)
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def create_media_export(request: MediaExportRequest) -> dict[str, object]:
         _require_recording_camera(deps, request.camera_id)
         maximum = 24 * 60 * 60 if request.kind == "recording" else 7 * 24 * 60 * 60
@@ -574,6 +584,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/cameras/{camera_id}/recordings/window")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_window(
         camera_id: str,
         start_epoch: float,
@@ -601,6 +612,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/cameras/{camera_id}/recordings/preview.jpg")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_preview(camera_id: str, epoch: float, source: str = "main") -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
         if not math.isfinite(epoch) or epoch <= 0:
@@ -632,6 +644,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
 
     @router.get("/api/cameras/{camera_id}/recordings/updates")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_updates(
         camera_id: str,
         start_epoch: float,
@@ -699,6 +712,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         }
 
     @router.get("/api/cameras/{camera_id}/recordings/day.m3u8")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_day_hls_playlist(
         camera_id: str,
         start_epoch: float,
@@ -772,6 +786,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
     @router.get(
         "/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/init.mp4"
     )
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_day_hls_init(
         camera_id: str,
         segment_name: str,
@@ -797,6 +812,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
     @router.get(
         "/api/cameras/{camera_id}/recordings/day/segment/{segment_name}/media.m4s"
     )
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def recording_day_hls_segment(
         camera_id: str,
         segment_name: str,
@@ -820,6 +836,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         return deps.recording_file_response(media_path, "video/iso.segment")
 
     @router.get("/api/events/{event_id}/clip.mp4")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def event_clip(
         event_id: int,
         before: float | None = None,
@@ -850,6 +867,7 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         )
 
     @router.get("/api/events/{event_id}/stream.m3u8")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def event_stream(
         event_id: int,
         before: float | None = None,

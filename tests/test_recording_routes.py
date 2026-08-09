@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest import TestCase
 
@@ -9,6 +10,7 @@ from survng.app.recording_routes import (
     RecordingRouteDependencies,
     create_recording_router,
 )
+from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class _Recorder:
@@ -64,6 +66,28 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_request_holds_manager_lease_while_query_runs(self) -> None:
+        active_manager = _Manager("current")
+        access = ManagerAccessCoordinator()
+        lock = threading.RLock()
+
+        def recording_rows(manager, *_args, **_kwargs):
+            self.assertIs(manager, active_manager)
+            self.assertEqual(access.active_leases(active_manager), 1)
+            return []
+
+        dependencies = replace(
+            _dependencies(lambda: active_manager),
+            recording_rows=recording_rows,
+            manager_lock=lock,
+            manager_access=access,
+        )
+
+        create_recording_router(dependencies).handlers["recordings"](
+            "gate", 10, "main"
+        )
+        self.assertEqual(access.active_leases(active_manager), 0)
+
     def test_recording_helper_receives_request_manager_snapshot(self) -> None:
         active_manager = _Manager("current")
         helper_managers: list[_Manager] = []

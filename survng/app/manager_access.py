@@ -6,10 +6,14 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TypeVar
+from functools import wraps
+from inspect import iscoroutinefunction
+from typing import Any, ParamSpec, TypeVar
 
 
 ManagerT = TypeVar("ManagerT")
+ReturnT = TypeVar("ReturnT")
+Params = ParamSpec("Params")
 
 
 class ManagerAccessCoordinator:
@@ -61,3 +65,67 @@ class ManagerAccessCoordinator:
     def active_leases(self, manager: object) -> int:
         with self._condition:
             return self._active.get(id(manager), 0)
+
+
+@contextmanager
+def manager_generation_lease(
+    access: ManagerAccessCoordinator | None,
+    generation_lock: threading.RLock | None,
+    get_manager: Callable[[], ManagerT],
+) -> Iterator[ManagerT]:
+    """Protect one bounded use of the selected manager generation."""
+    if access is not None:
+        if generation_lock is None:
+            raise RuntimeError("manager generation lease requires a generation lock")
+        with access.lease(generation_lock, get_manager) as manager:
+            yield manager
+        return
+    if generation_lock is not None:
+        with generation_lock:
+            yield get_manager()
+        return
+    yield get_manager()
+
+
+def guard_manager_generation(
+    access: ManagerAccessCoordinator | None,
+    generation_lock: threading.RLock | None,
+    get_manager: Callable[[], Any],
+) -> Callable[[Callable[Params, ReturnT]], Callable[Params, ReturnT]]:
+    """Decorate a bounded sync or async operation with a generation lease."""
+
+    def decorate(operation: Callable[Params, ReturnT]) -> Callable[Params, ReturnT]:
+        if iscoroutinefunction(operation):
+            @wraps(operation)
+            async def async_guarded(*args: Params.args, **kwargs: Params.kwargs) -> Any:
+                if access is not None:
+                    if generation_lock is None:
+                        raise RuntimeError(
+                            "manager generation guard requires a generation lock"
+                        )
+                    with access.lease(generation_lock, get_manager):
+                        return await operation(*args, **kwargs)
+                if generation_lock is not None:
+                    with generation_lock:
+                        return await operation(*args, **kwargs)
+                return await operation(*args, **kwargs)
+
+            return async_guarded
+
+        @wraps(operation)
+        def guarded(*args: Params.args, **kwargs: Params.kwargs) -> ReturnT:
+            if access is not None:
+                if generation_lock is None:
+                    raise RuntimeError(
+                        "manager generation guard requires a generation lock"
+                    )
+                with access.lease(generation_lock, get_manager):
+                    return operation(*args, **kwargs)
+            if generation_lock is not None:
+                with generation_lock:
+                    return operation(*args, **kwargs)
+            return operation(*args, **kwargs)
+
+        return guarded
+
+    return decorate

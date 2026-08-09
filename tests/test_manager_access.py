@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 
-from survng.app.manager_access import ManagerAccessCoordinator
+from survng.app.manager_access import (
+    ManagerAccessCoordinator,
+    guard_manager_generation,
+)
 
 
 def test_generation_lease_releases_reload_lock_during_io_but_blocks_retirement() -> None:
@@ -48,3 +52,33 @@ def test_lease_registration_is_atomic_with_manager_selection() -> None:
         assert access.active_leases(second) == 0
 
     assert access.wait_idle(first, 0.1)
+
+
+def test_guard_holds_generation_lease_without_holding_reload_lock() -> None:
+    generation_lock = threading.RLock()
+    access = ManagerAccessCoordinator()
+    manager = object()
+
+    @guard_manager_generation(access, generation_lock, lambda: manager)
+    def operation() -> object:
+        assert generation_lock.acquire(timeout=0.1)
+        generation_lock.release()
+        assert access.active_leases(manager) == 1
+        return manager
+
+    assert operation() is manager
+    assert access.active_leases(manager) == 0
+
+
+def test_async_guard_keeps_lease_across_await() -> None:
+    generation_lock = threading.RLock()
+    access = ManagerAccessCoordinator()
+    manager = object()
+
+    @guard_manager_generation(access, generation_lock, lambda: manager)
+    async def operation() -> None:
+        await asyncio.sleep(0)
+        assert access.active_leases(manager) == 1
+
+    asyncio.run(operation())
+    assert access.active_leases(manager) == 0

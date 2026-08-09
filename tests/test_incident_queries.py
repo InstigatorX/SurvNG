@@ -12,6 +12,7 @@ from survng.app.incident_queries import (
     IncidentQueryService,
     create_incident_query_router,
 )
+from survng.app.manager_access import ManagerAccessCoordinator
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
@@ -73,7 +74,11 @@ class IncidentQueryRouterTest(unittest.TestCase):
 
         service.feed.side_effect = feed
         bundle = create_incident_query_router(
-            IncidentQueryDependencies(get_manager=get_manager, manager_lock=lock),
+            IncidentQueryDependencies(
+                get_manager=get_manager,
+                manager_lock=lock,
+                manager_access=ManagerAccessCoordinator(),
+            ),
             service,
         )
 

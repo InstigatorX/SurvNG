@@ -23,6 +23,7 @@ from .domain_events import ObjectDetected
 from .incident_presenter import _event_row
 from .incident_utils import event_epoch, event_snapshot_path
 from .manager import AppManager
+from .manager_access import ManagerAccessCoordinator, guard_manager_generation
 from .tracking_comparison import TRACKING_COMPARISON_IMPLEMENTATIONS
 from .zones import apply_detection_zones, detection_threshold
 
@@ -48,6 +49,7 @@ class DetectionRouteDependencies:
     dependency_status: Callable[[], dict[str, Any]]
     comparison_runner: Callable[..., Any]
     sample_video_frames: Callable[..., Any]
+    manager_access: ManagerAccessCoordinator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +109,12 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
     router = APIRouter()
 
     def generation() -> tuple[AppManager, AppConfig]:
-        with deps.manager_lock:
-            return deps.get_manager(), deps.get_config().model_copy(deep=True)
+        active_manager = deps.get_manager()
+        active_config = getattr(active_manager, "config", None) or deps.get_config()
+        return active_manager, active_config.model_copy(deep=True)
 
     @router.post("/api/events/{event_id}/detect")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def detect_event_snapshot(event_id: int, confidence: float = 0.35) -> dict[str, Any]:
         active_manager, active_config = generation()
         event = active_manager.events.get(event_id)
@@ -215,42 +219,43 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         }
 
     @router.get("/api/tracking-comparisons")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def tracking_comparison_history(
         camera_id: str = "", limit: int = 25
     ) -> dict[str, Any]:
-        with deps.manager_lock:
-            active_manager = deps.get_manager()
-            normalized = str(camera_id or "").strip()
-            return {
-                "items": active_manager.events.tracking_comparison_history(
-                    camera_id=normalized, limit=limit
-                ),
-                "summary": active_manager.events.tracking_comparison_summary(
-                    camera_id=normalized
-                ),
-            }
+        active_manager = deps.get_manager()
+        normalized = str(camera_id or "").strip()
+        return {
+            "items": active_manager.events.tracking_comparison_history(
+                camera_id=normalized, limit=limit
+            ),
+            "summary": active_manager.events.tracking_comparison_summary(
+                camera_id=normalized
+            ),
+        }
 
     @router.put("/api/tracking-comparisons/{comparison_id}/verdict")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def update_tracking_comparison_verdict(
         comparison_id: int, payload: TrackingComparisonVerdictRequest
     ) -> dict[str, Any]:
-        with deps.manager_lock:
-            active_manager = deps.get_manager()
-            comparison = active_manager.events.set_tracking_comparison_verdict(
-                comparison_id, payload.verdict
+        active_manager = deps.get_manager()
+        comparison = active_manager.events.set_tracking_comparison_verdict(
+            comparison_id, payload.verdict
+        )
+        if comparison is None:
+            raise HTTPException(
+                status_code=404, detail="tracking comparison not found"
             )
-            if comparison is None:
-                raise HTTPException(
-                    status_code=404, detail="tracking comparison not found"
-                )
-            return {
-                "comparison": comparison,
-                "summary": active_manager.events.tracking_comparison_summary(
-                    camera_id=str(comparison.get("camera_id") or "")
-                ),
-            }
+        return {
+            "comparison": comparison,
+            "summary": active_manager.events.tracking_comparison_summary(
+                camera_id=str(comparison.get("camera_id") or "")
+            ),
+        }
 
     @router.post("/api/events/{event_id}/tracking-comparison")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     def compare_event_tracking(
         event_id: int, duration_seconds: float | None = None
     ) -> dict[str, Any]:
@@ -344,6 +349,7 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
             limiter.release()
 
     @router.post("/api/detector/frame")
+    @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
     async def detect_debug_frame(
         request: Request, confidence: float = 0.35
     ) -> dict[str, Any]:
@@ -377,8 +383,7 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         if not math.isfinite(confidence):
             raise HTTPException(status_code=422, detail="confidence must be finite")
         safe_confidence = max(0.01, min(0.99, float(confidence)))
-        with deps.manager_lock:
-            active_detector = deps.get_manager().detector
+        active_detector = deps.get_manager().detector
         started = time.perf_counter()
         objects = await asyncio.to_thread(
             active_detector.detect, frame, confidence_threshold=safe_confidence
