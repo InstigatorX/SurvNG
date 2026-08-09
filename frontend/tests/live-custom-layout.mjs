@@ -21,6 +21,7 @@ assert.deepEqual(layout.sizes.portrait, { columns: 3, rows: 2, aspectLocked: fal
 assert.deepEqual(moveLiveCamera(layout.order, "portrait", "door"), ["portrait", "door", "gate"]);
 assert.deepEqual(moveLiveCamera(layout.order, "door", "gate", "after"), ["gate", "door", "portrait"]);
 assert.deepEqual(moveLiveCamera(["door", "gate", "portrait"], "door", "gate", "after"), ["gate", "door", "portrait"]);
+assert.deepEqual(moveLiveCamera(["door", "gate", "portrait"], "door", "portrait", "swap"), ["portrait", "gate", "door"]);
 assert.deepEqual(moveLiveCamera(layout.order, "door", "door", "after"), layout.order);
 const dragSlots = [
   { id: "door", left: 0, top: 0, width: 100, height: 100 },
@@ -28,9 +29,11 @@ const dragSlots = [
   { id: "portrait", left: 220, top: 0, width: 100, height: 210 },
 ];
 assert.deepEqual(liveCustomDropTarget(dragSlots, 50, 50, "door"), { targetId: "door", position: "original" });
-assert.deepEqual(liveCustomDropTarget(dragSlots, 125, 50, "door"), { targetId: "gate", position: "before" });
-assert.deepEqual(liveCustomDropTarget(dragSlots, 195, 50, "door"), { targetId: "gate", position: "after" });
-assert.deepEqual(liveCustomDropTarget(dragSlots, 270, 190, "door"), { targetId: "portrait", position: "after" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 130, 50, "door"), { targetId: "gate", position: "swap" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 180, 50, "door"), { targetId: "gate", position: "swap" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 270, 160, "door"), { targetId: "portrait", position: "swap" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 112, 50, "door"), { targetId: "gate", position: "before" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 208, 50, "door"), { targetId: "gate", position: "after" });
 assert.equal(liveCustomDropTarget([], 50, 50, "door"), null);
 assert.deepEqual(resizeLiveCamera({ columns: 3, rows: 1 }, 2, 1), { columns: 5, rows: 2, aspectLocked: false });
 assert.deepEqual(resizeLiveCamera({ columns: 12, rows: 4 }, 4, 3), { columns: 12, rows: 4, aspectLocked: false });

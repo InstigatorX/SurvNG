@@ -47,6 +47,14 @@ export function moveLiveCamera(order, sourceId, targetId, position = "before") {
   if (!source || !target || source === target || !order.includes(source) || !order.includes(target)) {
     return [...order];
   }
+  if (position === "swap") {
+    const sourceIndex = order.indexOf(source);
+    const targetIndex = order.indexOf(target);
+    const next = [...order];
+    next[sourceIndex] = target;
+    next[targetIndex] = source;
+    return next;
+  }
   const next = order.filter((id) => id !== source);
   const targetIndex = next.indexOf(target);
   next.splice(targetIndex + (position === "after" ? 1 : 0), 0, source);
@@ -77,6 +85,15 @@ export function liveCustomDropTarget(slots, clientX, clientY, sourceId) {
   const containing = candidates.find((slot) => (
     x >= slot.left && x <= slot.left + slot.width && y >= slot.top && y <= slot.top + slot.height
   ));
+  if (containing) {
+    const edgeX = Math.min(containing.width * 0.18, 36);
+    const edgeY = Math.min(containing.height * 0.18, 36);
+    const insideCenter = x >= containing.left + edgeX
+      && x <= containing.left + containing.width - edgeX
+      && y >= containing.top + edgeY
+      && y <= containing.top + containing.height - edgeY;
+    if (insideCenter) return { targetId: containing.id, position: "swap" };
+  }
   const target = containing || candidates.reduce((nearest, slot) => {
     const distance = Math.hypot(x - (slot.left + slot.width / 2), y - (slot.top + slot.height / 2));
     return !nearest || distance < nearest.distance ? { slot, distance } : nearest;
