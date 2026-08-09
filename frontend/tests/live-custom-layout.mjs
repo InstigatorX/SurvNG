@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   liveCustomGridMetrics,
+  liveCustomDropTarget,
   liveCustomTilePlacement,
   moveLiveCamera,
   readLiveCustomLayout,
@@ -21,6 +22,16 @@ assert.deepEqual(moveLiveCamera(layout.order, "portrait", "door"), ["portrait", 
 assert.deepEqual(moveLiveCamera(layout.order, "door", "gate", "after"), ["gate", "door", "portrait"]);
 assert.deepEqual(moveLiveCamera(["door", "gate", "portrait"], "door", "gate", "after"), ["gate", "door", "portrait"]);
 assert.deepEqual(moveLiveCamera(layout.order, "door", "door", "after"), layout.order);
+const dragSlots = [
+  { id: "door", left: 0, top: 0, width: 100, height: 100 },
+  { id: "gate", left: 110, top: 0, width: 100, height: 100 },
+  { id: "portrait", left: 220, top: 0, width: 100, height: 210 },
+];
+assert.deepEqual(liveCustomDropTarget(dragSlots, 50, 50, "door"), { targetId: "door", position: "original" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 125, 50, "door"), { targetId: "gate", position: "before" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 195, 50, "door"), { targetId: "gate", position: "after" });
+assert.deepEqual(liveCustomDropTarget(dragSlots, 270, 190, "door"), { targetId: "portrait", position: "after" });
+assert.equal(liveCustomDropTarget([], 50, 50, "door"), null);
 assert.deepEqual(resizeLiveCamera({ columns: 3, rows: 1 }, 2, 1), { columns: 5, rows: 2, aspectLocked: false });
 assert.deepEqual(resizeLiveCamera({ columns: 12, rows: 4 }, 4, 3), { columns: 12, rows: 4, aspectLocked: false });
 assert.equal(liveCustomGridMetrics(1200, 800).columnWidth > 90, true);

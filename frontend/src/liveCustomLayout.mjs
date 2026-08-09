@@ -53,6 +53,44 @@ export function moveLiveCamera(order, sourceId, targetId, position = "before") {
   return next;
 }
 
+export function liveCustomDropTarget(slots, clientX, clientY, sourceId) {
+  const x = Number(clientX);
+  const y = Number(clientY);
+  const source = String(sourceId || "");
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Array.isArray(slots) || !source) return null;
+  const normalized = slots
+    .map((slot) => ({
+      id: String(slot?.id || ""),
+      left: Number(slot?.left),
+      top: Number(slot?.top),
+      width: Number(slot?.width),
+      height: Number(slot?.height),
+    }))
+    .filter((slot) => slot.id && [slot.left, slot.top, slot.width, slot.height].every(Number.isFinite) && slot.width > 0 && slot.height > 0);
+  const sourceSlot = normalized.find((slot) => slot.id === source);
+  if (sourceSlot && x >= sourceSlot.left && x <= sourceSlot.left + sourceSlot.width
+    && y >= sourceSlot.top && y <= sourceSlot.top + sourceSlot.height) {
+    return { targetId: source, position: "original" };
+  }
+  const candidates = normalized.filter((slot) => slot.id !== source);
+  if (!candidates.length) return null;
+  const containing = candidates.find((slot) => (
+    x >= slot.left && x <= slot.left + slot.width && y >= slot.top && y <= slot.top + slot.height
+  ));
+  const target = containing || candidates.reduce((nearest, slot) => {
+    const distance = Math.hypot(x - (slot.left + slot.width / 2), y - (slot.top + slot.height / 2));
+    return !nearest || distance < nearest.distance ? { slot, distance } : nearest;
+  }, null)?.slot;
+  if (!target) return null;
+  const verticalIntent = Math.abs(y - (target.top + target.height / 2)) > target.height * 0.2;
+  return {
+    targetId: target.id,
+    position: verticalIntent
+      ? (y >= target.top + target.height / 2 ? "after" : "before")
+      : (x >= target.left + target.width / 2 ? "after" : "before"),
+  };
+}
+
 export function resizeLiveCamera(size, columnDelta, rowDelta) {
   return {
     columns: clampInteger(Number(size?.columns) + Number(columnDelta || 0), 2, COLUMN_COUNT, 3),

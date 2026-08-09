@@ -94,7 +94,7 @@ import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigat
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
-import { liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
+import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -1671,7 +1671,7 @@ function mediaAspectRatio(aspect) {
   return width / height;
 }
 
-function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, dragging = false, dragOver = false, resizing = false, aspectSnapped = false }) {
+function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout, customLayout = false, customStyle, resizeHandleProps = {}, startDelayMs = 0, dragHandleProps = {}, resizing = false, aspectSnapped = false }) {
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -1829,7 +1829,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
 
   return (
     <article
-      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${dragging ? "dragging" : ""} ${dragOver ? "drag-over" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""}`}
+      className={`bento-card camera-tile ${layout ? "viewport-layout" : ""} ${customLayout ? "custom-layout-tile" : ""} ${motionActive ? "motion-active" : ""} ${resizing ? "resizing" : ""} ${aspectSnapped ? "aspect-snapped" : ""}`}
       data-motion-active={motionActive ? "true" : "false"}
       data-camera-id={camera.id}
       style={customLayout ? customStyle : layout ? {
@@ -4612,12 +4612,8 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const [cameraOrder] = useStoredState("survng.liveCameraOrder.v1", "[]");
   const [liveLayoutMode, setLiveLayoutMode] = useStoredState("survng.liveLayoutMode.v1", "auto");
   const [customLayoutValue, setCustomLayoutValue] = useStoredState("survng.liveCustomLayout.v1", "{}");
-  const [customOrderPreview, setCustomOrderPreview] = useState(null);
   const [customSizePreview, setCustomSizePreview] = useState({});
   const [resizingCameraId, setResizingCameraId] = useState("");
-  const [dragCameraId, setDragCameraId] = useState("");
-  const [dragOverCameraId, setDragOverCameraId] = useState("");
-  const customOrderPreviewRef = useRef(null);
   const customMoveCleanupRef = useRef(null);
   const liveCameraGridRef = useRef(null);
   const [liveCameraGridSize, setLiveCameraGridSize] = useState({ width: 0, height: 0 });
@@ -4678,12 +4674,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     () => readLiveCustomLayout(customLayoutValue, cameras, liveCameraAspects),
     [cameras, customLayoutValue, liveCameraAspects],
   );
-  const customOrder = customOrderPreview || customLayout.order;
-  const customCameras = useMemo(() => {
-    const camerasById = new Map(cameras.map((camera) => [String(camera.id), camera]));
-    return customOrder.map((id) => camerasById.get(String(id))).filter(Boolean);
-  }, [cameras, customOrder]);
-  const displayedCameras = normalizedLayoutMode === "custom" ? customCameras : orderedCameras;
+  const displayedCameras = orderedCameras;
   const liveCameraLayout = useMemo(
     () => recordingGridLayout(
       orderedCameras,
@@ -4846,94 +4837,113 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
     const originalOrder = [...customLayout.order];
     let latestOrder = originalOrder;
     let changed = false;
+    let activeTarget = null;
+    let animationFrame = 0;
+    let pendingPoint = null;
     const sourceTile = event.currentTarget.closest(".camera-tile");
     const sourceRect = sourceTile?.getBoundingClientRect();
+    const grid = liveCameraGridRef.current;
+    const startScrollLeft = grid?.scrollLeft || 0;
+    const startScrollTop = grid?.scrollTop || 0;
+    const tiles = [...(grid?.querySelectorAll(".camera-tile[data-camera-id]") || [])];
+    const tilesById = new Map(tiles.map((tile) => [String(tile.dataset.cameraId), tile]));
+    const dragSlots = tiles.map((tile) => {
+      const rect = tile.getBoundingClientRect();
+      return { id: String(tile.dataset.cameraId), left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    });
     const offsetX = sourceRect ? event.clientX - sourceRect.left : 24;
     const offsetY = sourceRect ? event.clientY - sourceRect.top : 20;
-    const ghost = sourceTile?.cloneNode(true);
-    if (ghost && sourceRect) {
-      ghost.classList.add("camera-drag-ghost");
-      ghost.classList.remove("dragging", "drag-over", "motion-active");
+    let ghost = null;
+    if (sourceTile && sourceRect) {
+      ghost = document.createElement("div");
+      ghost.className = "camera-drag-ghost";
       ghost.setAttribute("aria-hidden", "true");
+      const poster = sourceTile.querySelector(".camera-tile-poster")?.cloneNode(true);
+      if (poster) ghost.appendChild(poster);
+      const label = document.createElement("strong");
+      label.textContent = sourceTile.querySelector(".tile-header h2")?.textContent || source;
+      ghost.appendChild(label);
       ghost.style.width = `${sourceRect.width}px`;
       ghost.style.height = `${sourceRect.height}px`;
       ghost.style.transform = `translate3d(${event.clientX - offsetX}px, ${event.clientY - offsetY}px, 0)`;
       document.body.appendChild(ghost);
     }
-    setDragCameraId(source);
-    setCustomOrderPreview(originalOrder);
-    customOrderPreviewRef.current = originalOrder;
+    const applyOrder = (order) => order.forEach((id, index) => {
+      const tile = tilesById.get(String(id));
+      if (tile) tile.style.order = String(index);
+    });
+    const markTarget = (targetId) => {
+      activeTarget?.classList.remove("drag-over");
+      activeTarget = targetId && targetId !== source ? tilesById.get(String(targetId)) : null;
+      activeTarget?.classList.add("drag-over");
+    };
+    sourceTile?.classList.add("dragging");
     document.documentElement.classList.add("camera-layout-dragging");
     event.currentTarget.setPointerCapture?.(event.pointerId);
 
-    const targetAt = (moveEvent) => {
-      const direct = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest?.(".camera-tile[data-camera-id]");
-      if (direct && direct.dataset.cameraId !== source) return direct;
-      const grid = liveCameraGridRef.current;
+    const renderPoint = () => {
+      animationFrame = 0;
+      const point = pendingPoint;
+      if (!point) return;
+      pendingPoint = null;
+      if (ghost) ghost.style.transform = `translate3d(${point.x - offsetX}px, ${point.y - offsetY}px, 0)`;
       const gridRect = grid?.getBoundingClientRect();
-      if (!gridRect || moveEvent.clientX < gridRect.left || moveEvent.clientX > gridRect.right
-        || moveEvent.clientY < gridRect.top || moveEvent.clientY > gridRect.bottom) return null;
-      let nearest = null;
-      let nearestDistance = Number.POSITIVE_INFINITY;
-      for (const tile of grid.querySelectorAll(".camera-tile[data-camera-id]")) {
-        if (tile.dataset.cameraId === source) continue;
-        const rect = tile.getBoundingClientRect();
-        const distance = Math.hypot(
-          moveEvent.clientX - (rect.left + rect.width / 2),
-          moveEvent.clientY - (rect.top + rect.height / 2),
-        );
-        if (distance < nearestDistance) {
-          nearest = tile;
-          nearestDistance = distance;
-        }
+      if (!gridRect || point.x < gridRect.left || point.x > gridRect.right || point.y < gridRect.top || point.y > gridRect.bottom) {
+        markTarget("");
+        return;
       }
-      return nearest;
+      const scrollOffsetX = startScrollLeft - (grid?.scrollLeft || 0);
+      const scrollOffsetY = startScrollTop - (grid?.scrollTop || 0);
+      const target = liveCustomDropTarget(
+        dragSlots.map((slot) => ({ ...slot, left: slot.left + scrollOffsetX, top: slot.top + scrollOffsetY })),
+        point.x,
+        point.y,
+        source,
+      );
+      if (!target) {
+        markTarget("");
+        return;
+      }
+      const next = target.position === "original"
+        ? originalOrder
+        : moveLiveCamera(originalOrder, source, target.targetId, target.position);
+      if (next.some((id, index) => id !== latestOrder[index])) {
+        latestOrder = next;
+        changed = latestOrder.some((id, index) => id !== originalOrder[index]);
+        applyOrder(latestOrder);
+      }
+      markTarget(target.targetId);
     };
 
     const onMove = (moveEvent) => {
       moveEvent.preventDefault();
-      if (ghost) {
-        ghost.style.transform = `translate3d(${moveEvent.clientX - offsetX}px, ${moveEvent.clientY - offsetY}px, 0)`;
-      }
-      const target = targetAt(moveEvent);
-      const targetId = String(target?.dataset.cameraId || "");
-      if (!targetId) {
-        setDragOverCameraId("");
-        return;
-      }
-      const rect = target.getBoundingClientRect();
-      const verticalIntent = Math.abs(moveEvent.clientY - (rect.top + rect.height / 2)) > rect.height * 0.2;
-      const position = verticalIntent
-        ? (moveEvent.clientY >= rect.top + rect.height / 2 ? "after" : "before")
-        : (moveEvent.clientX >= rect.left + rect.width / 2 ? "after" : "before");
-      const next = moveLiveCamera(latestOrder, source, targetId, position);
-      if (next.some((id, index) => id !== latestOrder[index])) {
-        latestOrder = next;
-        changed = latestOrder.some((id, index) => id !== originalOrder[index]);
-        customOrderPreviewRef.current = latestOrder;
-        setCustomOrderPreview(latestOrder);
-      }
-      setDragOverCameraId(targetId);
+      pendingPoint = { x: moveEvent.clientX, y: moveEvent.clientY };
+      if (!animationFrame) animationFrame = window.requestAnimationFrame(renderPoint);
     };
 
     let finished = false;
     const finish = (commit) => {
       if (finished) return;
       finished = true;
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
       window.removeEventListener("blur", onPointerCancel);
       ghost?.remove();
+      activeTarget?.classList.remove("drag-over");
+      sourceTile?.classList.remove("dragging");
       document.documentElement.classList.remove("camera-layout-dragging");
       if (commit && changed) saveCustomLayout(latestOrder, customLayout.sizes);
-      setCustomOrderPreview(null);
-      customOrderPreviewRef.current = null;
-      setDragCameraId("");
-      setDragOverCameraId("");
+      else applyOrder(originalOrder);
       if (customMoveCleanupRef.current === finish) customMoveCleanupRef.current = null;
     };
-    const onPointerUp = () => finish(true);
+    const onPointerUp = (pointerEvent) => {
+      pendingPoint = { x: pointerEvent.clientX, y: pointerEvent.clientY };
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+      renderPoint();
+      finish(true);
+    };
     const onPointerCancel = () => finish(false);
     window.addEventListener("pointermove", onMove, { passive: false });
     window.addEventListener("pointerup", onPointerUp, { once: true });
@@ -4968,7 +4978,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       window.removeEventListener("pointercancel", onEnd);
       window.removeEventListener("blur", onEnd);
       const sizes = { ...customLayout.sizes, ...customSizePreview, [cameraId]: latest };
-      saveCustomLayout(customOrderPreviewRef.current || customLayout.order, sizes);
+      saveCustomLayout(customLayout.order, sizes);
       setCustomSizePreview({});
       setResizingCameraId("");
       document.documentElement.classList.remove("camera-layout-resizing");
@@ -5182,14 +5192,13 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
                 const measuredAspect = Number(liveCameraAspects[camera.id]);
                 const placement = liveCustomTilePlacement(size, customGridMetrics, measuredAspect);
                 return {
+                  order: customLayout.order.indexOf(String(camera.id)),
                   gridColumn: `span ${placement.columns}`,
                   gridRow: `span ${placement.packedRows}`,
                   height: `${placement.height}px`,
                 };
               })() : undefined}
               startDelayMs={index * 450}
-              dragging={dragCameraId === camera.id}
-              dragOver={dragOverCameraId === camera.id && dragCameraId !== camera.id}
               resizing={resizingCameraId === camera.id}
               aspectSnapped={Boolean((customSizePreview[camera.id] || customLayout.sizes[camera.id]).aspectLocked)}
               dragHandleProps={normalizedLayoutMode === "custom" ? {
