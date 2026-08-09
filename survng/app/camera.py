@@ -24,7 +24,7 @@ from .camera_lifecycle import (
 )
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
-from .onvif_events import OnvifEventListener
+from .onvif_events import OnvifEventListener, OnvifStopTicket
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_analysis_service import MotionAnalysisService
 from .motion_qualification_service import MotionQualificationService
@@ -301,11 +301,15 @@ class CameraWorker:
         """Release the camera's ONVIF subscription without stopping video."""
         self.lifecycle.stop_onvif_events()
 
-    def request_onvif_stop(self) -> None:
-        self.lifecycle.request_onvif_stop()
+    def request_onvif_stop(self) -> OnvifStopTicket:
+        return self.lifecycle.request_onvif_stop()
 
-    def wait_onvif_stopped(self, deadline: float) -> bool:
-        return self.lifecycle.wait_onvif_stopped(deadline)
+    def wait_onvif_stopped(
+        self,
+        deadline: float,
+        ticket: OnvifStopTicket | None = None,
+    ) -> bool:
+        return self.lifecycle.wait_onvif_stopped(deadline, ticket)
 
     def close(self) -> None:
         self.lifecycle.close()

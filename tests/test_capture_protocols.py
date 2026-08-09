@@ -246,6 +246,39 @@ class CaptureProtocolTest(unittest.TestCase):
 
         stopping.join.assert_called_once_with(timeout=STOP_FORCE_SECONDS)
 
+    def test_onvif_start_cannot_cross_an_unfinished_stop_transaction(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        thread = Mock()
+        thread.is_alive.return_value = True
+        listener._thread = thread
+
+        ticket = listener.request_stop()
+
+        with self.assertRaisesRegex(RuntimeError, "stop is still pending"):
+            listener.start()
+        self.assertIs(listener.request_stop(), ticket)
+        thread.start.assert_not_called()
+
+    def test_stale_onvif_stop_ticket_cannot_finalize_a_new_generation(self) -> None:
+        listener = OnvifEventListener(camera(onvif=True), Mock())
+        old_thread = Mock()
+        old_thread.is_alive.return_value = False
+        listener._thread = old_thread
+        old_ticket = listener.request_stop()
+        self.assertTrue(listener.wait_stopped(1.0, old_ticket))
+
+        replacement = Mock()
+        replacement.is_alive.return_value = True
+        with patch(
+            "survng.app.onvif_events.threading.Thread",
+            return_value=replacement,
+        ):
+            listener.start()
+
+        self.assertFalse(listener.wait_stopped(0.0, old_ticket))
+        self.assertIs(listener._thread, replacement)
+        self.assertTrue(listener.connected is False)
+
     def test_onvif_stop_during_subscribe_closes_generation_once(self) -> None:
         listener = OnvifEventListener(camera(onvif=True), Mock())
         entered = threading.Event()

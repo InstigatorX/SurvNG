@@ -182,6 +182,17 @@ def test_onvif_release_attempts_every_camera_after_peer_failure() -> None:
     workers["yard"].request_onvif_stop.assert_called_once_with()
 
 
+def test_onvif_release_waits_for_each_requested_generation_ticket() -> None:
+    fleet, workers, _recorder, _startup, _publisher = _fleet()
+    ticket = object()
+    workers["gate"].request_onvif_stop.return_value = ticket
+
+    fleet.release_onvif(timeout=1.0)
+
+    deadline, forwarded = workers["gate"].wait_onvif_stopped.call_args.args
+    assert deadline > 0
+    assert forwarded is ticket
+
 def test_onvif_quiescence_cancels_admission_before_release() -> None:
     fleet, workers, _recorder, startup, _publisher = _fleet()
     order: list[str] = []

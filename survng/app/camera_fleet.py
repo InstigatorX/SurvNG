@@ -27,8 +27,10 @@ class CameraFleetWorker(Protocol):
     def active_workers(self) -> list[str]: ...
     def close(self) -> None: ...
     def stop_onvif_events(self) -> None: ...
-    def request_onvif_stop(self) -> None: ...
-    def wait_onvif_stopped(self, deadline: float) -> bool: ...
+    def request_onvif_stop(self) -> Any: ...
+    def wait_onvif_stopped(
+        self, deadline: float, ticket: Any | None = None
+    ) -> bool: ...
     def live_capture_ready(self) -> bool: ...
     def set_detection_enabled(self, enabled: bool) -> None: ...
     def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None: ...
@@ -224,9 +226,10 @@ class CameraFleetLifecycle:
 
     def release_onvif(self, *, timeout: float | None = None) -> None:
         failures: list[CameraFleetFailure] = []
+        stop_tickets: dict[str, Any] = {}
         for camera_id, worker in self.workers.items():
             try:
-                worker.request_onvif_stop()
+                stop_tickets[camera_id] = worker.request_onvif_stop()
             except Exception as error:
                 failures.append(CameraFleetFailure(camera_id, error))
         deadline = time.monotonic() + max(
@@ -236,7 +239,10 @@ class CameraFleetLifecycle:
         active: set[str] = set()
         for camera_id, worker in self.workers.items():
             try:
-                if not worker.wait_onvif_stopped(deadline):
+                if not worker.wait_onvif_stopped(
+                    deadline,
+                    stop_tickets.get(camera_id),
+                ):
                     active.add(camera_id)
             except Exception as error:
                 failures.append(CameraFleetFailure(camera_id, error))

@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,15 @@ SUBSCRIPTION_RENEW_MIN_MARGIN_SECONDS = 5.0
 MAX_EVENT_MESSAGE_CHARACTERS = 16_384
 
 
+@dataclass(frozen=True, slots=True)
+class OnvifStopTicket:
+    """Identity and resources owned by one listener stop transaction."""
+
+    generation: int
+    thread: threading.Thread | None
+    stop_event: threading.Event
+
+
 class OnvifEventListener:
     def __init__(
         self,
@@ -47,6 +57,7 @@ class OnvifEventListener:
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
         self._generation = 0
+        self._pending_stop: OnvifStopTicket | None = None
         self._transport: Any = None
         self._transport_generation: int | None = None
         self._subscription_manager: Any = None
@@ -90,6 +101,10 @@ class OnvifEventListener:
             return
         stopping_thread: threading.Thread | None = None
         with self._lifecycle_lock:
+            if self._pending_stop is not None:
+                raise RuntimeError(
+                    f"ONVIF listener stop is still pending for {self.camera.id}"
+                )
             if self._thread is not None and self._thread.is_alive():
                 if not self._stop.is_set():
                     return
@@ -127,21 +142,41 @@ class OnvifEventListener:
                 raise
 
     def stop(self) -> None:
-        self.request_stop()
-        self.wait_stopped(STOP_GRACE_SECONDS + STOP_FORCE_SECONDS)
+        ticket = self.request_stop()
+        self.wait_stopped(STOP_GRACE_SECONDS + STOP_FORCE_SECONDS, ticket)
 
-    def request_stop(self) -> None:
+    def request_stop(self) -> OnvifStopTicket:
         """Signal the listener without waiting for camera I/O to return."""
         with self._lifecycle_lock:
-            stop_event = self._stop
-        stop_event.set()
+            if self._pending_stop is not None:
+                return self._pending_stop
+            ticket = OnvifStopTicket(
+                generation=self._generation,
+                thread=self._thread,
+                stop_event=self._stop,
+            )
+            self._pending_stop = ticket
+            # Bind the stop signal to the snapshotted generation atomically;
+            # start() cannot replace this event until wait_stopped finalizes it.
+            ticket.stop_event.set()
+            return ticket
 
-    def wait_stopped(self, timeout: float) -> bool:
+    def wait_stopped(
+        self,
+        timeout: float,
+        ticket: OnvifStopTicket | None = None,
+    ) -> bool:
         """Wait within one caller-owned budget, forcing transport closure once."""
         deadline = time.monotonic() + max(0.0, timeout)
         with self._lifecycle_lock:
-            thread = self._thread
-            generation = self._generation
+            pending = self._pending_stop
+            expected = ticket or pending
+            if expected is None:
+                return self._thread is None or not self._thread.is_alive()
+            if pending is not expected:
+                return False
+            thread = expected.thread
+            generation = expected.generation
         if thread is not None:
             # PullMessages has a short bounded timeout. Let the owning worker
             # return from it and send Unsubscribe while its transport is still
@@ -158,13 +193,17 @@ class OnvifEventListener:
                 ))
                 if thread.is_alive():
                     LOGGER.error("ONVIF worker did not stop for %s", self.camera.id)
-        self.connected = False
         with self._lifecycle_lock:
-            if self._thread is thread and (thread is None or not thread.is_alive()):
+            stopped = thread is None or not thread.is_alive()
+            if self._thread is thread and stopped:
                 self._thread = None
-        if thread is None or not thread.is_alive():
+            if generation == self._generation and stopped:
+                self.connected = False
+            if self._pending_stop is expected and stopped:
+                self._pending_stop = None
+        if stopped:
             self._close_transport(generation)
-        return thread is None or not thread.is_alive()
+        return stopped
 
     def _run(
         self,

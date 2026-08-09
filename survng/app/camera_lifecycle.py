@@ -15,7 +15,7 @@ from typing import Any, Callable
 from .camera_capture import CameraCaptureService
 from .motion_runtime import MotionRuntimeService
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
-from .onvif_events import OnvifEventListener
+from .onvif_events import OnvifEventListener, OnvifStopTicket
 from .security import redact_secret_text
 from .tracking_frames import TrackingFrameService
 
@@ -385,11 +385,18 @@ class CameraLifecycleService:
         with self._operation_lock:
             self.onvif.stop()
 
-    def request_onvif_stop(self) -> None:
-        self.onvif.request_stop()
+    def request_onvif_stop(self) -> OnvifStopTicket:
+        return self.onvif.request_stop()
 
-    def wait_onvif_stopped(self, deadline: float) -> bool:
-        return self.onvif.wait_stopped(max(0.0, deadline - time.monotonic()))
+    def wait_onvif_stopped(
+        self,
+        deadline: float,
+        ticket: OnvifStopTicket | None = None,
+    ) -> bool:
+        return self.onvif.wait_stopped(
+            max(0.0, deadline - time.monotonic()),
+            ticket,
+        )
 
     def active_workers(self) -> list[str]:
         return self._residual_workers()
