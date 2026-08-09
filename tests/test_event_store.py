@@ -14,6 +14,79 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_refinement_removes_replaced_snapshot_when_unreferenced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshots = root / "snapshots" / "gate"
+            snapshots.mkdir(parents=True)
+            old = snapshots / "old.webp"
+            new = snapshots / "new.webp"
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                snapshot_path=str(old),
+                objects_json="[]",
+            )
+
+            store.refine_event_evidence(
+                int(event["id"]),
+                snapshot_path=str(new),
+                recording_path="",
+                objects_json="[]",
+            )
+
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())
+
+    def test_refinement_keeps_old_snapshot_until_audit_reference_moves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshots = root / "snapshots" / "gate"
+            snapshots.mkdir(parents=True)
+            old = snapshots / "old.webp"
+            new = snapshots / "new.webp"
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                snapshot_path=str(old),
+                objects_json="[]",
+            )
+            audit_payload = {
+                "decision_id": "gate-decision",
+                "camera_id": "gate",
+                "created_at": "2026-08-08T12:00:00+00:00",
+                "mode": "camera_rescue",
+                "sensitivity": "balanced",
+                "score": 0.8,
+                "threshold": 0.5,
+                "reason": "visual_backup_trigger",
+                "object_detected": True,
+                "trigger_count": 1,
+                "features": {},
+                "category": "visual_backup",
+                "event_id": int(event["id"]),
+            }
+            store.add_motion_audit(snapshot_path=str(old), **audit_payload)
+
+            store.refine_event_evidence(
+                int(event["id"]),
+                snapshot_path=str(new),
+                recording_path="",
+                objects_json="[]",
+            )
+            self.assertTrue(old.exists())
+
+            store.add_motion_audit(snapshot_path=str(new), **audit_payload)
+
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())
+
     def test_process_lifecycle_events_are_durable_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

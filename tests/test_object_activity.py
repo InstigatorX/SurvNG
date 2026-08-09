@@ -276,3 +276,18 @@ def test_out_of_order_event_cannot_learn_from_future_context() -> None:
 
     assert older.attribution.evidence.scene_context_memory_match is False
     assert older.attribution.role is ObjectActivityRole.INDETERMINATE
+
+
+def test_repeated_scene_context_history_is_bounded() -> None:
+    attributor = ObjectActivityAttributor("shadow")
+
+    for index in range(100):
+        attributor.admit(
+            [observation()],
+            {},
+            event_key=f"event-{index}",
+            observed_at_epoch=1000.0 + index,
+        )
+
+    assert len(attributor._context_memory) == 1
+    assert len(attributor._context_memory[0].stable_event_keys) == 16

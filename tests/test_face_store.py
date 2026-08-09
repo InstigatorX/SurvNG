@@ -18,6 +18,90 @@ from survng.app.inference import InferenceUnavailable
 
 
 class FaceStoreTest(unittest.TestCase):
+    def test_refined_candidates_remain_bounded_to_four_per_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = Path(tmpdir)
+            store = FaceStore(storage, start_recognition=False)
+            batches = []
+            paths = []
+            for batch_index in range(2):
+                batch = []
+                for local_index in range(4):
+                    offset = batch_index * 4 + local_index + 1
+                    path = storage / f"candidate-{offset}.jpg"
+                    path.write_bytes(b"candidate")
+                    paths.append(path)
+                    batch.append({
+                        "snapshot_path": str(path),
+                        "box": {"x1": 5, "y1": 5, "x2": 35, "y2": 35},
+                        "confidence": 0.9,
+                        "track_id": "face-1",
+                        "rank": local_index + 1,
+                        "offset_seconds": float(offset),
+                        "quality_score": float(offset) / 10.0,
+                    })
+                batches.append(batch)
+
+            store.ingest_candidates(103, "gate", "2026-08-08T12:00:00+00:00", batches[0])
+            store.ingest_candidates(103, "gate", "2026-08-08T12:00:00+00:00", batches[1])
+
+            with store._connect() as connection:
+                retained = connection.execute(
+                    "select candidate_offset_seconds from face_observations where event_id = 103"
+                ).fetchall()
+            self.assertEqual(
+                {float(row["candidate_offset_seconds"]) for row in retained},
+                {5.0, 6.0, 7.0, 8.0},
+            )
+            self.assertEqual(sum(path.exists() for path in paths), 4)
+            self.assertEqual(store.observation_count(), 1)
+
+    def test_pruning_removes_complete_candidate_track_and_its_crops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = Path(tmpdir)
+            store = FaceStore(storage, max_observations=100, start_recognition=False)
+            first_paths: list[Path] = []
+            with store._connect() as connection:
+                for event_id in range(1, 102):
+                    for rank in (1, 2):
+                        path = storage / f"face-{event_id}-{rank}.jpg"
+                        path.write_bytes(b"candidate")
+                        if event_id == 1:
+                            first_paths.append(path)
+                        connection.execute(
+                            """
+                            insert into face_observations (
+                                event_id, object_index, camera_id, snapshot_path,
+                                box_json, observed_at, created_at,
+                                candidate_track_id, candidate_rank,
+                                candidate_offset_seconds, canonical
+                            ) values (?, ?, 'gate', ?, ?, ?, ?, 'face-1', ?, ?, ?)
+                            """,
+                            (
+                                event_id,
+                                rank - 1,
+                                path.name,
+                                '{"x1":1,"y1":1,"x2":10,"y2":10}',
+                                f"{event_id:03}",
+                                f"{event_id:03}",
+                                rank,
+                                float(rank),
+                                int(rank == 1),
+                            ),
+                        )
+                removed = store._prune_locked(connection)
+
+            self.assertEqual(removed, 2)
+            self.assertEqual(store.observation_count(), 100)
+            self.assertTrue(all(not path.exists() for path in first_paths))
+            with store._connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "select count(*) from face_observations where event_id = 1"
+                    ).fetchone()[0],
+                    0,
+                )
+
     def test_temporal_candidates_expose_only_one_canonical_face(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = Path(tmpdir)
@@ -274,6 +358,30 @@ class FaceStoreTest(unittest.TestCase):
 
             self.assertEqual(inserted, 1)
             self.assertEqual(len(committed_ids), 1)
+
+    def test_provisional_event_snapshot_is_not_ingested_as_face_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            snapshot = Path(tmpdir) / "snapshot.jpg"
+            snapshot.write_bytes(b"image")
+
+            inserted = store.ingest_events([{
+                "id": 42,
+                "camera_id": "front-door",
+                "snapshot_path": str(snapshot),
+                "created_at": "2026-08-08T12:00:00+00:00",
+                "objects_json": json.dumps([
+                    {
+                        "label": "face",
+                        "confidence": 0.8,
+                        "box": {"x1": 1, "y1": 2, "x2": 20, "y2": 24},
+                    },
+                    {"status": "face_evidence_pending"},
+                ]),
+            }])
+
+            self.assertEqual(inserted, 0)
+            self.assertEqual(store.observation_count(), 0)
 
     def test_bulk_ingestion_queues_only_retained_recent_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

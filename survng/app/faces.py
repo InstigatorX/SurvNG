@@ -332,6 +332,7 @@ class FaceStore:
         inserted = 0
         recognition_ids: list[int] = []
         touched_tracks: set[str] = set()
+        discarded_paths: list[Path] = []
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as connection:
             next_index = int(connection.execute(
@@ -388,8 +389,59 @@ class FaceStore:
                     except OSError:
                         LOGGER.debug("could not remove duplicate face candidate %s", resolved_snapshot)
             for track_id in touched_tracks:
+                protected_count = int(connection.execute(
+                    """
+                    select count(*) from face_observations
+                    where event_id = ? and candidate_track_id = ?
+                        and (person_id is not null or review_status != 'unknown' or reference_pinned = 1)
+                    """,
+                    (event_id, track_id),
+                ).fetchone()[0])
+                unreviewed_limit = max(0, 4 - protected_count)
+                excess_rows = connection.execute(
+                    """
+                    select id, snapshot_path from face_observations
+                    where event_id = ? and candidate_track_id = ?
+                        and person_id is null and review_status = 'unknown'
+                        and reference_pinned = 0
+                    order by quality_score desc, candidate_rank asc, id asc
+                    limit -1 offset ?
+                    """,
+                    (event_id, track_id, unreviewed_limit),
+                ).fetchall()
+                if excess_rows:
+                    connection.executemany(
+                        "delete from face_observations where id = ?",
+                        ((int(row["id"]),) for row in excess_rows),
+                    )
+                    for row in excess_rows:
+                        try:
+                            discarded_paths.append(event_snapshot_path(
+                                self.storage_dir,
+                                {"snapshot_path": str(row["snapshot_path"] or "")},
+                            ))
+                        except (FileNotFoundError, PermissionError, OSError, RuntimeError):
+                            continue
                 self._reconcile_candidate_track(connection, event_id, track_id)
             self._prune_locked(connection)
+            if recognition_ids:
+                retained_ids = {
+                    int(row["id"])
+                    for row in connection.execute(
+                        f"select id from face_observations where id in ({','.join('?' for _ in recognition_ids)})",
+                        recognition_ids,
+                    ).fetchall()
+                }
+                recognition_ids = [
+                    observation_id
+                    for observation_id in recognition_ids
+                    if observation_id in retained_ids
+                ]
+        for discarded_path in discarded_paths:
+            try:
+                discarded_path.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.debug("could not remove superseded face candidate %s", discarded_path)
         for observation_id in recognition_ids:
             self._queue_recognition(observation_id)
         return inserted
@@ -424,6 +476,12 @@ class FaceStore:
                 except (TypeError, json.JSONDecodeError):
                     continue
                 if not isinstance(objects, list):
+                    continue
+                if any(
+                    isinstance(item, dict)
+                    and item.get("status") == "face_evidence_pending"
+                    for item in objects
+                ):
                     continue
                 for object_index, detected in enumerate(objects):
                     if not isinstance(detected, dict):
@@ -1181,33 +1239,63 @@ class FaceStore:
         return selected_all
 
     def _prune_locked(self, connection: sqlite3.Connection) -> int:
-        total = int(connection.execute("select count(*) from face_observations").fetchone()[0])
+        total = int(connection.execute(
+            "select count(*) from face_observations where canonical = 1"
+        ).fetchone()[0])
         excess = total - self.max_observations
         if excess <= 0:
             return 0
-        remove_ids = [
-            int(row["id"])
-            for row in connection.execute(
+        selected = connection.execute(
+            """
+            select id, event_id, candidate_track_id from face_observations
+            where canonical = 1 and reference_pinned = 0 and id not in (
+                select id from (
+                    select id, row_number() over (
+                        partition by person_id order by observed_at desc, id desc
+                    ) as position
+                    from face_observations
+                    where person_id is not null and canonical = 1
+                ) where position = 1
+            )
+            order by observed_at asc, id asc
+            limit ?
+            """,
+            (excess,),
+        ).fetchall()
+        remove_ids: set[int] = set()
+        candidate_paths: list[str] = []
+        for row in selected:
+            track_id = str(row["candidate_track_id"] or "")
+            if not track_id:
+                remove_ids.add(int(row["id"]))
+                continue
+            group = connection.execute(
                 """
-                select id from face_observations
-                where reference_pinned = 0 and id not in (
-                    select id from (
-                        select id, row_number() over (
-                            partition by person_id order by observed_at desc, id desc
-                        ) as position
-                        from face_observations
-                        where person_id is not null
-                    ) where position = 1
-                )
-                order by observed_at asc, id asc
-                limit ?
+                select id, snapshot_path, reference_pinned
+                from face_observations
+                where event_id = ? and candidate_track_id = ?
                 """,
-                (excess,),
+                (int(row["event_id"]), track_id),
             ).fetchall()
-        ]
+            if any(bool(item["reference_pinned"]) for item in group):
+                continue
+            remove_ids.update(int(item["id"]) for item in group)
+            candidate_paths.extend(str(item["snapshot_path"] or "") for item in group)
         if remove_ids:
             connection.executemany("delete from face_observations where id = ?", ((item,) for item in remove_ids))
+            # Commit the authoritative database removal before deleting the
+            # uniquely owned crop files. A later SQLite commit failure must
+            # never leave retained rows pointing at already deleted images.
+            connection.commit()
             self._invalidate_reference_gallery()
+            for raw_path in candidate_paths:
+                try:
+                    event_snapshot_path(
+                        self.storage_dir,
+                        {"snapshot_path": raw_path},
+                    ).unlink(missing_ok=True)
+                except (FileNotFoundError, PermissionError, OSError, RuntimeError):
+                    LOGGER.debug("could not remove pruned face candidate %s", raw_path)
         return len(remove_ids)
 
     def people(self) -> list[dict[str, Any]]:

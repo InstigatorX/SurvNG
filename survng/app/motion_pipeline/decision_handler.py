@@ -466,6 +466,8 @@ class MotionDecisionHandler:
             *objects,
             {"status": "motion_qualification", "motion_qualification": qualification},
         ]
+        if bool(getattr(provider_result, "refinement_pending", False)):
+            stored_objects.append({"status": "face_evidence_pending"})
         if existing_event_id is None:
             event = self.events.add_event(
                 camera_id=self.camera_id,
@@ -538,30 +540,18 @@ class MotionDecisionHandler:
             return
         persisted: list[dict[str, Any]] = []
         for candidate in candidates:
-            frame = candidate.frame
-            height, width = frame.shape[:2]
             box = candidate.box
-            face_width = float(box["x2"] - box["x1"])
-            face_height = float(box["y2"] - box["y1"])
-            pad_x, pad_y = face_width * 0.2, face_height * 0.2
-            left = max(0, int(math.floor(box["x1"] - pad_x)))
-            top = max(0, int(math.floor(box["y1"] - pad_y)))
-            right = min(width, int(math.ceil(box["x2"] + pad_x)))
-            bottom = min(height, int(math.ceil(box["y2"] + pad_y)))
-            if right <= left or bottom <= top:
-                continue
-            crop = frame[top:bottom, left:right]
             candidate_at = event_at + timedelta(seconds=candidate.offset_seconds)
-            path = self.snapshot_writer(crop, candidate_at)
+            path = self.snapshot_writer(candidate.frame, candidate_at)
             if not path:
                 continue
             persisted.append({
                 "snapshot_path": path,
                 "box": {
-                    "x1": float(box["x1"] - left),
-                    "y1": float(box["y1"] - top),
-                    "x2": float(box["x2"] - left),
-                    "y2": float(box["y2"] - top),
+                    "x1": float(box["x1"]),
+                    "y1": float(box["y1"]),
+                    "x2": float(box["x2"]),
+                    "y2": float(box["y2"]),
                 },
                 "confidence": candidate.confidence,
                 "track_id": candidate.track_id,

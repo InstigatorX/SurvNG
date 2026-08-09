@@ -15,6 +15,39 @@ from survng.app.incident_queries import (
 
 
 class IncidentQueryRouterTest(unittest.TestCase):
+    def test_face_enrichment_keeps_distinct_unknown_tracks(self) -> None:
+        manager = SimpleNamespace(
+            faces=SimpleNamespace(
+                for_event_ids=lambda _ids: [
+                    {
+                        "observation_id": 11,
+                        "event_id": 7,
+                        "person_id": None,
+                        "candidate_person_id": None,
+                        "confidence": 0.8,
+                        "consensus": {"candidate_count": 3},
+                    },
+                    {
+                        "observation_id": 12,
+                        "event_id": 7,
+                        "person_id": None,
+                        "candidate_person_id": None,
+                        "confidence": 0.7,
+                        "consensus": {"candidate_count": 2},
+                    },
+                ]
+            )
+        )
+        incidents = [{"events": [{"id": 7}]}]
+
+        result = IncidentQueryService.with_faces(manager, incidents)
+
+        self.assertEqual(len(result[0]["faces"]), 2)
+        self.assertEqual(
+            {face["candidate_count"] for face in result[0]["faces"]},
+            {2, 3},
+        )
+
     def test_feed_resolves_manager_while_generation_lock_is_held(self) -> None:
         class GenerationLock:
             held = False

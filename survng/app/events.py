@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .incident_utils import portable_media_path
+from .incident_utils import event_snapshot_path, portable_media_path
 
 
 class EventStore:
@@ -1579,15 +1579,17 @@ class EventStore:
             separators=(",", ":"),
             allow_nan=False,
         )
+        replaced_snapshot = ""
         with self._lock, self._connect() as conn:
             audit_id: int | None = None
             if normalized_decision_id:
                 existing = conn.execute(
-                    "select id from motion_audits where decision_id = ?",
+                    "select id, snapshot_path from motion_audits where decision_id = ?",
                     (normalized_decision_id,),
                 ).fetchone()
                 if existing is not None:
                     audit_id = int(existing["id"])
+                    replaced_snapshot = str(existing["snapshot_path"] or "")
                     conn.execute(
                         """
                         update motion_audits
@@ -1692,6 +1694,8 @@ class EventStore:
                         audit_id = int(existing["id"])
             if audit_id is None:
                 raise RuntimeError("motion audit could not be persisted or resolved")
+        if replaced_snapshot and replaced_snapshot != snapshot_path:
+            self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return self.get_motion_audit(audit_id) or {}
 
     def motion_audits(
@@ -2310,6 +2314,7 @@ class EventStore:
         replacement = [item for item in replacement if isinstance(item, dict)]
         portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
         portable_recording = portable_media_path(self.storage_dir, recording_path)
+        replaced_snapshot = ""
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 "select objects_json, snapshot_path, recording_path from events where id = ?",
@@ -2317,6 +2322,7 @@ class EventStore:
             ).fetchone()
             if row is None:
                 return None
+            replaced_snapshot = str(row["snapshot_path"] or "")
             try:
                 existing = json.loads(str(row["objects_json"] or "[]"))
             except (TypeError, ValueError):
@@ -2344,7 +2350,45 @@ class EventStore:
                 "select * from events where id = ?",
                 (event_id,),
             ).fetchone()
+        if replaced_snapshot and replaced_snapshot != portable_snapshot:
+            self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None
+
+    def _delete_snapshot_if_unreferenced(self, raw_path: str) -> None:
+        """Remove a replaced snapshot only after every durable reference moved."""
+        portable = portable_media_path(self.storage_dir, raw_path)
+        if not portable:
+            return
+        with self._lock, self._connect() as conn:
+            referenced = bool(conn.execute(
+                """
+                select exists(select 1 from events where snapshot_path = ?)
+                    or exists(select 1 from motion_audits where snapshot_path = ?)
+                """,
+                (portable, portable),
+            ).fetchone()[0])
+            if not referenced:
+                has_faces = conn.execute(
+                    "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
+                ).fetchone() is not None
+                referenced = bool(
+                    has_faces
+                    and conn.execute(
+                        "select 1 from face_observations where snapshot_path = ? limit 1",
+                        (portable,),
+                    ).fetchone() is not None
+                )
+        if referenced:
+            return
+        try:
+            path = event_snapshot_path(
+                self.storage_dir,
+                {"snapshot_path": portable},
+            )
+            path.relative_to((self.storage_dir / "snapshots").resolve())
+            path.unlink(missing_ok=True)
+        except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
+            return
 
     def update_object_tracking(
         self,

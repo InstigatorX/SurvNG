@@ -228,7 +228,12 @@ class IncidentQueryService:
                 if not math.isfinite(score):
                     score = 0.0
                 score = max(0.0, min(1.0, score))
-                key = (status, identity_id)
+                key = (
+                    status,
+                    identity_id
+                    if status != "unknown"
+                    else int(observation["observation_id"]),
+                )
                 current = summaries.get(key)
                 if current is None or score > current["confidence"]:
                     summaries[key] = {

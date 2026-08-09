@@ -322,3 +322,27 @@ def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() 
     service.request_stop()
     assert service.wait_stopped(1.0)
     assert not service.running()
+
+
+def test_unavailable_refinement_worker_preserves_initial_tracking_handoff() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="initial.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    image_reader.return_value = np.ones((20, 20, 3), dtype=np.uint8)
+
+    outcome = service.process(
+        "motion",
+        "person",
+        datetime.now(timezone.utc),
+        {},
+    )
+
+    assert outcome is initial
+    decision.refine.assert_not_called()
+    tracking.start.assert_called_once()
+    assert service.status()["refinements_dropped"] == 1

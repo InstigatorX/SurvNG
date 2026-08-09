@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -145,6 +146,7 @@ class ObjectActivityAttributor:
     CONTEXT_MEMORY_MAX_ENTRIES = 128
     CONTEXT_MEMORY_MIN_IOU = 0.72
     CONTEXT_MEMORY_MIN_PRIOR_SIGHTINGS = 2
+    CONTEXT_MEMORY_MAX_SIGHTINGS = 16
 
     def __init__(self, mode: AttributionMode = "enforce") -> None:
         self.mode: AttributionMode = mode
@@ -415,6 +417,7 @@ class ObjectActivityAttributor:
             if match is not None:
                 if event_key not in match.stable_event_keys:
                     match.stable_event_keys.append(event_key)
+                    del match.stable_event_keys[:-self.CONTEXT_MEMORY_MAX_SIGHTINGS]
                 match.box = box
                 match.last_seen_epoch = observed_at_epoch
             else:
@@ -530,6 +533,8 @@ class ObjectActivityAttributor:
             return None
         if normalized[2] <= normalized[0] or normalized[3] <= normalized[1]:
             return None
+        if not all(math.isfinite(value) for value in normalized):
+            return None
         return normalized
 
     @staticmethod
@@ -565,6 +570,8 @@ class ObjectActivityAttributor:
                 float(box["y2"]) / height,
             )
         except (KeyError, TypeError, ValueError):
+            return False
+        if not all(math.isfinite(value) for value in normalized):
             return False
         if not isinstance(regions, list):
             return False

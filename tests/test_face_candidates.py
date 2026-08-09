@@ -70,3 +70,36 @@ def test_collect_face_candidates_ignores_non_faces_and_invalid_boxes() -> None:
     ))
 
     assert candidates == ()
+
+
+def test_collect_face_candidates_uses_parent_people_to_avoid_face_track_swap() -> None:
+    frame = np.zeros((120, 300, 3), dtype=np.uint8)
+    first_left = _face(70, quality=0.8)
+    first_left["detection_source"] = "identity-a"
+    first_left["parent_person_box"] = {"x1": 20, "y1": 0, "x2": 130, "y2": 120}
+    first_right = _face(150, quality=0.8)
+    first_right["detection_source"] = "identity-b"
+    first_right["parent_person_box"] = {"x1": 130, "y1": 0, "x2": 260, "y2": 120}
+    second_left_person = _face(145, quality=0.9)
+    second_left_person["detection_source"] = "identity-a"
+    second_left_person["parent_person_box"] = {"x1": 35, "y1": 0, "x2": 145, "y2": 120}
+    second_right_person = _face(75, quality=0.9)
+    second_right_person["detection_source"] = "identity-b"
+    second_right_person["parent_person_box"] = {"x1": 145, "y1": 0, "x2": 275, "y2": 120}
+
+    candidates = collect_face_candidates((
+        FaceCandidateSample(0.0, frame, (first_left, first_right)),
+        FaceCandidateSample(1.0, frame, (second_left_person, second_right_person)),
+    ))
+
+    tracks = {track_id: [] for track_id in {item.track_id for item in candidates}}
+    for candidate in candidates:
+        tracks[candidate.track_id].append(
+            (candidate.offset_seconds, candidate.detection_source)
+        )
+    assert len(tracks) == 2
+    assert all(
+        [offset for offset, _source in sorted(observations)] == [0.0, 1.0]
+        and len({source for _offset, source in observations}) == 1
+        for observations in tracks.values()
+    )

@@ -114,18 +114,17 @@ def collect_face_candidates(
             box = _box(detected)
             if box is None:
                 continue
+            crop_result = _padded_crop(sample.frame, box)
+            if crop_result is None:
+                continue
+            crop, crop_box = crop_result
             retained.append(
                 FaceCandidate(
                     track_id=f"face-{track_index}",
                     rank=rank,
                     offset_seconds=float(sample.offset_seconds),
-                    frame=sample.frame,
-                    box={
-                        "x1": box[0],
-                        "y1": box[1],
-                        "x2": box[2],
-                        "y2": box[3],
-                    },
+                    frame=crop,
+                    box=crop_box,
                     confidence=_confidence(detected),
                     quality_score=_finite_score(detected.get("face_quality_score")),
                     sharpness_score=_finite_score(detected.get("face_sharpness_score")),
@@ -168,6 +167,16 @@ def _association_score(
     previous: dict[str, Any],
     current: dict[str, Any],
 ) -> float | None:
+    previous_parent = previous.get("parent_person_box")
+    current_parent = current.get("parent_person_box")
+    if isinstance(previous_parent, dict) and isinstance(current_parent, dict):
+        parent_score = _association_score(
+            {"box": previous_parent},
+            {"box": current_parent},
+        )
+        # A dedicated face belongs to its detected person. Refusing a distant
+        # parent match prevents two nearby or crossing faces from swapping IDs.
+        return 4.0 + parent_score if parent_score is not None else None
     previous_box = _box(previous)
     current_box = _box(current)
     if previous_box is None or current_box is None:
@@ -210,6 +219,34 @@ def _edge_clearance(
         ),
         5,
     )
+
+
+def _padded_crop(
+    frame: np.ndarray,
+    box: tuple[float, float, float, float],
+    *,
+    padding: float = 0.2,
+) -> tuple[np.ndarray, dict[str, float]] | None:
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = box
+    pad_x = (x2 - x1) * padding
+    pad_y = (y2 - y1) * padding
+    left = max(0, min(width, int(math.floor(x1 - pad_x))))
+    top = max(0, min(height, int(math.floor(y1 - pad_y))))
+    right = max(left, min(width, int(math.ceil(x2 + pad_x))))
+    bottom = max(top, min(height, int(math.ceil(y2 + pad_y))))
+    if right <= left or bottom <= top:
+        return None
+    # The explicit copy establishes a small immutable ownership boundary and
+    # allows the much larger decoded sample frame to be released immediately.
+    crop = np.ascontiguousarray(frame[top:bottom, left:right]).copy()
+    crop.setflags(write=False)
+    return crop, {
+        "x1": float(x1 - left),
+        "y1": float(y1 - top),
+        "x2": float(x2 - left),
+        "y2": float(y2 - top),
+    }
 
 
 def _confidence(detected: dict[str, Any]) -> float:

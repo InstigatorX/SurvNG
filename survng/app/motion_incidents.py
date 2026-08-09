@@ -246,7 +246,7 @@ class MotionIncidentService:
         )
         self._record_timing(outcome)
         if outcome.refinement_pending:
-            self._queue_refinement(
+            queued = self._queue_refinement(
                 _RefinementJob(
                     topic=topic,
                     message=message,
@@ -258,7 +258,11 @@ class MotionIncidentService:
                     callback=refinement_callback,
                 )
             )
-        if not outcome.refinement_pending:
+            if not queued:
+                # Initial detection is already valid evidence. Capacity loss
+                # must not also discard its tracking handoff.
+                self._handoff(outcome, event_at)
+        else:
             self._handoff(outcome, event_at)
         return outcome
 
@@ -306,16 +310,22 @@ class MotionIncidentService:
                 redact_secret_text(error)[:500],
             )
 
-    def _queue_refinement(self, job: _RefinementJob) -> None:
+    def _queue_refinement(self, job: _RefinementJob) -> bool:
+        if not self.running():
+            with self._status_lock:
+                self._refinements_dropped += 1
+            LOGGER.warning("motion refinement worker unavailable for %s", self.camera_id)
+            return False
         try:
             self._refinement_queue.put_nowait(job)
         except queue.Full:
             with self._status_lock:
                 self._refinements_dropped += 1
             LOGGER.warning("motion refinement queue full for %s", self.camera_id)
-            return
+            return False
         with self._status_lock:
             self._refinements_queued += 1
+        return True
 
     def _run_refinements(self) -> None:
         while True:

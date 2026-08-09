@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -40,8 +41,8 @@ class MotionDecisionHandlerTest(unittest.TestCase):
                 track_id="face-1",
                 rank=1,
                 offset_seconds=0.5,
-                frame=frame,
-                box={"x1": 30, "y1": 20, "x2": 80, "y2": 70},
+                frame=frame[10:80, 20:90].copy(),
+                box={"x1": 10, "y1": 10, "x2": 60, "y2": 60},
                 confidence=0.88,
                 quality_score=0.75,
                 sharpness_score=0.7,
@@ -76,6 +77,51 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             ingested[0][3][0]["box"],
             {"x1": 10.0, "y1": 10.0, "x2": 60.0, "y2": 60.0},
         )
+
+    def test_handler_retains_candidates_while_marking_provisional_face_evidence(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((40, 40, 3), dtype=np.uint8)
+        candidate = FaceCandidate(
+            track_id="face-1",
+            rank=1,
+            offset_seconds=0.0,
+            frame=frame,
+            box={"x1": 5, "y1": 5, "x2": 35, "y2": 35},
+            confidence=0.9,
+            quality_score=0.8,
+            sharpness_score=0.8,
+            exposure_score=0.8,
+            edge_clearance_ratio=0.1,
+            detection_source="dedicated_face",
+        )
+        result = RecordedDetectionResult(
+            frame=frame,
+            objects=[{"label": "person", "confidence": 0.9, "incident_eligible": True}],
+            recording_path="recording.mp4",
+            timings_ms={},
+            refinement_pending=True,
+            face_candidates=(candidate,),
+        )
+        sink = Mock()
+        handler = MotionDecisionHandler(
+            camera_id="front-door",
+            events=events,
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda _frame, _at: "snapshot.webp",
+            object_serializer=json.dumps,
+            face_candidate_sink=sink,
+        )
+
+        handler.handle(
+            "onvif/motion",
+            "motion",
+            datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc),
+            {},
+        )
+
+        sink.assert_called_once()
+        stored = json.loads(events.payload["objects_json"])
+        self.assertIn("face_evidence_pending", {item.get("status") for item in stored})
 
     def test_disabled_object_activity_does_not_evaluate_or_learn(self) -> None:
         events = RecordingEventStore()
