@@ -18,6 +18,78 @@ from survng.app.inference import InferenceUnavailable
 
 
 class FaceStoreTest(unittest.TestCase):
+    def test_temporal_candidates_expose_only_one_canonical_face(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = Path(tmpdir)
+            candidates = []
+            for rank, quality in enumerate((0.7, 0.9, 0.8), start=1):
+                path = storage / f"candidate-{rank}.jpg"
+                self.assertTrue(cv2.imwrite(str(path), np.zeros((40, 40, 3), dtype=np.uint8)))
+                candidates.append({
+                    "snapshot_path": str(path),
+                    "box": {"x1": 5, "y1": 5, "x2": 35, "y2": 35},
+                    "confidence": 0.9,
+                    "track_id": "face-1",
+                    "rank": rank,
+                    "offset_seconds": float(rank),
+                    "quality_score": quality,
+                })
+            store = FaceStore(storage, start_recognition=False)
+
+            self.assertEqual(
+                store.ingest_candidates(
+                    101,
+                    "gate",
+                    "2026-08-08T12:00:00+00:00",
+                    candidates,
+                ),
+                3,
+            )
+            self.assertEqual(store.observation_count(), 1)
+            observations = store.observations()
+            self.assertEqual(len(observations), 1)
+            self.assertEqual(observations[0]["candidate_track_id"], "face-1")
+            self.assertEqual(observations[0]["candidate_rank"], 2)
+
+    def test_temporal_consensus_selects_best_supported_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            with store._connect() as connection:
+                person_id = int(connection.execute(
+                    "insert into face_people (name, notes, created_at, updated_at) values ('Steve', '', 'now', 'now')"
+                ).lastrowid)
+            candidates = []
+            for rank, quality in enumerate((0.55, 0.92, 0.75), start=1):
+                path = Path(tmpdir) / f"candidate-{rank}.jpg"
+                self.assertTrue(cv2.imwrite(str(path), np.zeros((40, 40, 3), dtype=np.uint8)))
+                candidates.append({
+                    "snapshot_path": str(path),
+                    "box": {"x1": 5, "y1": 5, "x2": 35, "y2": 35},
+                    "confidence": 0.9,
+                    "track_id": "face-1",
+                    "rank": rank,
+                    "offset_seconds": float(rank),
+                    "quality_score": quality,
+                })
+            store.ingest_candidates(102, "gate", "2026-08-08T12:00:00+00:00", candidates)
+            with store._connect() as connection:
+                rows = connection.execute(
+                    "select id from face_observations where event_id = 102 order by candidate_rank"
+                ).fetchall()
+                for row, confidence in zip(rows, (0.82, 0.88, 0.86)):
+                    connection.execute(
+                        """update face_observations set recognition_pending = 0,
+                            candidate_person_id = ?, candidate_confidence = ?, quality_score = ?
+                            where id = ?""",
+                        (person_id, confidence, confidence, int(row["id"])),
+                    )
+                store._reconcile_candidate_track(connection, 102, "face-1")
+
+            observation = store.observations()[0]
+            self.assertEqual(observation["candidate_rank"], 2)
+            self.assertEqual(observation["candidate_person_id"], person_id)
+            self.assertEqual(observation["consensus"]["agreement_count"], 3)
+
     def test_face_quality_preserves_sharpness_separation(self) -> None:
         coordinates = np.indices((128, 128)) // 8
         checker = (coordinates.sum(axis=0) % 2 * 255).astype(np.uint8)

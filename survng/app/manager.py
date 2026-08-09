@@ -186,6 +186,7 @@ class AppManager:
         self.motion_decision_handler_factory = MotionDecisionHandlerFactory(
             events=self.events,
             object_serializer=objects_to_json,
+            face_candidate_sink=self.faces.ingest_candidates,
         )
         self.motion_object_detector_factory = RecordedMotionObjectDetectorFactory(
             detector=self.detector,

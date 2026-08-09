@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from survng.app.face_candidates import FaceCandidate
 from survng.app.object_activity import ObjectActivityAttributor
 from survng.app.motion_pipeline import MotionDecisionHandler
+from survng.app.motion_pipeline.object_detection import RecordedDetectionResult
 
 
 class RecordingEventStore:
@@ -25,6 +27,56 @@ class RecordingEventStore:
 
 
 class MotionDecisionHandlerTest(unittest.TestCase):
+    def test_handler_persists_cropped_temporal_face_candidates(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 160, 3), dtype=np.uint8)
+        frame[20:70, 30:80] = 255
+        result = RecordedDetectionResult(
+            frame=frame,
+            objects=[{"label": "person", "confidence": 0.9, "incident_eligible": True}],
+            recording_path="recording.mp4",
+            timings_ms={},
+            face_candidates=(FaceCandidate(
+                track_id="face-1",
+                rank=1,
+                offset_seconds=0.5,
+                frame=frame,
+                box={"x1": 30, "y1": 20, "x2": 80, "y2": 70},
+                confidence=0.88,
+                quality_score=0.75,
+                sharpness_score=0.7,
+                exposure_score=0.8,
+                edge_clearance_ratio=0.1,
+                detection_source="dedicated_face",
+            ),),
+        )
+        writes = []
+        ingested = []
+        handler = MotionDecisionHandler(
+            camera_id="front-door",
+            events=events,
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda value, at: (
+                writes.append((value.shape, at)) or f"snapshot-{len(writes)}.webp"
+            ),
+            object_serializer=json.dumps,
+            face_candidate_sink=lambda *args: ingested.append(args) or 1,
+        )
+        event_at = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+
+        outcome = handler.handle("onvif/motion", "motion", event_at, {})
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(writes[0][0], (100, 160, 3))
+        self.assertEqual(writes[1][0], (70, 70, 3))
+        self.assertEqual(writes[1][1], event_at.replace(microsecond=500000))
+        self.assertEqual(ingested[0][0:3], (42, "front-door", event_at.isoformat()))
+        self.assertEqual(ingested[0][3][0]["track_id"], "face-1")
+        self.assertEqual(
+            ingested[0][3][0]["box"],
+            {"x1": 10.0, "y1": 10.0, "x2": 60.0, "y2": 60.0},
+        )
+
     def test_disabled_object_activity_does_not_evaluate_or_learn(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)

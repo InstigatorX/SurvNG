@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import math
 import time
@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 
 from ..detector import detection_failure
 from ..domain_events import IncidentCreated, ObjectDetected
+from ..face_candidates import FaceCandidate
 from ..object_activity import AttributionMode, ObjectActivityAttributor
 from ..object_motion import (
     MAXIMUM_MOVEMENT_RATIO,
@@ -22,6 +23,7 @@ MotionDetectionProvider = Callable[[datetime], Any]
 MotionSnapshotWriter = Callable[[Frame, datetime], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
 MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
+FaceCandidateSink = Callable[[int, str, str, list[dict[str, Any]]], int]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -228,6 +230,7 @@ class MotionDecisionHandler:
         initial_detection_provider: MotionDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
+        face_candidate_sink: FaceCandidateSink | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
@@ -237,6 +240,7 @@ class MotionDecisionHandler:
         self.object_serializer = object_serializer
         self.event_callback = event_callback
         self.activity_attributor = activity_attributor
+        self.face_candidate_sink = face_candidate_sink
 
     def activity_status(self) -> dict[str, Any]:
         if self.activity_attributor is None:
@@ -482,6 +486,11 @@ class MotionDecisionHandler:
                 recording_path=recording_path,
                 objects_json=self.object_serializer(stored_objects),
             )
+        self._persist_face_candidates(
+            event_id,
+            event_at,
+            tuple(getattr(provider_result, "face_candidates", ()) or ()),
+        )
         if self.event_callback and existing_event_id is None:
             self._publish(
                 "incident",
@@ -518,6 +527,68 @@ class MotionDecisionHandler:
             processing_timing=processing_timing,
             object_activity=activity_summary,
         )
+
+    def _persist_face_candidates(
+        self,
+        event_id: int,
+        event_at: datetime,
+        candidates: tuple[FaceCandidate, ...],
+    ) -> None:
+        if self.face_candidate_sink is None or not candidates:
+            return
+        persisted: list[dict[str, Any]] = []
+        for candidate in candidates:
+            frame = candidate.frame
+            height, width = frame.shape[:2]
+            box = candidate.box
+            face_width = float(box["x2"] - box["x1"])
+            face_height = float(box["y2"] - box["y1"])
+            pad_x, pad_y = face_width * 0.2, face_height * 0.2
+            left = max(0, int(math.floor(box["x1"] - pad_x)))
+            top = max(0, int(math.floor(box["y1"] - pad_y)))
+            right = min(width, int(math.ceil(box["x2"] + pad_x)))
+            bottom = min(height, int(math.ceil(box["y2"] + pad_y)))
+            if right <= left or bottom <= top:
+                continue
+            crop = frame[top:bottom, left:right]
+            candidate_at = event_at + timedelta(seconds=candidate.offset_seconds)
+            path = self.snapshot_writer(crop, candidate_at)
+            if not path:
+                continue
+            persisted.append({
+                "snapshot_path": path,
+                "box": {
+                    "x1": float(box["x1"] - left),
+                    "y1": float(box["y1"] - top),
+                    "x2": float(box["x2"] - left),
+                    "y2": float(box["y2"] - top),
+                },
+                "confidence": candidate.confidence,
+                "track_id": candidate.track_id,
+                "rank": candidate.rank,
+                "offset_seconds": candidate.offset_seconds,
+                "quality_score": candidate.quality_score,
+                "quality": {
+                    "sharpness": candidate.sharpness_score,
+                    "exposure": candidate.exposure_score,
+                    "edge_clearance": candidate.edge_clearance_ratio,
+                },
+                "detection_source": candidate.detection_source,
+            })
+        if persisted:
+            try:
+                self.face_candidate_sink(
+                    event_id,
+                    self.camera_id,
+                    event_at.isoformat(),
+                    persisted,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "face candidate persistence failed for camera %s event %s",
+                    self.camera_id,
+                    event_id,
+                )
 
     def record_audit(
         self,
@@ -576,9 +647,11 @@ class MotionDecisionHandlerFactory:
         self,
         events: MotionEventStore,
         object_serializer: MotionObjectSerializer,
+        face_candidate_sink: FaceCandidateSink | None = None,
     ) -> None:
         self.events = events
         self.object_serializer = object_serializer
+        self.face_candidate_sink = face_candidate_sink
 
     def create(
         self,
@@ -598,4 +671,5 @@ class MotionDecisionHandlerFactory:
             object_serializer=self.object_serializer,
             event_callback=event_callback,
             activity_attributor=activity_attributor,
+            face_candidate_sink=self.face_candidate_sink,
         )

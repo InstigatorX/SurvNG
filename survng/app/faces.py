@@ -232,10 +232,22 @@ class FaceStore:
                 "reference_pinned": "alter table face_observations add column reference_pinned integer not null default 0",
                 "auto_identified": "alter table face_observations add column auto_identified integer not null default 0",
                 "match_details_json": "alter table face_observations add column match_details_json text not null default '{}'",
+                "candidate_track_id": "alter table face_observations add column candidate_track_id text not null default ''",
+                "candidate_rank": "alter table face_observations add column candidate_rank integer not null default 1",
+                "candidate_offset_seconds": "alter table face_observations add column candidate_offset_seconds real not null default 0",
+                "canonical": "alter table face_observations add column canonical integer not null default 1",
+                "consensus_json": "alter table face_observations add column consensus_json text not null default '{}'",
             }
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
+            connection.execute(
+                """
+                create unique index if not exists idx_face_candidate_identity
+                on face_observations(event_id, candidate_track_id, candidate_offset_seconds)
+                where candidate_track_id != ''
+                """
+            )
             connection.execute(
                 """
                 update face_observations
@@ -307,6 +319,81 @@ class FaceStore:
                 )
             self._prune_locked(connection)
 
+    def ingest_candidates(
+        self,
+        event_id: int,
+        camera_id: str,
+        observed_at: str,
+        candidates: list[dict[str, Any]],
+    ) -> int:
+        """Persist bounded face crops produced by temporal object analysis."""
+        if event_id <= 0:
+            return 0
+        inserted = 0
+        recognition_ids: list[int] = []
+        touched_tracks: set[str] = set()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as connection:
+            next_index = int(connection.execute(
+                "select coalesce(max(object_index), -1) + 1 from face_observations where event_id = ?",
+                (event_id,),
+            ).fetchone()[0])
+            for candidate in candidates:
+                box = parse_face_box(candidate.get("box"))
+                track_id = str(candidate.get("track_id") or "").strip()
+                if box is None or not track_id:
+                    continue
+                try:
+                    confidence = float(candidate.get("confidence") or 0.0)
+                    rank = max(1, int(candidate.get("rank") or 1))
+                    offset_seconds = float(candidate.get("offset_seconds") or 0.0)
+                    quality_score = float(candidate.get("quality_score") or 0.0)
+                    resolved_snapshot = event_snapshot_path(
+                        self.storage_dir,
+                        {"snapshot_path": str(candidate.get("snapshot_path") or "")},
+                    )
+                    snapshot_path = portable_media_path(self.storage_dir, resolved_snapshot)
+                except (FileNotFoundError, PermissionError, OSError, RuntimeError, TypeError, ValueError):
+                    continue
+                if not all(math.isfinite(value) for value in (confidence, offset_seconds, quality_score)):
+                    continue
+                quality_payload = dict(candidate.get("quality") or {})
+                quality_payload["collector_score"] = max(0.0, min(1.0, quality_score))
+                cursor = connection.execute(
+                    """
+                    insert or ignore into face_observations (
+                        event_id, object_index, camera_id, snapshot_path, box_json,
+                        confidence, observed_at, created_at, candidate_track_id,
+                        candidate_rank, candidate_offset_seconds, canonical,
+                        quality_score, quality_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id, next_index, camera_id, snapshot_path,
+                        json.dumps(box, separators=(",", ":")),
+                        max(0.0, min(1.0, confidence)), observed_at, now,
+                        track_id, rank, offset_seconds, int(rank == 1),
+                        max(0.0, min(1.0, quality_score)),
+                        json.dumps(quality_payload, separators=(",", ":")),
+                    ),
+                )
+                next_index += 1
+                if cursor.rowcount > 0:
+                    inserted += 1
+                    recognition_ids.append(int(cursor.lastrowid))
+                    touched_tracks.add(track_id)
+                else:
+                    try:
+                        resolved_snapshot.unlink(missing_ok=True)
+                    except OSError:
+                        LOGGER.debug("could not remove duplicate face candidate %s", resolved_snapshot)
+            for track_id in touched_tracks:
+                self._reconcile_candidate_track(connection, event_id, track_id)
+            self._prune_locked(connection)
+        for observation_id in recognition_ids:
+            self._queue_recognition(observation_id)
+        return inserted
+
     def _invalidate_reference_gallery(self) -> None:
         with self._gallery_lock:
             self._gallery_generation += 1
@@ -342,6 +429,11 @@ class FaceStore:
                     if not isinstance(detected, dict):
                         continue
                     if str(detected.get("label") or "").lower() != "face":
+                        continue
+                    if connection.execute(
+                        "select 1 from face_observations where event_id = ? and candidate_track_id != '' limit 1",
+                        (event_id,),
+                    ).fetchone() is not None:
                         continue
                     box = parse_face_box(detected.get("box"))
                     if box is None:
@@ -412,7 +504,7 @@ class FaceStore:
             row = connection.execute(
                 """
                 select sum(case when embedding_model = ? and embedding_blob is not null then 1 else 0 end) as embedded_current,
-                    sum(case when candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested,
+                    sum(case when canonical = 1 and candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested,
                     sum(case when recognition_error != '' then 1 else 0 end) as failed,
                     sum(case when recognition_pending = 1 then 1 else 0 end) as pending
                 from face_observations
@@ -676,6 +768,7 @@ class FaceStore:
                     >= getattr(recognizer.config, "face_auto_identify_margin", 1.0)
                     and len(match.reference_ids) >= 3
                     and quality.score >= 0.45
+                    and not str(row["candidate_track_id"] or "")
                 )
                 details = json.dumps(
                     {
@@ -738,6 +831,13 @@ class FaceStore:
                     "select person_id from face_observations where id = ?",
                     (observation_id,),
                 ).fetchone()
+                track_id = str(row["candidate_track_id"] or "")
+                if track_id:
+                    self._reconcile_candidate_track(
+                        connection,
+                        int(row["event_id"]),
+                        track_id,
+                    )
             if row["person_id"] is not None:
                 self._invalidate_reference_gallery()
             return current is not None and current["person_id"] is not None
@@ -754,6 +854,126 @@ class FaceStore:
                     (str(exc)[:500], datetime.now(timezone.utc).isoformat(), observation_id),
                 )
             return False
+
+    def _reconcile_candidate_track(
+        self,
+        connection: sqlite3.Connection,
+        event_id: int,
+        track_id: str,
+    ) -> None:
+        rows = connection.execute(
+            """
+            select id, person_id, candidate_person_id, candidate_confidence,
+                match_confidence, review_status,
+                quality_score, recognition_pending, recognition_error,
+                match_details_json
+            from face_observations
+            where event_id = ? and candidate_track_id = ?
+            order by candidate_rank, id
+            """,
+            (event_id, track_id),
+        ).fetchall()
+        if not rows:
+            return
+        completed = [
+            row for row in rows
+            if not bool(row["recognition_pending"]) and not str(row["recognition_error"] or "")
+        ]
+        votes: dict[int, list[sqlite3.Row]] = {}
+        for row in completed:
+            person_id = row["person_id"] or row["candidate_person_id"]
+            confidence = row["match_confidence"] if row["person_id"] is not None else row["candidate_confidence"]
+            if person_id is not None and confidence is not None:
+                votes.setdefault(int(person_id), []).append(row)
+        winner_id: int | None = None
+        support: list[sqlite3.Row] = []
+        if votes:
+            winner_id, support = max(
+                votes.items(),
+                key=lambda item: (
+                    len(item[1]),
+                    sum(self._row_identity_confidence(row) for row in item[1]) / len(item[1]),
+                ),
+            )
+        consensus_score = (
+            sum(self._row_identity_confidence(row) for row in support) / len(support)
+            if support else None
+        )
+        canonical = max(
+            support or completed or rows,
+            key=lambda row: (
+                0.55 * float(row["quality_score"] or 0.0)
+                + 0.45 * self._row_identity_confidence(row),
+                -int(row["id"]),
+            ),
+        )
+        consensus = {
+            "candidate_count": len(rows),
+            "processed_count": len(completed),
+            "agreement_count": len(support),
+            "person_id": winner_id,
+            "score": round(consensus_score, 4) if consensus_score is not None else None,
+        }
+        connection.execute(
+            "update face_observations set canonical = 0 where event_id = ? and candidate_track_id = ?",
+            (event_id, track_id),
+        )
+        connection.execute(
+            "update face_observations set canonical = 1, consensus_json = ? where id = ?",
+            (json.dumps(consensus, separators=(",", ":")), int(canonical["id"])),
+        )
+        connection.execute(
+            """
+            update face_observations
+            set candidate_person_id = null, candidate_confidence = null
+            where event_id = ? and candidate_track_id = ? and id != ?
+                and person_id is null
+            """,
+            (event_id, track_id, int(canonical["id"])),
+        )
+        recognizer = self.recognizer
+        auto_identify = bool(
+            recognizer is not None
+            and getattr(recognizer.config, "face_auto_identify_enabled", False)
+            and winner_id is not None
+            and len(support) >= 2
+            and len(support) > len(completed) / 2
+            and consensus_score is not None
+            and consensus_score >= getattr(recognizer.config, "face_auto_identify_threshold", 1.0)
+            and all(self._candidate_auto_eligible(row, recognizer) for row in support)
+        )
+        if auto_identify:
+            connection.execute(
+                """
+                update face_observations
+                set person_id = ?, review_status = 'auto_identified',
+                    match_confidence = ?, auto_identified = 1,
+                    candidate_person_id = null, candidate_confidence = null
+                where id = ? and person_id is null
+                """,
+                (winner_id, consensus_score, int(canonical["id"])),
+            )
+
+    @staticmethod
+    def _row_identity_confidence(row: sqlite3.Row) -> float:
+        value = row["match_confidence"] if row["person_id"] is not None else row["candidate_confidence"]
+        return float(value or 0.0)
+
+    @staticmethod
+    def _candidate_auto_eligible(
+        row: sqlite3.Row,
+        recognizer: OpenVinoFaceRecognizer,
+    ) -> bool:
+        try:
+            details = json.loads(row["match_details_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return bool(
+            float(details.get("margin") or 0.0)
+            >= getattr(recognizer.config, "face_auto_identify_margin", 1.0)
+            and len(details.get("reference_ids") or ()) >= 3
+            and float(row["quality_score"] or 0.0) >= 0.45
+        )
 
     def _best_match(
         self,
@@ -1003,7 +1223,7 @@ class FaceStore:
                      where latest.person_id = p.id
                      order by latest.observed_at desc limit 1) as preview_observation_id
                 from face_people p
-                left join face_observations o on o.person_id = p.id
+                left join face_observations o on o.person_id = p.id and o.canonical = 1
                 group by p.id
                 order by lower(p.name)
                 """
@@ -1019,6 +1239,7 @@ class FaceStore:
                     sum(case when person_id is not null then 1 else 0 end) as known,
                     sum(case when candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested
                 from face_observations
+                where canonical = 1
                 """
             ).fetchone()
             people = connection.execute("select count(*) from face_people").fetchone()[0]
@@ -1172,7 +1393,7 @@ class FaceStore:
         limit: int = 200,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
+        clauses: list[str] = ["o.canonical = 1"]
         values: list[Any] = []
         if person_id is not None:
             clauses.append("o.person_id = ?")
@@ -1210,7 +1431,7 @@ class FaceStore:
         camera_id: str = "",
         status: str = "all",
     ) -> int:
-        clauses: list[str] = []
+        clauses: list[str] = ["canonical = 1"]
         values: list[Any] = []
         if person_id is not None:
             clauses.append("person_id = ?")
@@ -1264,6 +1485,7 @@ class FaceStore:
                     left join face_people p on p.id = o.person_id
                     left join face_people candidate on candidate.id = o.candidate_person_id
                     where o.event_id in ({placeholders})
+                        and o.canonical = 1
                     """,
                     chunk,
                 ).fetchall()
@@ -1434,6 +1656,7 @@ class FaceStore:
         for source, target in (
             ("quality_json", "quality"),
             ("match_details_json", "match_details"),
+            ("consensus_json", "consensus"),
         ):
             try:
                 item[target] = json.loads(item.pop(source) or "{}")
