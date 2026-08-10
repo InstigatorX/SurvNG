@@ -343,3 +343,56 @@ def test_active_followup_requires_correlated_object_and_records_audit() -> None:
     assert audit_kwargs["object_detected"] is False
     state.increment_stat.assert_any_call("active_followup_no_object", 1)
     assert not events.adaptive_trigger_pending
+
+
+def test_refined_active_followup_updates_completed_outcome_telemetry() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    state = Mock()
+    audit = Mock()
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=audit,
+        config=MotionQualificationConfig(),
+        qualification=Mock(),
+        incidents=Mock(),
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
+    )
+    refined = Mock()
+    refined.as_dict.return_value = {
+        "event_id": 55,
+        "object_detected": True,
+        "snapshot_path": "followup.webp",
+        "rejection_reason": "",
+        "motion_correlation": {"required": True},
+    }
+    result = MotionQualificationResult(
+        True,
+        0.82,
+        0.48,
+        "active_event_new_motion",
+        3,
+        {},
+    )
+
+    orchestrator._record_refined_outcome(
+        refined,
+        decision_id="followup-refined",
+        event_at=datetime.now(timezone.utc),
+        mode="adaptive",
+        sensitivity="balanced",
+        result=result,
+        trigger_count=1,
+        visual_backup=False,
+        active_followup=True,
+        borderline_candidate=False,
+        suppression_verification_candidate=False,
+        episode_sequence=events.current_episode_sequence(),
+    )
+
+    state.increment_stat.assert_any_call("active_followup_objects", 1)
+    audit_kwargs = audit.record_audit.call_args.kwargs
+    assert audit_kwargs["category"] == "active_followup"
+    assert audit_kwargs["event_id"] == 55

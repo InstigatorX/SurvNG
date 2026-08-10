@@ -314,6 +314,33 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(worker.runtime_state.detection_enabled)
             self.assertEqual(sync.call_count, 2)
 
+    def test_identity_motion_alignment_discards_stale_affine_values(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_stream_url="rtsp://camera/sub",
+            motion_qualification={
+                "spatial_alignment": {
+                    "mode": "identity",
+                    "confidence": 0.2,
+                    "scale_x": 0.5,
+                    "scale_y": 0.6,
+                    "offset_x": 0.2,
+                    "offset_y": -0.1,
+                }
+            },
+        )
+
+        alignment = CameraWorker._motion_spatial_alignment(camera)
+
+        self.assertTrue(alignment["reliable"])
+        self.assertEqual(alignment["confidence"], 1.0)
+        self.assertEqual(alignment["scale_x"], 1.0)
+        self.assertEqual(alignment["scale_y"], 1.0)
+        self.assertEqual(alignment["offset_x"], 0.0)
+        self.assertEqual(alignment["offset_y"], 0.0)
+
     def test_tracking_session_swap_preserves_camera_and_resizes_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(

@@ -78,11 +78,13 @@ class MotionEventClock:
             elif baseline is not None and len(prior) >= self._warmup_samples:
                 estimated_offset = baseline
                 delivery_delay = max(0.0, delta - baseline)
-                sampling_at = datetime.fromtimestamp(
-                    camera_at.timestamp() + baseline,
-                    timezone.utc,
-                )
-                reason = "camera_clock_corrected"
+                corrected_epoch = camera_at.timestamp() + baseline
+                if corrected_epoch > received_epoch:
+                    corrected_epoch = received_epoch
+                    reason = "camera_clock_corrected_clamped"
+                else:
+                    reason = "camera_clock_corrected"
+                sampling_at = datetime.fromtimestamp(corrected_epoch, timezone.utc)
             else:
                 sampling_at = received_at
                 estimated_offset = None

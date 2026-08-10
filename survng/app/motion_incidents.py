@@ -127,6 +127,7 @@ class MotionIncidentService:
         self._pending_refinement_keys: set[tuple[str, int | float]] = set()
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
+        self._refinement_accepting = False
         self._refinements_queued = 0
         self._refinements_completed = 0
         self._refinements_dropped = 0
@@ -190,18 +191,33 @@ class MotionIncidentService:
             }
 
     def start(self, stop_event: threading.Event) -> None:
-        if self._refinement_thread is not None and self._refinement_thread.is_alive():
-            return
-        self._refinement_stop = stop_event
-        thread = threading.Thread(
-            target=self._run_refinements,
-            name=f"motion-refine-{self.camera_id}",
-            daemon=False,
-        )
-        self._refinement_thread = thread
-        thread.start()
+        with self._status_lock:
+            if self._refinement_thread is not None and self._refinement_thread.is_alive():
+                return
+            self._refinement_stop = stop_event
+            self._refinement_accepting = not stop_event.is_set()
+            thread = threading.Thread(
+                target=self._run_refinements,
+                name=f"motion-refine-{self.camera_id}",
+                daemon=False,
+            )
+            self._refinement_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            with self._status_lock:
+                if self._refinement_thread is thread:
+                    self._refinement_thread = None
+                    self._refinement_stop = None
+                    self._refinement_accepting = False
+            raise
 
     def request_stop(self) -> None:
+        # Close admission before publishing the sentinel. Otherwise a producer
+        # can enqueue behind the sentinel while the worker is still alive and
+        # lose the initial tracking handoff when shutdown drains that job.
+        with self._status_lock:
+            self._refinement_accepting = False
         try:
             self._refinement_queue.put_nowait(None)
         except queue.Full:
@@ -221,8 +237,10 @@ class MotionIncidentService:
         thread.join(max(0.0, timeout))
         if thread.is_alive():
             return False
-        self._refinement_thread = None
-        self._refinement_stop = None
+        with self._status_lock:
+            self._refinement_thread = None
+            self._refinement_stop = None
+            self._refinement_accepting = False
         self._clear_refinements()
         return True
 
@@ -357,13 +375,19 @@ class MotionIncidentService:
             )
 
     def _queue_refinement(self, job: _RefinementJob) -> str:
-        if not self.running():
-            with self._status_lock:
-                self._refinements_dropped += 1
-            LOGGER.warning("motion refinement worker unavailable for %s", self.camera_id)
-            return "dropped"
         superseded: _RefinementJob | None = None
         with self._status_lock:
+            stop = self._refinement_stop
+            if (
+                not self._refinement_accepting
+                or stop is None
+                or stop.is_set()
+                or self._refinement_thread is None
+                or not self._refinement_thread.is_alive()
+            ):
+                self._refinements_dropped += 1
+                LOGGER.warning("motion refinement worker unavailable for %s", self.camera_id)
+                return "dropped"
             key = job.key()
             if key in self._pending_refinement_keys:
                 self._refinements_coalesced += 1

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import threading
 
 import numpy as np
+import pytest
 
 from survng.app.motion_incidents import MotionIncidentService
 from survng.app.motion_pipeline.decision_handler import MotionDecisionOutcome
@@ -497,7 +498,51 @@ def test_unavailable_refinement_worker_preserves_initial_tracking_handoff() -> N
     assert outcome is initial
     decision.refine.assert_not_called()
     tracking.start.assert_called_once()
+
+
+def test_refinement_admission_closes_before_shutdown_sentinel() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="initial.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    service, _decision, tracking, _prewarm, image_reader = _service(initial)
+    image_reader.return_value = np.ones((10, 10, 3), dtype=np.uint8)
+    tracking.start.return_value = True
+    stop = threading.Event()
+    service.start(stop)
+
+    service.request_stop()
+    service.process(
+        "motion",
+        "person",
+        datetime.now(timezone.utc),
+        {"motion_episode_sequence": 12},
+    )
+
+    tracking.start.assert_called_once()
     assert service.status()["refinements_dropped"] == 1
+    stop.set()
+    assert service.wait_stopped(1.0)
+    assert service.status()["refinements_dropped"] == 1
+
+
+def test_refinement_thread_start_failure_restores_stopped_state() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+    )
+    service, _decision, _tracking, _prewarm, _image_reader = _service(initial)
+
+    with patch("survng.app.motion_incidents.threading.Thread.start", side_effect=RuntimeError("no thread")):
+        with pytest.raises(RuntimeError, match="no thread"):
+            service.start(threading.Event())
+
+    assert not service.running()
+    assert service.wait_stopped(0.01)
 
 
 def test_failed_refinement_preserves_initial_handoff_and_reports_cause() -> None:

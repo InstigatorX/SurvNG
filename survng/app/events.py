@@ -1610,7 +1610,11 @@ class EventStore:
         snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
         normalized_decision_id = str(decision_id or "").strip()
         normalized_category = str(category or "qualification").strip().lower()
-        if normalized_category not in {"qualification", "visual_backup"}:
+        if normalized_category not in {
+            "qualification",
+            "visual_backup",
+            "active_followup",
+        }:
             raise ValueError("invalid motion audit category")
         normalized_related_event_id = (
             int(related_event_id) if related_event_id is not None else None
@@ -1632,6 +1636,7 @@ class EventStore:
             allow_nan=False,
         )
         replaced_snapshot = ""
+        persisted_snapshot = snapshot_path
         with self._lock, self._connect() as conn:
             for fingerprint, configuration_json in pipeline_configurations.items():
                 conn.execute(
@@ -1650,7 +1655,7 @@ class EventStore:
             ):
                 existing = conn.execute(
                     """
-                    select id, trigger_count, features_json
+                    select id, trigger_count, features_json, snapshot_path
                     from motion_audits
                     where event_id is null and related_event_id = ?
                       and camera_id = ? and mode = ? and sensitivity = ?
@@ -1668,6 +1673,8 @@ class EventStore:
                 ).fetchone()
                 if existing is not None:
                     audit_id = int(existing["id"])
+                    replaced_snapshot = str(existing["snapshot_path"] or "")
+                    persisted_snapshot = snapshot_path or replaced_snapshot
                     compact_features["episode_observation_count"] = (
                         int(existing["trigger_count"] or 1) + normalized_trigger_count
                     )
@@ -1680,11 +1687,13 @@ class EventStore:
                     conn.execute(
                         """
                         update motion_audits
-                        set created_at = ?, score = max(score, ?), threshold = ?,
-                            trigger_count = trigger_count + ?, features_json = ?
+                        set snapshot_path = ?, created_at = ?, score = max(score, ?),
+                            threshold = ?, trigger_count = trigger_count + ?,
+                            features_json = ?
                         where id = ?
                         """,
                         (
+                            persisted_snapshot,
                             created_at,
                             normalized_score,
                             normalized_threshold,
@@ -1701,6 +1710,7 @@ class EventStore:
                 if existing is not None:
                     audit_id = int(existing["id"])
                     replaced_snapshot = str(existing["snapshot_path"] or "")
+                    persisted_snapshot = snapshot_path or replaced_snapshot
                     conn.execute(
                         """
                         update motion_audits
@@ -1716,7 +1726,7 @@ class EventStore:
                             event_id,
                             normalized_related_event_id,
                             camera_id,
-                            snapshot_path,
+                            persisted_snapshot,
                             created_at,
                             mode,
                             sensitivity,
@@ -1805,7 +1815,7 @@ class EventStore:
                         audit_id = int(existing["id"])
             if audit_id is None:
                 raise RuntimeError("motion audit could not be persisted or resolved")
-        if replaced_snapshot and replaced_snapshot != snapshot_path:
+        if replaced_snapshot and replaced_snapshot != persisted_snapshot:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return self.get_motion_audit(audit_id) or {}
 
@@ -2233,6 +2243,10 @@ class EventStore:
                 "visual_backup_no_object": 0,
                 "visual_backup_incomplete": 0,
                 "visual_backup_not_ready": 0,
+                "active_followup_attempts": 0,
+                "active_followup_objects": 0,
+                "active_followup_no_object": 0,
+                "active_followup_incomplete": 0,
             })
 
         for row in event_rows:
@@ -2274,7 +2288,8 @@ class EventStore:
             if row["event_id"] is not None:
                 continue
             summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
-            if str(row["category"] or "qualification") == "visual_backup":
+            category = str(row["category"] or "qualification")
+            if category == "visual_backup":
                 if str(row["reason"] or "") == "startup_not_ready":
                     summary["visual_backup_not_ready"] += 1
                     continue
@@ -2285,6 +2300,15 @@ class EventStore:
                     summary["visual_backup_objects"] += 1
                 else:
                     summary["visual_backup_no_object"] += 1
+                continue
+            if category == "active_followup":
+                summary["active_followup_attempts"] += 1
+                if row["object_detected"] is None:
+                    summary["active_followup_incomplete"] += 1
+                elif bool(row["object_detected"]):
+                    summary["active_followup_objects"] += 1
+                else:
+                    summary["active_followup_no_object"] += 1
                 continue
             reason = str(row["reason"] or "")
             if reason.startswith("event_state_"):

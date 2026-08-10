@@ -1061,6 +1061,81 @@ class EventStoreTest(unittest.TestCase):
                 "2026-08-10T12:00:02+00:00",
             )
 
+    def test_incident_activity_coalescing_replaces_and_cleans_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshots = root / "snapshots" / "foyer"
+            snapshots.mkdir(parents=True)
+            old = snapshots / "old.webp"
+            new = snapshots / "new.webp"
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            store = EventStore(root)
+            event = store.add_event(camera_id="foyer", kind="motion")
+            base = {
+                "camera_id": "foyer",
+                "mode": "camera",
+                "sensitivity": "balanced",
+                "score": 0.1,
+                "threshold": 0.5,
+                "reason": "event_state_active",
+                "object_detected": None,
+                "trigger_count": 1,
+                "features": {},
+                "related_event_id": int(event["id"]),
+            }
+            store.add_motion_audit(
+                **base,
+                snapshot_path=str(old),
+                created_at="2026-08-10T12:00:01+00:00",
+                decision_id="active-one",
+            )
+            updated = store.add_motion_audit(
+                **base,
+                snapshot_path=str(new),
+                created_at="2026-08-10T12:00:02+00:00",
+                decision_id="active-two",
+            )
+            retained = store.add_motion_audit(
+                **base,
+                snapshot_path="",
+                created_at="2026-08-10T12:00:03+00:00",
+                decision_id="active-three",
+            )
+
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())
+            self.assertEqual(updated["snapshot_path"], "snapshots/foyer/new.webp")
+            self.assertEqual(retained["snapshot_path"], "snapshots/foyer/new.webp")
+
+    def test_active_followup_audits_are_persisted_and_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.add_motion_audit(
+                camera_id="gate",
+                snapshot_path="",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                mode="adaptive",
+                sensitivity="balanced",
+                score=0.8,
+                threshold=0.48,
+                reason="active_event_followup",
+                object_detected=True,
+                trigger_count=1,
+                features={},
+                category="active_followup",
+            )
+
+            rows, total = store.motion_audits(category="active_followup")
+            summary = store.motion_effectiveness(days=1)["by_camera"]["gate"]["adaptive"]
+
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["category"], "active_followup")
+            self.assertEqual(summary["active_followup_attempts"], 1)
+            self.assertEqual(summary["active_followup_objects"], 1)
+            self.assertEqual(summary["visual_filtered"], 0)
+            self.assertEqual(summary["total_decisions"], 0)
+
     def test_motion_audits_filter_visual_backup_category(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

@@ -1501,10 +1501,10 @@ class RecordedMotionObjectDetector:
                 return decoded, process_count
             last_error = f"{backend}: batch frame decode returned no frames"
         LOGGER.debug(
-            "recorded batch decode failed for %s (%d samples): %s%s",
+            "recorded batch decode failed for %s camera=%s samples=%d%s",
             path,
-            len(offsets),
             self.camera.id,
+            len(offsets),
             f" ({last_error})" if last_error else "",
         )
         return {}, process_count

@@ -114,6 +114,24 @@ def test_event_clock_never_samples_future_camera_time_during_warmup() -> None:
     assert timing.sampling_at.timestamp() == received
 
 
+def test_event_clock_never_samples_future_time_after_warmup() -> None:
+    clock = MotionEventClock()
+    base = 1_800_000_000.0
+    for index in range(4):
+        camera_at = datetime.fromtimestamp(base + index, timezone.utc)
+        clock.resolve(camera_at, base + index + 5.0)
+
+    received = base + 10.0
+    # The camera offset remains within the discontinuity tolerance, but its
+    # newest delta is lower than the learned minimum-delivery baseline.
+    camera_at = datetime.fromtimestamp(received - 4.0, timezone.utc)
+    timing = clock.resolve(camera_at, received)
+
+    assert timing.selection_reason == "camera_clock_corrected_clamped"
+    assert timing.sampling_at.timestamp() == received
+    assert timing.estimated_delivery_delay_seconds == 0.0
+
+
 def test_adaptive_mode_retains_camera_evidence_without_queuing_detection() -> None:
     service, owned = _service(mode="adaptive")
 

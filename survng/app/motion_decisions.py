@@ -692,6 +692,11 @@ class MotionDecisionOrchestrator:
                 self._state.increment_stat("borderline_rescues", 1)
             if suppression_verification_candidate:
                 self._state.increment_stat("suppression_verification_rescues", 1)
+        if active_followup:
+            if object_outcome is True:
+                self._state.increment_stat("active_followup_objects", 1)
+            elif object_outcome is False:
+                self._state.increment_stat("active_followup_no_object", 1)
         correlation = outcome.get("motion_correlation")
         reason = str(outcome.get("rejection_reason") or result.reason)
         features = {

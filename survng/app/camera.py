@@ -295,6 +295,7 @@ class CameraWorker:
             or (mode == "affine" and confidence >= 0.8)
             or (mode == "auto" and same_stream)
         )
+        identity_transform = mode == "identity" or (mode == "auto" and same_stream)
         return {
             "mode": mode,
             "reliable": reliable,
@@ -303,10 +304,10 @@ class CameraWorker:
                 if mode == "untrusted"
                 else 1.0 if mode == "identity" or same_stream else confidence
             ),
-            "scale_x": configured.scale_x,
-            "scale_y": configured.scale_y,
-            "offset_x": configured.offset_x,
-            "offset_y": configured.offset_y,
+            "scale_x": 1.0 if identity_transform else configured.scale_x,
+            "scale_y": 1.0 if identity_transform else configured.scale_y,
+            "offset_x": 0.0 if identity_transform else configured.offset_x,
+            "offset_y": 0.0 if identity_transform else configured.offset_y,
         }
 
     def start(self) -> None:
