@@ -839,9 +839,7 @@ class RecordedMotionObjectDetector:
                 timing,
                 workflow_started,
                 refinement_pending=refinement_pending,
-                face_candidates=collect_face_candidates((
-                    FaceCandidateSample(0.0, fallback, tuple(objects)),
-                )),
+                face_candidates=(),
             )
         objects = self._detect_objects(fallback, timing=timing)
         if objects:

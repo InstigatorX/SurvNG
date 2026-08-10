@@ -953,6 +953,31 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             before,
         )
 
+    def test_overlapping_replay_does_not_retrain_background_or_tracks(self) -> None:
+        frames = moving_subject_frames(6)
+        timestamps = [100.0 + index * 0.2 for index in range(len(frames))]
+        first = self.process_timed(frames, timestamps)
+        background_state = self.pipeline.runtime.stage_state["background"]
+        tracker_state = self.pipeline.runtime.stage_state["tracking"]
+        background_before = background_state.background.copy()
+        track_counts_before = {
+            track_id: track.consecutive_frames
+            for track_id, track in tracker_state.tracks.items()
+        }
+
+        second = self.process_timed(frames, timestamps)
+
+        np.testing.assert_array_equal(background_state.background, background_before)
+        self.assertEqual(
+            {
+                track_id: track.consecutive_frames
+                for track_id, track in tracker_state.tracks.items()
+            },
+            track_counts_before,
+        )
+        self.assertEqual(second.debug.values["background_stale_transitions_skipped"], 5)
+        self.assertEqual(second.debug.values["tracker_stale_frames_skipped"], 5)
+
     def test_motion_score_accumulates_across_incremental_invocations(self) -> None:
         frames = moving_subject_frames(5)
         first = self.process_timed(frames[:3], [100.0, 100.2, 100.4])

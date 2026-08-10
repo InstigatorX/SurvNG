@@ -237,6 +237,7 @@ class AdaptiveEmaBackgroundStage:
             brightness_ema = state.brightness_ema
             sample_fps = max(1.0, float(context.configuration.get("sample_fps", 5.0)))
             previous_processed_at = state.last_processed_at
+            stale_transition_count = 0
             for frame_index, frame in enumerate(frames[1:], start=1):
                 current = frame.astype(np.float32, copy=False)
                 delta = cv2.absdiff(current, background)
@@ -248,10 +249,33 @@ class AdaptiveEmaBackgroundStage:
                 changed = delta > stable_limit
                 changed_ratio = float(np.count_nonzero(changed)) / max(1, changed.size)
 
+                current_at = (
+                    timestamps[frame_index]
+                    if frame_index < len(timestamps)
+                    else context.captured_at
+                )
+                is_new_transition = (
+                    state.last_processed_at is None
+                    or current_at > state.last_processed_at
+                )
+                if not is_new_transition:
+                    # Overlapping continuous-analysis windows intentionally retain
+                    # history for scoring, but stateful scene learning must consume
+                    # each captured frame exactly once.
+                    stale_transition_count += 1
+                    differences.append(np.clip(delta, 0, 255).astype(np.uint8))
+                    learning_rates.append(0.0)
+                    moving_learning_rates.append(0.0)
+                    persistent_change_ratios.append(
+                        float(np.count_nonzero(persistent_change_seconds))
+                        / max(1, persistent_change_seconds.size)
+                    )
+                    global_changes.append(changed_ratio)
+                    continue
+
                 elapsed = 1.0 / sample_fps
                 if frame_index < len(timestamps):
                     previous_at = timestamps[frame_index - 1]
-                    current_at = timestamps[frame_index]
                     if previous_processed_at is not None and current_at > previous_processed_at:
                         elapsed = current_at - previous_processed_at
                     elif current_at > previous_at:
@@ -338,6 +362,7 @@ class AdaptiveEmaBackgroundStage:
             "scene_mode": "night" if brightness < 55 else "day",
             "global_change_ratios": [round(value, 4) for value in global_changes],
             "global_change_threshold": self.global_change_ratio,
+            "background_stale_transitions_skipped": stale_transition_count,
         })
         return context
 
@@ -671,13 +696,8 @@ class PersistentCentroidTrackerStage:
         frame_count = len(context.filtered_blob_history)
         timestamps = context.frame_timestamps
         visible_ids: set[int] = set()
+        stale_frame_count = 0
         with runtime.lock:
-            if (
-                timestamps
-                and runtime.last_processed_at is not None
-                and timestamps[-1] <= runtime.last_processed_at
-            ):
-                runtime.tracks.clear()
             runtime.tracks = {
                 key: value
                 for key, value in runtime.tracks.items()
@@ -689,6 +709,12 @@ class PersistentCentroidTrackerStage:
                     if timestamps
                     else context.captured_at - max(0, frame_count - frame_index - 1) / sample_fps
                 )
+                if (
+                    runtime.last_processed_at is not None
+                    and timestamp <= runtime.last_processed_at
+                ):
+                    stale_frame_count += 1
+                    continue
                 unmatched = set(runtime.tracks)
                 for blob in sorted(frame.blobs, key=lambda item: item.area_ratio, reverse=True):
                     best_id: int | None = None
@@ -760,12 +786,15 @@ class PersistentCentroidTrackerStage:
                 for track_id, track in runtime.tracks.items()
                 if track_id in visible_ids
             ]
-            runtime.last_processed_at = timestamps[-1] if timestamps else context.captured_at
+            newest_at = timestamps[-1] if timestamps else context.captured_at
+            if runtime.last_processed_at is None or newest_at > runtime.last_processed_at:
+                runtime.last_processed_at = newest_at
 
         tracks.sort(key=lambda item: (item.consecutive_frames, max(item.size_history, default=0.0)), reverse=True)
         context.tracked_objects = tracks
         context.dominant_track = tracks[0] if tracks else self._empty_track(frame_count)
         context.debug.values["active_track_count"] = len(tracks)
+        context.debug.values["tracker_stale_frames_skipped"] = stale_frame_count
         return context
 
     @staticmethod
