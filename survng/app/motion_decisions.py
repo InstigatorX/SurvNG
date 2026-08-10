@@ -99,6 +99,33 @@ def is_borderline_candidate(
     )
 
 
+def is_confident_nuisance(result: MotionQualificationResult) -> bool:
+    """Return true only for EMA rejections backed by categorical evidence."""
+    features = result.features
+    if result.reason == "global_illumination_change":
+        return float(features.get("global_change", 0.0)) >= float(
+            features.get("global_change_threshold", 1.0)
+        )
+    if result.reason == "stationary_region":
+        return bool(
+            int(features.get("stationary_region_count", 0)) > 0
+            and float(features.get("motion_progress", 1.0)) < 0.55
+            and float(features.get("robust_displacement", 1.0))
+            < float(features.get("stationary_max_displacement_threshold", 0.0))
+        )
+    if result.reason == "persistent_scene_motion":
+        return bool(
+            float(features.get("motion_progress", 1.0)) < 0.45
+            and float(features.get("direction_consistency", 1.0)) < 0.55
+            and float(features.get("containment_radius", 1.0))
+            < max(
+                0.05,
+                float(features.get("stationary_containment_threshold", 0.0)) * 2.0,
+            )
+        )
+    return False
+
+
 def audit_features(result: MotionQualificationResult) -> dict[str, Any]:
     features = dict(result.features)
     if result.telemetry:
@@ -277,12 +304,24 @@ class MotionDecisionOrchestrator:
             rescue_margin,
         )
         verification_rate = self._qualification.suppression_verification_rate()
+        confident_nuisance = is_confident_nuisance(result)
         suppression_verification_candidate = bool(
             mode in ENFORCING_MODES
             and not result.accepted
             and not borderline_candidate
             and not result.reason.startswith("event_state_")
-            and should_verify_suppression(decision_id, verification_rate)
+            and (
+                (
+                    not adaptive_only
+                    and not confident_nuisance
+                )
+                or should_verify_suppression(decision_id, verification_rate)
+            )
+        )
+        camera_uncertainty_verification = bool(
+            suppression_verification_candidate
+            and not adaptive_only
+            and not confident_nuisance
         )
         qualification = {
             **result.as_dict(),
@@ -295,6 +334,8 @@ class MotionDecisionOrchestrator:
             "borderline_candidate": borderline_candidate,
             "suppression_verification_rate": verification_rate,
             "suppression_verification_candidate": suppression_verification_candidate,
+            "camera_uncertainty_verification": camera_uncertainty_verification,
+            "confident_nuisance": confident_nuisance,
             "trigger_count": len(triggers),
             "trigger_source": (
                 "visual_backup"
@@ -544,6 +585,10 @@ class MotionDecisionOrchestrator:
                     "suppression_verification_rescues" if found_object else "suppressed",
                     1,
                 )
+                if qualification.get("camera_uncertainty_verification"):
+                    self._state.increment_stat("camera_uncertainty_checks", 1)
+                    if found_object:
+                        self._state.increment_stat("camera_uncertainty_rescues", 1)
             if mode == "audit" and not result.accepted and found_object:
                 self._state.increment_stat("audit_object_matches", 1)
             if visual_backup:

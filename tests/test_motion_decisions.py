@@ -8,6 +8,7 @@ from survng.app.motion import MotionQualificationResult
 from survng.app.motion_decisions import (
     MotionDecisionOrchestrator,
     audit_features,
+    is_confident_nuisance,
     is_borderline_candidate,
     priority_motion_topic,
     should_verify_suppression,
@@ -33,6 +34,37 @@ def test_motion_policy_helpers_are_deterministic_and_categorical() -> None:
     )
     assert not should_verify_suppression("stable-decision", 0.0)
     assert should_verify_suppression("stable-decision", 1.0)
+
+
+def test_confident_nuisance_requires_categorical_supporting_evidence() -> None:
+    uncertain_stationary = MotionQualificationResult(
+        False, 0.2, 0.5, "stationary_foreground", 3, {"motion_progress": 0.1}
+    )
+    learned_stationary = MotionQualificationResult(
+        False,
+        0.2,
+        0.5,
+        "stationary_region",
+        3,
+        {
+            "stationary_region_count": 2,
+            "motion_progress": 0.2,
+            "robust_displacement": 0.01,
+            "stationary_max_displacement_threshold": 0.03,
+        },
+    )
+    illumination = MotionQualificationResult(
+        False,
+        0.1,
+        0.5,
+        "global_illumination_change",
+        3,
+        {"global_change": 0.7, "global_change_threshold": 0.55},
+    )
+
+    assert not is_confident_nuisance(uncertain_stationary)
+    assert is_confident_nuisance(learned_stationary)
+    assert is_confident_nuisance(illumination)
 
 
 def test_audit_features_copies_inputs_and_attaches_pipeline_telemetry() -> None:
@@ -141,6 +173,111 @@ def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> Non
     qualification.qualify_burst.assert_not_called()
     assert not events.adaptive_trigger_pending
     assert events.active_triggers is None
+
+
+def test_uncertain_camera_rejection_receives_bounded_object_verification() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    now = datetime.now(timezone.utc)
+    trigger = MotionTrigger(
+        topic="onvif/motion",
+        message="motion",
+        event_at=now,
+        received_at=now.timestamp(),
+        decision_id="camera-uncertain",
+    )
+    result = MotionQualificationResult(
+        False,
+        0.18,
+        0.48,
+        "low_persistence",
+        2,
+        {"persistence_seconds": 0.3},
+    )
+    qualification = Mock()
+    qualification.settings.return_value = ("camera", "balanced", 640)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    qualification.qualify_burst.return_value = (result, {})
+    incidents = Mock()
+    incidents.process.return_value = Mock(as_dict=Mock(return_value={
+        "event_id": None,
+        "object_detected": False,
+        "snapshot_path": "",
+        "rejection_reason": "no_eligible_object",
+    }))
+    state = Mock()
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification,
+        incidents=incidents,
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
+    )
+
+    orchestrator._process_batch(MotionTriggerBatch((trigger,)), threading.Event())
+
+    assert incidents.process.call_count == 1
+    process_kwargs = incidents.process.call_args.kwargs
+    assert process_kwargs["require_eligible_object"] is True
+    assert process_kwargs["require_motion_correlation"] is False
+    published = state.publish_event.call_args.args[1]
+    assert published["camera_uncertainty_verification"] is True
+    assert published["confident_nuisance"] is False
+    state.increment_stat.assert_any_call("camera_uncertainty_checks", 1)
+
+
+def test_learned_camera_nuisance_remains_suppressed_without_forced_check() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    now = datetime.now(timezone.utc)
+    result = MotionQualificationResult(
+        False,
+        0.2,
+        0.48,
+        "stationary_region",
+        4,
+        {
+            "stationary_region_count": 1,
+            "motion_progress": 0.2,
+            "robust_displacement": 0.01,
+            "stationary_max_displacement_threshold": 0.03,
+        },
+    )
+    qualification = Mock()
+    qualification.settings.return_value = ("camera", "balanced", 640)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    qualification.qualify_burst.return_value = (result, {})
+    incidents = Mock()
+    state = Mock()
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.1),
+        qualification=qualification,
+        incidents=incidents,
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
+    )
+    trigger = MotionTrigger(
+        topic="onvif/motion",
+        message="motion",
+        event_at=now,
+        received_at=now.timestamp(),
+        decision_id="camera-nuisance",
+    )
+
+    orchestrator._process_batch(MotionTriggerBatch((trigger,)), threading.Event())
+
+    incidents.process.assert_not_called()
+    published = state.publish_event.call_args.args[1]
+    assert published["camera_uncertainty_verification"] is False
+    assert published["confident_nuisance"] is True
 
 
 def test_active_followup_requires_correlated_object_and_records_audit() -> None:
