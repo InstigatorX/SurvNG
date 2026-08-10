@@ -148,6 +148,19 @@ def test_portrait_sampling_caps_the_long_edge_instead_of_expanding_pixels() -> N
     assert service.telemetry_snapshot()["derived_frame_bytes"] == 320 * 240 * 5
 
 
+def test_extreme_aspect_sampling_preserves_geometry() -> None:
+    service = _service(_hooks())
+
+    service.remember_frame(
+        np.zeros((1000, 100, 3), dtype=np.uint8),
+        10.0,
+        threading.Event(),
+        100.0,
+    )
+
+    assert service.color_frames[-1][1].shape == (320, 32, 3)
+
+
 def test_cached_derivatives_are_bounded_to_the_reusable_three_frame_window() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()

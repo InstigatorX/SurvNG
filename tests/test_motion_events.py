@@ -191,6 +191,20 @@ def test_episode_ledger_unifies_source_history_and_incident_linkage() -> None:
     assert coordinator.active_incident_event_id() is None
 
 
+def test_adaptive_reservation_starts_an_episode_without_camera_observation() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+
+    assert coordinator.reserve_adaptive(
+        100.0,
+        rearm_seconds=5.0,
+        priority_tolerance_seconds=2.0,
+    )
+
+    snapshot = coordinator.episode_snapshot()
+    assert snapshot["sequence"] == 1
+    assert snapshot["observations"][0].source == "adaptive"
+
+
 def test_retry_queue_depth_reports_coordinator_owned_state() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     retry = _trigger(2)

@@ -800,7 +800,7 @@ class RecordedMotionObjectDetector:
                     "main",
                     discover_missing=False,
                 ))
-            except (OSError, TypeError, ValueError):
+            except Exception:
                 LOGGER.debug(
                     "recording range prefetch unavailable for %s",
                     self.camera.id,

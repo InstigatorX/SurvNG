@@ -354,6 +354,7 @@ class MotionEventCoordinator:
             ):
                 return False
             self._episode.adaptive_pending = True
+            self._episode.observe("adaptive", captured_at)
             return True
 
     def remember_priority(self, observed_at: float) -> None:
@@ -382,6 +383,8 @@ class MotionEventCoordinator:
     def reserve_with(
         self,
         predicate: Callable[[bool, float], bool],
+        *,
+        observed_at: float | None = None,
     ) -> bool:
         """Atomically reserve the adaptive slot when ``predicate`` permits it."""
         with self._lock:
@@ -391,6 +394,8 @@ class MotionEventCoordinator:
             ):
                 return False
             self._episode.adaptive_pending = True
+            if observed_at is not None:
+                self._episode.observe("adaptive", observed_at)
             return True
 
     def defer_adaptive(self, captured_at: float) -> None:

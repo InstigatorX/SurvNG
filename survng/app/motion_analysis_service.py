@@ -382,8 +382,8 @@ class MotionAnalysisService:
             height, width = frame.shape[:2]
             frame_width = self.qualification.settings()[2]
             scale = min(1.0, frame_width / max(1, width, height))
-            target_width = max(90, round(width * scale))
-            target_height = max(90, round(height * scale))
+            target_width = max(1, round(width * scale))
+            target_height = max(1, round(height * scale))
             resized = cv2.resize(
                 frame,
                 (target_width, target_height),
@@ -1189,7 +1189,8 @@ class MotionAnalysisService:
                     self.qualification.visual_backup_policy(),
                     trigger_pending=pending,
                     last_completed_at=last_completed_at,
-                )
+                ),
+                observed_at=captured_at,
             )
         if not allowed:
             self.state.increment_stat("visual_backup_rate_limited", 1)
