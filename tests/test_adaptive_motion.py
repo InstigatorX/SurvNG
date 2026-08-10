@@ -384,7 +384,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.assertEqual(result.scoring.reason, "illumination_change")
         self.assertTrue(result.scoring.features["illumination_would_reject"])
 
-    def test_illumination_filter_observes_without_rejecting_when_disabled(self) -> None:
+    def test_illumination_filter_skips_color_analysis_when_disabled(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(
             "light-observe",
             [MotionStageConfig("illumination", "illumination_change_filter")],
@@ -417,7 +417,8 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
 
         self.assertTrue(result.scoring.accepted)
         self.assertEqual(result.scoring.reason, "qualified")
-        self.assertTrue(result.scoring.features["illumination_would_reject"])
+        self.assertFalse(result.scoring.features["illumination_would_reject"])
+        self.assertTrue(result.debug.values["illumination_filter_skipped"])
 
     def test_illumination_filter_fails_open_for_physical_structure_change(self) -> None:
         pipeline = MotionPipelineFactory(build_builtin_motion_registry()).create(

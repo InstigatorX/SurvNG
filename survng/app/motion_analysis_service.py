@@ -381,10 +381,12 @@ class MotionAnalysisService:
         try:
             height, width = frame.shape[:2]
             frame_width = self.qualification.settings()[2]
-            target_height = max(90, round(height * frame_width / max(1, width)))
+            scale = min(1.0, frame_width / max(1, width, height))
+            target_width = max(90, round(width * scale))
+            target_height = max(90, round(height * scale))
             resized = cv2.resize(
                 frame,
-                (frame_width, target_height),
+                (target_width, target_height),
                 interpolation=cv2.INTER_AREA,
             )
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)

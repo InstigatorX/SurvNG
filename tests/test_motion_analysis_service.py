@@ -134,6 +134,20 @@ def test_frame_sampling_keeps_compact_gray_and_color_buffers() -> None:
     assert telemetry["preprocess_count"] == 1
 
 
+def test_portrait_sampling_caps_the_long_edge_instead_of_expanding_pixels() -> None:
+    service = _service(_hooks())
+
+    service.remember_frame(
+        np.zeros((640, 480, 3), dtype=np.uint8),
+        10.0,
+        threading.Event(),
+        100.0,
+    )
+
+    assert service.color_frames[-1][1].shape == (320, 240, 3)
+    assert service.telemetry_snapshot()["derived_frame_bytes"] == 320 * 240 * 5
+
+
 def test_cached_derivatives_are_bounded_to_the_reusable_three_frame_window() -> None:
     service = _service(_hooks())
     stop_event = threading.Event()

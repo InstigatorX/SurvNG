@@ -1401,6 +1401,18 @@ class IlluminationChangeFilterStage:
         }
 
     def process(self, context: MotionContext) -> MotionContext:
+        enabled = bool(context.configuration.get("illumination_filter_enabled", False))
+        features = context.scoring.features
+        features["illumination_filter_enabled"] = enabled
+        features["illumination_filter_threshold"] = round(self.rejection_threshold, 4)
+        if not enabled:
+            features["illumination_evidence_frames"] = 0
+            features["illumination_clear_streak"] = 0
+            features["illumination_evidence_available"] = False
+            features["illumination_would_reject"] = False
+            context.debug.values["illumination_filter_skipped"] = True
+            return context
+
         frames = context.frame_history
         masks = context.motion_mask_history
         evidence: list[dict[str, float]] = []
@@ -1484,10 +1496,6 @@ class IlluminationChangeFilterStage:
                         mask=active_mask,
                     )
 
-        features = context.scoring.features
-        enabled = bool(context.configuration.get("illumination_filter_enabled", False))
-        features["illumination_filter_enabled"] = enabled
-        features["illumination_filter_threshold"] = round(self.rejection_threshold, 4)
         if not evidence:
             with state.lock:
                 if (

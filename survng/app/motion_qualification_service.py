@@ -62,6 +62,13 @@ class MotionQualificationService:
         self._observation_lock = threading.Lock()
         self._fusion_lock = threading.Lock()
         self._fusion_last_at = 0.0
+        self._pipeline_configuration = {
+            **self.config.model_dump(mode="python"),
+            "camera_id": self.camera.id,
+            "motion_zones": [
+                zone.model_dump(mode="python") for zone in self.camera.zones
+            ],
+        }
 
     def settings(self) -> tuple[str, str, int]:
         override = self.camera.motion_qualification
@@ -623,16 +630,12 @@ class MotionQualificationService:
             processed_frame_history=tuple(processed_frames or ()),
             processed_frame=(processed_frames[-1] if processed_frames else None),
             configuration={
-                **self.config.model_dump(mode="python"),
-                "camera_id": self.camera.id,
+                **self._pipeline_configuration,
                 "mode": mode,
                 "sensitivity": sensitivity,
                 "stationary_object_tolerance": self.stationary_object_tolerance(),
                 "illumination_filter_enabled": self.illumination_filter_enabled(),
                 "frame_width": frame_width,
-                "motion_zones": [
-                    zone.model_dump(mode="python") for zone in self.camera.zones
-                ],
             },
             runtime=pipeline.runtime,
         )
