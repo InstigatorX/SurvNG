@@ -456,6 +456,7 @@ class MotionRuntimeService:
             "event_worker_running": self.decisions.running(),
             "event_queue_depth": self.events.queue.qsize(),
             "event_ingress_in_flight": self.ingress.in_flight(),
+            "event_time_model": self.ingress.timing_status(),
             "retry_queue_depth": self.events.retry_queue_depth(),
             "events": self.events.runtime_status(),
             "generation_clean": self._generation_clean,

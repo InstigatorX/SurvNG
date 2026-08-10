@@ -21,6 +21,34 @@ class RetryDisposition(StrEnum):
     STOPPED = "stopped"
 
 
+@dataclass(frozen=True, slots=True)
+class MotionEventTiming:
+    """Explicit source, receipt, and media-sampling clocks for one trigger."""
+
+    sampling_at: datetime
+    received_at: datetime
+    camera_event_at: datetime | None = None
+    camera_to_receive_delta_seconds: float | None = None
+    estimated_clock_offset_seconds: float | None = None
+    estimated_delivery_delay_seconds: float | None = None
+    selection_reason: str = "receipt_time"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "sampling_at": self.sampling_at.isoformat(),
+            "received_at": self.received_at.isoformat(),
+            "camera_event_at": (
+                self.camera_event_at.isoformat()
+                if self.camera_event_at is not None
+                else None
+            ),
+            "camera_to_receive_delta_seconds": self.camera_to_receive_delta_seconds,
+            "estimated_clock_offset_seconds": self.estimated_clock_offset_seconds,
+            "estimated_delivery_delay_seconds": self.estimated_delivery_delay_seconds,
+            "selection_reason": self.selection_reason,
+        }
+
+
 @dataclass(slots=True)
 class MotionTrigger:
     """Typed observation submitted to the motion-decision workflow."""
@@ -36,6 +64,7 @@ class MotionTrigger:
     retry_qualification_result: MotionQualificationResult | None = None
     retry_diagnostics: dict[str, Any] | None = None
     audit_snapshot_path: str | None = None
+    event_timing: MotionEventTiming | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
@@ -53,6 +82,10 @@ class MotionTrigger:
         self.received_at = float(self.received_at)
         if not math.isfinite(self.received_at):
             raise ValueError("motion trigger received_at must be finite")
+        if self.event_timing is not None and not isinstance(
+            self.event_timing, MotionEventTiming
+        ):
+            raise TypeError("motion trigger event timing has an invalid type")
         if isinstance(self.retry_count, bool) or not isinstance(self.retry_count, int):
             raise TypeError("motion trigger retry_count must be an integer")
         if self.retry_count < 0:

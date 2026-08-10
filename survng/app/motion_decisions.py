@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .config import MotionQualificationConfig
@@ -346,6 +346,18 @@ class MotionDecisionOrchestrator:
             ),
             "retry_count": max((item.retry_count for item in triggers), default=0),
             "trigger_received_at_epoch": received_at,
+            "event_timing": (
+                representative.event_timing.to_payload()
+                if representative.event_timing is not None
+                else {
+                    "sampling_at": event_at.isoformat(),
+                    "received_at": datetime.fromtimestamp(
+                        received_at, timezone.utc
+                    ).isoformat(),
+                    "camera_event_at": None,
+                    "selection_reason": "legacy_trigger",
+                }
+            ),
             "would_suppress": bool(mode in AUDITED_MODES and not result.accepted),
             "motion_episode_sequence": self._events.current_episode_sequence(),
         }

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from survng.app.motion_ingress import MotionEventIngressService
+from survng.app.motion_ingress import MotionEventClock, MotionEventIngressService
 
 
 def _service(
@@ -52,7 +52,8 @@ def test_camera_notice_is_normalized_observed_published_and_enqueued() -> None:
 
     service.handle("onvif/person", "person", local_time)
 
-    normalized = local_time.astimezone(timezone.utc)
+    camera_time = local_time.astimezone(timezone.utc)
+    normalized = datetime.fromtimestamp(1_700_000_000.0, timezone.utc)
     owned.observe_event.assert_called_once_with(
         "onvif/person",
         "person",
@@ -61,16 +62,45 @@ def test_camera_notice_is_normalized_observed_published_and_enqueued() -> None:
     )
     owned.events.remember_priority.assert_called_once_with(1_700_000_000.0)
     owned.events.remember_camera_motion.assert_called_once_with(1_700_000_000.0)
-    owned.publish_event.assert_called_once_with("motion", {
-        "camera_id": "gate",
-        "timestamp": normalized.isoformat(),
-        "source": "onvif",
-    })
+    payload = owned.publish_event.call_args.args[1]
+    assert payload["camera_id"] == "gate"
+    assert payload["timestamp"] == normalized.isoformat()
+    assert payload["source"] == "onvif"
+    assert payload["event_timing"]["camera_event_at"] == camera_time.isoformat()
+    assert payload["event_timing"]["selection_reason"] == "clock_model_warming"
     trigger = owned.events.enqueue.call_args.args[0]
     assert trigger.topic == "onvif/person"
     assert trigger.event_at == normalized
     assert trigger.received_at == 1_700_000_000.0
+    assert trigger.event_timing.camera_event_at == camera_time
     owned.state.end_ingress.assert_called_once_with(1)
+
+
+def test_event_clock_separates_stable_offset_from_delivery_delay() -> None:
+    clock = MotionEventClock()
+    base = 1_800_000_000.0
+    for index in range(4):
+        camera_at = datetime.fromtimestamp(base + index, timezone.utc)
+        clock.resolve(camera_at, base + index + 60.0)
+
+    camera_at = datetime.fromtimestamp(base + 10.0, timezone.utc)
+    timing = clock.resolve(camera_at, base + 73.0)
+
+    assert timing.selection_reason == "camera_clock_corrected"
+    assert timing.estimated_clock_offset_seconds == 60.0
+    assert timing.estimated_delivery_delay_seconds == 3.0
+    assert timing.sampling_at.timestamp() == base + 70.0
+
+
+def test_event_clock_uses_plausible_synchronized_camera_time_during_warmup() -> None:
+    clock = MotionEventClock()
+    camera_at = datetime.fromtimestamp(1_800_000_000.0, timezone.utc)
+
+    timing = clock.resolve(camera_at, 1_800_000_000.4)
+
+    assert timing.selection_reason == "plausible_camera_time"
+    assert timing.sampling_at == camera_at
+    assert timing.estimated_delivery_delay_seconds == 0.4
 
 
 def test_adaptive_mode_retains_camera_evidence_without_queuing_detection() -> None:
