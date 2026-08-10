@@ -979,7 +979,7 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
-            worker.motion_events.camera_motion_times.append(100.75)
+            worker.motion_events.remember_camera_motion(100.75)
             for captured_at in (100.0, 100.5, 101.0):
                 worker.motion_analysis.consider_visual_backup(accepted, samples, captured_at)
             for captured_at in (102.0, 102.5, 103.0):
@@ -1212,7 +1212,7 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            worker.motion_events.camera_motion_times.append(event_at.timestamp())
+            worker.motion_events.remember_camera_motion(event_at.timestamp())
             with (
                 patch.object(
                     worker.motion_incidents,

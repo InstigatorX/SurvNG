@@ -211,6 +211,39 @@ class MotionTriggerBatch:
         return self.triggers[index]
 
 
+@dataclass(frozen=True, slots=True)
+class MotionSourceObservation:
+    """One source observation belonging to the camera's current motion episode."""
+
+    source: str
+    observed_at: float
+
+
+@dataclass(slots=True)
+class MotionEpisodeState:
+    """Single coordinator-owned record of cross-source episode state."""
+
+    sequence: int = 0
+    observations: deque[MotionSourceObservation] = field(
+        default_factory=lambda: deque(maxlen=48)
+    )
+    active_triggers: MotionTriggerBatch | None = None
+    adaptive_pending: bool = False
+    adaptive_last_completed_at: float = 0.0
+    incident_event_id: int | None = None
+
+    def observe(self, source: str, observed_at: float) -> None:
+        if not self.observations or observed_at - self.observations[-1].observed_at > 30.0:
+            self.sequence += 1
+            self.incident_event_id = None
+        self.observations.append(MotionSourceObservation(source, observed_at))
+
+    def times(self, source: str) -> tuple[float, ...]:
+        return tuple(
+            item.observed_at for item in self.observations if item.source == source
+        )
+
+
 class MotionEventCoordinator:
     """Owns motion trigger admission, coalescing state, and retry scheduling.
 
@@ -224,11 +257,7 @@ class MotionEventCoordinator:
             maxsize=queue_size
         )
         self.retry_batches: deque[MotionTrigger] = deque()
-        self.active_triggers: MotionTriggerBatch | None = None
-        self.adaptive_trigger_pending = False
-        self.adaptive_last_completed_at = 0.0
-        self.priority_motion_times: deque[float] = deque(maxlen=16)
-        self.camera_motion_times: deque[float] = deque(maxlen=32)
+        self._episode = MotionEpisodeState()
         self._retry_limit = retry_limit
         self._lock = threading.RLock()
         self._runtime_metrics = {
@@ -415,39 +444,39 @@ class MotionEventCoordinator:
     ) -> bool:
         with self._lock:
             if (
-                self.adaptive_trigger_pending
+                self._episode.adaptive_pending
                 or self.matches_recent_priority(
                     captured_at,
                     rearm_seconds=priority_tolerance_seconds,
                 )
-                or captured_at - self.adaptive_last_completed_at < rearm_seconds
+                or captured_at - self._episode.adaptive_last_completed_at < rearm_seconds
             ):
                 return False
-            self.adaptive_trigger_pending = True
+            self._episode.adaptive_pending = True
             return True
 
     def remember_priority(self, observed_at: float) -> None:
         with self._lock:
-            self.priority_motion_times.append(observed_at)
+            self._episode.observe("priority", observed_at)
 
     def matches_recent_priority(self, event_at: float, *, rearm_seconds: float) -> bool:
         with self._lock:
             return any(
                 abs(event_at - priority_at) <= rearm_seconds
-                for priority_at in self.priority_motion_times
+                for priority_at in self._episode.times("priority")
             )
 
     def remember_camera_motion(self, observed_at: float) -> None:
         with self._lock:
-            self.camera_motion_times.append(observed_at)
+            self._episode.observe("camera", observed_at)
 
     def camera_motion_snapshot(self) -> tuple[float, ...]:
         with self._lock:
-            return tuple(self.camera_motion_times)
+            return self._episode.times("camera")
 
     def latest_camera_motion(self) -> float:
         with self._lock:
-            return max(self.camera_motion_times, default=0.0)
+            return max(self._episode.times("camera"), default=0.0)
 
     def reserve_with(
         self,
@@ -456,17 +485,17 @@ class MotionEventCoordinator:
         """Atomically reserve the adaptive slot when ``predicate`` permits it."""
         with self._lock:
             if not predicate(
-                self.adaptive_trigger_pending,
-                self.adaptive_last_completed_at,
+                self._episode.adaptive_pending,
+                self._episode.adaptive_last_completed_at,
             ):
                 return False
-            self.adaptive_trigger_pending = True
+            self._episode.adaptive_pending = True
             return True
 
     def defer_adaptive(self, captured_at: float) -> None:
         with self._lock:
-            self.adaptive_trigger_pending = False
-            self.adaptive_last_completed_at = captured_at
+            self._episode.adaptive_pending = False
+            self._episode.adaptive_last_completed_at = captured_at
 
     def complete_adaptive(
         self,
@@ -477,31 +506,78 @@ class MotionEventCoordinator:
         if not any(item.topic.startswith("adaptive/") for item in batch):
             return
         with self._lock:
-            self.adaptive_trigger_pending = False
-            self.adaptive_last_completed_at = completed_at
+            self._episode.adaptive_pending = False
+            self._episode.adaptive_last_completed_at = completed_at
 
     def set_active(self, batch: MotionTriggerBatch | None) -> None:
         with self._lock:
-            self.active_triggers = batch
+            self._episode.active_triggers = batch
 
     def take_failed_active(self) -> MotionTriggerBatch | None:
         with self._lock:
-            failed = self.active_triggers
-            self.active_triggers = None
+            failed = self._episode.active_triggers
+            self._episode.active_triggers = None
             return failed
+
+    def link_incident(self, event_id: int | None) -> None:
+        with self._lock:
+            self._episode.incident_event_id = event_id
+
+    def active_incident_event_id(self) -> int | None:
+        with self._lock:
+            return self._episode.incident_event_id
+
+    def episode_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "sequence": self._episode.sequence,
+                "observations": tuple(self._episode.observations),
+                "adaptive_pending": self._episode.adaptive_pending,
+                "adaptive_last_completed_at": self._episode.adaptive_last_completed_at,
+                "incident_event_id": self._episode.incident_event_id,
+            }
 
     def reset(self) -> None:
         self.clear()
         with self._lock:
-            self.active_triggers = None
-            self.adaptive_trigger_pending = False
-            self.adaptive_last_completed_at = 0.0
-            self.priority_motion_times.clear()
-            self.camera_motion_times.clear()
+            self._episode = MotionEpisodeState(sequence=self._episode.sequence)
 
     def reset_timebase(self) -> None:
         """Discard wall-clock histories without disturbing queued work."""
         with self._lock:
-            self.adaptive_last_completed_at = 0.0
-            self.priority_motion_times.clear()
-            self.camera_motion_times.clear()
+            self._episode.adaptive_last_completed_at = 0.0
+            self._episode.observations.clear()
+
+    # Transitional properties keep callers source-compatible while all episode
+    # state now has one coordinator-owned source of truth.
+    @property
+    def active_triggers(self) -> MotionTriggerBatch | None:
+        return self._episode.active_triggers
+
+    @active_triggers.setter
+    def active_triggers(self, value: MotionTriggerBatch | None) -> None:
+        self._episode.active_triggers = value
+
+    @property
+    def adaptive_trigger_pending(self) -> bool:
+        return self._episode.adaptive_pending
+
+    @adaptive_trigger_pending.setter
+    def adaptive_trigger_pending(self, value: bool) -> None:
+        self._episode.adaptive_pending = bool(value)
+
+    @property
+    def adaptive_last_completed_at(self) -> float:
+        return self._episode.adaptive_last_completed_at
+
+    @adaptive_last_completed_at.setter
+    def adaptive_last_completed_at(self, value: float) -> None:
+        self._episode.adaptive_last_completed_at = float(value)
+
+    @property
+    def priority_motion_times(self) -> tuple[float, ...]:
+        return self._episode.times("priority")
+
+    @property
+    def camera_motion_times(self) -> tuple[float, ...]:
+        return self._episode.times("camera")

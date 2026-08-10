@@ -527,6 +527,7 @@ class MotionDecisionOrchestrator:
                 # A persisted incident is the idempotency boundary. Failures in
                 # later audits or notifications must never replay detection.
                 self._events.set_active(None)
+                self._events.link_incident(int(event_id))
                 self._state.set_active_incident_event_id(int(event_id))
             object_outcome = outcome.get("object_detected")
             found_object = object_outcome is True
@@ -620,6 +621,7 @@ class MotionDecisionOrchestrator:
         object_outcome = outcome.get("object_detected")
         found_object = object_outcome is True
         if event_id is not None:
+            self._events.link_incident(int(event_id))
             self._state.set_active_incident_event_id(int(event_id))
         if found_object:
             self._state.increment_stat("late_object_rescues", 1)
@@ -779,4 +781,7 @@ class MotionDecisionOrchestrator:
     ) -> int | None:
         if result.reason not in INCIDENT_ACTIVITY_REASONS:
             return None
-        return self._state.active_incident_event_id()
+        return (
+            self._events.active_incident_event_id()
+            or self._state.active_incident_event_id()
+        )

@@ -172,6 +172,25 @@ def test_timebase_reset_preserves_queued_work_and_active_reservation() -> None:
     assert coordinator.camera_motion_snapshot() == ()
 
 
+def test_episode_ledger_unifies_source_history_and_incident_linkage() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    coordinator.remember_camera_motion(100.0)
+    coordinator.remember_priority(101.0)
+    coordinator.link_incident(42)
+
+    snapshot = coordinator.episode_snapshot()
+
+    assert snapshot["sequence"] == 1
+    assert [item.source for item in snapshot["observations"]] == ["camera", "priority"]
+    assert coordinator.camera_motion_snapshot() == (100.0,)
+    assert coordinator.active_incident_event_id() == 42
+
+    coordinator.remember_camera_motion(140.0)
+
+    assert coordinator.episode_snapshot()["sequence"] == 2
+    assert coordinator.active_incident_event_id() is None
+
+
 def test_retry_queue_depth_reports_coordinator_owned_state() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     retry = _trigger(2)
