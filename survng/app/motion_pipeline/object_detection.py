@@ -593,6 +593,63 @@ LiveFrameProvider = Callable[[], Frame | None]
 StopRequested = Callable[[], bool]
 
 
+class _EventRecordedSampler:
+    """Reuse recording discovery and decoded samples within one event workflow."""
+
+    def __init__(
+        self,
+        *,
+        camera_id: str,
+        recorder: MotionRecordingProvider,
+        frame_reader: Callable[..., Frame | None],
+        rows: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.camera_id = camera_id
+        self.recorder = recorder
+        self.frame_reader = frame_reader
+        self._rows: list[dict[str, Any]] = [dict(row) for row in (rows or [])]
+        self._frames: dict[tuple[str, float], Frame | None] = {}
+
+    def recording_at(self, epoch: float) -> dict[str, Any] | None:
+        for row in self._rows:
+            start = float(row.get("start_epoch", 0.0))
+            end = row.get("end_epoch")
+            if end is None:
+                duration = row.get("duration_seconds")
+                end = start + float(duration) if duration is not None else start
+            if start <= epoch <= float(end):
+                return row
+        row = self.recorder.recording_at(self.camera_id, epoch)
+        if row is not None and row.get("start_epoch") is not None:
+            normalized = dict(row)
+            if normalized.get("end_epoch") is None:
+                duration = normalized.get("duration_seconds")
+                if duration is not None:
+                    normalized["end_epoch"] = float(normalized["start_epoch"]) + float(duration)
+            self._rows.append(normalized)
+            return normalized
+        return row
+
+    def frame_at(
+        self,
+        path: Path,
+        offset_seconds: float,
+        *,
+        deadline: float | None,
+    ) -> Frame | None:
+        key = (str(path), round(max(0.0, offset_seconds), 3))
+        if key not in self._frames:
+            frame = self.frame_reader(
+                path,
+                offset_seconds,
+                deadline=deadline,
+            )
+            if frame is not None:
+                self._frames[key] = frame
+            return frame
+        return self._frames[key]
+
+
 class RecordedMotionObjectDetector:
     """Combines recorded event-time detections into repeatable object evidence."""
 
@@ -679,6 +736,33 @@ class RecordedMotionObjectDetector:
                 getattr(self.detector.config, "event_class_confirmation_frames", {}) or {}
             ).items()
         }
+        prefetched_rows: list[dict[str, Any]] = []
+        rows_between = getattr(self.recorder, "recording_rows_between", None)
+        if callable(rows_between):
+            lookup_started = time.monotonic()
+            try:
+                prefetched_rows = list(rows_between(
+                    self.camera.id,
+                    event_epoch + min(offset for stage in stages for offset in stage) - 1.0,
+                    event_epoch + max(offset for stage in stages for offset in stage) + 1.0,
+                    "main",
+                    discover_missing=False,
+                ))
+            except (OSError, TypeError, ValueError):
+                LOGGER.debug(
+                    "recording range prefetch unavailable for %s",
+                    self.camera.id,
+                    exc_info=True,
+                )
+            timing["recording_wait_ms"] += (
+                time.monotonic() - lookup_started
+            ) * 1000.0
+        sampler = _EventRecordedSampler(
+            camera_id=self.camera.id,
+            recorder=self.recorder,
+            frame_reader=self._read_recorded_frame,
+            rows=prefetched_rows,
+        )
 
         for stage_index, stage_offsets in enumerate(stages):
             while True:
@@ -709,7 +793,7 @@ class RecordedMotionObjectDetector:
                         future_sample = True
                         continue
                     lookup_started = time.monotonic()
-                    row = self.recorder.recording_at(self.camera.id, target_epoch)
+                    row = sampler.recording_at(target_epoch)
                     timing["recording_wait_ms"] += (
                         time.monotonic() - lookup_started
                     ) * 1000.0
@@ -721,7 +805,7 @@ class RecordedMotionObjectDetector:
                         continue
                     frame_offset = max(0.0, target_epoch - float(start_epoch))
                     decode_started = time.monotonic()
-                    frame = self._read_recorded_frame(
+                    frame = sampler.frame_at(
                         Path(str(row["path"])),
                         frame_offset,
                         deadline=stage_deadline,

@@ -12,6 +12,7 @@ import numpy as np
 
 from survng.app.config import CameraConfig
 from survng.app.motion_pipeline.object_detection import (
+    _EventRecordedSampler,
     _RecordedDetectionSample,
     RecordedMotionObjectDetector,
     _image_quality,
@@ -44,6 +45,96 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_event_sampler_reuses_segment_lookup_and_successful_decode(self) -> None:
+        class Recorder:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def recording_at(self, _camera_id, _epoch):
+                self.calls += 1
+                return {
+                    "path": "segment.mp4",
+                    "start_epoch": 100.0,
+                    "end_epoch": 110.0,
+                }
+
+        recorder = Recorder()
+        reads: list[tuple[str, float]] = []
+
+        def read(path, offset, **_kwargs):
+            reads.append((str(path), offset))
+            return np.zeros((10, 10, 3), dtype=np.uint8)
+
+        sampler = _EventRecordedSampler(
+            camera_id="gate",
+            recorder=recorder,
+            frame_reader=read,
+        )
+
+        self.assertEqual(sampler.recording_at(101.0)["path"], "segment.mp4")
+        self.assertEqual(sampler.recording_at(109.0)["path"], "segment.mp4")
+        first = sampler.frame_at(Path("segment.mp4"), 1.0, deadline=None)
+        second = sampler.frame_at(Path("segment.mp4"), 1.0, deadline=None)
+
+        self.assertIs(first, second)
+        self.assertEqual(recorder.calls, 1)
+        self.assertEqual(reads, [("segment.mp4", 1.0)])
+
+    def test_detector_prefetches_event_recording_range_once(self) -> None:
+        event_epoch = 1_800_000_000.0
+
+        class Recorder:
+            ffmpeg_path = "ffmpeg"
+            hardware_acceleration = "off"
+
+            def __init__(self) -> None:
+                self.range_calls = 0
+                self.point_calls = 0
+
+            def recording_rows_between(self, _camera_id, start, end, source, **kwargs):
+                self.range_calls += 1
+                self.asserted = (start, end, source, kwargs)
+                return [{
+                    "path": "segment.mp4",
+                    "start_epoch": event_epoch - 2.0,
+                    "end_epoch": event_epoch + 20.0,
+                }]
+
+            def recording_at(self, _camera_id, _epoch):
+                self.point_calls += 1
+                return None
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=1,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return [detected("person", 0.9, (2, 2, 12, 18))]
+
+        recorder = Recorder()
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            recorder,
+            lambda: None,
+        )
+        with (
+            patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
+            patch.object(
+                backend,
+                "_read_recorded_frame",
+                return_value=np.zeros((20, 20, 3), dtype=np.uint8),
+            ),
+        ):
+            backend.detect(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertEqual(recorder.range_calls, 1)
+        self.assertEqual(recorder.point_calls, 0)
+
     def test_dedicated_face_detector_replaces_generic_face_boxes_as_auxiliary_evidence(self) -> None:
         class Detector:
             config = SimpleNamespace(
