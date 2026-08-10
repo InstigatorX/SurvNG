@@ -103,6 +103,17 @@ def test_event_clock_uses_plausible_synchronized_camera_time_during_warmup() -> 
     assert timing.estimated_delivery_delay_seconds == 0.4
 
 
+def test_event_clock_never_samples_future_camera_time_during_warmup() -> None:
+    clock = MotionEventClock()
+    received = 1_800_000_000.0
+    camera_at = datetime.fromtimestamp(received + 0.5, timezone.utc)
+
+    timing = clock.resolve(camera_at, received)
+
+    assert timing.selection_reason == "future_camera_time_clamped"
+    assert timing.sampling_at.timestamp() == received
+
+
 def test_adaptive_mode_retains_camera_evidence_without_queuing_detection() -> None:
     service, owned = _service(mode="adaptive")
 

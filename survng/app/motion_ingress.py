@@ -67,10 +67,14 @@ class MotionEventClock:
                 reason = "clock_model_warming"
             self._deltas.append(delta)
             if baseline is None and abs(delta) <= 5.0:
-                sampling_at = camera_at
+                sampling_at = min(camera_at, received_at)
                 estimated_offset = 0.0
                 delivery_delay = max(0.0, delta)
-                reason = "plausible_camera_time"
+                reason = (
+                    "plausible_camera_time"
+                    if camera_at <= received_at
+                    else "future_camera_time_clamped"
+                )
             elif baseline is not None and len(prior) >= self._warmup_samples:
                 estimated_offset = baseline
                 delivery_delay = max(0.0, delta - baseline)

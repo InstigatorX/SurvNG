@@ -291,7 +291,7 @@ class MotionIncidentService:
         )
         self._record_timing(outcome)
         if outcome.refinement_pending:
-            queued = self._queue_refinement(
+            refinement_admission = self._queue_refinement(
                 _RefinementJob(
                     topic=topic,
                     message=message,
@@ -304,7 +304,7 @@ class MotionIncidentService:
                     initial_outcome=outcome,
                 )
             )
-            if not queued:
+            if refinement_admission == "dropped":
                 # Initial detection is already valid evidence. Capacity loss
                 # must not also discard its tracking handoff.
                 self._handoff(outcome, event_at)
@@ -356,12 +356,12 @@ class MotionIncidentService:
                 redact_secret_text(error)[:500],
             )
 
-    def _queue_refinement(self, job: _RefinementJob) -> bool:
+    def _queue_refinement(self, job: _RefinementJob) -> str:
         if not self.running():
             with self._status_lock:
                 self._refinements_dropped += 1
             LOGGER.warning("motion refinement worker unavailable for %s", self.camera_id)
-            return False
+            return "dropped"
         superseded: _RefinementJob | None = None
         with self._status_lock:
             key = job.key()
@@ -372,7 +372,7 @@ class MotionIncidentService:
                     self.camera_id,
                     key,
                 )
-                return False
+                return "coalesced"
             try:
                 self._refinement_queue.put_nowait(job)
             except queue.Full:
@@ -389,7 +389,7 @@ class MotionIncidentService:
                     except queue.Full:
                         pass
                     self._refinements_dropped += 1
-                    return False
+                    return "dropped"
                 if candidate is not None:
                     superseded = candidate
                     self._pending_refinement_keys.discard(candidate.key())
@@ -397,7 +397,7 @@ class MotionIncidentService:
                     self._refinement_queue.put_nowait(job)
                 except queue.Full:
                     self._refinements_dropped += 1
-                    return False
+                    return "dropped"
                 if superseded is not None:
                     self._refinements_superseded += 1
             self._pending_refinement_keys.add(key)
@@ -412,7 +412,7 @@ class MotionIncidentService:
                 superseded.key(),
                 job.key(),
             )
-        return True
+        return "queued"
 
     def _run_refinements(self) -> None:
         while True:

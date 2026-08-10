@@ -1653,12 +1653,15 @@ class EventStore:
                     select id, trigger_count, features_json
                     from motion_audits
                     where event_id is null and related_event_id = ?
-                      and camera_id = ? and reason = ? and category = ?
+                      and camera_id = ? and mode = ? and sensitivity = ?
+                      and reason = ? and category = ?
                     order by id asc limit 1
                     """,
                     (
                         normalized_related_event_id,
                         camera_id,
+                        mode,
+                        sensitivity,
                         reason,
                         normalized_category,
                     ),

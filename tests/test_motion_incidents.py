@@ -380,6 +380,51 @@ def test_duplicate_refinement_for_same_episode_is_coalesced() -> None:
     assert service.wait_stopped(1.0)
 
 
+def test_coalesced_refinement_does_not_duplicate_initial_tracking_handoff() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="initial.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    image_reader.return_value = np.ones((10, 10, 3), dtype=np.uint8)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def refine(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(1.0)
+        return refined
+
+    decision.refine.side_effect = refine
+    tracking.start.return_value = True
+    stop = threading.Event()
+    service.start(stop)
+    event_at = datetime.now(timezone.utc)
+    service.process("motion", "first", event_at, {"motion_episode_sequence": 9})
+    assert entered.wait(1.0)
+    service.process("motion", "duplicate", event_at, {"motion_episode_sequence": 9})
+    tracking.start.assert_not_called()
+
+    release.set()
+    for _ in range(100):
+        if service.status()["refinements_completed"]:
+            break
+        threading.Event().wait(0.01)
+    tracking.start.assert_called_once()
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
 def test_full_refinement_queue_supersedes_oldest_optional_episode() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,

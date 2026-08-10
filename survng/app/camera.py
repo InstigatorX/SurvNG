@@ -298,7 +298,11 @@ class CameraWorker:
         return {
             "mode": mode,
             "reliable": reliable,
-            "confidence": 1.0 if mode == "identity" or same_stream else confidence,
+            "confidence": (
+                0.0
+                if mode == "untrusted"
+                else 1.0 if mode == "identity" or same_stream else confidence
+            ),
             "scale_x": configured.scale_x,
             "scale_y": configured.scale_y,
             "offset_x": configured.offset_x,

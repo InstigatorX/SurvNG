@@ -143,10 +143,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         def batch_read(_path, offsets, **_kwargs):
             calls.append(list(offsets))
-            return {
+            return ({
                 offset: np.full((4, 4, 3), int(offset * 10), dtype=np.uint8)
                 for offset in offsets
-            }
+            }, 1)
 
         sampler = _EventRecordedSampler(
             camera_id="gate",
@@ -421,9 +421,12 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 "survng.app.motion_pipeline.object_detection.subprocess.run",
                 return_value=completed,
             ) as run:
-                frames = backend._read_recorded_frames(recording, [0.5, 1.0])
+                frames, process_count = backend._read_recorded_frames(
+                    recording, [0.5, 1.0]
+                )
 
         self.assertEqual(run.call_count, 1)
+        self.assertEqual(process_count, 1)
         self.assertTrue(np.array_equal(frames[0.5], first))
         self.assertTrue(np.array_equal(frames[1.0], second))
         command = run.call_args.args[0]
