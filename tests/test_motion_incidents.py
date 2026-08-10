@@ -307,7 +307,14 @@ def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() 
         "adaptive/visual_backup",
         "motion",
         datetime.now(timezone.utc),
-        {"accepted": True},
+        {
+            "accepted": True,
+            "telemetry": {
+                "schema_version": 1,
+                "origins": {"qualification": "global"},
+                "graphs": {"qualification": {"configuration": ["large"]}},
+            },
+        },
         require_eligible_object=True,
         refinement_callback=lambda value: completed.set() if value is refined else None,
     )
@@ -315,6 +322,12 @@ def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() 
     assert outcome is initial
     assert completed.wait(1.0)
     decision.refine.assert_called_once()
+    refinement_qualification = decision.refine.call_args.args[3]
+    assert refinement_qualification["refinement_payload_compacted"] is True
+    assert "graphs" not in refinement_qualification["telemetry"]
+    assert refinement_qualification["telemetry"]["origins"] == {
+        "qualification": "global"
+    }
     assert decision.refine.call_args.kwargs["existing_event_id"] is None
     tracking.start.assert_called_once()
     assert service.status()["refinements_completed"] == 1

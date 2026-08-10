@@ -946,6 +946,7 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
         self.process_timed(frames, timestamps)
         threshold_state = self.pipeline.runtime.stage_state["threshold"]
         before = (threshold_state.threshold_ema, threshold_state.noise_ema)
+        statistics_before = dict(threshold_state.statistics)
 
         self.process_timed(frames, timestamps)
 
@@ -953,6 +954,8 @@ class AdaptiveMotionPipelineTest(unittest.TestCase):
             (threshold_state.threshold_ema, threshold_state.noise_ema),
             before,
         )
+        self.assertEqual(threshold_state.statistics, statistics_before)
+        self.assertLessEqual(len(threshold_state.statistics), 16)
 
     def test_overlapping_replay_does_not_retrain_background_or_tracks(self) -> None:
         frames = moving_subject_frames(6)

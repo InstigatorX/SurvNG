@@ -49,6 +49,7 @@ class _ThresholdRuntime:
     threshold_ema: float = 12.0
     noise_ema: float = 4.0
     last_processed_at: float | None = None
+    statistics: dict[float, tuple[float, float, float]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> "_ThresholdRuntime":
@@ -57,6 +58,7 @@ class _ThresholdRuntime:
                 threshold_ema=self.threshold_ema,
                 noise_ema=self.noise_ema,
                 last_processed_at=self.last_processed_at,
+                statistics=dict(self.statistics),
             )
 
 
@@ -420,18 +422,33 @@ class AdaptiveStatisticalThresholdStage:
         difference_timestamps = context.frame_timestamps[1:]
         with state.lock:
             for index, difference in enumerate(context.difference_history):
-                flat = difference.reshape(-1).astype(np.float32, copy=False)
-                median = float(np.median(flat))
-                mad = float(np.median(np.abs(flat - median)))
-                noise = max(0.5, 1.4826 * mad)
-                percentile = float(np.percentile(flat, 80))
-                candidate = max(self.minimum, median + self.sigma * noise, percentile * 0.8)
-                candidate = min(self.maximum, candidate)
                 timestamp = (
                     difference_timestamps[index]
                     if index < len(difference_timestamps)
                     else None
                 )
+                cached = state.statistics.get(timestamp) if timestamp is not None else None
+                if cached is None:
+                    flat = difference.reshape(-1).astype(np.float32, copy=False)
+                    median = float(np.median(flat))
+                    mad = float(np.median(np.abs(flat - median)))
+                    noise = max(0.5, 1.4826 * mad)
+                    percentile = float(np.percentile(flat, 80))
+                    candidate = min(
+                        self.maximum,
+                        max(
+                            self.minimum,
+                            median + self.sigma * noise,
+                            percentile * 0.8,
+                        ),
+                    )
+                    if timestamp is not None:
+                        state.statistics[timestamp] = (median, noise, candidate)
+                        if len(state.statistics) > 16:
+                            oldest = min(state.statistics)
+                            state.statistics.pop(oldest, None)
+                else:
+                    median, noise, candidate = cached
                 is_new = (
                     timestamp is None
                     or state.last_processed_at is None

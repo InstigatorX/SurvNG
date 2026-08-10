@@ -55,6 +55,22 @@ TrackingStarter = Callable[
 RefinementCallback = Callable[[MotionDecisionOutcome], None]
 
 
+def _compact_refinement_qualification(
+    qualification: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy decision evidence without repeating the large pipeline graph."""
+    compact = copy.deepcopy(qualification)
+    telemetry = compact.get("telemetry")
+    if isinstance(telemetry, dict):
+        compact["telemetry"] = {
+            "schema_version": telemetry.get("schema_version"),
+            "origins": copy.deepcopy(telemetry.get("origins", {})),
+            "compacted_for_refinement": True,
+        }
+    compact["refinement_payload_compacted"] = True
+    return compact
+
+
 @dataclass(frozen=True, slots=True)
 class _RefinementJob:
     topic: str
@@ -280,7 +296,7 @@ class MotionIncidentService:
                     topic=topic,
                     message=message,
                     event_at=event_at,
-                    qualification=copy.deepcopy(qualification),
+                    qualification=_compact_refinement_qualification(qualification),
                     existing_event_id=outcome.event_id,
                     require_eligible_object=require_eligible_object,
                     require_motion_correlation=require_motion_correlation,
@@ -415,7 +431,7 @@ class MotionIncidentService:
                         job.topic,
                         job.message,
                         job.event_at,
-                        copy.deepcopy(job.qualification),
+                        job.qualification,
                         existing_event_id=job.existing_event_id,
                         require_eligible_object=job.require_eligible_object,
                         require_motion_correlation=job.require_motion_correlation,
