@@ -2160,7 +2160,7 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, onRequestFullResolution, onImageSize, children }) {
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
   const boxCoordinateSize = incidentDetectionFrameSize(event);
@@ -2218,8 +2218,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     setImageSize(coordinateSize);
   }, [coordinateSize?.height, coordinateSize?.width, imageReady]);
 
-  function onImageLoad(loadEvent, imageKey = progressiveImageKey) {
-    const image = loadEvent.currentTarget;
+  function recordImageLoad(image, imageKey = progressiveImageKey) {
     if (image.naturalWidth && image.naturalHeight) {
       const size = { width: image.naturalWidth, height: image.naturalHeight };
       setImageSize(size);
@@ -2228,8 +2227,21 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     }
   }
 
-  function markProgressiveReady(stage, loadEvent) {
-    onImageLoad(loadEvent, progressiveImageKey);
+  function onImageLoad(loadEvent, imageKey = progressiveImageKey) {
+    recordImageLoad(loadEvent.currentTarget, imageKey);
+  }
+
+  async function markProgressiveReady(stage, loadEvent) {
+    const image = loadEvent.currentTarget;
+    if (stage === "full" && typeof image.decode === "function") {
+      try {
+        await image.decode();
+      } catch {
+        // A completed load is still usable when a browser rejects decode().
+      }
+    }
+    if (!image.isConnected) return;
+    recordImageLoad(image, progressiveImageKey);
     setProgressiveState((current) => ({
       ...(current.key === progressiveImageKey ? current : { key: progressiveImageKey, base: false, intermediate: false, full: false }),
       key: progressiveImageKey,
@@ -2298,15 +2310,17 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
 
   const activeLayerStyle = objectFocused && focusStyle ? focusStyle : layerStyle;
   const aspect = imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
+  const prefersHighQualityRaster = highQualityZoom || objectFocused;
 
   return (
-    <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
+    <div ref={frameRef} className={`snapshot-frame ${objectFocused ? "object-focused" : ""} ${prefersHighQualityRaster ? "high-quality-zoom" : ""} ${className}`} style={aspect ? { "--snapshot-aspect": aspect } : undefined}>
       <div className="snapshot-layer" style={activeLayerStyle || undefined}>
         {event?.snapshot_path && eventSnapshotUrl(event) ? (
           progressive ? (
-            <div className="snapshot-progressive-stack">
+            <div className={`snapshot-progressive-stack ${progressiveReady.full ? "full-resolution-ready" : ""}`}>
               <img
                 key={`${progressiveImageKey}-base`}
+                className="snapshot-progressive-base"
                 src={eventThumbnailUrl(event)}
                 alt={alt}
                 decoding="async"
@@ -2315,7 +2329,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
               {progressiveReady.base ? (
                 <img
                   key={`${progressiveImageKey}-intermediate`}
-                  className={`snapshot-progressive-image ${progressiveReady.intermediate ? "ready" : ""}`}
+                  className={`snapshot-progressive-image snapshot-intermediate-image ${progressiveReady.intermediate ? "ready" : ""}`}
                   src={eventThumbnailUrl(event, progressiveWidth, progressiveQuality)}
                   alt=""
                   aria-hidden="true"
@@ -2326,7 +2340,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
               {shouldLoadFullResolution && progressiveReady.intermediate ? (
                 <img
                   key={`${progressiveImageKey}-full`}
-                  className={`snapshot-progressive-image ${progressiveReady.full ? "ready" : ""}`}
+                  className={`snapshot-progressive-image snapshot-full-resolution-image ${progressiveReady.full ? "ready" : ""}`}
                   src={eventSnapshotUrl(event)}
                   alt=""
                   aria-hidden="true"
@@ -2335,7 +2349,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
                 />
               ) : null}
             </div>
-          ) : <img src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, progressiveImageKey)} />
+          ) : <img className={thumbnail ? "snapshot-thumbnail-image" : "snapshot-original-image"} src={thumbnail ? eventThumbnailUrl(event) : eventSnapshotUrl(event)} alt={alt} loading={thumbnail ? "lazy" : undefined} decoding="async" onLoad={(loadEvent) => onImageLoad(loadEvent, progressiveImageKey)} />
         ) : <div className="empty-thumb"><Camera size={iconSize} /></div>}
         {imageReady && showAnnotations && (!showTracking || !renderedTracks.length) && renderedBoxes.length ? (
           <div className="object-box-layer" aria-hidden="true">
@@ -2883,6 +2897,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
             event={preview}
             alt="incident snapshot"
             layerStyle={desktopWorkspace && expanded ? { transform: `translate3d(${snapshotZoom.x}px, ${snapshotZoom.y}px, 0) scale(${snapshotZoom.scale})` } : null}
+            highQualityZoom={desktopWorkspace && expanded && snapshotZoom.scale > 1}
             showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
             showTracking={false}
             incidentEligibleOnly={!expanded}
@@ -3785,6 +3800,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             allowObjectFocus={zoom.scale === 1 && !videoActive}
             progressive
             fullResolution={fullSnapshotRequested}
+            highQualityZoom={zoom.scale > 1}
             onRequestFullResolution={() => setFullSnapshotRequested(true)}
             showAnnotations
             showTracking={trackingVisible && !manualDetection}

@@ -2549,6 +2549,12 @@ button.status-pill.hud-toggle:disabled {
   will-change: transform;
 }
 
+.snapshot-frame.high-quality-zoom .snapshot-layer {
+  /* Repaint from the decoded original instead of indefinitely magnifying the
+     compositor texture prepared for the unzoomed view. */
+  will-change: auto;
+}
+
 .snapshot-layer img,
 .snapshot-layer .empty-thumb {
   display: block;
@@ -2564,6 +2570,15 @@ button.status-pill.hud-toggle:disabled {
   inset: 0;
 }
 
+.snapshot-progressive-stack > img {
+  position: absolute;
+  inset: 0;
+}
+
+.snapshot-progressive-base {
+  z-index: 0;
+}
+
 .snapshot-progressive-image {
   position: absolute;
   inset: 0;
@@ -2571,8 +2586,20 @@ button.status-pill.hud-toggle:disabled {
   transition: opacity 100ms ease-out;
 }
 
+.snapshot-intermediate-image {
+  z-index: 1;
+}
+
+.snapshot-full-resolution-image {
+  z-index: 2;
+}
+
 .snapshot-progressive-image.ready {
   opacity: 1;
+}
+
+.snapshot-progressive-stack.full-resolution-ready > :not(.snapshot-full-resolution-image) {
+  visibility: hidden;
 }
 
 .object-box-layer {
