@@ -41,12 +41,23 @@ def _resolve_graph(
     camera_stages: list[MotionStageSelection] | None,
     defaults: list[MotionStageConfig],
 ) -> tuple[tuple[MotionStageConfig, ...], str]:
+    def migrate_legacy(
+        stages: list[MotionStageSelection],
+        origin: str,
+    ) -> tuple[tuple[MotionStageConfig, ...], str]:
+        if (
+            len(stages) == 1
+            and stages[0].implementation in {"legacy_qualifier", "legacy_motion_scorer"}
+        ):
+            return tuple(defaults), f"{origin}_legacy_migrated"
+        return _stage_configs(stages), origin
+
     if camera_stages is not None:
         if not camera_stages:
             raise ValueError(f"camera motion {graph_name} graph cannot be empty")
-        return _stage_configs(camera_stages), "camera"
+        return migrate_legacy(camera_stages, "camera")
     if global_stages:
-        return _stage_configs(global_stages), "global"
+        return migrate_legacy(global_stages, "global")
     return tuple(defaults), "default"
 
 

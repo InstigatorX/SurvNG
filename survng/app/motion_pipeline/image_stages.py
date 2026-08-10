@@ -9,12 +9,11 @@ from ..motion import (
     filter_motion_blobs,
     morphology_motion_masks,
     preprocess_motion_frames,
-    score_motion_masks,
     score_motion_track,
     threshold_motion_differences,
     track_dominant_motion,
 )
-from .context import MotionContext, MotionEventPhase, MotionScoring, TriggerDecision
+from .context import MotionContext, MotionScoring
 from .registry import (
     MotionStageDependencies,
     MotionStageOption,
@@ -195,44 +194,6 @@ class MotionScoringStage:
         return context
 
 
-class LegacyMotionScoringStage:
-    """Compatibility stage retaining combined blob, score, state, and trigger policy."""
-
-    def __init__(self, stage_id: str) -> None:
-        self._stage_id = stage_id
-
-    @property
-    def stage_id(self) -> str:
-        return self._stage_id
-
-    def process(self, context: MotionContext) -> MotionContext:
-        sensitivity = str(context.configuration.get("sensitivity") or "balanced")
-        result = score_motion_masks(
-            list(context.processed_frame_history),
-            list(context.motion_mask_history),
-            sensitivity,
-        )
-        context.scoring = MotionScoring(
-            accepted=result.accepted,
-            score=result.score,
-            threshold=result.threshold,
-            reason=result.reason,
-            frame_count=result.frame_count,
-            features=dict(result.features),
-        )
-        context.event_state.phase = (
-            MotionEventPhase.ACTIVE if result.accepted else MotionEventPhase.REJECTED
-        )
-        context.event_state.updated_at = context.captured_at
-        context.decision = TriggerDecision(
-            run_object_detection=result.accepted,
-            reason=result.reason,
-            score=result.score,
-            evidence_sources=("frame_difference",),
-        )
-        return context
-
-
 def _build_preprocessor(
     stage_id: str,
     options: Mapping[str, Any],
@@ -271,15 +232,6 @@ def _build_morphology(
         kernel_size=int(options.get("kernel_size", 3)),
         close_iterations=int(options.get("close_iterations", 2)),
     )
-
-
-def _build_scorer(
-    stage_id: str,
-    options: Mapping[str, Any],
-    dependencies: MotionStageDependencies,
-) -> LegacyMotionScoringStage:
-    del options, dependencies
-    return LegacyMotionScoringStage(stage_id)
 
 
 def _build_blob_extractor(
@@ -377,18 +329,6 @@ def register_image_motion_stages(registry: MotionStageRegistry) -> None:
                 MotionStageOption("kernel_size", "Cleanup size", "integer", 3, minimum=1, maximum=15),
                 MotionStageOption("close_iterations", "Join passes", "integer", 2, minimum=0, maximum=10),
             ),
-        )
-    )
-    registry.register(
-        MotionStageRegistration(
-            implementation="legacy_motion_scorer",
-            builder=_build_scorer,
-            requires=frozenset({"processed_frame_history", "motion_mask_history"}),
-            provides=frozenset({"scoring", "event_state", "decision"}),
-            graph="qualification",
-            category="compatibility",
-            display_name="Classic combined scorer",
-            description="Preserves the earlier combined mask, score, and trigger behavior.",
         )
     )
     registry.register(

@@ -77,13 +77,11 @@ from .image_stages import (
     DominantCentroidTrackingStage,
     FixedThresholdStage,
     FrameDifferenceStage,
-    LegacyMotionScoringStage,
     MotionFramePreprocessorStage,
     MotionScoringStage,
     OpenCloseMorphologyStage,
     register_image_motion_stages,
 )
-from .legacy import LegacyQualificationStage, register_legacy_motion_stage
 from .pipeline import LoggingMotionPipelineObserver, MotionPipeline
 from .object_detection import RecordedMotionObjectDetector, RecordedMotionObjectDetectorFactory
 from .registry import (
@@ -97,23 +95,11 @@ from .runtime import MotionRuntimeState
 
 def build_builtin_motion_registry() -> MotionStageRegistry:
     registry = MotionStageRegistry()
-    register_legacy_motion_stage(registry)
     register_image_motion_stages(registry)
     register_adaptive_motion_stages(registry)
     register_evidence_stages(registry)
     register_decision_stages(registry)
     return registry
-
-
-def build_legacy_motion_pipeline(camera_id: str) -> MotionPipeline:
-    factory = MotionPipelineFactory(
-        build_builtin_motion_registry(),
-        observer=LoggingMotionPipelineObserver(),
-    )
-    return factory.create(
-        camera_id,
-        [MotionStageConfig(stage_id="qualification", implementation="legacy_qualifier")],
-    )
 
 
 def build_default_motion_pipeline(camera_id: str) -> MotionPipeline:
@@ -129,8 +115,6 @@ __all__ = [
     "AdaptiveEmaBackgroundStage",
     "AdaptiveMotionScoringStage",
     "AdaptiveStatisticalThresholdStage",
-    "LegacyQualificationStage",
-    "LegacyMotionScoringStage",
     "BlobExtractionStage",
     "BlobFilteringStage",
     "BufferedMotionFusionStage",
@@ -188,14 +172,12 @@ __all__ = [
     "build_builtin_motion_registry",
     "builtin_motion_pipeline_presets",
     "build_default_motion_pipeline",
-    "build_legacy_motion_pipeline",
     "guided_fusion_settings",
     "identify_analysis_preset",
     "default_motion_stage_configs",
     "motion_fusion_stage_configs",
     "motion_pipeline_catalog",
     "motion_observation_stage_configs",
-    "register_legacy_motion_stage",
     "register_image_motion_stages",
     "register_adaptive_motion_stages",
     "register_evidence_stages",

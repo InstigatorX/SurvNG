@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator
 
 from .motion import MotionQualificationResult
 
@@ -81,105 +81,6 @@ class MotionTrigger:
         ):
             raise TypeError("motion trigger audit snapshot path must be a string")
 
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> MotionTrigger:
-        known = {
-            "topic", "message", "event_at", "received_at", "prequalified",
-            "_motion_decision_id", "_event_retry_count", "_retry_batch",
-            "_retry_qualification_result", "_retry_diagnostics",
-            "_motion_audit_snapshot_path",
-        }
-        unknown = set(value) - known
-        if unknown:
-            raise ValueError(
-                f"unsupported motion trigger fields: {', '.join(sorted(unknown))}"
-            )
-        missing = {"topic", "event_at", "received_at"} - set(value)
-        if missing:
-            raise ValueError(
-                f"missing motion trigger fields: {', '.join(sorted(missing))}"
-            )
-        raw_retry_batch = value.get("_retry_batch")
-        retry_batch = None
-        if raw_retry_batch is not None:
-            if not isinstance(raw_retry_batch, (list, tuple)):
-                raise TypeError("motion trigger retry batch must be a sequence")
-            retry_batch = tuple(coerce_motion_trigger(item) for item in raw_retry_batch)
-        prequalified = value.get("prequalified")
-        if prequalified is not None and not isinstance(
-            prequalified, MotionQualificationResult
-        ):
-            raise TypeError("motion trigger prequalified result has an invalid type")
-        retry_result = value.get("_retry_qualification_result")
-        if retry_result is not None and not isinstance(
-            retry_result, MotionQualificationResult
-        ):
-            raise TypeError("motion trigger retry result has an invalid type")
-        retry_diagnostics = value.get("_retry_diagnostics")
-        if retry_diagnostics is not None and not isinstance(
-            retry_diagnostics, Mapping
-        ):
-            raise TypeError("motion trigger retry diagnostics must be a mapping")
-        decision_id = value.get("_motion_decision_id", "")
-        if not isinstance(decision_id, str):
-            raise TypeError("motion trigger decision ID must be a string")
-        retry_count = value.get("_event_retry_count", 0)
-        if isinstance(retry_count, bool) or not isinstance(retry_count, int):
-            raise TypeError("motion trigger retry count must be an integer")
-        audit_snapshot_path = value.get("_motion_audit_snapshot_path")
-        if audit_snapshot_path is not None and not isinstance(
-            audit_snapshot_path, str
-        ):
-            raise TypeError("motion trigger audit snapshot path must be a string")
-        return cls(
-            topic=value["topic"],
-            message=value.get("message", ""),
-            event_at=value["event_at"],
-            received_at=value["received_at"],
-            prequalified=prequalified,
-            decision_id=decision_id,
-            retry_count=retry_count,
-            retry_batch=retry_batch,
-            retry_qualification_result=retry_result,
-            retry_diagnostics=(
-                dict(retry_diagnostics)
-                if retry_diagnostics is not None
-                else None
-            ),
-            audit_snapshot_path=audit_snapshot_path,
-        )
-
-    # Temporary read-only compatibility for callers migrating from trigger
-    # dictionaries. New production code uses the typed attributes above.
-    def __getitem__(self, key: str) -> Any:
-        legacy = {
-            "topic": self.topic,
-            "message": self.message,
-            "event_at": self.event_at,
-            "received_at": self.received_at,
-            "prequalified": self.prequalified,
-            "_motion_decision_id": self.decision_id,
-            "_event_retry_count": self.retry_count,
-            "_retry_batch": self.retry_batch,
-            "_retry_qualification_result": self.retry_qualification_result,
-            "_retry_diagnostics": self.retry_diagnostics,
-            "_motion_audit_snapshot_path": self.audit_snapshot_path,
-        }
-        if key not in legacy:
-            raise KeyError(key)
-        return legacy[key]
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
-def coerce_motion_trigger(value: MotionTrigger | Mapping[str, Any]) -> MotionTrigger:
-    return value if isinstance(value, MotionTrigger) else MotionTrigger.from_mapping(value)
-
-
 @dataclass(frozen=True, slots=True)
 class MotionTriggerBatch:
     """An immutable, ordered motion burst delivered as one decision unit."""
@@ -195,11 +96,11 @@ class MotionTriggerBatch:
     @classmethod
     def coerce(
         cls,
-        values: MotionTriggerBatch | Iterable[MotionTrigger | Mapping[str, Any]],
+        values: MotionTriggerBatch | Iterable[MotionTrigger],
     ) -> MotionTriggerBatch:
         if isinstance(values, cls):
             return values
-        return cls(tuple(coerce_motion_trigger(item) for item in values))
+        return cls(tuple(values))
 
     def __iter__(self) -> Iterator[MotionTrigger]:
         return iter(self.triggers)
@@ -253,7 +154,7 @@ class MotionEventCoordinator:
     """
 
     def __init__(self, *, queue_size: int, retry_limit: int) -> None:
-        self.queue: queue.Queue[MotionTrigger | Mapping[str, Any] | None] = queue.Queue(
+        self.queue: queue.Queue[MotionTrigger | None] = queue.Queue(
             maxsize=queue_size
         )
         self.retry_batches: deque[MotionTrigger] = deque()
@@ -272,13 +173,14 @@ class MotionEventCoordinator:
 
     def enqueue(
         self,
-        trigger: MotionTrigger | Mapping[str, Any],
+        trigger: MotionTrigger,
         *,
         evict_oldest: bool = True,
         on_trigger: StatCallback | None = None,
         on_drop: StatCallback | None = None,
     ) -> bool:
-        trigger = coerce_motion_trigger(trigger)
+        if not isinstance(trigger, MotionTrigger):
+            raise TypeError("motion coordinator accepts only MotionTrigger values")
         if on_trigger is not None:
             on_trigger("triggers")
         try:
@@ -330,9 +232,9 @@ class MotionEventCoordinator:
     def next_trigger(self, timeout: float) -> MotionTrigger | None:
         with self._lock:
             if self.retry_batches:
-                return coerce_motion_trigger(self.retry_batches.popleft())
+                return self.retry_batches.popleft()
         item = self.queue.get(timeout=timeout)
-        return None if item is None else coerce_motion_trigger(item)
+        return item
 
     def retry_queue_depth(self) -> int:
         with self._lock:
@@ -340,12 +242,11 @@ class MotionEventCoordinator:
 
     def coalesce(
         self,
-        first: MotionTrigger | Mapping[str, Any],
+        first: MotionTrigger,
         *,
         quiet_seconds: float,
         stop_event: threading.Event,
     ) -> MotionTriggerBatch | None:
-        first = coerce_motion_trigger(first)
         if first.retry_batch is not None:
             return MotionTriggerBatch(first.retry_batch)
         triggers = [first]
@@ -361,13 +262,13 @@ class MotionEventCoordinator:
                 break
             if item is None:
                 return None
-            triggers.append(coerce_motion_trigger(item))
+            triggers.append(item)
             quiet_deadline = min(hard_deadline, time.monotonic() + quiet_seconds)
         return MotionTriggerBatch(tuple(triggers))
 
     def schedule_retry(
         self,
-        triggers: MotionTriggerBatch | Iterable[MotionTrigger | Mapping[str, Any]],
+        triggers: MotionTriggerBatch | Iterable[MotionTrigger],
         *,
         stop_event: threading.Event,
         on_retry: StatCallback | None = None,
@@ -499,7 +400,7 @@ class MotionEventCoordinator:
 
     def complete_adaptive(
         self,
-        triggers: MotionTriggerBatch | Iterable[MotionTrigger | Mapping[str, Any]],
+        triggers: MotionTriggerBatch | Iterable[MotionTrigger],
         completed_at: float,
     ) -> None:
         batch = MotionTriggerBatch.coerce(triggers)

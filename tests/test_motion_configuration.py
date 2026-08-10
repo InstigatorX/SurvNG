@@ -26,10 +26,8 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             CameraMotionQualificationConfig(),
         )
         self.assertEqual(identify_analysis_preset(graphs.qualification), "adaptive")
-        self.assertEqual(
-            analysis_preset_selections("classic")[0].implementation,
-            "legacy_qualifier",
-        )
+        with self.assertRaisesRegex(ValueError, "unknown motion analysis preset"):
+            analysis_preset_selections("classic")
 
         updated = update_guided_fusion(graphs.fusion, "fusion_policy", "weighted")
         resolved = resolve_motion_pipeline_graphs(
@@ -91,7 +89,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(resolved_trigger_mode("camera_rescue"), "camera_rescue")
         self.assertTrue(graphs.fusion[0].options["include_primary"])
 
-    def test_global_graph_is_selected_and_camera_graph_takes_precedence(self) -> None:
+    def test_legacy_graphs_are_migrated_to_adaptive_defaults(self) -> None:
         global_config = MotionQualificationConfig.model_validate({
             "pipeline": {
                 "qualification": [{
@@ -118,11 +116,10 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             }),
         )
 
-        self.assertEqual(inherited.origins["qualification"], "global")
-        self.assertEqual(inherited.qualification[0].stage_id, "global_qualification")
-        self.assertEqual(overridden.origins["qualification"], "camera")
-        self.assertEqual(overridden.qualification[0].stage_id, "camera_qualification")
-        self.assertEqual(overridden.qualification[0].options["profile"], "camera")
+        self.assertEqual(inherited.origins["qualification"], "global_legacy_migrated")
+        self.assertEqual(inherited.qualification[1].implementation, "adaptive_ema_background")
+        self.assertEqual(overridden.origins["qualification"], "camera_legacy_migrated")
+        self.assertEqual(overridden.qualification[1].implementation, "adaptive_ema_background")
 
     def test_mog2_observation_runs_when_enforced_fusion_uses_it(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
@@ -411,11 +408,11 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             graphs.qualification,
         )
 
-        self.assertEqual(pipeline.status()["configuration"], [{
-            "stage_id": "qualification",
-            "implementation": "legacy_qualifier",
-            "options": {"diagnostic": True},
-        }])
+        self.assertEqual(
+            pipeline.status()["configuration"][1]["implementation"],
+            "adaptive_ema_background",
+        )
+        self.assertEqual(graphs.origins["qualification"], "global_legacy_migrated")
 
     def test_application_preflight_rejects_invalid_graph_before_runtime(self) -> None:
         config = AppConfig.model_validate({

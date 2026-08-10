@@ -41,6 +41,7 @@ from survng.app.motion_pipeline import (
     MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
+    analysis_preset_selections,
     resolve_motion_pipeline_graphs,
 )
 
@@ -911,8 +912,8 @@ class CameraWorkerTest(unittest.TestCase):
 
             self.assertGreaterEqual(analyze.call_count, 1)
             trigger = worker.motion_events.queue.get_nowait()
-            self.assertEqual(trigger["topic"], "adaptive/motion")
-            self.assertIs(trigger["prequalified"], accepted)
+            self.assertEqual(trigger.topic, "adaptive/motion")
+            self.assertIs(trigger.prequalified, accepted)
             worker._stop.set()
             worker.motion_analysis.request_stop()
             thread.join(timeout=1)
@@ -942,8 +943,8 @@ class CameraWorkerTest(unittest.TestCase):
 
             trigger = worker.motion_events.queue.get_nowait()
 
-        self.assertEqual(trigger["topic"], "adaptive/visual_backup")
-        self.assertTrue(trigger["prequalified"].features["visual_backup"])
+        self.assertEqual(trigger.topic, "adaptive/visual_backup")
+        self.assertTrue(trigger.prequalified.features["visual_backup"])
 
     def test_visual_backup_counts_rate_limited_promotion_without_audit(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1014,7 +1015,7 @@ class CameraWorkerTest(unittest.TestCase):
 
             trigger = worker.motion_events.queue.get_nowait()
 
-        self.assertEqual(trigger["topic"], "adaptive/visual_backup")
+        self.assertEqual(trigger.topic, "adaptive/visual_backup")
 
     def test_visual_backup_readiness_resets_until_post_warmup_scene_is_quiet(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1038,11 +1039,11 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_visual_trigger_modes_run_replaceable_non_adaptive_qualifiers_continuously(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        classic_pipeline = {
-            "qualification": [{
-                "stage_id": "qualification",
-                "implementation": "legacy_qualifier",
-            }],
+        modular_pipeline = {
+            "qualification": [
+                stage.model_dump(mode="json")
+                for stage in analysis_preset_selections("modular")
+            ],
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             rescue = make_worker(
@@ -1050,7 +1051,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 motion_config=MotionQualificationConfig.model_validate({
                     "mode": "camera_rescue",
-                    "pipeline": classic_pipeline,
+                    "pipeline": modular_pipeline,
                 }),
             )
             visual = make_worker(
@@ -1058,7 +1059,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 motion_config=MotionQualificationConfig.model_validate({
                     "mode": "adaptive",
-                    "pipeline": classic_pipeline,
+                    "pipeline": modular_pipeline,
                 }),
             )
             camera_only = make_worker(
@@ -1066,7 +1067,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 motion_config=MotionQualificationConfig.model_validate({
                     "mode": "camera",
-                    "pipeline": classic_pipeline,
+                    "pipeline": modular_pipeline,
                 }),
             )
 
@@ -1133,13 +1134,13 @@ class CameraWorkerTest(unittest.TestCase):
 
             trigger = worker.motion_events.queue.get_nowait()
 
-        self.assertEqual(trigger["topic"], "adaptive/visual_backup")
+        self.assertEqual(trigger.topic, "adaptive/visual_backup")
         self.assertEqual(
-            trigger["prequalified"].reason,
+            trigger.prequalified.reason,
             "illumination_verification_probe",
         )
         self.assertTrue(
-            trigger["prequalified"].features["illumination_verification_probe"]
+            trigger.prequalified.features["illumination_verification_probe"]
         )
         self.assertEqual(worker.motion_state._stats["illumination_verification_probes"], 1)
 
@@ -1177,13 +1178,13 @@ class CameraWorkerTest(unittest.TestCase):
             ):
                 thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
-                worker.motion_ingress.enqueue({
-                    "topic": "adaptive/visual_backup",
-                    "message": "backup",
-                    "event_at": datetime.fromtimestamp(observed_at, timezone.utc),
-                    "received_at": observed_at,
-                    "prequalified": prequalified,
-                })
+                worker.motion_ingress.enqueue(MotionTrigger(
+                    topic="adaptive/visual_backup",
+                    message="backup",
+                    event_at=datetime.fromtimestamp(observed_at, timezone.utc),
+                    received_at=observed_at,
+                    prequalified=prequalified,
+                ))
                 deadline = time.monotonic() + 2
                 while record_audit.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
@@ -1225,19 +1226,19 @@ class CameraWorkerTest(unittest.TestCase):
                 ) as process_event,
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                worker.motion_ingress.enqueue({
-                    "topic": "adaptive/visual_backup",
-                    "message": "backup",
-                    "event_at": event_at,
-                    "received_at": event_at.timestamp(),
-                    "prequalified": accepted,
-                })
-                worker.motion_ingress.enqueue({
-                    "topic": "onvif/motion",
-                    "message": "camera notice",
-                    "event_at": event_at,
-                    "received_at": event_at.timestamp(),
-                })
+                worker.motion_ingress.enqueue(MotionTrigger(
+                    topic="adaptive/visual_backup",
+                    message="backup",
+                    event_at=event_at,
+                    received_at=event_at.timestamp(),
+                    prequalified=accepted,
+                ))
+                worker.motion_ingress.enqueue(MotionTrigger(
+                    topic="onvif/motion",
+                    message="camera notice",
+                    event_at=event_at,
+                    received_at=event_at.timestamp(),
+                ))
                 thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 deadline = time.monotonic() + 2
@@ -1286,13 +1287,13 @@ class CameraWorkerTest(unittest.TestCase):
                 ),
                 patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
             ):
-                worker.motion_ingress.enqueue({
-                    "topic": "adaptive/visual_backup",
-                    "message": "backup",
-                    "event_at": event_at,
-                    "received_at": event_at.timestamp(),
-                    "prequalified": accepted,
-                })
+                worker.motion_ingress.enqueue(MotionTrigger(
+                    topic="adaptive/visual_backup",
+                    message="backup",
+                    event_at=event_at,
+                    received_at=event_at.timestamp(),
+                    prequalified=accepted,
+                ))
                 thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 deadline = time.monotonic() + 2
@@ -1349,7 +1350,7 @@ class CameraWorkerTest(unittest.TestCase):
 
             worker.handle_motion_event("manual/test", "manual GUI trigger")
 
-            self.assertEqual(worker.motion_events.queue.get_nowait()["topic"], "manual/test")
+            self.assertEqual(worker.motion_events.queue.get_nowait().topic, "manual/test")
 
     def test_continuous_analysis_never_blocks_camera_frame_delivery(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1415,12 +1416,12 @@ class CameraWorkerTest(unittest.TestCase):
             worker._stop.clear()
             now = datetime.now(timezone.utc)
             for index in range(worker.motion_events.queue.maxsize):
-                worker.motion_events.queue.put_nowait({
-                    "topic": "onvif/motion",
-                    "message": str(index),
-                    "event_at": now,
-                    "received_at": now.timestamp(),
-                })
+                worker.motion_events.queue.put_nowait(MotionTrigger(
+                    topic="onvif/motion",
+                    message=str(index),
+                    event_at=now,
+                    received_at=now.timestamp(),
+                ))
             with worker._frame_lock:
                 worker.motion_analysis.frames.extend([
                     (1.0, np.zeros((90, 160), dtype=np.uint8)),
@@ -1663,12 +1664,12 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
             event_at = datetime.now(timezone.utc)
-            worker.motion_events.queue.put_nowait({
-                "topic": "onvif/motion",
-                "message": "motion",
-                "event_at": event_at,
-                "received_at": event_at.timestamp(),
-            })
+            worker.motion_events.queue.put_nowait(MotionTrigger(
+                topic="onvif/motion",
+                message="motion",
+                event_at=event_at,
+                received_at=event_at.timestamp(),
+            ))
             worker._stop.clear()
 
             def stop_during_validation(*_args):
@@ -1959,30 +1960,30 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir))
             worker._stop.clear()
             now = datetime.now(timezone.utc)
-            worker.motion_decisions.retry_batch([{
-                "topic": "onvif/motion",
-                "message": "retry me",
-                "event_at": now,
-                "received_at": now.timestamp(),
-            }], worker._stop)
+            worker.motion_decisions.retry_batch([MotionTrigger(
+                topic="onvif/motion",
+                message="retry me",
+                event_at=now,
+                received_at=now.timestamp(),
+            )], worker._stop)
             for index in range(worker.motion_events.queue.maxsize):
-                worker.motion_events.queue.put_nowait({
-                    "topic": "onvif/motion",
-                    "message": str(index),
-                    "event_at": now,
-                    "received_at": now.timestamp(),
-                })
+                worker.motion_events.queue.put_nowait(MotionTrigger(
+                    topic="onvif/motion",
+                    message=str(index),
+                    event_at=now,
+                    received_at=now.timestamp(),
+                ))
 
-            worker.motion_ingress.enqueue({
-                "topic": "onvif/motion",
-                "message": "new priority event",
-                "event_at": now,
-                "received_at": now.timestamp(),
-            })
+            worker.motion_ingress.enqueue(MotionTrigger(
+                topic="onvif/motion",
+                message="new priority event",
+                event_at=now,
+                received_at=now.timestamp(),
+            ))
 
             self.assertEqual(len(worker.motion_events.retry_batches), 1)
             self.assertEqual(
-                worker.motion_events.retry_batches[0]["_retry_batch"][0]["message"],
+                worker.motion_events.retry_batches[0].retry_batch[0].message,
                 "retry me",
             )
             self.assertEqual(worker.motion_state._stats["event_retry_drops"], 0)
@@ -2030,12 +2031,12 @@ class CameraWorkerTest(unittest.TestCase):
                 )
                 thread.start()
                 now = datetime.now(timezone.utc)
-                worker.motion_ingress.enqueue({
-                    "topic": "adaptive/motion",
-                    "message": "adaptive",
-                    "event_at": now,
-                    "received_at": now.timestamp(),
-                })
+                worker.motion_ingress.enqueue(MotionTrigger(
+                    topic="adaptive/motion",
+                    message="adaptive",
+                    event_at=now,
+                    received_at=now.timestamp(),
+                ))
                 deadline = time.monotonic() + 3
                 while (
                     worker.motion_state._stats["event_retry_drops"] == 0
@@ -2220,13 +2221,13 @@ class CameraWorkerTest(unittest.TestCase):
                 thread = worker.motion_decisions._thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
                 thread.start()
                 now = datetime.now(timezone.utc)
-                worker.motion_ingress.enqueue({
-                    "topic": "adaptive/motion",
-                    "message": "adaptive",
-                    "event_at": now,
-                    "received_at": now.timestamp(),
-                    "prequalified": rejected,
-                })
+                worker.motion_ingress.enqueue(MotionTrigger(
+                    topic="adaptive/motion",
+                    message="adaptive",
+                    event_at=now,
+                    received_at=now.timestamp(),
+                    prequalified=rejected,
+                ))
                 deadline = time.monotonic() + 1
                 while worker.motion_state._stats["event_worker_errors"] == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)

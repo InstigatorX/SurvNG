@@ -71,21 +71,6 @@ def builtin_motion_pipeline_presets() -> tuple[MotionPipelinePreset, ...]:
             graph="qualification",
             stages=tuple(default_motion_stage_configs()),
         ),
-        MotionPipelinePreset(
-            preset_id="classic",
-            label="Classic compatibility",
-            description=(
-                "Original all-in-one SurvNG analysis for troubleshooting or behavior "
-                "comparison."
-            ),
-            graph="qualification",
-            stages=(
-                MotionStageConfig(
-                    stage_id="qualification",
-                    implementation="legacy_qualifier",
-                ),
-            ),
-        ),
     )
 
 

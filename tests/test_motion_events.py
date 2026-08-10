@@ -31,8 +31,8 @@ def test_full_queue_evicts_oldest_trigger_and_reports_drop() -> None:
     assert coordinator.enqueue(_trigger(2), on_trigger=stats.append, on_drop=stats.append)
     assert coordinator.enqueue(_trigger(3), on_trigger=stats.append, on_drop=stats.append)
 
-    assert coordinator.queue.get_nowait()["message"] == "2"
-    assert coordinator.queue.get_nowait()["message"] == "3"
+    assert coordinator.queue.get_nowait().message == "2"
+    assert coordinator.queue.get_nowait().message == "3"
     assert stats == ["triggers", "triggers", "triggers", "dropped_triggers"]
     runtime = coordinator.runtime_status()
     assert runtime["enqueued"] == 3
@@ -92,8 +92,8 @@ def test_retry_batch_is_prioritized_and_bounded() -> None:
     ) == RetryDisposition.SCHEDULED
     wrapper = coordinator.next_trigger(timeout=0.01)
     assert wrapper is not None
-    retry_batch = wrapper["_retry_batch"]
-    assert retry_batch[0]["_event_retry_count"] == 1
+    retry_batch = wrapper.retry_batch
+    assert retry_batch[0].retry_count == 1
     assert coordinator.schedule_retry(
         retry_batch,
         stop_event=stop,
@@ -202,7 +202,7 @@ def test_retry_queue_depth_reports_coordinator_owned_state() -> None:
     assert coordinator.retry_queue_depth() == 0
 
 
-def test_legacy_mapping_adapter_rejects_unknown_payload_fields() -> None:
+def test_coordinator_rejects_untyped_payloads() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     trigger = {
         "topic": "onvif/motion",
@@ -212,35 +212,7 @@ def test_legacy_mapping_adapter_rejects_unknown_payload_fields() -> None:
         "typo_decison_id": "silently-lost-before",
     }
 
-    with pytest.raises(ValueError, match="typo_decison_id"):
-        coordinator.enqueue(trigger)
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "error"),
-    [
-        ("topic", "", "topic"),
-        ("event_at", "not-a-date", "event_at"),
-        ("received_at", float("nan"), "received_at"),
-        ("prequalified", {"accepted": True}, "prequalified"),
-        ("_event_retry_count", "1", "retry count"),
-    ],
-)
-def test_legacy_mapping_adapter_rejects_malformed_typed_fields(
-    field: str,
-    value: object,
-    error: str,
-) -> None:
-    trigger = {
-        "topic": "onvif/motion",
-        "message": "motion",
-        "event_at": datetime.now(timezone.utc),
-        "received_at": 1.0,
-        field: value,
-    }
-
-    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    with pytest.raises((TypeError, ValueError), match=error):
+    with pytest.raises(TypeError, match="MotionTrigger"):
         coordinator.enqueue(trigger)
 
 
