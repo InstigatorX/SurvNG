@@ -225,6 +225,24 @@ def _temporal_association_score(
     return 1.0 - distance_ratio / TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO
 
 
+_TEMPORAL_LABEL_FAMILIES = (
+    frozenset({
+        "car", "truck", "bus", "van", "motorcycle", "bicycle",
+        "robot_lawnmower",
+    }),
+    frozenset({"person", "child"}),
+    frozenset({"dog", "cat", "horse", "deer", "bird", "animal"}),
+)
+
+
+def _temporally_compatible_labels(previous: dict[str, Any], detected: dict[str, Any]) -> bool:
+    left = str(previous.get("label") or "").strip().lower()
+    right = str(detected.get("label") or "").strip().lower()
+    if not left or not right or left == right:
+        return True
+    return any(left in family and right in family for family in _TEMPORAL_LABEL_FAMILIES)
+
+
 def _eligible_detection(detected: dict[str, Any]) -> bool:
     return bool(detected.get("label") and detected.get("incident_eligible") is not False)
 
@@ -238,7 +256,10 @@ def _candidate_detection(detected: dict[str, Any]) -> bool:
     """
     return bool(
         detected.get("label")
-        and detected.get("confidence_eligible") is not False
+        and detected.get(
+            "temporal_candidate_eligible",
+            detected.get("confidence_eligible"),
+        ) is not False
         and _box(detected) is not None
     )
 
@@ -325,24 +346,32 @@ def _temporal_consensus(
     for sample_index, sample in enumerate(samples):
         available = set(range(len(evidence)))
         candidates = [item for item in sample.objects if _candidate_detection(item)]
-        for object_index, detected in sorted(
-            enumerate(candidates),
-            key=lambda item: _confidence(item[1]),
-            reverse=True,
-        ):
-            matches = [
-                (score, evidence_index)
+        pair_scores = sorted(
+            (
+                (score, evidence_index, object_index)
                 for evidence_index in available
-                if (score := _temporal_association_score(evidence[evidence_index].latest, detected)) is not None
-            ]
-            if matches:
-                _, evidence_index = max(matches)
-                track = evidence[evidence_index]
-                available.remove(evidence_index)
-            else:
+                for object_index, detected in enumerate(candidates)
+                if _temporally_compatible_labels(evidence[evidence_index].latest, detected)
+                and (score := _temporal_association_score(
+                    evidence[evidence_index].latest,
+                    detected,
+                )) is not None
+            ),
+            reverse=True,
+        )
+        matched_objects: dict[int, int] = {}
+        for _score, evidence_index, object_index in pair_scores:
+            if evidence_index not in available or object_index in matched_objects:
+                continue
+            matched_objects[object_index] = evidence_index
+            available.remove(evidence_index)
+        for object_index, detected in enumerate(candidates):
+            evidence_index = matched_objects.get(object_index)
+            if evidence_index is None:
                 track = _TemporalDetectionEvidence()
                 evidence.append(track)
-                evidence_index = len(evidence) - 1
+            else:
+                track = evidence[evidence_index]
             track.add(sample_index, detected)
             assignments[(sample_index, id(detected))] = track
 
@@ -355,12 +384,26 @@ def _temporal_consensus(
         id(track): normalized_class_confirmations.get(track.winning_label.lower(), default_required)
         for track in evidence
     }
-    confirmed_ids = {
+    normally_confirmed_ids = {
         id(track)
         for track in evidence
         if len(track.winning_observations) >= required_by_track[id(track)]
         and any(_eligible_detection(item) for item in track.winning_observations)
     }
+    low_confidence_confirmed_ids = {
+        id(track)
+        for track in evidence
+        if len(track.winning_observations) >= max(3, required_by_track[id(track)])
+        and track.aggregate_confidence >= max(
+            float(item.get("temporal_candidate_threshold") or 0.0)
+            for item in track.winning_observations
+        )
+        and any(
+            item.get("spatial_zone_eligible") is True
+            for item in track.winning_observations
+        )
+    }
+    confirmed_ids = normally_confirmed_ids | low_confidence_confirmed_ids
     if confirmed_ids:
         confirmed_ids.update(
             id(track)
@@ -461,12 +504,20 @@ def _temporal_consensus(
         label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
         confirmed = confirmed and label_confirmed_here
         incident_confirmed = confirmed and not bool(detected.get("auxiliary_detection"))
+        low_confidence_confirmed = id(track) in low_confidence_confirmed_ids
         zone_eligible = any(
             _eligible_detection(item) for item in track.winning_observations
+        ) or bool(
+            low_confidence_confirmed
+            and any(
+                item.get("spatial_zone_eligible") is True
+                for item in track.winning_observations
+            )
         )
         edge_clearance, subject_area = _normalized_box_metrics(detected, selected.frame)
         enriched = {
             **detected,
+            "label": track.winning_label,
             "incident_eligible": incident_confirmed,
             "zone_eligible": zone_eligible,
             "temporal_eligible": incident_confirmed,
@@ -477,6 +528,7 @@ def _temporal_consensus(
                 ["temporal_unconfirmed"]
             ),
             "temporal_consensus": confirmed,
+            "temporal_low_confidence_confirmation": low_confidence_confirmed,
             "temporal_sample_offset_seconds": selected.offset,
             "temporal_observations": len(track.winning_observations),
             "temporal_track_observations": len(track.observations),
@@ -1006,8 +1058,19 @@ class RecordedMotionObjectDetector:
             configured_threshold,
             class_thresholds,
         )
+        candidate_threshold = min(
+            threshold,
+            float(getattr(
+                self.detector.config,
+                "event_candidate_confidence_threshold",
+                threshold,
+            )),
+        )
         detector_started = time.monotonic()
-        objects = self.detector.detect(frame, confidence_threshold=threshold)
+        objects = self.detector.detect(
+            frame,
+            confidence_threshold=candidate_threshold,
+        )
         detector_ms = (time.monotonic() - detector_started) * 1000.0
         if timing is not None:
             timing["detector_request_ms"] += detector_ms
@@ -1046,6 +1109,12 @@ class RecordedMotionObjectDetector:
             class_thresholds,
         )
         for detected in objects:
+            if isinstance(detected, dict):
+                detected["temporal_candidate_threshold"] = candidate_threshold
+                detected["temporal_candidate_eligible"] = bool(
+                    detected.get("label")
+                    and _confidence(detected) >= candidate_threshold
+                )
             if isinstance(detected, dict) and str(
                 detected.get("label") or ""
             ).strip().lower() == "face":

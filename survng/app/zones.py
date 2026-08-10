@@ -102,6 +102,7 @@ def apply_detection_zones(
             detected.pop("zone_point", None)
             detected["incident_eligible"] = False
             detected["zone_eligible"] = False
+            detected["spatial_zone_eligible"] = bool(detected.get("label"))
             label = str(detected.get("label") or "")
             if class_confidence_thresholds is None:
                 detected["incident_eligible"] = bool(label)
@@ -173,6 +174,18 @@ def apply_detection_zones(
             for zone in zones
             if zone.behavior != "none" and _class_applies(zone, label)
         ]
+        spatial_matches = [zone for zone in relevant if _point_in_polygon(x, y, zone)]
+        spatial_ignored = any(zone.behavior == "ignore" for zone in spatial_matches)
+        spatial_admitted = any(zone.behavior == "incident" for zone in spatial_matches)
+        zone_required = (
+            require_incident_zone
+            if camera.require_incident_zone is None
+            else camera.require_incident_zone
+        )
+        detected["spatial_zone_eligible"] = bool(
+            not spatial_ignored
+            and (spatial_admitted or not (zone_required and has_incident_zones))
+        )
         matches = []
         for zone in relevant:
             threshold = zone.confidence_threshold if zone.confidence_threshold is not None else label_threshold
@@ -189,11 +202,6 @@ def apply_detection_zones(
             for zone in matches
         ]
         detected["zone_point"] = {"x": round(x, 5), "y": round(y, 5)}
-        zone_required = (
-            require_incident_zone
-            if camera.require_incident_zone is None
-            else camera.require_incident_zone
-        )
         if zone_required and has_incident_zones:
             eligible = admitted
         else:

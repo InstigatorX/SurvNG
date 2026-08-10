@@ -458,6 +458,7 @@ class DetectorConfig(BaseModel):
     face_min_size: int = Field(default=48, ge=16, le=1024)
     face_max_references: int = Field(default=20, ge=1, le=200)
     confidence_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
+    event_candidate_confidence_threshold: float = Field(default=0.25, ge=0.01, le=0.95)
     nms_threshold: float = Field(default=0.45, ge=0.01, le=0.99)
     event_confirmation_frames: int = Field(default=2, ge=1, le=5)
     event_class_confirmation_frames: dict[str, int] = Field(default_factory=dict)

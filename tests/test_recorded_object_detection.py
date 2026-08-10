@@ -45,6 +45,36 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
+    def test_three_consistent_low_confidence_candidates_can_qualify(self) -> None:
+        observations = []
+        for offset in (-0.5, 0.0, 0.5):
+            candidate = detected("person", 0.55, (2, 2, 20, 19))
+            candidate.update({
+                "incident_eligible": False,
+                "confidence_eligible": False,
+                "temporal_candidate_eligible": True,
+                "temporal_candidate_threshold": 0.25,
+                "spatial_zone_eligible": True,
+            })
+            observations.append(sample(offset, [candidate]))
+
+        _selected, objects = _temporal_consensus(observations, minimum_confirmations=2)
+
+        self.assertTrue(objects[0]["incident_eligible"])
+        self.assertTrue(objects[0]["temporal_low_confidence_confirmation"])
+        self.assertEqual(objects[0]["temporal_observations"], 3)
+
+    def test_incompatible_labels_do_not_share_temporal_identity(self) -> None:
+        _selected, objects = _temporal_consensus(
+            [
+                sample(-0.5, [detected("person", 0.9, (2, 2, 20, 19))]),
+                sample(0.0, [detected("face", 0.9, (2, 2, 20, 19))]),
+            ],
+            minimum_confirmations=2,
+        )
+
+        self.assertFalse(any(item.get("temporal_consensus") for item in objects))
+
     def test_event_sampler_reuses_segment_lookup_and_successful_decode(self) -> None:
         class Recorder:
             def __init__(self) -> None:
