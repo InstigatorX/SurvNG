@@ -324,6 +324,100 @@ def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() 
     assert not service.running()
 
 
+def test_duplicate_refinement_for_same_episode_is_coalesced() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+    )
+    service, decision, _tracking, _prewarm, _image_reader = _service(initial)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def refine(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(1.0)
+        return refined
+
+    decision.refine.side_effect = refine
+    stop = threading.Event()
+    service.start(stop)
+    event_at = datetime.now(timezone.utc)
+    service.process("motion", "first", event_at, {"motion_episode_sequence": 7})
+    assert entered.wait(1.0)
+    service.process("motion", "duplicate", event_at, {"motion_episode_sequence": 7})
+
+    status = service.status()
+    assert status["refinements_coalesced"] == 1
+    assert status["refinement_pending_episodes"] == 1
+    release.set()
+    for _ in range(100):
+        if service.status()["refinements_completed"]:
+            break
+        threading.Event().wait(0.01)
+    assert decision.refine.call_count == 1
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
+def test_full_refinement_queue_supersedes_oldest_optional_episode() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="",
+        object_detected=False,
+    )
+    service, decision, _tracking, _prewarm, _image_reader = _service(initial)
+    entered = threading.Event()
+    release = threading.Event()
+    refined_sequences: list[int] = []
+
+    def refine(_topic, _message, _event_at, qualification, **_kwargs):
+        sequence = qualification["motion_episode_sequence"]
+        refined_sequences.append(sequence)
+        if sequence == 1:
+            entered.set()
+            assert release.wait(1.0)
+        return refined
+
+    decision.refine.side_effect = refine
+    stop = threading.Event()
+    service.start(stop)
+    event_at = datetime.now(timezone.utc)
+    service.process("motion", "1", event_at, {"motion_episode_sequence": 1})
+    assert entered.wait(1.0)
+    for sequence in (2, 3, 4, 5):
+        service.process(
+            "motion",
+            str(sequence),
+            event_at,
+            {"motion_episode_sequence": sequence},
+        )
+
+    assert service.status()["refinements_superseded"] == 1
+    release.set()
+    for _ in range(100):
+        if service.status()["refinements_completed"] == 4:
+            break
+        threading.Event().wait(0.01)
+    assert refined_sequences == [1, 3, 4, 5]
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
 def test_unavailable_refinement_worker_preserves_initial_tracking_handoff() -> None:
     initial = MotionDecisionOutcome(
         event_id=42,

@@ -67,6 +67,14 @@ class _RefinementJob:
     callback: RefinementCallback | None
     initial_outcome: MotionDecisionOutcome
 
+    def key(self) -> tuple[str, int | float]:
+        if self.existing_event_id is not None:
+            return ("event", self.existing_event_id)
+        sequence = self.qualification.get("motion_episode_sequence")
+        if isinstance(sequence, int):
+            return ("episode", sequence)
+        return ("time", round(self.event_at.timestamp(), 3))
+
 
 class MotionIncidentService:
     """Persists a qualified incident and hands durable results to tracking.
@@ -99,12 +107,15 @@ class MotionIncidentService:
         self._last_prewarm_failure: dict[str, Any] | None = None
         self._handoff_failures = 0
         self._last_handoff_failure: dict[str, Any] | None = None
-        self._refinement_queue: queue.Queue[_RefinementJob | None] = queue.Queue(maxsize=8)
+        self._refinement_queue: queue.Queue[_RefinementJob | None] = queue.Queue(maxsize=3)
+        self._pending_refinement_keys: set[tuple[str, int | float]] = set()
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
         self._refinements_queued = 0
         self._refinements_completed = 0
         self._refinements_dropped = 0
+        self._refinements_coalesced = 0
+        self._refinements_superseded = 0
         self._refinement_failures = 0
         self._last_refinement_failure: dict[str, Any] | None = None
         self._refinement_callback_failures = 0
@@ -132,6 +143,8 @@ class MotionIncidentService:
                 "refinements_queued": self._refinements_queued,
                 "refinements_completed": self._refinements_completed,
                 "refinements_dropped": self._refinements_dropped,
+                "refinements_coalesced": self._refinements_coalesced,
+                "refinements_superseded": self._refinements_superseded,
                 "refinement_failures": self._refinement_failures,
                 "last_refinement_failure": (
                     dict(self._last_refinement_failure)
@@ -145,6 +158,7 @@ class MotionIncidentService:
                     else None
                 ),
                 "refinement_queue_depth": self._refinement_queue.qsize(),
+                "refinement_pending_episodes": len(self._pending_refinement_keys),
                 "refinement_worker_alive": bool(
                     self._refinement_thread and self._refinement_thread.is_alive()
                 ),
@@ -332,15 +346,56 @@ class MotionIncidentService:
                 self._refinements_dropped += 1
             LOGGER.warning("motion refinement worker unavailable for %s", self.camera_id)
             return False
-        try:
-            self._refinement_queue.put_nowait(job)
-        except queue.Full:
-            with self._status_lock:
-                self._refinements_dropped += 1
-            LOGGER.warning("motion refinement queue full for %s", self.camera_id)
-            return False
+        superseded: _RefinementJob | None = None
         with self._status_lock:
+            key = job.key()
+            if key in self._pending_refinement_keys:
+                self._refinements_coalesced += 1
+                LOGGER.debug(
+                    "coalesced duplicate motion refinement for %s %s",
+                    self.camera_id,
+                    key,
+                )
+                return False
+            try:
+                self._refinement_queue.put_nowait(job)
+            except queue.Full:
+                removed = False
+                try:
+                    candidate = self._refinement_queue.get_nowait()
+                    removed = True
+                except queue.Empty:
+                    candidate = None
+                if removed and candidate is None:
+                    # Preserve a shutdown sentinel; admission is already closed.
+                    try:
+                        self._refinement_queue.put_nowait(None)
+                    except queue.Full:
+                        pass
+                    self._refinements_dropped += 1
+                    return False
+                if candidate is not None:
+                    superseded = candidate
+                    self._pending_refinement_keys.discard(candidate.key())
+                try:
+                    self._refinement_queue.put_nowait(job)
+                except queue.Full:
+                    self._refinements_dropped += 1
+                    return False
+                if superseded is not None:
+                    self._refinements_superseded += 1
+            self._pending_refinement_keys.add(key)
             self._refinements_queued += 1
+        if superseded is not None:
+            # Refinement is optional enrichment. Preserve the displaced
+            # decision's already-valid tracking handoff.
+            self._handoff(superseded.initial_outcome, superseded.event_at)
+            LOGGER.info(
+                "superseded stale motion refinement for %s %s with %s",
+                self.camera_id,
+                superseded.key(),
+                job.key(),
+            )
         return True
 
     def _run_refinements(self) -> None:
@@ -355,42 +410,16 @@ class MotionIncidentService:
             if job is None or stop.is_set():
                 return
             try:
-                outcome = self.decision_processor.refine(
-                    job.topic,
-                    job.message,
-                    job.event_at,
-                    copy.deepcopy(job.qualification),
-                    existing_event_id=job.existing_event_id,
-                    require_eligible_object=job.require_eligible_object,
-                    require_motion_correlation=job.require_motion_correlation,
-                )
-            except Exception as error:
-                failure = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "error": redact_secret_text(error)[:500],
-                    "error_type": type(error).__name__,
-                    "event_at": job.event_at.isoformat(),
-                    "existing_event_id": job.existing_event_id,
-                }
-                with self._status_lock:
-                    self._refinement_failures += 1
-                    self._last_refinement_failure = failure
-                # Initial evidence remains valid even when delayed enrichment
-                # fails. Do not also lose its tracking handoff.
-                self._handoff(job.initial_outcome, job.event_at)
-                LOGGER.exception(
-                    "motion refinement failed for %s: %s: %s",
-                    self.camera_id,
-                    type(error).__name__,
-                    redact_secret_text(error)[:500],
-                )
-                continue
-
-            self._record_timing(outcome)
-            self._handoff(outcome, job.event_at)
-            if job.callback is not None and not stop.is_set():
                 try:
-                    job.callback(outcome)
+                    outcome = self.decision_processor.refine(
+                        job.topic,
+                        job.message,
+                        job.event_at,
+                        copy.deepcopy(job.qualification),
+                        existing_event_id=job.existing_event_id,
+                        require_eligible_object=job.require_eligible_object,
+                        require_motion_correlation=job.require_motion_correlation,
+                    )
                 except Exception as error:
                     failure = {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -400,16 +429,44 @@ class MotionIncidentService:
                         "existing_event_id": job.existing_event_id,
                     }
                     with self._status_lock:
-                        self._refinement_callback_failures += 1
-                        self._last_refinement_callback_failure = failure
+                        self._refinement_failures += 1
+                        self._last_refinement_failure = failure
+                    self._handoff(job.initial_outcome, job.event_at)
                     LOGGER.exception(
-                        "motion refinement callback failed for %s: %s: %s",
+                        "motion refinement failed for %s: %s: %s",
                         self.camera_id,
                         type(error).__name__,
                         redact_secret_text(error)[:500],
                     )
-            with self._status_lock:
-                self._refinements_completed += 1
+                    continue
+
+                self._record_timing(outcome)
+                self._handoff(outcome, job.event_at)
+                if job.callback is not None and not stop.is_set():
+                    try:
+                        job.callback(outcome)
+                    except Exception as error:
+                        failure = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "error": redact_secret_text(error)[:500],
+                            "error_type": type(error).__name__,
+                            "event_at": job.event_at.isoformat(),
+                            "existing_event_id": job.existing_event_id,
+                        }
+                        with self._status_lock:
+                            self._refinement_callback_failures += 1
+                            self._last_refinement_callback_failure = failure
+                        LOGGER.exception(
+                            "motion refinement callback failed for %s: %s: %s",
+                            self.camera_id,
+                            type(error).__name__,
+                            redact_secret_text(error)[:500],
+                        )
+                with self._status_lock:
+                    self._refinements_completed += 1
+            finally:
+                with self._status_lock:
+                    self._pending_refinement_keys.discard(job.key())
 
     def _record_timing(self, outcome: MotionDecisionOutcome) -> None:
         timing = outcome.processing_timing
@@ -439,4 +496,6 @@ class MotionIncidentService:
             try:
                 self._refinement_queue.get_nowait()
             except queue.Empty:
+                with self._status_lock:
+                    self._pending_refinement_keys.clear()
                 return
