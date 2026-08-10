@@ -393,7 +393,8 @@ def _temporal_consensus(
     low_confidence_confirmed_ids = {
         id(track)
         for track in evidence
-        if len(track.winning_observations) >= max(3, required_by_track[id(track)])
+        if id(track) not in normally_confirmed_ids
+        and len(track.winning_observations) >= max(3, required_by_track[id(track)])
         and track.aggregate_confidence >= max(
             float(item.get("temporal_candidate_threshold") or 0.0)
             for item in track.winning_observations
@@ -659,11 +660,16 @@ class _EventRecordedSampler:
         self.camera_id = camera_id
         self.recorder = recorder
         self.frame_reader = frame_reader
-        self._rows: list[dict[str, Any]] = [dict(row) for row in (rows or [])]
+        self._rows: list[dict[str, Any]] = sorted(
+            (dict(row) for row in (rows or [])),
+            key=lambda row: float(row.get("start_epoch", 0.0)),
+        )
         self._frames: dict[tuple[str, float], Frame | None] = {}
 
     def recording_at(self, epoch: float) -> dict[str, Any] | None:
-        for row in self._rows:
+        # Match Recorder.recording_at(): at a shared segment boundary the
+        # newest segment is preferred, avoiding an EOF decode from its predecessor.
+        for row in reversed(self._rows):
             start = float(row.get("start_epoch", 0.0))
             end = row.get("end_epoch")
             if end is None:
@@ -679,6 +685,9 @@ class _EventRecordedSampler:
                 if duration is not None:
                     normalized["end_epoch"] = float(normalized["start_epoch"]) + float(duration)
             self._rows.append(normalized)
+            self._rows.sort(
+                key=lambda item: float(item.get("start_epoch", 0.0))
+            )
             return normalized
         return row
 

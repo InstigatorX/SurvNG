@@ -80,6 +80,10 @@ class MotionEventStateStage:
         state: _EventRuntime,
     ) -> None:
         now = context.captured_at
+        if state.updated_at is not None and now == state.updated_at:
+            state.transition_reason = "duplicate_timestamp"
+            self._publish(context, state)
+            return
         if state.updated_at is not None and now < state.updated_at:
             state.reset("clock_reset")
 

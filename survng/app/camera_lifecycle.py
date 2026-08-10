@@ -67,7 +67,6 @@ class CameraRuntimeState:
     enabled: bool = False
     detection_enabled: bool = True
     accepting_motion_events: bool = False
-    active_incident_event_id: int | None = None
     generation: int = 0
     transition_count: int = 0
     last_transition_at: str = ""
@@ -250,7 +249,6 @@ class CameraLifecycleService:
             self.state.enabled = False
             self.state.accepting_motion_events = False
             self.state.stop_event.set()
-            self.state.active_incident_event_id = None
             self._transition_locked(CameraLifecyclePhase.STOPPING)
 
         # Broadcast first so all independent workers consume the same later

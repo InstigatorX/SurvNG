@@ -77,7 +77,6 @@ def test_orchestrator_executes_an_off_mode_trigger_and_clears_active_batch() -> 
     qualification.rescue_settings.return_value = (False, 0.0)
     qualification.suppression_verification_rate.return_value = 0.0
     state = Mock()
-    state.active_incident_event_id.return_value = None
     orchestrator = MotionDecisionOrchestrator(
         camera_id="gate",
         events=events,
@@ -125,7 +124,6 @@ def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> Non
     qualification.rescue_settings.return_value = (False, 0.0)
     qualification.suppression_verification_rate.return_value = 0.0
     state = Mock()
-    state.active_incident_event_id.return_value = None
     orchestrator = MotionDecisionOrchestrator(
         camera_id="gate",
         events=events,
@@ -184,7 +182,7 @@ def test_active_followup_requires_correlated_object_and_records_audit() -> None:
     }))
     audit = Mock()
     state = Mock()
-    state.active_incident_event_id.return_value = 42
+    events.link_incident(42)
     orchestrator = MotionDecisionOrchestrator(
         camera_id="gate",
         events=events,

@@ -64,6 +64,20 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(objects[0]["temporal_low_confidence_confirmation"])
         self.assertEqual(objects[0]["temporal_observations"], 3)
 
+    def test_normally_eligible_consensus_is_not_labeled_low_confidence(self) -> None:
+        observations = [
+            sample(offset, [detected("person", 0.9, (2, 2, 20, 19))])
+            for offset in (-0.5, 0.0, 0.5)
+        ]
+
+        _selected, objects = _temporal_consensus(
+            observations,
+            minimum_confirmations=2,
+        )
+
+        self.assertTrue(objects[0]["incident_eligible"])
+        self.assertFalse(objects[0]["temporal_low_confidence_confirmation"])
+
     def test_incompatible_labels_do_not_share_temporal_identity(self) -> None:
         _selected, objects = _temporal_consensus(
             [
@@ -109,6 +123,20 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(recorder.calls, 1)
         self.assertEqual(reads, [("segment.mp4", 1.0)])
+
+    def test_event_sampler_prefers_new_segment_at_shared_boundary(self) -> None:
+        recorder = SimpleNamespace(recording_at=lambda *_args: None)
+        sampler = _EventRecordedSampler(
+            camera_id="gate",
+            recorder=recorder,
+            frame_reader=lambda *_args, **_kwargs: None,
+            rows=[
+                {"path": "new.mp4", "start_epoch": 110.0, "end_epoch": 120.0},
+                {"path": "old.mp4", "start_epoch": 100.0, "end_epoch": 110.0},
+            ],
+        )
+
+        self.assertEqual(sampler.recording_at(110.0)["path"], "new.mp4")
 
     def test_detector_prefetches_event_recording_range_once(self) -> None:
         event_epoch = 1_800_000_000.0

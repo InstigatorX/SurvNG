@@ -431,6 +431,9 @@ def test_backward_wall_clock_step_resets_runtime_without_suspending_frames() -> 
     deadline = time.monotonic() + 1.0
     while len(analyzed) < 1 and time.monotonic() < deadline:
         time.sleep(0.005)
+    stale_result = MotionQualificationResult(True, 0.8, 0.5, "qualified", 4, {})
+    service.qualification_results.append((100.0, stale_result))
+    service.last_continuous_result = stale_result
     service.submit_frame(
         np.ones((90, 160, 3), dtype=np.uint8),
         11.0,
@@ -443,6 +446,8 @@ def test_backward_wall_clock_step_resets_runtime_without_suspending_frames() -> 
     assert service.last_processed_sequence == 2
     assert service.last_processed_at == 90.0
     assert [timestamp for timestamp, _frame in service.frames] == [90.0]
+    assert service.qualification_results_since(0.0) == []
+    assert service.last_continuous_result is None
     reset_runtime.assert_called_once()
     assert callable(reset_runtime.call_args.kwargs["clear_observation_evidence"])
     assert service.telemetry_snapshot()["clock_discontinuity_resets"] == 1

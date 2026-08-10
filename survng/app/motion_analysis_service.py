@@ -129,6 +129,9 @@ class MotionAnalysisService:
         self.frames: deque[tuple[float, np.ndarray]] = deque(maxlen=ring_size)
         self.color_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
         self.processed_frames: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+        self.qualification_results: deque[
+            tuple[float, MotionQualificationResult]
+        ] = deque(maxlen=ring_size)
         self.queue: queue.Queue[
             float | MotionFrameSubmission | _AnalysisSlotWakeup | None
         ] = queue.Queue(
@@ -255,6 +258,7 @@ class MotionAnalysisService:
             self.frames.clear()
             self.color_frames.clear()
             self.processed_frames.clear()
+            self.qualification_results.clear()
             self.last_sample_clock = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
@@ -430,6 +434,8 @@ class MotionAnalysisService:
             self.frames.clear()
             self.color_frames.clear()
             self.processed_frames.clear()
+            self.qualification_results.clear()
+            self.last_continuous_result = None
             self.last_processed_at = 0.0
             self.primary_last_processed_at = 0.0
             self._pending_analysis_at = 0.0
@@ -457,6 +463,18 @@ class MotionAnalysisService:
             return [
                 (timestamp, self._share_frame(frame, "samples_since"))
                 for timestamp, frame in self.frames
+                if timestamp >= captured_at
+            ]
+
+    def qualification_results_since(
+        self,
+        captured_at: float,
+    ) -> list[tuple[float, MotionQualificationResult]]:
+        """Return already-computed EMA results without replaying frame state."""
+        with self.frame_lock:
+            return [
+                (timestamp, result)
+                for timestamp, result in self.qualification_results
                 if timestamp >= captured_at
             ]
 
@@ -867,8 +885,16 @@ class MotionAnalysisService:
                 error,
             )
             return
-        self.last_continuous_result = result
-        self.primary_last_processed_at = captured_at
+        with self.frame_lock:
+            self.last_continuous_result = result
+            self.primary_last_processed_at = captured_at
+            if (
+                self.qualification_results
+                and self.qualification_results[-1][0] == captured_at
+            ):
+                self.qualification_results[-1] = (captured_at, result)
+            else:
+                self.qualification_results.append((captured_at, result))
         self._record_continuous_stats(result)
         if self._stopping():
             return

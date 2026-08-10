@@ -130,6 +130,7 @@ class _ScoringRuntime:
     accumulated_scores: dict[int, float] = field(default_factory=dict)
     last_seen: dict[int, float] = field(default_factory=dict)
     stationary_regions: list["_StationaryRegion"] = field(default_factory=list)
+    last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> "_ScoringRuntime":
@@ -138,6 +139,7 @@ class _ScoringRuntime:
                 accumulated_scores=dict(self.accumulated_scores),
                 last_seen=dict(self.last_seen),
                 stationary_regions=[replace(region) for region in self.stationary_regions],
+                last_processed_at=self.last_processed_at,
             )
 
 
@@ -148,6 +150,7 @@ class _IlluminationRuntime:
     color_background: np.ndarray | None = None
     clear_streak: int = 0
     last_evaluated_at: float | None = None
+    last_processed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> "_IlluminationRuntime":
@@ -164,6 +167,7 @@ class _IlluminationRuntime:
                 ),
                 clear_streak=self.clear_streak,
                 last_evaluated_at=self.last_evaluated_at,
+                last_processed_at=self.last_processed_at,
             )
 
 
@@ -286,7 +290,9 @@ class AdaptiveEmaBackgroundStage:
                         float(np.count_nonzero(persistent_change_seconds))
                         / max(1, persistent_change_seconds.size)
                     )
-                    global_changes.append(changed_ratio)
+                    # A historical frame compared with the already-advanced
+                    # background is not valid global-change evidence.
+                    global_changes.append(0.0)
                     continue
 
                 elapsed = 1.0 / sample_fps
@@ -948,6 +954,10 @@ class AdaptiveMotionScoringStage:
                 if context.captured_at - region.last_seen <= 120.0
             ]
             stationary_regions = [replace(region) for region in score_state.stationary_regions]
+            is_new_score = (
+                score_state.last_processed_at is None
+                or context.captured_at > score_state.last_processed_at
+            )
         if scores:
             minimum_persistence_seconds = self.minimum_persistence_frames / sample_fps
             evaluations: list[
@@ -1038,30 +1048,37 @@ class AdaptiveMotionScoringStage:
                     candidate_accepted,
                     candidate_reason,
                 ))
-            with score_state.lock:
-                for _candidate_score, candidate_track, _features, _accepted, candidate_reason in evaluations:
-                    if candidate_reason in {"stationary_foreground", "stationary_region", "persistent_scene_motion"}:
-                        self._remember_stationary_region(
-                            score_state.stationary_regions,
-                            candidate_track.box,
-                            context.captured_at,
-                        )
+            if is_new_score:
+                with score_state.lock:
+                    for _candidate_score, candidate_track, _features, _accepted, candidate_reason in evaluations:
+                        if candidate_reason in {"stationary_foreground", "stationary_region", "persistent_scene_motion"}:
+                            self._remember_stationary_region(
+                                score_state.stationary_regions,
+                                candidate_track.box,
+                                context.captured_at,
+                            )
             accepted_evaluations = [item for item in evaluations if item[3]]
             score, best, features, accepted, reason = max(
                 accepted_evaluations or evaluations,
                 key=lambda item: item[0],
             )
             with score_state.lock:
-                accumulated = score_state.accumulated_scores.get(best.track_id, 0.0) + score
-                score_state.accumulated_scores[best.track_id] = accumulated
-                score_state.last_seen[best.track_id] = context.captured_at
-                expired = [
-                    track_id for track_id, last_seen in score_state.last_seen.items()
-                    if context.captured_at - last_seen > 30.0
-                ]
-                for track_id in expired:
-                    score_state.last_seen.pop(track_id, None)
-                    score_state.accumulated_scores.pop(track_id, None)
+                accumulated = score_state.accumulated_scores.get(
+                    best.track_id,
+                    best.accumulated_score,
+                )
+                if is_new_score:
+                    accumulated += score
+                    score_state.accumulated_scores[best.track_id] = accumulated
+                    score_state.last_seen[best.track_id] = context.captured_at
+                    score_state.last_processed_at = context.captured_at
+                    expired = [
+                        track_id for track_id, last_seen in score_state.last_seen.items()
+                        if context.captured_at - last_seen > 30.0
+                    ]
+                    for track_id in expired:
+                        score_state.last_seen.pop(track_id, None)
+                        score_state.accumulated_scores.pop(track_id, None)
             scored = replace(best, score=round(score, 4), accumulated_score=accumulated)
             context.dominant_track = scored
             context.tracked_objects = [scored if item.track_id == scored.track_id else item for item in context.tracked_objects]
@@ -1428,6 +1445,10 @@ class IlluminationChangeFilterStage:
         state = context.runtime.state_for(self.stage_id, _IlluminationRuntime)
         current_color = frames[-1] if frames and frames[-1].ndim == 3 else None
         with state.lock:
+            is_new_state = (
+                state.last_processed_at is None
+                or context.captured_at > state.last_processed_at
+            )
             color_background = (
                 None
                 if state.color_background is None
@@ -1449,7 +1470,7 @@ class IlluminationChangeFilterStage:
                 )
                 if anchored is not None:
                     evidence.append(anchored)
-            if current_color is not None and (
+            if is_new_state and current_color is not None and (
                 state.anchor_frame is None
                 or state.anchor_frame.shape != current_color.shape
                 or state.anchor_at is None
@@ -1472,7 +1493,7 @@ class IlluminationChangeFilterStage:
             )
             if background_evidence is not None:
                 evidence.append(background_evidence)
-        if current_color is not None:
+        if is_new_state and current_color is not None:
             with state.lock:
                 current_float = current_color.astype(np.float32, copy=False)
                 if (
@@ -1495,10 +1516,13 @@ class IlluminationChangeFilterStage:
                         0.001,
                         mask=active_mask,
                     )
+        if is_new_state:
+            with state.lock:
+                state.last_processed_at = context.captured_at
 
         if not evidence:
             with state.lock:
-                if (
+                if is_new_state and (
                     state.last_evaluated_at is not None
                     and context.captured_at - state.last_evaluated_at > 3.0
                 ):
@@ -1539,17 +1563,18 @@ class IlluminationChangeFilterStage:
             and sample["structure_preservation"] >= 0.70
         )
         with state.lock:
-            if (
+            if is_new_state and (
                 state.last_evaluated_at is None
                 or context.captured_at < state.last_evaluated_at
                 or context.captured_at - state.last_evaluated_at > 3.0
             ):
                 state.clear_streak = 0
-            if context.scoring.accepted and instantaneous_clear:
-                state.clear_streak += 1
-            else:
-                state.clear_streak = 0
-            state.last_evaluated_at = context.captured_at
+            if is_new_state:
+                if context.scoring.accepted and instantaneous_clear:
+                    state.clear_streak += 1
+                else:
+                    state.clear_streak = 0
+                state.last_evaluated_at = context.captured_at
             clear_streak = state.clear_streak
         evidence_support = max(supporting_pairs, clear_streak)
         clear_illumination = bool(

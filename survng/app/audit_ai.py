@@ -241,8 +241,8 @@ downstream evidence about persistence and identity, never as evidence that cause
 
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed and prefer camera-scoped changes over global changes. Recommend
-settings only for active visual components. Use analysis_preset only to choose adaptive, modular, or
-modular analysis, and prefer adaptive unless telemetry shows a compatibility problem. Trigger mode,
+settings only for active visual components. Use analysis_preset only to choose adaptive or modular
+analysis, and prefer adaptive unless telemetry shows a compatibility problem. Trigger mode,
 validator selection, agreement policy, and fail-open behavior are operator-owned safety settings:
 explain relevant evidence, but never recommend changing their topology. Do not recommend lowering
 sensitivity merely because an object exists.

@@ -150,14 +150,6 @@ class CameraMotionState:
         with self._ingress_idle:
             return sum(self._ingress_by_generation.values())
 
-    def active_incident_event_id(self) -> int | None:
-        with self.camera_state.lock:
-            return self.camera_state.active_incident_event_id
-
-    def set_active_incident_event_id(self, event_id: int | None) -> None:
-        with self.camera_state.lock:
-            self.camera_state.active_incident_event_id = event_id
-
     def last_motion_at(self) -> str:
         with self._lock:
             return self._last_motion_at

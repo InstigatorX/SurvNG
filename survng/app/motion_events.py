@@ -132,12 +132,22 @@ class MotionEpisodeState:
     adaptive_pending: bool = False
     adaptive_last_completed_at: float = 0.0
     incident_event_id: int | None = None
+    latest_observed_at: float | None = None
 
     def observe(self, source: str, observed_at: float) -> None:
-        if not self.observations or observed_at - self.observations[-1].observed_at > 30.0:
+        if not math.isfinite(observed_at):
+            raise ValueError("motion observation timestamp must be finite")
+        if (
+            self.latest_observed_at is None
+            or observed_at - self.latest_observed_at > 30.0
+        ):
             self.sequence += 1
             self.incident_event_id = None
         self.observations.append(MotionSourceObservation(source, observed_at))
+        self.latest_observed_at = max(
+            observed_at,
+            self.latest_observed_at if self.latest_observed_at is not None else observed_at,
+        )
 
     def times(self, source: str) -> tuple[float, ...]:
         return tuple(
@@ -425,9 +435,24 @@ class MotionEventCoordinator:
             self._episode.active_triggers = None
             return failed
 
-    def link_incident(self, event_id: int | None) -> None:
+    def current_episode_sequence(self) -> int:
         with self._lock:
+            return self._episode.sequence
+
+    def link_incident(
+        self,
+        event_id: int | None,
+        *,
+        expected_sequence: int | None = None,
+    ) -> bool:
+        with self._lock:
+            if (
+                expected_sequence is not None
+                and expected_sequence != self._episode.sequence
+            ):
+                return False
             self._episode.incident_event_id = event_id
+            return True
 
     def active_incident_event_id(self) -> int | None:
         with self._lock:
@@ -441,6 +466,7 @@ class MotionEventCoordinator:
                 "adaptive_pending": self._episode.adaptive_pending,
                 "adaptive_last_completed_at": self._episode.adaptive_last_completed_at,
                 "incident_event_id": self._episode.incident_event_id,
+                "latest_observed_at": self._episode.latest_observed_at,
             }
 
     def reset(self) -> None:
@@ -451,39 +477,52 @@ class MotionEventCoordinator:
     def reset_timebase(self) -> None:
         """Discard wall-clock histories without disturbing queued work."""
         with self._lock:
+            # Invalidate callbacks and incident linkage created against the old
+            # clock while leaving admitted queue work and reservations intact.
+            self._episode.sequence += 1
+            self._episode.incident_event_id = None
             self._episode.adaptive_last_completed_at = 0.0
             self._episode.observations.clear()
+            self._episode.latest_observed_at = None
 
     # Transitional properties keep callers source-compatible while all episode
     # state now has one coordinator-owned source of truth.
     @property
     def active_triggers(self) -> MotionTriggerBatch | None:
-        return self._episode.active_triggers
+        with self._lock:
+            return self._episode.active_triggers
 
     @active_triggers.setter
     def active_triggers(self, value: MotionTriggerBatch | None) -> None:
-        self._episode.active_triggers = value
+        with self._lock:
+            self._episode.active_triggers = value
 
     @property
     def adaptive_trigger_pending(self) -> bool:
-        return self._episode.adaptive_pending
+        with self._lock:
+            return self._episode.adaptive_pending
 
     @adaptive_trigger_pending.setter
     def adaptive_trigger_pending(self, value: bool) -> None:
-        self._episode.adaptive_pending = bool(value)
+        with self._lock:
+            self._episode.adaptive_pending = bool(value)
 
     @property
     def adaptive_last_completed_at(self) -> float:
-        return self._episode.adaptive_last_completed_at
+        with self._lock:
+            return self._episode.adaptive_last_completed_at
 
     @adaptive_last_completed_at.setter
     def adaptive_last_completed_at(self, value: float) -> None:
-        self._episode.adaptive_last_completed_at = float(value)
+        with self._lock:
+            self._episode.adaptive_last_completed_at = float(value)
 
     @property
     def priority_motion_times(self) -> tuple[float, ...]:
-        return self._episode.times("priority")
+        with self._lock:
+            return self._episode.times("priority")
 
     @property
     def camera_motion_times(self) -> tuple[float, ...]:
-        return self._episode.times("camera")
+        with self._lock:
+            return self._episode.times("camera")

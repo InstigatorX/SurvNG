@@ -2383,7 +2383,8 @@ class CameraWorkerTest(unittest.TestCase):
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir))
-            worker.runtime_state.active_incident_event_id = 42
+            worker.motion_events.remember_camera_motion(time.time())
+            worker.motion_events.link_incident(42)
 
             active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
             cooldown = MotionQualificationResult(False, 0.7, 0.5, "event_state_cooldown", 2, {})
@@ -2403,7 +2404,8 @@ class CameraWorkerTest(unittest.TestCase):
         active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            worker.runtime_state.active_incident_event_id = 42
+            worker.motion_events.remember_camera_motion(time.time())
+            worker.motion_events.link_incident(42)
             worker._stop.clear()
             with (
                 patch.object(worker.motion_qualification, "qualify_burst", return_value=(active, {})),
@@ -2928,6 +2930,49 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertGreater(diagnostics["windows_evaluated"], 0)
             self.assertNotIn("mog2_warmed", result.features)
             self.assertEqual(result.features["event_state_phase"], "active")
+
+    def test_camera_validation_reuses_continuous_qualification_result(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+        )
+        config = MotionQualificationConfig(
+            mode="camera",
+            post_trigger_seconds=0.5,
+            window_seconds=0.8,
+        )
+        accepted = MotionQualificationResult(
+            True,
+            0.82,
+            0.48,
+            "qualified",
+            4,
+            {"primary_motion_source": "adaptive_background"},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
+            worker._stop.clear()
+            received_at = time.time() - 0.1
+            worker.motion_analysis.qualification_results.append(
+                (received_at + 0.01, accepted)
+            )
+            with patch.object(
+                worker.motion_qualification,
+                "run_pipeline",
+                side_effect=AssertionError("continuous evidence should be reused"),
+            ) as replay:
+                result, diagnostics = worker.motion_qualification.qualify_burst(
+                    datetime.fromtimestamp(received_at, timezone.utc),
+                    received_at,
+                    "balanced",
+                    worker.motion_analysis,
+                )
+
+            self.assertTrue(result.accepted)
+            self.assertEqual(result.score, 0.82)
+            self.assertEqual(diagnostics["windows_evaluated"], 1)
+            replay.assert_not_called()
 
     def test_worker_uses_final_state_machine_trigger_decision(self) -> None:
         camera = CameraConfig(

@@ -61,8 +61,6 @@ class MotionDecisionAnalysis(Protocol):
 
 
 class MotionDecisionState(Protocol):
-    def active_incident_event_id(self) -> int | None: ...
-    def set_active_incident_event_id(self, event_id: int | None) -> None: ...
     def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
     def record_decision(self, **kwargs: Any) -> None: ...
     def increment_stat(self, name: str, amount: int = 1) -> None: ...
@@ -308,6 +306,7 @@ class MotionDecisionOrchestrator:
             "retry_count": max((item.retry_count for item in triggers), default=0),
             "trigger_received_at_epoch": received_at,
             "would_suppress": bool(mode in AUDITED_MODES and not result.accepted),
+            "motion_episode_sequence": self._events.current_episode_sequence(),
         }
         effective_accepted = bool(
             mode in {"off", "audit"}
@@ -494,6 +493,7 @@ class MotionDecisionOrchestrator:
         suppression_verification_candidate: bool,
     ) -> None:
         durable_incident = False
+        episode_sequence = int(qualification["motion_episode_sequence"])
         try:
             outcome = self._incidents.process(
                 representative.topic,
@@ -519,6 +519,7 @@ class MotionDecisionOrchestrator:
                     active_followup=active_followup,
                     borderline_candidate=borderline_candidate,
                     suppression_verification_candidate=suppression_verification_candidate,
+                    episode_sequence=episode_sequence,
                 ),
             ).as_dict()
             event_id = outcome.get("event_id")
@@ -527,8 +528,10 @@ class MotionDecisionOrchestrator:
                 # A persisted incident is the idempotency boundary. Failures in
                 # later audits or notifications must never replay detection.
                 self._events.set_active(None)
-                self._events.link_incident(int(event_id))
-                self._state.set_active_incident_event_id(int(event_id))
+                self._events.link_incident(
+                    int(event_id),
+                    expected_sequence=episode_sequence,
+                )
             object_outcome = outcome.get("object_detected")
             found_object = object_outcome is True
             if borderline_candidate and found_object:
@@ -615,14 +618,17 @@ class MotionDecisionOrchestrator:
         active_followup: bool,
         borderline_candidate: bool,
         suppression_verification_candidate: bool,
+        episode_sequence: int,
     ) -> None:
         outcome = refined.as_dict()
         event_id = outcome.get("event_id")
         object_outcome = outcome.get("object_detected")
         found_object = object_outcome is True
         if event_id is not None:
-            self._events.link_incident(int(event_id))
-            self._state.set_active_incident_event_id(int(event_id))
+            self._events.link_incident(
+                int(event_id),
+                expected_sequence=episode_sequence,
+            )
         if found_object:
             self._state.increment_stat("late_object_rescues", 1)
             if borderline_candidate:
@@ -689,7 +695,7 @@ class MotionDecisionOrchestrator:
         self._audit_recorder.record_audit(
             event_id=int(event_id) if event_id is not None else None,
             related_event_id=(
-                None if event_id is not None else self._state.active_incident_event_id()
+                None if event_id is not None else self._events.active_incident_event_id()
             ),
             decision_id=decision_id,
             snapshot_path=str(outcome.get("snapshot_path") or ""),
@@ -781,7 +787,4 @@ class MotionDecisionOrchestrator:
     ) -> int | None:
         if result.reason not in INCIDENT_ACTIVITY_REASONS:
             return None
-        return (
-            self._events.active_incident_event_id()
-            or self._state.active_incident_event_id()
-        )
+        return self._events.active_incident_event_id()

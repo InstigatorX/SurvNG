@@ -32,6 +32,11 @@ class MotionQualificationState(Protocol):
 class MotionSampleSource(Protocol):
     def samples_since(self, captured_at: float) -> list[tuple[float, np.ndarray]]: ...
 
+    def qualification_results_since(
+        self,
+        captured_at: float,
+    ) -> list[tuple[float, MotionQualificationResult]]: ...
+
 
 class MotionQualificationService:
     """Own qualification configuration, pipeline execution, and fusion state."""
@@ -509,11 +514,36 @@ class MotionQualificationService:
         best_result: MotionQualificationResult | None = None
         evaluated_windows: set[tuple[float, ...]] = set()
         samples: list[tuple[float, np.ndarray]] = []
+        result_source = getattr(sample_source, "qualification_results_since", None)
         while not self.stop_event.is_set():
+            computed: list[tuple[float, MotionQualificationResult]] = []
+            if callable(result_source):
+                computed = result_source(received_at)
+                for result_at, result in computed:
+                    key = (round(float(result_at), 3),)
+                    if key in evaluated_windows:
+                        continue
+                    evaluated_windows.add(key)
+                    if best_result is None or result.score > best_result.score:
+                        best_result = result
+                    if result.accepted and not self.external_confirmation_required():
+                        return self.with_source_evidence(
+                            result,
+                            anchor - self.config.window_seconds,
+                            time.time(),
+                        ), self._diagnostics(
+                            received_at, event_epoch, len(evaluated_windows)
+                        )
             samples = sample_source.samples_since(
                 anchor - self.config.window_seconds
             )
-            for end_index in range(3, len(samples)):
+            # Production supplies results from its continuously advancing EMA
+            # runtime. The clean-runtime replay is retained for deterministic
+            # tools and alternate sample providers only.
+            replay_indices = (
+                range(3, len(samples)) if not computed else ()
+            )
+            for end_index in replay_indices:
                 window_end = samples[end_index][0]
                 if window_end < received_at:
                     continue
@@ -537,6 +567,7 @@ class MotionQualificationService:
                         sensitivity,
                         window_end,
                         [item[0] for item in window],
+                        clone_runtime=False,
                     )
                 except Exception as error:
                     return self.validation_fail_open_result(
@@ -603,6 +634,7 @@ class MotionQualificationService:
         include_telemetry: bool = True,
         processed_frames: list[np.ndarray] | None = None,
         processed_frame_implementation: str = "",
+        clone_runtime: bool = True,
     ) -> MotionQualificationResult:
         if (
             processed_frames is not None
@@ -617,7 +649,7 @@ class MotionQualificationService:
         if isolated:
             with self.analysis_lock:
                 pipeline = self.qualification_pipeline.isolated_copy(
-                    clone_runtime=True
+                    clone_runtime=clone_runtime
                 )
         else:
             pipeline = self.qualification_pipeline

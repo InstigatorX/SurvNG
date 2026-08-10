@@ -162,6 +162,8 @@ def test_timebase_reset_preserves_queued_work_and_active_reservation() -> None:
     coordinator.adaptive_last_completed_at = 100.0
     coordinator.remember_priority(101.0)
     coordinator.remember_camera_motion(102.0)
+    sequence = coordinator.current_episode_sequence()
+    coordinator.link_incident(42)
 
     coordinator.reset_timebase()
 
@@ -170,6 +172,9 @@ def test_timebase_reset_preserves_queued_work_and_active_reservation() -> None:
     assert coordinator.adaptive_last_completed_at == 0.0
     assert tuple(coordinator.priority_motion_times) == ()
     assert coordinator.camera_motion_snapshot() == ()
+    assert coordinator.current_episode_sequence() == sequence + 1
+    assert coordinator.active_incident_event_id() is None
+    assert not coordinator.link_incident(84, expected_sequence=sequence)
 
 
 def test_episode_ledger_unifies_source_history_and_incident_linkage() -> None:
@@ -203,6 +208,26 @@ def test_adaptive_reservation_starts_an_episode_without_camera_observation() -> 
     snapshot = coordinator.episode_snapshot()
     assert snapshot["sequence"] == 1
     assert snapshot["observations"][0].source == "adaptive"
+
+
+def test_stale_refinement_cannot_link_into_a_new_episode() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    coordinator.remember_camera_motion(100.0)
+    sequence = coordinator.current_episode_sequence()
+    coordinator.remember_camera_motion(140.0)
+
+    assert not coordinator.link_incident(42, expected_sequence=sequence)
+    assert coordinator.active_incident_event_id() is None
+
+
+def test_out_of_order_observation_does_not_move_episode_clock_backwards() -> None:
+    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
+    coordinator.remember_camera_motion(100.0)
+    coordinator.remember_camera_motion(90.0)
+    coordinator.remember_camera_motion(125.0)
+
+    assert coordinator.current_episode_sequence() == 1
+    assert coordinator.episode_snapshot()["latest_observed_at"] == 125.0
 
 
 def test_retry_queue_depth_reports_coordinator_owned_state() -> None:

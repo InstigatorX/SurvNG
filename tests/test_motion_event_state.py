@@ -156,6 +156,17 @@ class MotionEventStateTest(unittest.TestCase):
         self.assertEqual(continuous.event_state.phase, MotionEventPhase.ACTIVE)
         self.assertEqual(continuous.decision.reason, "event_state_active")
 
+    def test_duplicate_timestamp_does_not_advance_activation_counter(self) -> None:
+        pipeline = state_pipeline("gate", activation_frames=2)
+
+        first = process_score(pipeline, 10.0, True)
+        duplicate = process_score(pipeline, 10.0, True)
+
+        self.assertEqual(first.event_state.phase, MotionEventPhase.CANDIDATE)
+        self.assertEqual(duplicate.event_state.phase, MotionEventPhase.CANDIDATE)
+        self.assertEqual(duplicate.event_state.consecutive_accepts, 1)
+        self.assertFalse(duplicate.decision.run_object_detection)
+
     def test_concurrent_scores_produce_only_one_activation_trigger(self) -> None:
         pipeline = state_pipeline("gate")
 

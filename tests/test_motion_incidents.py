@@ -346,3 +346,77 @@ def test_unavailable_refinement_worker_preserves_initial_tracking_handoff() -> N
     decision.refine.assert_not_called()
     tracking.start.assert_called_once()
     assert service.status()["refinements_dropped"] == 1
+
+
+def test_failed_refinement_preserves_initial_handoff_and_reports_cause() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="initial.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+        refinement_pending=True,
+    )
+    service, decision, tracking, _prewarm, image_reader = _service(initial)
+    decision.refine.side_effect = RuntimeError("recorded frame unavailable")
+    image_reader.return_value = np.ones((20, 20, 3), dtype=np.uint8)
+    stop = threading.Event()
+    service.start(stop)
+
+    service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    deadline = threading.Event()
+    for _ in range(100):
+        if service.status()["refinement_failures"]:
+            break
+        deadline.wait(0.01)
+    status = service.status()
+    assert status["refinement_failures"] == 1
+    assert status["last_refinement_failure"]["error_type"] == "RuntimeError"
+    assert status["last_refinement_failure"]["error"] == "recorded frame unavailable"
+    tracking.start.assert_called_once()
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
+def test_refinement_callback_failure_does_not_reclassify_completed_refinement() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=None,
+        snapshot_path="initial.webp",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    refined = MotionDecisionOutcome(
+        event_id=84,
+        snapshot_path="refined.webp",
+        object_detected=True,
+        detected_objects=({"label": "person", "incident_eligible": True},),
+    )
+    service, decision, _tracking, _prewarm, _image_reader = _service(initial)
+    decision.refine.return_value = refined
+    stop = threading.Event()
+    service.start(stop)
+
+    service.process(
+        "motion",
+        "person",
+        datetime.now(timezone.utc),
+        {},
+        refinement_callback=lambda _value: (_ for _ in ()).throw(
+            RuntimeError("audit callback failed")
+        ),
+    )
+
+    waiter = threading.Event()
+    for _ in range(100):
+        if service.status()["refinements_completed"]:
+            break
+        waiter.wait(0.01)
+    status = service.status()
+    assert status["refinements_completed"] == 1
+    assert status["refinement_failures"] == 0
+    assert status["refinement_callback_failures"] == 1
+    assert status["last_refinement_callback_failure"]["error_type"] == "RuntimeError"
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
