@@ -655,11 +655,13 @@ class _EventRecordedSampler:
         camera_id: str,
         recorder: MotionRecordingProvider,
         frame_reader: Callable[..., Frame | None],
+        batch_frame_reader: Callable[..., dict[float, Frame]] | None = None,
         rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.recorder = recorder
         self.frame_reader = frame_reader
+        self.batch_frame_reader = batch_frame_reader
         self._rows: list[dict[str, Any]] = sorted(
             (dict(row) for row in (rows or [])),
             key=lambda row: float(row.get("start_epoch", 0.0)),
@@ -709,6 +711,56 @@ class _EventRecordedSampler:
                 self._frames[key] = frame
             return frame
         return self._frames[key]
+
+    def frames_at(
+        self,
+        path: Path,
+        offsets_seconds: list[float],
+        *,
+        deadline: float | None,
+    ) -> tuple[dict[float, Frame], int, int]:
+        """Return cached/batched frames and bounded fallback counts.
+
+        The tuple contains frames keyed by the caller's original offsets,
+        batch process count, and single-frame fallback count.
+        """
+        requested = list(dict.fromkeys(max(0.0, value) for value in offsets_seconds))
+        frames: dict[float, Frame] = {}
+        missing: list[float] = []
+        for offset in requested:
+            key = (str(path), round(offset, 3))
+            cached = self._frames.get(key)
+            if cached is not None:
+                frames[offset] = cached
+            else:
+                missing.append(offset)
+
+        batch_processes = 0
+        if missing and self.batch_frame_reader is not None:
+            batch_processes = 1
+            decoded = self.batch_frame_reader(path, missing, deadline=deadline)
+            decoded_by_key = {
+                round(max(0.0, offset), 3): frame
+                for offset, frame in decoded.items()
+            }
+            for offset in missing:
+                normalized_offset = round(offset, 3)
+                frame = decoded_by_key.get(normalized_offset)
+                if frame is None:
+                    continue
+                key = (str(path), normalized_offset)
+                self._frames[key] = frame
+                frames[offset] = frame
+
+        fallback_count = 0
+        for offset in missing:
+            if offset in frames:
+                continue
+            fallback_count += 1
+            frame = self.frame_at(path, offset, deadline=deadline)
+            if frame is not None:
+                frames[offset] = frame
+        return frames, batch_processes, fallback_count
 
 
 class RecordedMotionObjectDetector:
@@ -768,6 +820,10 @@ class RecordedMotionObjectDetector:
             "detector_request_ms": 0.0,
             "detection_enrichment_ms": 0.0,
             "temporal_confirmation_wait_ms": 0.0,
+            "recording_batch_processes": 0.0,
+            "recording_fallback_samples": 0.0,
+            "recording_samples_requested": 0.0,
+            "recording_samples_decoded": 0.0,
         }
         event_epoch = event_at.timestamp()
         initial_offsets = stages[0]
@@ -822,6 +878,7 @@ class RecordedMotionObjectDetector:
             camera_id=self.camera.id,
             recorder=self.recorder,
             frame_reader=self._read_recorded_frame,
+            batch_frame_reader=self._read_recorded_frames,
             rows=prefetched_rows,
         )
 
@@ -844,6 +901,7 @@ class RecordedMotionObjectDetector:
                 )
                 recording_missing = False
                 future_sample = False
+                pending_by_path: dict[Path, list[tuple[float, float, dict[str, Any]]]] = {}
                 for sample_offset in stage_offsets:
                     if sample_offset in samples_by_offset:
                         continue
@@ -865,24 +923,35 @@ class RecordedMotionObjectDetector:
                     if start_epoch is None:
                         continue
                     frame_offset = max(0.0, target_epoch - float(start_epoch))
+                    pending_by_path.setdefault(Path(str(row["path"])), []).append(
+                        (sample_offset, frame_offset, row)
+                    )
+
+                for path, pending in pending_by_path.items():
                     decode_started = time.monotonic()
-                    frame = sampler.frame_at(
-                        Path(str(row["path"])),
-                        frame_offset,
+                    frames, batch_processes, fallback_count = sampler.frames_at(
+                        path,
+                        [frame_offset for _, frame_offset, _ in pending],
                         deadline=stage_deadline,
                     )
                     timing["frame_decode_ms"] += (
                         time.monotonic() - decode_started
                     ) * 1000.0
-                    if frame is None:
-                        continue
-                    objects = self._detect_objects(frame, timing=timing)
-                    samples_by_offset[sample_offset] = _RecordedDetectionSample(
-                        offset=sample_offset,
-                        frame=frame,
-                        objects=objects,
-                        recording_path=str(row["path"]),
-                    )
+                    timing["recording_batch_processes"] += batch_processes
+                    timing["recording_fallback_samples"] += fallback_count
+                    timing["recording_samples_requested"] += len(pending)
+                    timing["recording_samples_decoded"] += len(frames)
+                    for sample_offset, frame_offset, row in pending:
+                        frame = frames.get(frame_offset)
+                        if frame is None:
+                            continue
+                        objects = self._detect_objects(frame, timing=timing)
+                        samples_by_offset[sample_offset] = _RecordedDetectionSample(
+                            offset=sample_offset,
+                            frame=frame,
+                            objects=objects,
+                            recording_path=str(row["path"]),
+                        )
 
                 samples = [
                     samples_by_offset[offset]
@@ -1331,6 +1400,127 @@ class RecordedMotionObjectDetector:
             f" ({last_error})" if last_error else "",
         )
         return None
+
+    def _read_recorded_frames(
+        self,
+        path: Path,
+        offsets_seconds: list[float],
+        *,
+        deadline: float | None = None,
+    ) -> dict[float, Frame]:
+        """Decode several ordered samples from one segment in one process.
+
+        The select expression emits exactly the first decoded frame at or
+        after each requested segment-relative timestamp. Missing outputs are
+        intentionally left to the established nudged single-frame fallback.
+        """
+        if not path.exists():
+            return {}
+        offsets = sorted(dict.fromkeys(round(max(0.0, value), 3) for value in offsets_seconds))
+        if not offsets:
+            return {}
+
+        expression = "0"
+        for index, offset in reversed(list(enumerate(offsets))):
+            expression = (
+                f"if(eq(selected_n\\,{index})\\,gte(t\\,{offset:.3f})\\,{expression})"
+            )
+        hw_input_args, hw_filter_args = recorded_frame_hw_args(
+            self.recorder.hardware_acceleration
+        )
+        decode_plans = [("hardware", hw_input_args, hw_filter_args)] if hw_input_args else []
+        decode_plans.append(("cpu", [], []))
+        last_error = ""
+        for backend, input_args, filter_args in decode_plans:
+            timeout = 8.0
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                timeout = min(timeout, remaining)
+            filter_prefix = ""
+            if filter_args:
+                try:
+                    filter_prefix = f"{filter_args[filter_args.index('-vf') + 1]},"
+                except (ValueError, IndexError):
+                    filter_prefix = ""
+            command = [
+                self.recorder.ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-fflags",
+                "+discardcorrupt",
+                "-err_detect",
+                "ignore_err",
+                *input_args,
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-an",
+                "-vf",
+                f"{filter_prefix}select={expression}",
+                "-fps_mode",
+                "passthrough",
+                "-frames:v",
+                str(len(offsets)),
+                "-pix_fmt",
+                "bgr24",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "bmp",
+                "pipe:1",
+            ]
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = f"{backend} timed out"
+                continue
+            if result.returncode != 0 or not result.stdout:
+                detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()[0:2]
+                last_error = f"{backend}: {' '.join(detail)[:180]}"
+                continue
+            encoded_frames = self._split_bmp_stream(result.stdout)
+            decoded: dict[float, Frame] = {}
+            for offset, encoded in zip(offsets, encoded_frames, strict=False):
+                frame = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is not None:
+                    decoded[offset] = frame
+            if decoded:
+                return decoded
+            last_error = f"{backend}: batch frame decode returned no frames"
+        LOGGER.debug(
+            "recorded batch decode failed for %s (%d samples): %s%s",
+            path,
+            len(offsets),
+            self.camera.id,
+            f" ({last_error})" if last_error else "",
+        )
+        return {}
+
+    @staticmethod
+    def _split_bmp_stream(payload: bytes) -> list[bytes]:
+        """Split concatenated image2pipe BMP records using their file headers."""
+        frames: list[bytes] = []
+        cursor = 0
+        payload_length = len(payload)
+        while cursor + 6 <= payload_length:
+            if payload[cursor:cursor + 2] != b"BM":
+                break
+            frame_size = int.from_bytes(payload[cursor + 2:cursor + 6], "little")
+            if frame_size < 54 or cursor + frame_size > payload_length:
+                break
+            frames.append(payload[cursor:cursor + frame_size])
+            cursor += frame_size
+        return frames
 
 class RecordedMotionObjectDetectorFactory:
     def __init__(

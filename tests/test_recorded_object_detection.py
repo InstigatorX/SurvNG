@@ -138,6 +138,35 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         self.assertEqual(sampler.recording_at(110.0)["path"], "new.mp4")
 
+    def test_event_sampler_batches_uncached_offsets_and_reuses_results(self) -> None:
+        calls: list[list[float]] = []
+
+        def batch_read(_path, offsets, **_kwargs):
+            calls.append(list(offsets))
+            return {
+                offset: np.full((4, 4, 3), int(offset * 10), dtype=np.uint8)
+                for offset in offsets
+            }
+
+        sampler = _EventRecordedSampler(
+            camera_id="gate",
+            recorder=SimpleNamespace(recording_at=lambda *_args: None),
+            frame_reader=lambda *_args, **_kwargs: None,
+            batch_frame_reader=batch_read,
+        )
+        first, batch_count, fallback_count = sampler.frames_at(
+            Path("segment.mp4"), [0.5, 1.0], deadline=None
+        )
+        second, second_batch_count, second_fallback_count = sampler.frames_at(
+            Path("segment.mp4"), [0.5, 1.0], deadline=None
+        )
+
+        self.assertEqual(set(first), {0.5, 1.0})
+        self.assertIs(first[0.5], second[0.5])
+        self.assertEqual(calls, [[0.5, 1.0]])
+        self.assertEqual((batch_count, fallback_count), (1, 0))
+        self.assertEqual((second_batch_count, second_fallback_count), (0, 0))
+
     def test_detector_prefetches_event_recording_range_once(self) -> None:
         event_epoch = 1_800_000_000.0
 
@@ -367,6 +396,39 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertIn("bmp", command)
         self.assertIn("bgr24", command)
         self.assertNotIn("mjpeg", command)
+
+    def test_recorded_frame_batch_uses_one_process_and_splits_lossless_frames(self) -> None:
+        first = np.full((12, 16, 3), 17, dtype=np.uint8)
+        second = np.full((12, 16, 3), 39, dtype=np.uint8)
+        ok_first, encoded_first = cv2.imencode(".bmp", first)
+        ok_second, encoded_second = cv2.imencode(".bmp", second)
+        self.assertTrue(ok_first and ok_second)
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            SimpleNamespace(config=SimpleNamespace()),
+            SimpleNamespace(ffmpeg_path="ffmpeg", hardware_acceleration="off"),
+            lambda: None,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recording = Path(tmpdir) / "sample.mp4"
+            recording.touch()
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=encoded_first.tobytes() + encoded_second.tobytes(),
+                stderr=b"",
+            )
+            with patch(
+                "survng.app.motion_pipeline.object_detection.subprocess.run",
+                return_value=completed,
+            ) as run:
+                frames = backend._read_recorded_frames(recording, [0.5, 1.0])
+
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue(np.array_equal(frames[0.5], first))
+        self.assertTrue(np.array_equal(frames[1.0], second))
+        command = run.call_args.args[0]
+        self.assertIn("-fps_mode", command)
+        self.assertIn("select=", " ".join(command))
 
     def test_per_class_confidence_sets_inference_floor_and_object_eligibility(self) -> None:
         class Detector:
@@ -816,6 +878,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 "detector_request_ms",
                 "detection_enrichment_ms",
                 "temporal_confirmation_wait_ms",
+                "recording_batch_processes",
+                "recording_fallback_samples",
+                "recording_samples_requested",
+                "recording_samples_decoded",
                 "workflow_ms",
             },
         )
