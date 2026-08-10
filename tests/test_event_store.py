@@ -959,6 +959,108 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(tracks[0]["id"], 3)
             self.assertEqual(tracks[0]["path"][-1], [0.2, 0.3])
 
+    def test_motion_audit_pipeline_configuration_is_deduplicated_and_hydrated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            configuration = [{"id": "threshold", "implementation": "adaptive"}]
+            base = {
+                "camera_id": "gate",
+                "snapshot_path": "",
+                "mode": "camera",
+                "sensitivity": "balanced",
+                "score": 0.2,
+                "threshold": 0.5,
+                "object_detected": None,
+                "trigger_count": 1,
+                "features": {
+                    "pipeline_telemetry": {
+                        "graphs": {
+                            "qualification": {
+                                "configuration": configuration,
+                                "invocation_timings": {},
+                            }
+                        }
+                    }
+                },
+            }
+            first = store.add_motion_audit(
+                **base,
+                created_at="2026-08-10T12:00:00+00:00",
+                reason="low_score",
+                decision_id="one",
+            )
+            store.add_motion_audit(
+                **base,
+                created_at="2026-08-10T12:00:01+00:00",
+                reason="low_persistence",
+                decision_id="two",
+            )
+
+            with sqlite3.connect(store.db_path) as conn:
+                config_count = conn.execute(
+                    "select count(*) from motion_audit_pipeline_configs"
+                ).fetchone()[0]
+                raw_features = json.loads(conn.execute(
+                    "select features_json from motion_audits where id = ?",
+                    (first["id"],),
+                ).fetchone()[0])
+            self.assertEqual(config_count, 1)
+            raw_graph = raw_features["pipeline_telemetry"]["graphs"]["qualification"]
+            self.assertNotIn("configuration", raw_graph)
+            self.assertIn("configuration_fingerprint", raw_graph)
+            hydrated = store.get_motion_audit(int(first["id"]))
+            hydrated_features = json.loads(hydrated["features_json"])
+            self.assertEqual(
+                hydrated_features["pipeline_telemetry"]["graphs"]["qualification"]["configuration"],
+                configuration,
+            )
+
+    def test_incident_activity_audits_are_summarized_per_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            event = store.add_event(
+                camera_id="foyer",
+                kind="motion",
+                created_at="2026-08-10T12:00:00+00:00",
+            )
+            base = {
+                "camera_id": "foyer",
+                "snapshot_path": "",
+                "mode": "camera",
+                "sensitivity": "balanced",
+                "score": 0.1,
+                "threshold": 0.5,
+                "reason": "event_state_active",
+                "object_detected": None,
+                "trigger_count": 1,
+                "features": {},
+                "related_event_id": int(event["id"]),
+            }
+            first = store.add_motion_audit(
+                **base,
+                created_at="2026-08-10T12:00:01+00:00",
+                decision_id="active-one",
+            )
+            second = store.add_motion_audit(
+                **base,
+                created_at="2026-08-10T12:00:02+00:00",
+                decision_id="active-two",
+            )
+
+            rows, total = store.motion_audits(
+                camera_id="foyer",
+                include_incident_activity=True,
+            )
+            self.assertEqual(first["id"], second["id"])
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["trigger_count"], 2)
+            features = json.loads(rows[0]["features_json"])
+            self.assertEqual(features["episode_observation_count"], 2)
+            self.assertEqual(
+                features["episode_last_observed_at"],
+                "2026-08-10T12:00:02+00:00",
+            )
+
     def test_motion_audits_filter_visual_backup_category(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

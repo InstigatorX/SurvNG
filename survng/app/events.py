@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import copy
+import hashlib
 import math
 import sqlite3
 import threading
@@ -144,6 +146,15 @@ class EventStore:
             )
             conn.execute(
                 "create unique index if not exists idx_motion_audits_decision on motion_audits(decision_id) where decision_id is not null and decision_id != ''"
+            )
+            conn.execute(
+                """
+                create table if not exists motion_audit_pipeline_configs (
+                    fingerprint text primary key,
+                    configuration_json text not null,
+                    created_at text not null
+                )
+                """
             )
             conn.execute(
                 """
@@ -1612,15 +1623,74 @@ class EventStore:
         normalized_threshold = float(threshold)
         if not math.isfinite(normalized_score) or not math.isfinite(normalized_threshold):
             raise ValueError("motion audit score and threshold must be finite")
+        compact_features, pipeline_configurations = self._compact_audit_features(
+            features or {}
+        )
         features_json = json.dumps(
-            features or {},
+            compact_features,
             separators=(",", ":"),
             allow_nan=False,
         )
         replaced_snapshot = ""
         with self._lock, self._connect() as conn:
+            for fingerprint, configuration_json in pipeline_configurations.items():
+                conn.execute(
+                    """
+                    insert or ignore into motion_audit_pipeline_configs (
+                        fingerprint, configuration_json, created_at
+                    ) values (?, ?, ?)
+                    """,
+                    (fingerprint, configuration_json, created_at),
+                )
             audit_id: int | None = None
-            if normalized_decision_id:
+            if (
+                reason in {"event_state_active", "event_state_cooldown"}
+                and normalized_related_event_id is not None
+                and event_id is None
+            ):
+                existing = conn.execute(
+                    """
+                    select id, trigger_count, features_json
+                    from motion_audits
+                    where event_id is null and related_event_id = ?
+                      and camera_id = ? and reason = ? and category = ?
+                    order by id asc limit 1
+                    """,
+                    (
+                        normalized_related_event_id,
+                        camera_id,
+                        reason,
+                        normalized_category,
+                    ),
+                ).fetchone()
+                if existing is not None:
+                    audit_id = int(existing["id"])
+                    compact_features["episode_observation_count"] = (
+                        int(existing["trigger_count"] or 1) + normalized_trigger_count
+                    )
+                    compact_features["episode_last_observed_at"] = created_at
+                    features_json = json.dumps(
+                        compact_features,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    conn.execute(
+                        """
+                        update motion_audits
+                        set created_at = ?, score = max(score, ?), threshold = ?,
+                            trigger_count = trigger_count + ?, features_json = ?
+                        where id = ?
+                        """,
+                        (
+                            created_at,
+                            normalized_score,
+                            normalized_threshold,
+                            normalized_trigger_count,
+                            features_json,
+                            audit_id,
+                        ),
+                    )
+            if audit_id is None and normalized_decision_id:
                 existing = conn.execute(
                     "select id, snapshot_path from motion_audits where decision_id = ?",
                     (normalized_decision_id,),
@@ -1657,7 +1727,7 @@ class EventStore:
                             audit_id,
                         ),
                     )
-            elif event_id is None:
+            elif audit_id is None and event_id is None:
                 existing = conn.execute(
                     """
                     select id from motion_audits
@@ -1736,6 +1806,89 @@ class EventStore:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return self.get_motion_audit(audit_id) or {}
 
+    @staticmethod
+    def _compact_audit_features(
+        features: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        compact = copy.deepcopy(features)
+        configurations: dict[str, str] = {}
+        telemetry = compact.get("pipeline_telemetry")
+        graphs = telemetry.get("graphs") if isinstance(telemetry, dict) else None
+        if isinstance(graphs, dict):
+            for graph in graphs.values():
+                if not isinstance(graph, dict) or "configuration" not in graph:
+                    continue
+                configuration = graph.pop("configuration")
+                serialized = json.dumps(
+                    configuration,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                fingerprint = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+                graph["configuration_fingerprint"] = fingerprint
+                configurations[fingerprint] = serialized
+        return compact, configurations
+
+    @staticmethod
+    def _hydrate_audit_rows(
+        conn: sqlite3.Connection,
+        rows: list[sqlite3.Row],
+    ) -> list[dict[str, Any]]:
+        decoded: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        fingerprints: set[str] = set()
+        for row in rows:
+            payload = dict(row)
+            try:
+                features = json.loads(str(payload.get("features_json") or "{}"))
+            except (json.JSONDecodeError, TypeError):
+                features = {}
+            telemetry = features.get("pipeline_telemetry") if isinstance(features, dict) else None
+            graphs = telemetry.get("graphs") if isinstance(telemetry, dict) else None
+            if isinstance(graphs, dict):
+                for graph in graphs.values():
+                    if not isinstance(graph, dict):
+                        continue
+                    fingerprint = graph.get("configuration_fingerprint")
+                    if isinstance(fingerprint, str) and fingerprint:
+                        fingerprints.add(fingerprint)
+            decoded.append((payload, features))
+
+        configurations: dict[str, Any] = {}
+        if fingerprints:
+            placeholders = ",".join("?" for _ in fingerprints)
+            config_rows = conn.execute(
+                f"select fingerprint, configuration_json "
+                f"from motion_audit_pipeline_configs where fingerprint in ({placeholders})",
+                sorted(fingerprints),
+            ).fetchall()
+            for config_row in config_rows:
+                try:
+                    configurations[str(config_row["fingerprint"])] = json.loads(
+                        str(config_row["configuration_json"])
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        hydrated: list[dict[str, Any]] = []
+        for payload, features in decoded:
+            telemetry = features.get("pipeline_telemetry") if isinstance(features, dict) else None
+            graphs = telemetry.get("graphs") if isinstance(telemetry, dict) else None
+            if isinstance(graphs, dict):
+                for graph in graphs.values():
+                    if not isinstance(graph, dict):
+                        continue
+                    configuration = configurations.get(graph.get("configuration_fingerprint"))
+                    if configuration is not None:
+                        graph["configuration"] = configuration
+            payload["features_json"] = json.dumps(
+                features,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            hydrated.append(payload)
+        return hydrated
+
     def motion_audits(
         self,
         *,
@@ -1779,7 +1932,8 @@ class EventStore:
                 """,
                 [*values, bounded_limit, bounded_offset],
             ).fetchall()
-        return [dict(row) for row in rows], total
+            hydrated = self._hydrate_audit_rows(conn, list(rows))
+        return hydrated, total
 
     def create_motion_ai_review(self, camera_id: str, audits_considered: int) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
@@ -2050,7 +2204,8 @@ class EventStore:
             ).fetchall()
             audit_rows = conn.execute(
                 """
-                select camera_id, mode, reason, event_id, object_detected, features_json, category
+                select camera_id, mode, reason, event_id, object_detected,
+                       trigger_count, features_json, category
                 from motion_audits
                 where created_at >= ?
                 """,
@@ -2130,7 +2285,9 @@ class EventStore:
                 continue
             reason = str(row["reason"] or "")
             if reason.startswith("event_state_"):
-                summary["state_deduplicated"] += 1
+                summary["state_deduplicated"] += max(
+                    1, int(row["trigger_count"] or 1)
+                )
             else:
                 summary["visual_filtered"] += 1
                 try:
@@ -2176,7 +2333,11 @@ class EventStore:
                 "select * from motion_audits where id = ?",
                 (int(audit_id),),
             ).fetchone()
-        return dict(row) if row is not None else None
+            hydrated = self._hydrate_audit_rows(
+                conn,
+                [row] if row is not None else [],
+            )
+        return hydrated[0] if hydrated else None
 
     def motion_audits_for_related_events(self, event_ids: list[int]) -> list[dict[str, Any]]:
         unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
@@ -2195,7 +2356,7 @@ class EventStore:
                     """,
                     chunk,
                 ).fetchall()
-                audits.extend(dict(row) for row in rows)
+                audits.extend(self._hydrate_audit_rows(conn, list(rows)))
         return audits
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
