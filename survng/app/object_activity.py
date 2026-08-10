@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any, Iterable, Literal, Mapping
 
 from .object_motion import TemporalObjectMotionEvidence, temporal_object_motion_evidence
+from .stationary_policy import StationaryObjectPolicy, stationary_object_policy
 
 
 AttributionMode = Literal["off", "shadow", "enforce"]
@@ -148,8 +149,15 @@ class ObjectActivityAttributor:
     CONTEXT_MEMORY_MIN_PRIOR_SIGHTINGS = 2
     CONTEXT_MEMORY_MAX_SIGHTINGS = 16
 
-    def __init__(self, mode: AttributionMode = "enforce") -> None:
+    def __init__(
+        self,
+        mode: AttributionMode = "enforce",
+        stationary_tolerance: str = "balanced",
+    ) -> None:
         self.mode: AttributionMode = mode
+        self.stationary_policy: StationaryObjectPolicy = stationary_object_policy(
+            stationary_tolerance
+        )
         self._lock = threading.Lock()
         self._counts = {
             "evaluated": 0,
@@ -207,7 +215,8 @@ class ObjectActivityAttributor:
                 **self._counts,
                 "reasons": dict(self._reasons),
                 "scene_context_memory_entries": len(self._context_memory),
-                "scene_context_memory_ttl_seconds": self.CONTEXT_MEMORY_TTL_SECONDS,
+                "scene_context_memory_ttl_seconds": self.stationary_policy.scene_memory_ttl_seconds,
+                "stationary_policy": self.stationary_policy.as_dict(),
             }
 
     def reconfigure(self, mode: AttributionMode) -> None:
@@ -236,16 +245,16 @@ class ObjectActivityAttributor:
         stable = bool(
             observation.get("temporal_consensus") is True
             and motion.stable(
-                maximum_displacement_ratio=self.STABLE_DISPLACEMENT_RATIO,
-                maximum_path_ratio=self.STABLE_PATH_RATIO,
+                maximum_displacement_ratio=self.stationary_policy.scene_stable_displacement_ratio,
+                maximum_path_ratio=self.stationary_policy.scene_stable_path_ratio,
                 require_trigger_span=True,
             )
         )
         stable_observation = bool(
             observation.get("temporal_consensus") is True
             and motion.stable(
-                maximum_displacement_ratio=self.STABLE_DISPLACEMENT_RATIO,
-                maximum_path_ratio=self.STABLE_PATH_RATIO,
+                maximum_displacement_ratio=self.stationary_policy.scene_stable_displacement_ratio,
+                maximum_path_ratio=self.stationary_policy.scene_stable_path_ratio,
             )
         )
         memory_match, memory_sightings, memory_age = self._context_memory_evidence(
@@ -275,7 +284,7 @@ class ObjectActivityAttributor:
         elif (
             stable_observation
             and memory_match
-            and memory_sightings >= self.CONTEXT_MEMORY_MIN_PRIOR_SIGHTINGS
+            and memory_sightings >= self.stationary_policy.scene_memory_min_prior_sightings
         ):
             role = ObjectActivityRole.SCENE_CONTEXT
             confidence = self._bounded(0.86 + min(0.1, memory_sightings * 0.02))
@@ -380,7 +389,7 @@ class ObjectActivityAttributor:
                 if entry.label == label
                 and event_key not in entry.stable_event_keys
                 and entry.last_seen_epoch <= observed_at_epoch
-                and self._box_iou(entry.box, box) >= self.CONTEXT_MEMORY_MIN_IOU
+                and self._box_iou(entry.box, box) >= self.stationary_policy.scene_memory_min_iou
             ]
             if not matches:
                 return False, 0, None
@@ -410,7 +419,7 @@ class ObjectActivityAttributor:
                     for entry in self._context_memory
                     if entry.label == label
                     and entry.last_seen_epoch <= observed_at_epoch
-                    and self._box_iou(entry.box, box) >= self.CONTEXT_MEMORY_MIN_IOU
+                    and self._box_iou(entry.box, box) >= self.stationary_policy.scene_memory_min_iou
                 ),
                 None,
             )
@@ -444,7 +453,7 @@ class ObjectActivityAttributor:
             for entry in self._context_memory:
                 matches = bool(
                     entry.label == label
-                    and self._box_iou(entry.box, box) >= self.CONTEXT_MEMORY_MIN_IOU
+                    and self._box_iou(entry.box, box) >= self.stationary_policy.scene_memory_min_iou
                 )
                 if matches and invalidate_location:
                     continue
@@ -455,7 +464,7 @@ class ObjectActivityAttributor:
             self._context_memory[:] = retained
 
     def _prune_context_memory(self, observed_at_epoch: float) -> None:
-        cutoff = observed_at_epoch - self.CONTEXT_MEMORY_TTL_SECONDS
+        cutoff = observed_at_epoch - self.stationary_policy.scene_memory_ttl_seconds
         self._context_memory[:] = [
             entry for entry in self._context_memory if entry.last_seen_epoch >= cutoff
         ]

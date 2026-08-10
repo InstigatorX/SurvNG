@@ -143,7 +143,12 @@ class CameraWorker:
                     )
                     if camera.object_activity_attribution == "inherit"
                     else camera.object_activity_attribution
-                )
+                ),
+                stationary_tolerance=(
+                    self.motion_config.stationary_object_tolerance
+                    if camera.motion_qualification.stationary_object_tolerance == "inherit"
+                    else camera.motion_qualification.stationary_object_tolerance
+                ),
             ),
         )
         self.motion_incidents = MotionIncidentService(

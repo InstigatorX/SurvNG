@@ -10,6 +10,7 @@ import numpy as np
 
 from ..motion import MOTION_SCORE_THRESHOLDS
 from ..motion_types import MotionBlob, MotionFrameBlobs, MotionTrack
+from ..stationary_policy import stationary_object_policy
 from .context import MotionContext, MotionScoring
 from .registry import (
     MotionStageDependencies,
@@ -236,6 +237,21 @@ class AdaptiveEmaBackgroundStage:
             noise_ema = state.noise_ema
             brightness_ema = state.brightness_ema
             sample_fps = max(1.0, float(context.configuration.get("sample_fps", 5.0)))
+            stationary_tolerance = str(
+                context.configuration.get("stationary_object_tolerance") or ""
+            )
+            stationary_policy = stationary_object_policy(stationary_tolerance)
+            stationary_learning_seconds = (
+                stationary_policy.background_learning_seconds
+                if stationary_tolerance in {"low", "balanced", "high"}
+                else self.stationary_learning_seconds
+            )
+            stationary_learning_rate = max(
+                self.learning_rate,
+                stationary_policy.background_learning_rate
+                if stationary_tolerance in {"low", "balanced", "high"}
+                else self.stationary_learning_rate,
+            )
             previous_processed_at = state.last_processed_at
             stale_transition_count = 0
             for frame_index, frame in enumerate(frames[1:], start=1):
@@ -291,7 +307,7 @@ class AdaptiveEmaBackgroundStage:
                 ).astype(np.float32, copy=False)
                 persistent_change = np.logical_and(
                     changed,
-                    persistent_change_seconds >= self.stationary_learning_seconds,
+                    persistent_change_seconds >= stationary_learning_seconds,
                 )
 
                 if changed_ratio >= self.global_change_ratio:
@@ -319,7 +335,7 @@ class AdaptiveEmaBackgroundStage:
                     else:
                         moving_rate = 0.0
                     stationary_rate = 1.0 - (
-                        1.0 - self.stationary_learning_rate
+                        1.0 - stationary_learning_rate
                     ) ** elapsed_frames
                     cv2.accumulateWeighted(
                         current,
@@ -356,7 +372,8 @@ class AdaptiveEmaBackgroundStage:
             "background_learning_rates": [round(value, 5) for value in learning_rates],
             "background_moving_learning_rates": [round(value, 5) for value in moving_learning_rates],
             "background_persistent_change_ratios": [round(value, 6) for value in persistent_change_ratios],
-            "background_stationary_learning_seconds": self.stationary_learning_seconds,
+            "background_stationary_learning_seconds": stationary_learning_seconds,
+            "stationary_policy": stationary_policy.as_dict(),
             "scene_noise": round(scene_noise, 4),
             "scene_brightness": round(brightness, 2),
             "scene_mode": "night" if brightness < 55 else "day",
@@ -872,13 +889,7 @@ class AdaptiveMotionScoringStage:
         stationary_tolerance = str(
             context.configuration.get("stationary_object_tolerance") or ""
         )
-        stationary_thresholds = {
-            # displacement, path, containment radius, maximum oscillation
-            # progress, maximum oscillation displacement
-            "low": (0.006, 0.015, 0.012, 0.18, 0.035),
-            "balanced": (0.01, 0.025, 0.025, 0.32, 0.065),
-            "high": (0.02, 0.05, 0.045, 0.45, 0.12),
-        }
+        stationary_policy = stationary_object_policy(stationary_tolerance)
         (
             stationary_displacement_ratio,
             stationary_path_ratio,
@@ -886,15 +897,12 @@ class AdaptiveMotionScoringStage:
             stationary_progress_ratio,
             stationary_max_displacement_ratio,
         ) = (
-            stationary_thresholds.get(
-                stationary_tolerance,
-                (
-                    self.stationary_displacement_ratio,
-                    self.stationary_path_ratio,
-                    max(self.stationary_displacement_ratio * 2.5, 0.025),
-                    0.32,
-                    max(self.stationary_displacement_ratio * 6.0, 0.065),
-                ),
+            (
+                stationary_policy.displacement_ratio,
+                stationary_policy.path_ratio,
+                stationary_policy.containment_ratio,
+                stationary_policy.progress_ratio,
+                stationary_policy.maximum_displacement_ratio,
             )
         )
         context.debug.values["stationary_object_tolerance"] = (

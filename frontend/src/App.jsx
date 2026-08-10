@@ -1079,7 +1079,7 @@ const assistantTrackingAssessments = {
 const assistantSettingLabels = {
   analysis_preset: "Motion analysis style",
   sensitivity: "Motion sensitivity",
-  stationary_object_tolerance: "EMA stationary-motion filtering",
+  stationary_object_tolerance: "Stationary object policy",
   frame_width: "Motion analysis image size",
   borderline_rescue_enabled: "Second look at borderline motion",
   borderline_margin: "Borderline motion range",
@@ -9512,7 +9512,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     <option value="balanced">Balanced</option>
                     <option value="low">Low</option>
                   </select></label>
-                  <label>EMA stationary-motion filtering<select value={selectedCamera.motion_qualification?.stationary_object_tolerance || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "stationary_object_tolerance"], event.target.value)}>
+                  <label>Stationary object policy<select value={selectedCamera.motion_qualification?.stationary_object_tolerance || "inherit"} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "stationary_object_tolerance"], event.target.value)}>
                     <option value="inherit">Use global setting</option>
                     <option value="low">Light</option>
                     <option value="balanced">Standard</option>
@@ -9911,7 +9911,7 @@ function Mog2TrackOverlay({ tracks, bounds }) {
 
 const motionAiSettingLabels = {
   analysis_preset: "Motion analysis method",
-  stationary_object_tolerance: "EMA stationary-motion filtering",
+  stationary_object_tolerance: "Stationary object policy",
 };
 
 function formatMotionAiValue(setting, value) {
@@ -10719,7 +10719,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <div><h3>Stationary objects &amp; scene context</h3><p>Separate visual-motion filtering from object-level incident attribution.</p></div>
           </header>
           <div className="detection-field-grid">
-            <label>EMA stationary-motion filtering<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Light</option><option value="balanced">Standard</option><option value="high">Strong</option></select><small>Runs before object detection. It rejects confined outline shimmer and stationary foreground motion; Strong may ignore unusually slow or distant travel.</small></label>
+            <label>Stationary object policy<select value={config.motion_qualification?.stationary_object_tolerance || "balanced"} onChange={(event) => updateConfig(["motion_qualification", "stationary_object_tolerance"], event.target.value)}><option value="low">Light</option><option value="balanced">Standard</option><option value="high">Strong</option></select><small>Coordinates EMA background learning, stationary-motion scoring, and parked-object scene memory. Strong may ignore unusually slow or distant travel.</small></label>
             <label>Repeated scene context<select value={config.detector?.object_activity_attribution || "enforce"} onChange={(event) => updateConfig(["detector", "object_activity_attribution"], event.target.value)}>
               <option value="enforce">Prevent false incident labels</option>
               <option value="shadow">Observe without changing incidents</option>
