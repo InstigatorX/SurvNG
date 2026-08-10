@@ -1028,6 +1028,7 @@ function defaultCamera(cameras, seed = {}) {
       borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
       suppression_verification_rate: seed.motion_qualification?.suppression_verification_rate ?? null,
       mog2_audit_enabled: seed.motion_qualification?.mog2_audit_enabled ?? null,
+      spatial_alignment: structuredClone(seed.motion_qualification?.spatial_alignment || {}),
       pipeline: structuredClone(seed.motion_qualification?.pipeline || {}),
     },
     zones: structuredClone(seed.zones || []),

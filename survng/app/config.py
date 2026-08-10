@@ -210,6 +210,15 @@ class MotionQualificationConfig(BaseModel):
     pipeline: MotionPipelineConfig = Field(default_factory=MotionPipelineConfig)
 
 
+class MotionSpatialAlignmentConfig(BaseModel):
+    mode: Literal["auto", "identity", "affine", "untrusted"] = "auto"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    scale_x: float = Field(default=1.0, ge=0.1, le=10.0)
+    scale_y: float = Field(default=1.0, ge=0.1, le=10.0)
+    offset_x: float = Field(default=0.0, ge=-1.0, le=1.0)
+    offset_y: float = Field(default=0.0, ge=-1.0, le=1.0)
+
+
 class CameraMotionQualificationConfig(BaseModel):
     mode: Literal["inherit", "camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "inherit"
     sensitivity: Literal["inherit", "low", "balanced", "high"] = "inherit"
@@ -225,6 +234,9 @@ class CameraMotionQualificationConfig(BaseModel):
     borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
     suppression_verification_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     mog2_audit_enabled: bool | None = None
+    spatial_alignment: MotionSpatialAlignmentConfig = Field(
+        default_factory=MotionSpatialAlignmentConfig
+    )
     pipeline: CameraMotionPipelineConfig = Field(default_factory=CameraMotionPipelineConfig)
 
 

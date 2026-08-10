@@ -51,16 +51,46 @@ def _intersects_motion_region(
     return False
 
 
+def _aligned_motion_regions(
+    regions: list[object],
+    alignment: dict[str, Any],
+) -> list[list[float]]:
+    scale_x = float(alignment.get("scale_x", 1.0))
+    scale_y = float(alignment.get("scale_y", 1.0))
+    offset_x = float(alignment.get("offset_x", 0.0))
+    offset_y = float(alignment.get("offset_y", 0.0))
+    aligned: list[list[float]] = []
+    for region in regions:
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (float(value) for value in region)
+        except (TypeError, ValueError):
+            continue
+        aligned.append([
+            max(0.0, min(1.0, x1 * scale_x + offset_x)),
+            max(0.0, min(1.0, y1 * scale_y + offset_y)),
+            max(0.0, min(1.0, x2 * scale_x + offset_x)),
+            max(0.0, min(1.0, y2 * scale_y + offset_y)),
+        ])
+    return aligned
+
+
 def motion_correlated_objects(
     frame: Frame,
     objects: list[dict[str, Any]],
     qualification: dict[str, Any],
+    alignment: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep objects that spatially or temporally explain an EMA trigger."""
     features = qualification.get("features")
     regions = features.get("motion_regions", []) if isinstance(features, dict) else []
     if not isinstance(regions, list):
         regions = []
+    alignment = dict(alignment or {})
+    alignment_reliable = bool(alignment.get("reliable", True))
+    if alignment_reliable:
+        regions = _aligned_motion_regions(regions, alignment)
     correlated: list[dict[str, Any]] = []
     spatial_matches = 0
     temporal_matches = 0
@@ -75,10 +105,19 @@ def motion_correlated_objects(
             frame_height=height,
         )
         box = evidence.normalized_box
-        spatial = bool(box is not None and _intersects_motion_region(box, regions))
+        spatial = bool(
+            alignment_reliable
+            and box is not None
+            and _intersects_motion_region(box, regions)
+        )
         temporal = evidence.displacement_ratio >= evidence.movement_threshold
         spatial_fallback = spatial and not evidence.temporal_evidence_available
-        appearance_match = spatial and evidence.newly_appeared
+        appearance_match = evidence.newly_appeared and (
+            spatial or not alignment_reliable
+        )
+        alignment_fallback = bool(
+            not alignment_reliable and not evidence.temporal_evidence_available
+        )
         # A short recorded sequence can begin and end at nearly the same point
         # while a real object walks through the EMA region.  Permit that only
         # when spatial evidence also agrees and the travelled path is well
@@ -90,13 +129,18 @@ def motion_correlated_objects(
             and evidence.path_ratio >= evidence.path_threshold
         )
         motion_correlated = bool(
-            temporal or spatial_path or spatial_fallback or appearance_match
+            temporal
+            or spatial_path
+            or spatial_fallback
+            or appearance_match
+            or alignment_fallback
         )
         detected["motion_correlated"] = motion_correlated
         detected["motion_correlation"] = (
             "temporal" if temporal else
             "spatial_path" if spatial_path else
             "appearance" if appearance_match else
+            "alignment_unverified" if alignment_fallback else
             "spatial" if spatial_fallback else
             "none"
         )
@@ -144,6 +188,9 @@ def motion_correlated_objects(
         "minimum_temporal_movement_ratio": MAXIMUM_MOVEMENT_RATIO,
         "adaptive_minimum_temporal_movement_ratio": MINIMUM_MOVEMENT_RATIO,
         "region_margin_ratio": MOTION_REGION_MARGIN_RATIO,
+        "alignment_reliable": alignment_reliable,
+        "alignment_mode": str(alignment.get("mode") or "legacy_identity"),
+        "alignment_confidence": float(alignment.get("confidence", 1.0)),
     }
 
 
@@ -231,6 +278,7 @@ class MotionDecisionHandler:
         event_callback: MotionEventCallback | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
         face_candidate_sink: FaceCandidateSink | None = None,
+        spatial_alignment: dict[str, Any] | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
@@ -241,6 +289,7 @@ class MotionDecisionHandler:
         self.event_callback = event_callback
         self.activity_attributor = activity_attributor
         self.face_candidate_sink = face_candidate_sink
+        self.spatial_alignment = dict(spatial_alignment or {"reliable": True})
 
     def activity_status(self) -> dict[str, Any]:
         if self.activity_attributor is None:
@@ -425,6 +474,7 @@ class MotionDecisionHandler:
                 frame,
                 eligible_objects,
                 qualification,
+                self.spatial_alignment,
             )
             uncorrelated_eligible_objects -= len(eligible_objects)
             qualification["motion_correlation"] = correlation
@@ -651,6 +701,7 @@ class MotionDecisionHandlerFactory:
         initial_detection_provider: MotionDetectionProvider | None = None,
         event_callback: MotionEventCallback | None = None,
         activity_attributor: ObjectActivityAttributor | None = None,
+        spatial_alignment: dict[str, Any] | None = None,
     ) -> MotionDecisionHandler:
         return MotionDecisionHandler(
             camera_id=camera_id,
@@ -662,4 +713,5 @@ class MotionDecisionHandlerFactory:
             event_callback=event_callback,
             activity_attributor=activity_attributor,
             face_candidate_sink=self.face_candidate_sink,
+            spatial_alignment=spatial_alignment,
         )

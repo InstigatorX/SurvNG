@@ -414,6 +414,84 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertTrue(outcome.object_detected)
         self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "spatial")
 
+    def test_untrusted_main_sub_alignment_fails_open_without_temporal_evidence(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "incident_eligible": True,
+                    "box": {"x1": 70, "y1": 70, "x2": 90, "y2": 95},
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+            spatial_alignment={
+                "mode": "auto",
+                "reliable": False,
+                "confidence": 0.0,
+            },
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.1, 0.1, 0.3, 0.3]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(
+            outcome.detected_objects[0]["motion_correlation"],
+            "alignment_unverified",
+        )
+        self.assertFalse(outcome.motion_correlation["alignment_reliable"])
+
+    def test_untrusted_alignment_still_rejects_temporally_stationary_object(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "car",
+                    "confidence": 0.96,
+                    "incident_eligible": True,
+                    "box": {"x1": 60, "y1": 50, "x2": 90, "y2": 85},
+                    "temporal_track_observations": 3,
+                    "temporal_center_displacement_ratio": 0.001,
+                    "temporal_center_path_ratio": 0.002,
+                    "temporal_newly_appeared": False,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+            spatial_alignment={"mode": "untrusted", "reliable": False},
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.6, 0.5, 0.9, 0.85]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+
     def test_ema_rescue_rejects_spatially_overlapping_stationary_object(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)

@@ -150,6 +150,7 @@ class CameraWorker:
                     else camera.motion_qualification.stationary_object_tolerance
                 ),
             ),
+            spatial_alignment=self._motion_spatial_alignment(camera),
         )
         self.motion_incidents = MotionIncidentService(
             camera_id=camera.id,
@@ -282,6 +283,27 @@ class CameraWorker:
             incidents=self.motion_incidents,
             lifecycle=self.lifecycle,
         )
+
+    @staticmethod
+    def _motion_spatial_alignment(camera: CameraConfig) -> dict[str, Any]:
+        configured = camera.motion_qualification.spatial_alignment
+        mode = configured.mode
+        same_stream = camera.live_url() == camera.stream_url
+        confidence = float(configured.confidence)
+        reliable = bool(
+            mode == "identity"
+            or (mode == "affine" and confidence >= 0.8)
+            or (mode == "auto" and same_stream)
+        )
+        return {
+            "mode": mode,
+            "reliable": reliable,
+            "confidence": 1.0 if mode == "identity" or same_stream else confidence,
+            "scale_x": configured.scale_x,
+            "scale_y": configured.scale_y,
+            "offset_x": configured.offset_x,
+            "offset_y": configured.offset_y,
+        }
 
     def start(self) -> None:
         self.lifecycle.start()
