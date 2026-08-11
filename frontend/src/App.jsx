@@ -9513,13 +9513,50 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
   const zones = camera.zones || [];
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
+  const [snapshotSize, setSnapshotSize] = useState(null);
+  const [canvasSize, setCanvasSize] = useState(null);
+  const canvasRef = useRef(null);
   const snapshotUrl = useMemo(() => appUrl(`/api/cameras/${camera.id}/zone-snapshot.jpg?source=live&t=${Date.now()}`), [camera.id]);
   const selectedZone = zones[selectedIndex] || null;
 
   useEffect(() => {
     setSelectedIndex(0);
     setDragPoint(null);
+    setSnapshotSize(null);
   }, [camera.id]);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const updateSize = () => {
+      setCanvasSize((current) => {
+        const next = {
+          width: Math.max(0, canvas.clientWidth),
+          height: Math.max(0, canvas.clientHeight),
+        };
+        return current && Math.abs(current.width - next.width) < 0.5 && Math.abs(current.height - next.height) < 0.5
+          ? current
+          : next;
+      });
+    };
+    updateSize();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateSize);
+      return () => window.removeEventListener("resize", updateSize);
+    }
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [camera.id]);
+
+  const mediaSize = useMemo(() => {
+    if (!snapshotSize?.width || !snapshotSize?.height || !canvasSize?.width || !canvasSize?.height) return null;
+    const scale = Math.min(canvasSize.width / snapshotSize.width, canvasSize.height / snapshotSize.height);
+    return {
+      width: Math.max(1, Math.floor(snapshotSize.width * scale)),
+      height: Math.max(1, Math.floor(snapshotSize.height * scale)),
+    };
+  }, [canvasSize, snapshotSize]);
 
   useEffect(() => {
     if (!dragPoint) return undefined;
@@ -9598,9 +9635,16 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
         </div>
       </div>
       <div className="zone-editor-layout">
-        <div className="zone-canvas">
-          <div className="zone-canvas-media">
-            <img src={snapshotUrl} alt={`${camera.name} zone editor`} />
+        <div className="zone-canvas" ref={canvasRef}>
+          <div className="zone-canvas-media" style={mediaSize || undefined}>
+            <img
+              src={snapshotUrl}
+              alt={`${camera.name} zone editor`}
+              onLoad={(event) => setSnapshotSize({
+                width: event.currentTarget.naturalWidth,
+                height: event.currentTarget.naturalHeight,
+              })}
+            />
             <svg
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
@@ -9644,61 +9688,69 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
           </div>
           {!selectedZone ? <div className="zone-canvas-empty">Add a zone to begin</div> : selectedZone.points?.length < 3 ? <div className="zone-canvas-hint">Click at least three points</div> : null}
         </div>
-        <div className="zone-list">
-          {zones.map((zone, index) => (
-            <button type="button" key={`${zone.name}-${index}`} className={index === selectedIndex ? "active" : ""} onClick={() => setSelectedIndex(index)}>
-              <span className="zone-swatch" style={{ background: zone.color || "#22c55e" }} />
-              <span>{zone.name || `Zone ${index + 1}`}</span>
-              <small>{zone.behavior === "none" ? "no object effect" : zone.behavior}{zone.exclude_from_ema ? " · EMA excluded" : ""}</small>
-            </button>
-          ))}
-          {!zones.length ? <div className="empty-state compact">No zones configured.</div> : null}
-        </div>
-      </div>
-      {selectedZone ? (
-        <div className="zone-fields">
-          <label>Name<input value={selectedZone.name || ""} onChange={(event) => replaceZone(selectedIndex, { name: event.target.value })} /></label>
-          <label>Color<input className="zone-color-input" type="color" value={selectedZone.color || "#22c55e"} onChange={(event) => replaceZone(selectedIndex, { color: event.target.value })} /></label>
-          <label>Behavior<select value={selectedZone.behavior || "incident"} onChange={(event) => replaceZone(selectedIndex, { behavior: event.target.value })}><option value="incident">Incident</option><option value="ignore">Ignore</option><option value="none">No object effect</option></select></label>
-          <div className="zone-class-field">
-            <span>Object Classes</span>
-            <details className={`zone-class-dropdown${selectedZone.behavior === "none" ? " disabled" : ""}`}>
-              <summary>{selectedZone.behavior === "none" ? "Not used" : selectedZone.object_classes?.length ? selectedZone.object_classes.join(", ") : "All classes"}</summary>
-              <div className="zone-class-menu">
-                <label>
-                  <input type="checkbox" checked={!selectedZone.object_classes?.length} onChange={() => replaceZone(selectedIndex, { object_classes: [] })} />
-                  All classes
-                </label>
-                {classOptions.map((className) => {
-                  const selectedClasses = selectedZone.object_classes || [];
-                  const checked = selectedClasses.includes(className);
-                  return (
-                    <label key={className}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => replaceZone(selectedIndex, {
-                          object_classes: checked
-                            ? selectedClasses.filter((item) => item !== className)
-                            : [...selectedClasses, className],
-                        })}
-                      />
-                      {className}
-                    </label>
-                  );
-                })}
-                {!classOptions.length ? <small>No model classes reported</small> : null}
+        <aside className="zone-sidebar">
+          <div className="zone-sidebar-panel">
+            <h4>Zones</h4>
+            <div className="zone-list">
+              {zones.map((zone, index) => (
+                <button type="button" key={`${zone.name}-${index}`} className={index === selectedIndex ? "active" : ""} onClick={() => setSelectedIndex(index)}>
+                  <span className="zone-swatch" style={{ background: zone.color || "#22c55e" }} />
+                  <span>{zone.name || `Zone ${index + 1}`}</span>
+                  <small>{zone.behavior === "none" ? "no object effect" : zone.behavior}{zone.exclude_from_ema ? " · EMA excluded" : ""}</small>
+                </button>
+              ))}
+              {!zones.length ? <div className="empty-state compact">No zones configured.</div> : null}
+            </div>
+          </div>
+          {selectedZone ? (
+            <div className="zone-sidebar-panel zone-config-panel">
+              <h4>Zone settings</h4>
+              <div className="zone-fields">
+                <label className="zone-field-name">Name<input value={selectedZone.name || ""} onChange={(event) => replaceZone(selectedIndex, { name: event.target.value })} /></label>
+                <label className="zone-field-color">Color<input className="zone-color-input" type="color" value={selectedZone.color || "#22c55e"} onChange={(event) => replaceZone(selectedIndex, { color: event.target.value })} /></label>
+                <label className="zone-field-behavior">Behavior<select value={selectedZone.behavior || "incident"} onChange={(event) => replaceZone(selectedIndex, { behavior: event.target.value })}><option value="incident">Incident</option><option value="ignore">Ignore</option><option value="none">No object effect</option></select></label>
+                <div className="zone-class-field">
+                  <span>Object Classes</span>
+                  <details className={`zone-class-dropdown${selectedZone.behavior === "none" ? " disabled" : ""}`}>
+                    <summary>{selectedZone.behavior === "none" ? "Not used" : selectedZone.object_classes?.length ? selectedZone.object_classes.join(", ") : "All classes"}</summary>
+                    <div className="zone-class-menu">
+                      <label>
+                        <input type="checkbox" checked={!selectedZone.object_classes?.length} onChange={() => replaceZone(selectedIndex, { object_classes: [] })} />
+                        All classes
+                      </label>
+                      {classOptions.map((className) => {
+                        const selectedClasses = selectedZone.object_classes || [];
+                        const checked = selectedClasses.includes(className);
+                        return (
+                          <label key={className}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => replaceZone(selectedIndex, {
+                                object_classes: checked
+                                  ? selectedClasses.filter((item) => item !== className)
+                                  : [...selectedClasses, className],
+                              })}
+                            />
+                            {className}
+                          </label>
+                        );
+                      })}
+                      {!classOptions.length ? <small>No model classes reported</small> : null}
+                    </div>
+                  </details>
+                </div>
+                <label className="zone-field-confidence">Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={selectedZone.behavior === "none" ? "N/A" : "Global"} disabled={selectedZone.behavior === "none"} value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
+                <div className="zone-toggle-stack">
+                  <label title="Motion inside this zone will not validate or trigger EMA activity. Object incident rules remain unchanged."><input type="checkbox" checked={selectedZone.exclude_from_ema === true} onChange={(event) => replaceZone(selectedIndex, { exclude_from_ema: event.target.checked })} /> Exclude from EMA</label>
+                  <label><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
+                </div>
+                <button type="button" className="danger zone-remove-button" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
               </div>
-            </details>
-          </div>
-          <label>Confidence<input type="number" min="0.01" max="0.99" step="0.01" placeholder={selectedZone.behavior === "none" ? "N/A" : "Global"} disabled={selectedZone.behavior === "none"} value={selectedZone.confidence_threshold ?? ""} onChange={(event) => replaceZone(selectedIndex, { confidence_threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
-          <div className="zone-toggle-stack">
-            <label title="Motion inside this zone will not validate or trigger EMA activity. Object incident rules remain unchanged."><input type="checkbox" checked={selectedZone.exclude_from_ema === true} onChange={(event) => replaceZone(selectedIndex, { exclude_from_ema: event.target.checked })} /> Exclude from EMA</label>
-            <label><input type="checkbox" checked={selectedZone.enabled !== false} onChange={(event) => replaceZone(selectedIndex, { enabled: event.target.checked })} /> Enabled</label>
-          </div>
-          <button type="button" className="danger" onClick={() => removeZone(selectedIndex)}><Trash2 size={15} /> Remove Zone</button>
-        </div>
-      ) : null}
+            </div>
+          ) : null}
+        </aside>
+      </div>
     </div>
   );
 }
