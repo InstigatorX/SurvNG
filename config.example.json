@@ -32,7 +32,7 @@
     "cleanup_batch_files": 2000
   },
   "motion_qualification": {
-    "mode": "camera",
+    "mode": "camera_rescue",
     "sensitivity": "balanced",
     "stationary_object_tolerance": "balanced",
     "frame_width": 320,

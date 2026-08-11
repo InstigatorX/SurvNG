@@ -15,13 +15,13 @@ const DEFAULT_SETTINGS = Object.freeze({
 export const MOTION_MODE_OPTIONS = Object.freeze([
   Object.freeze({
     value: "camera",
-    label: "Camera-triggered (Recommended)",
+    label: "Camera-triggered",
     status: "Camera ONVIF triggers",
     description: "Only camera ONVIF notices and manual tests can start object detection. Optional visual validators can confirm ordinary camera motion before detection runs.",
   }),
   Object.freeze({
     value: "camera_rescue",
-    label: "Camera + EMA backup",
+    label: "Camera + EMA backup (Recommended)",
     status: "Camera primary · EMA backup",
     description: "Camera ONVIF notices remain primary. Exceptionally strong, persistent Enhanced Motion Analysis (EMA) can start object detection when the camera stays silent; an eligible object must overlap that motion or move across detector samples.",
   }),
@@ -70,7 +70,7 @@ export const MOTION_BEHAVIOR_OPTIONS = Object.freeze([
 
 export function motionBehaviorOption(value) {
   return MOTION_BEHAVIOR_OPTIONS.find((option) => option.value === value)
-    || MOTION_BEHAVIOR_OPTIONS[1];
+    || MOTION_BEHAVIOR_OPTIONS[2];
 }
 
 export function motionBehaviorValue(mode, settings) {
@@ -81,7 +81,7 @@ export function motionBehaviorValue(mode, settings) {
       ? "camera"
       : "camera_validation";
   }
-  return String(mode || "camera");
+  return String(mode || "camera_rescue");
 }
 
 export function motionBehaviorSettings(current, behavior) {
@@ -119,7 +119,7 @@ const LEGACY_MODE_INFO = Object.freeze({
 export function motionModeInfo(mode) {
   if (LEGACY_MODE_INFO[mode]) return LEGACY_MODE_INFO[mode];
   return MOTION_MODE_OPTIONS.find((option) => option.value === mode)
-    || MOTION_MODE_OPTIONS.find((option) => option.value === "camera");
+    || MOTION_MODE_OPTIONS.find((option) => option.value === "camera_rescue");
 }
 
 const GUIDED_IMPLEMENTATIONS = [

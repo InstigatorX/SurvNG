@@ -201,7 +201,7 @@ class CameraMotionPipelineConfig(BaseModel):
 class MotionQualificationConfig(BaseModel):
     # Legacy off/audit/enforce values remain loadable for backward
     # compatibility; the GUI emits camera/camera_rescue/adaptive for new saves.
-    mode: Literal["camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "camera"
+    mode: Literal["camera", "camera_rescue", "adaptive", "off", "audit", "enforce"] = "camera_rescue"
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     stationary_object_tolerance: Literal["low", "balanced", "high"] = "balanced"
     illumination_filter_enabled: bool = False

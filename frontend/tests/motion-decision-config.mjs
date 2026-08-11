@@ -3,6 +3,7 @@ import {
   buildMotionDecisionFusion,
   MOTION_BEHAVIOR_OPTIONS,
   MOTION_MODE_OPTIONS,
+  motionBehaviorOption,
   motionBehaviorSettings,
   motionBehaviorValue,
   motionModeInfo,
@@ -15,7 +16,8 @@ assert.deepEqual(MOTION_BEHAVIOR_OPTIONS.map((option) => option.value), ["camera
 assert.match(motionModeInfo("camera").description, /Only camera ONVIF notices/);
 assert.match(motionModeInfo("camera_rescue").description, /must overlap that motion or move/);
 assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
-assert.equal(motionModeInfo("unknown").value, "camera");
+assert.equal(motionModeInfo("unknown").value, "camera_rescue");
+assert.equal(motionBehaviorOption("unknown").value, "camera_rescue");
 assert.equal(motionModeInfo("audit").value, "audit");
 assert.match(motionModeInfo("enforce").description, /ambiguous hybrid/);
 

@@ -864,7 +864,7 @@ class CameraWorkerTest(unittest.TestCase):
             while worker.motion_state._stats["continuous_frames"] == 0 and time.monotonic() < deadline:
                 time.sleep(0.01)
 
-            self.assertEqual(worker.motion_qualification.settings(), ("camera", "balanced", 480))
+            self.assertEqual(worker.motion_qualification.settings(), ("camera_rescue", "balanced", 480))
             self.assertEqual(worker.status()["motion_qualification"]["frame_width"], 480)
             self.assertEqual(worker.status()["motion_qualification"]["frame_shape"], [270, 480])
             self.assertEqual(

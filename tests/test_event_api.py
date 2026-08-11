@@ -797,8 +797,14 @@ class EventApiSerializationTest(unittest.TestCase):
             manager,
         )
 
-        self.assertEqual(context["motion_paradigm"]["paradigm"], "camera_triggered")
-        self.assertEqual(context["motion_paradigm"]["adaptive_visual"]["role"], "validator")
+        self.assertEqual(
+            context["motion_paradigm"]["paradigm"],
+            "camera_triggered_with_visual_backup",
+        )
+        self.assertEqual(
+            context["motion_paradigm"]["adaptive_visual"]["role"],
+            "validator_and_backup_trigger",
+        )
         self.assertTrue(context["decision_outcome"]["filtered_before_object_detection"])
         self.assertFalse(context["decision_outcome"]["object_detection_ran"])
         self.assertIsNone(context["decision_outcome"]["object_detected"])

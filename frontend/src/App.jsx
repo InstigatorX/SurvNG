@@ -9395,7 +9395,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     cameraName={selectedCamera.name}
                     fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
                     mode={selectedCamera.motion_qualification?.mode || "inherit"}
-                    globalMode={config.motion_qualification?.mode || "camera"}
+                    globalMode={config.motion_qualification?.mode || "camera_rescue"}
                     inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
                     inheritedFusion={config.motion_qualification?.pipeline?.fusion}
                     onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
@@ -10771,7 +10771,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         </details>
         <MotionDecisionEditor
           fusion={config.motion_qualification?.pipeline?.fusion}
-          mode={config.motion_qualification?.mode || "camera"}
+          mode={config.motion_qualification?.mode || "camera_rescue"}
           onModeChange={(mode) => updateConfig(["motion_qualification", "mode"], mode)}
           onChange={(fusion) => updateConfig(
             ["motion_qualification", "pipeline"],

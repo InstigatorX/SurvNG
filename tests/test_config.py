@@ -176,6 +176,7 @@ class AppConfigTest(unittest.TestCase):
         })
 
         self.assertEqual(config.motion_qualification.frame_width, 320)
+        self.assertEqual(config.motion_qualification.mode, "camera_rescue")
         self.assertEqual(config.motion_qualification.stationary_object_tolerance, "balanced")
         self.assertEqual(config.motion_qualification.camera_mode_background_fps, 2.0)
         self.assertEqual(config.motion_qualification.visual_backup_warmup_seconds, 10.0)
