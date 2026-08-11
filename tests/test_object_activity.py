@@ -77,7 +77,7 @@ def test_credible_movement_is_active_and_admitted() -> None:
     assert admission.admitted is True
 
 
-def test_robust_appearance_and_zone_entry_are_active() -> None:
+def test_robust_appearance_needs_causal_evidence_while_zone_entry_is_active() -> None:
     attributor = ObjectActivityAttributor("enforce")
 
     appearance, zone = attributor.admit(
@@ -91,8 +91,56 @@ def test_robust_appearance_and_zone_entry_are_active() -> None:
         {},
     )
 
-    assert appearance.attribution.role is ObjectActivityRole.ACTIVE
+    assert appearance.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert appearance.attribution.evidence.reasons == (
+        "robust_new_appearance_without_causal_motion",
+    )
     assert zone.attribution.role is ObjectActivityRole.ACTIVE
+
+
+def test_repeated_stable_robust_appearance_builds_scene_context_memory() -> None:
+    attributor = ObjectActivityAttributor("enforce")
+    appeared = observation(
+        temporal_pretrigger_observations=0,
+        temporal_posttrigger_observations=4,
+        temporal_robust_new_appearance=True,
+    )
+
+    first = attributor.admit(
+        [appeared], {}, event_key="event-1", observed_at_epoch=1000.0
+    )[0]
+    second = attributor.admit(
+        [appeared], {}, event_key="event-2", observed_at_epoch=1060.0
+    )[0]
+    third = attributor.admit(
+        [appeared], {}, event_key="event-3", observed_at_epoch=1120.0
+    )[0]
+
+    assert first.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert second.attribution.role is ObjectActivityRole.INDETERMINATE
+    assert third.attribution.role is ObjectActivityRole.SCENE_CONTEXT
+    assert attributor.status()["scene_context_memory_entries"] == 1
+
+
+def test_semantic_rescue_telemetry_is_grouped_by_trigger_source() -> None:
+    attributor = ObjectActivityAttributor("enforce")
+
+    attributor.record_semantic_rescue(
+        source="visual_backup",
+        candidates=3,
+        admitted=1,
+        rejected=2,
+    )
+
+    status = attributor.status()
+    assert status["semantic_rescue_candidates"] == 3
+    assert status["semantic_rescue_admissions"] == 1
+    assert status["semantic_rescue_rejections"] == 2
+    assert status["semantic_rescue_by_source"]["visual_backup"] == {
+        "candidates": 3,
+        "admitted": 1,
+        "rejected": 2,
+    }
 
 
 def test_incomplete_evidence_fails_open() -> None:

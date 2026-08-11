@@ -45,7 +45,54 @@ def sample(offset: float, objects: list[dict]) -> _RecordedDetectionSample:
 
 
 class RecordedObjectConsensusTest(unittest.TestCase):
-    def test_three_consistent_low_confidence_candidates_can_qualify(self) -> None:
+    def test_semantic_tiers_respect_candidate_rescue_and_standard_boundaries(self) -> None:
+        expected = (
+            (0.4849, "evidence", False),
+            (0.4850, "rescue_candidate", False),
+            (0.7199, "rescue_candidate", False),
+            (0.7200, "standard", True),
+        )
+        for confidence, tier, eligible in expected:
+            with self.subTest(confidence=confidence):
+                samples = []
+                for offset in (-0.5, 0.0, 0.5):
+                    candidate = detected("person", confidence, (2, 2, 20, 19))
+                    candidate.update({
+                        "incident_eligible": confidence >= 0.72,
+                        "confidence_eligible": confidence >= 0.72,
+                        "confidence_threshold": 0.72,
+                        "temporal_candidate_eligible": True,
+                        "temporal_candidate_threshold": 0.25,
+                        "spatial_zone_eligible": True,
+                    })
+                    samples.append(sample(offset, [candidate]))
+
+                _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+                self.assertEqual(objects[0]["semantic_tier"], tier)
+                self.assertIs(objects[0]["incident_eligible"], eligible)
+
+    def test_class_threshold_derives_its_own_rescue_floor(self) -> None:
+        samples = []
+        for offset in (-0.5, 0.0, 0.5):
+            candidate = detected("robot_lawnmower", 0.525, (2, 2, 20, 19))
+            candidate.update({
+                "incident_eligible": False,
+                "confidence_eligible": False,
+                "confidence_threshold": 0.8,
+                "temporal_candidate_eligible": True,
+                "temporal_candidate_threshold": 0.25,
+                "spatial_zone_eligible": True,
+            })
+            samples.append(sample(offset, [candidate]))
+
+        _selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(objects[0]["semantic_rescue_threshold"], 0.525)
+        self.assertEqual(objects[0]["semantic_tier"], "rescue_candidate")
+        self.assertFalse(objects[0]["incident_eligible"])
+
+    def test_three_consistent_low_confidence_candidates_remain_pending(self) -> None:
         observations = []
         for offset in (-0.5, 0.0, 0.5):
             candidate = detected("person", 0.55, (2, 2, 20, 19))
@@ -54,14 +101,18 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 "confidence_eligible": False,
                 "temporal_candidate_eligible": True,
                 "temporal_candidate_threshold": 0.25,
+                "confidence_threshold": 0.72,
                 "spatial_zone_eligible": True,
             })
             observations.append(sample(offset, [candidate]))
 
         _selected, objects = _temporal_consensus(observations, minimum_confirmations=2)
 
-        self.assertTrue(objects[0]["incident_eligible"])
+        self.assertFalse(objects[0]["incident_eligible"])
         self.assertTrue(objects[0]["temporal_low_confidence_confirmation"])
+        self.assertTrue(objects[0]["temporal_rescue_candidate"])
+        self.assertEqual(objects[0]["semantic_tier"], "rescue_candidate")
+        self.assertEqual(objects[0]["semantic_rescue_threshold"], 0.485)
         self.assertEqual(objects[0]["temporal_observations"], 3)
 
     def test_normally_eligible_consensus_is_not_labeled_low_confidence(self) -> None:

@@ -173,7 +173,32 @@ class IntelligenceService:
                 if not isinstance(entry, dict):
                     continue
                 if entry.get('label'):
-                    detected_objects.append({'label': entry.get('label'), 'confidence': entry.get('confidence'), 'box': entry.get('box'), 'zones': entry.get('zones') or entry.get('zone_matches') or [], 'incident_eligible': entry.get('incident_eligible', True), 'temporal_consensus': entry.get('temporal_consensus'), 'temporal_sample_offset_seconds': entry.get('temporal_sample_offset_seconds'), 'temporal_observations': entry.get('temporal_observations'), 'temporal_track_observations': entry.get('temporal_track_observations'), 'temporal_incident_observations': entry.get('temporal_incident_observations'), 'temporal_required_observations': entry.get('temporal_required_observations'), 'temporal_samples': entry.get('temporal_samples'), 'temporal_peak_confidence': entry.get('temporal_peak_confidence'), 'temporal_label_votes': entry.get('temporal_label_votes'), 'temporal_center_displacement_ratio': entry.get('temporal_center_displacement_ratio'), 'temporal_center_path_ratio': entry.get('temporal_center_path_ratio'), 'temporal_first_observation_offset_seconds': entry.get('temporal_first_observation_offset_seconds'), 'temporal_last_observation_offset_seconds': entry.get('temporal_last_observation_offset_seconds'), 'temporal_newly_appeared': entry.get('temporal_newly_appeared'), 'motion_correlated': entry.get('motion_correlated'), 'motion_correlation': entry.get('motion_correlation'), 'motion_correlation_threshold': entry.get('motion_correlation_threshold'), 'motion_temporal_evidence_available': entry.get('motion_temporal_evidence_available'), 'track_id': entry.get('track_id'), 'track_state': entry.get('track_state'), 'track_observations': entry.get('track_observations')})
+                    detected_objects.append({
+                        key: entry.get(key)
+                        for key in (
+                            'label', 'confidence', 'box', 'zones',
+                            'incident_eligible', 'incident_admission_reason',
+                            'semantic_tier', 'semantic_candidate_threshold',
+                            'semantic_rescue_threshold', 'semantic_standard_threshold',
+                            'semantic_median_confidence', 'semantic_rescue_admitted',
+                            'temporal_consensus', 'temporal_sample_offset_seconds',
+                            'temporal_observations', 'temporal_track_observations',
+                            'temporal_incident_observations',
+                            'temporal_required_observations', 'temporal_samples',
+                            'temporal_peak_confidence', 'temporal_label_votes',
+                            'temporal_center_displacement_ratio',
+                            'temporal_center_path_ratio',
+                            'temporal_first_observation_offset_seconds',
+                            'temporal_last_observation_offset_seconds',
+                            'temporal_newly_appeared',
+                            'temporal_robust_new_appearance', 'temporal_zone_entry',
+                            'activity_role', 'activity_confidence',
+                            'motion_correlated', 'motion_correlation',
+                            'motion_correlation_threshold',
+                            'motion_temporal_evidence_available',
+                            'track_id', 'track_state', 'track_observations',
+                        )
+                    })
                 if entry.get('status') == 'motion_qualification':
                     candidate = entry.get('motion_qualification')
                     qualification = candidate if isinstance(candidate, dict) else {}
@@ -1065,7 +1090,17 @@ class IntelligenceService:
             if not isinstance(item, dict):
                 continue
             if item.get('label'):
-                objects.append({key: item.get(key) for key in ('label', 'confidence', 'incident_eligible', 'zones', 'box', 'temporal_observations', 'temporal_required_observations', 'temporal_center_displacement_ratio', 'motion_correlated', 'motion_correlation', 'track_id', 'track_state')})
+                objects.append({key: item.get(key) for key in (
+                    'label', 'confidence', 'incident_eligible', 'zones', 'box',
+                    'semantic_tier', 'semantic_rescue_threshold',
+                    'semantic_standard_threshold', 'semantic_rescue_admitted',
+                    'incident_admission_reason', 'temporal_observations',
+                    'temporal_required_observations',
+                    'temporal_center_displacement_ratio',
+                    'temporal_center_path_ratio', 'temporal_robust_new_appearance',
+                    'temporal_zone_entry', 'activity_role', 'motion_correlated',
+                    'motion_correlation', 'track_id', 'track_state',
+                )})
             elif isinstance(item.get('motion_qualification'), dict):
                 qualification = item['motion_qualification']
             elif isinstance(item.get('object_tracking'), dict):

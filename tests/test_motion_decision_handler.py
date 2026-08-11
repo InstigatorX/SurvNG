@@ -567,7 +567,45 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "spatial_path")
         self.assertEqual(outcome.motion_correlation["temporal_path_match_count"], 1)
 
-    def test_ema_rescue_accepts_new_object_appearing_inside_motion_region(self) -> None:
+    def test_ema_rescue_accepts_robust_appearance_inside_reliably_aligned_region(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "car",
+                    "confidence": 0.91,
+                    "incident_eligible": True,
+                    "box": {"x1": 20, "y1": 20, "x2": 55, "y2": 65},
+                    "temporal_track_observations": 2,
+                    "temporal_center_displacement_ratio": 0.001,
+                    "temporal_center_path_ratio": 0.001,
+                    "temporal_newly_appeared": True,
+                    "temporal_robust_new_appearance": True,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 1, 22, 10, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.15, 0.15, 0.60, 0.70]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "appearance")
+        self.assertEqual(outcome.motion_correlation["new_appearance_match_count"], 1)
+
+    def test_ema_rescue_rejects_new_appearance_without_robust_evidence(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
         handler = MotionDecisionHandler(
@@ -600,9 +638,8 @@ class MotionDecisionHandlerTest(unittest.TestCase):
             require_motion_correlation=True,
         )
 
-        self.assertEqual(outcome.event_id, 42)
-        self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "appearance")
-        self.assertEqual(outcome.motion_correlation["new_appearance_match_count"], 1)
+        self.assertIsNone(outcome.event_id)
+        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
 
     def test_ema_rescue_accepts_temporally_moving_object_outside_latest_region(self) -> None:
         events = RecordingEventStore()
@@ -639,6 +676,91 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         self.assertEqual(outcome.event_id, 42)
         self.assertTrue(outcome.object_detected)
         self.assertEqual(outcome.detected_objects[0]["motion_correlation"], "temporal")
+
+    def test_low_confidence_rescue_requires_and_accepts_causal_movement(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="front-door",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.55,
+                    "incident_eligible": False,
+                    "spatial_zone_eligible": True,
+                    "semantic_tier": "rescue_candidate",
+                    "temporal_rescue_candidate": True,
+                    "box": {"x1": 20, "y1": 20, "x2": 40, "y2": 70},
+                    "temporal_track_observations": 3,
+                    "temporal_center_displacement_ratio": 0.025,
+                    "temporal_center_path_ratio": 0.03,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+            spatial_alignment={"reliable": False, "mode": "untrusted"},
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc),
+            {"features": {"motion_regions": []}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertTrue(outcome.detected_objects[0]["semantic_rescue_admitted"])
+        self.assertEqual(
+            outcome.detected_objects[0]["incident_admission_reason"],
+            "temporal_rescue_with_causal_motion",
+        )
+
+    def test_low_confidence_stable_appearance_is_not_rescued_when_alignment_is_untrusted(self) -> None:
+        events = RecordingEventStore()
+        frame = np.zeros((2560, 1920, 3), dtype=np.uint8)
+        handler = MotionDecisionHandler(
+            camera_id="front-door",
+            events=events,
+            detection_provider=lambda _event_at: (
+                frame,
+                [{
+                    "label": "person",
+                    "confidence": 0.55,
+                    "incident_eligible": False,
+                    "spatial_zone_eligible": True,
+                    "semantic_tier": "rescue_candidate",
+                    "temporal_rescue_candidate": True,
+                    "box": {"x1": 982, "y1": 1322, "x2": 1015, "y2": 1409},
+                    "temporal_track_observations": 4,
+                    "temporal_pretrigger_observations": 0,
+                    "temporal_posttrigger_observations": 4,
+                    "temporal_robust_new_appearance": True,
+                    "temporal_center_displacement_ratio": 0.0013,
+                    "temporal_center_path_ratio": 0.00266,
+                }],
+                "recording.mp4",
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshot.jpg",
+            object_serializer=json.dumps,
+            spatial_alignment={"reliable": False, "mode": "untrusted"},
+        )
+
+        outcome = handler.handle(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.45, 0.45, 0.60, 0.65]]}},
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertIsNone(outcome.event_id)
+        self.assertEqual(outcome.rejection_reason, "no_eligible_object")
 
     def test_ema_rescue_scales_temporal_movement_for_distant_object(self) -> None:
         events = RecordingEventStore()

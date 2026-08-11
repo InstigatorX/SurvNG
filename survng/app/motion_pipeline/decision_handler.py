@@ -95,6 +95,7 @@ def motion_correlated_objects(
     spatial_matches = 0
     temporal_matches = 0
     temporal_path_matches = 0
+    temporal_path_only_matches = 0
     new_appearance_matches = 0
     stationary_spatial_rejections = 0
     height, width = frame.shape[:2]
@@ -111,12 +112,30 @@ def motion_correlated_objects(
             and _intersects_motion_region(box, regions)
         )
         temporal = evidence.displacement_ratio >= evidence.movement_threshold
-        spatial_fallback = spatial and not evidence.temporal_evidence_available
-        appearance_match = evidence.newly_appeared and (
-            spatial or not alignment_reliable
+        temporal_path = bool(
+            evidence.temporal_evidence_available
+            and evidence.path_ratio >= evidence.path_threshold
+        )
+        semantic_tier = str(detected.get("semantic_tier") or "standard")
+        standard_semantic = semantic_tier == "standard"
+        stable_geometry = bool(
+            evidence.track_observations >= 3
+            and evidence.displacement_ratio < evidence.movement_threshold
+            and evidence.path_ratio < evidence.path_threshold
+        )
+        spatial_fallback = bool(
+            standard_semantic and spatial and not evidence.temporal_evidence_available
+        )
+        appearance_match = bool(
+            evidence.robust_new_appearance
+            and alignment_reliable
+            and spatial
+            and not stable_geometry
         )
         alignment_fallback = bool(
-            not alignment_reliable and not evidence.temporal_evidence_available
+            standard_semantic
+            and not alignment_reliable
+            and not evidence.temporal_evidence_available
         )
         # A short recorded sequence can begin and end at nearly the same point
         # while a real object walks through the EMA region.  Permit that only
@@ -130,6 +149,8 @@ def motion_correlated_objects(
         )
         motion_correlated = bool(
             temporal
+            or evidence.zone_entry
+            or temporal_path
             or spatial_path
             or spatial_fallback
             or appearance_match
@@ -138,7 +159,9 @@ def motion_correlated_objects(
         detected["motion_correlated"] = motion_correlated
         detected["motion_correlation"] = (
             "temporal" if temporal else
+            "zone_entry" if evidence.zone_entry else
             "spatial_path" if spatial_path else
+            "temporal_path" if temporal_path else
             "appearance" if appearance_match else
             "alignment_unverified" if alignment_fallback else
             "spatial" if spatial_fallback else
@@ -157,6 +180,7 @@ def motion_correlated_objects(
             spatial_matches += int(spatial)
             temporal_matches += int(temporal)
             temporal_path_matches += int(spatial_path)
+            temporal_path_only_matches += int(temporal_path and not spatial)
             new_appearance_matches += int(appearance_match)
         else:
             # Preserve the detection as diagnostic evidence without allowing
@@ -183,6 +207,7 @@ def motion_correlated_objects(
         "spatial_match_count": spatial_matches,
         "temporal_match_count": temporal_matches,
         "temporal_path_match_count": temporal_path_matches,
+        "temporal_path_only_match_count": temporal_path_only_matches,
         "new_appearance_match_count": new_appearance_matches,
         "stationary_spatial_rejection_count": stationary_spatial_rejections,
         "minimum_temporal_movement_ratio": MAXIMUM_MOVEMENT_RATIO,
@@ -191,6 +216,81 @@ def motion_correlated_objects(
         "alignment_reliable": alignment_reliable,
         "alignment_mode": str(alignment.get("mode") or "legacy_identity"),
         "alignment_confidence": float(alignment.get("confidence", 1.0)),
+    }
+
+
+def _admit_semantic_rescues(
+    frame: Frame,
+    objects: list[dict[str, Any]],
+    qualification: dict[str, Any],
+    alignment: dict[str, Any],
+) -> dict[str, Any]:
+    """Finalize below-threshold candidates after independent causal checks."""
+    candidates = [
+        item for item in objects
+        if item.get("label") and item.get("semantic_tier") == "rescue_candidate"
+    ]
+    if not candidates:
+        return {
+            "policy": "causal_v1",
+            "candidate_count": 0,
+            "admitted_count": 0,
+            "rejected_count": 0,
+        }
+    correlated, correlation = motion_correlated_objects(
+        frame,
+        candidates,
+        qualification,
+        alignment,
+    )
+    admitted_ids = {id(item) for item in correlated}
+    admitted = 0
+    for detected in candidates:
+        activity_role = str(detected.get("activity_role") or "indeterminate")
+        zone_allowed = detected.get("spatial_zone_eligible") is True
+        eligible = bool(
+            id(detected) in admitted_ids
+            and zone_allowed
+            and activity_role != "scene_context"
+        )
+        detected["semantic_rescue_admitted"] = eligible
+        detected["semantic_rescue_policy"] = "causal_v1"
+        detected["semantic_previous_policy_admitted"] = True
+        detected["semantic_final_admission"] = (
+            "rescue" if eligible else "rejected"
+        )
+        detected["incident_eligible"] = eligible
+        detected["temporal_eligible"] = eligible
+        reasons = detected.get("incident_ineligible_reasons")
+        normalized = (
+            [str(value) for value in reasons]
+            if isinstance(reasons, list)
+            else [str(reasons)] if reasons else []
+        )
+        normalized = [reason for reason in normalized if reason != "pending_causal_confirmation"]
+        if eligible:
+            admitted += 1
+            detected["incident_ineligible_reasons"] = normalized
+            detected["incident_admission_reason"] = "temporal_rescue_with_causal_motion"
+        else:
+            rejection = (
+                "stationary_scene_context"
+                if activity_role == "scene_context"
+                else "outside_incident_zone"
+                if not zone_allowed
+                else "low_confidence_without_causal_motion"
+            )
+            detected["incident_ineligible_reasons"] = list(dict.fromkeys([
+                *normalized,
+                rejection,
+            ]))
+            detected["incident_admission_reason"] = rejection
+    return {
+        "policy": "causal_v1",
+        "candidate_count": len(candidates),
+        "admitted_count": admitted,
+        "rejected_count": len(candidates) - admitted,
+        "correlation": correlation,
     }
 
 
@@ -460,6 +560,31 @@ class MotionDecisionHandler:
                 "objects": activity_objects,
             }
             qualification["object_activity_attribution"] = activity_summary
+
+        if frame is not None:
+            rescue_summary = _admit_semantic_rescues(
+                frame,
+                objects,
+                qualification,
+                self.spatial_alignment,
+            )
+            rescue_summary["trigger_source"] = str(
+                qualification.get("trigger_source") or "unknown"
+            )
+            qualification["semantic_rescue"] = rescue_summary
+            if activity_summary is not None:
+                activity_summary["semantic_rescue"] = rescue_summary
+                activity_summary["final_admitted"] = sum(
+                    bool(item.get("label") and item.get("incident_eligible") is not False)
+                    for item in objects
+                )
+            if self.activity_attributor is not None:
+                self.activity_attributor.record_semantic_rescue(
+                    source=rescue_summary["trigger_source"],
+                    candidates=int(rescue_summary["candidate_count"]),
+                    admitted=int(rescue_summary["admitted_count"]),
+                    rejected=int(rescue_summary["rejected_count"]),
+                )
 
         eligible_objects = [
             detected

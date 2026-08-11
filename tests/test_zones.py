@@ -139,6 +139,20 @@ class DetectionZoneTest(unittest.TestCase):
         self.assertEqual(objects[0]["zones"], ["Lower Driveway"])
         self.assertTrue(objects[0]["incident_eligible"])
 
+    def test_spatial_zone_membership_survives_below_confidence(self) -> None:
+        objects = [{
+            "label": "car",
+            "confidence": 0.3,
+            "box": {"x1": 438, "y1": 897, "x2": 1914, "y2": 2160},
+        }]
+
+        apply_detection_zones(self.camera, objects, 3840, 2160, 0.72)
+
+        self.assertEqual(objects[0]["zones"], [])
+        self.assertEqual(objects[0]["spatial_zones"], ["Lower Driveway"])
+        self.assertTrue(objects[0]["spatial_zone_eligible"])
+        self.assertFalse(objects[0]["incident_eligible"])
+
     def test_ignore_zone_still_wins_in_full_frame_mode(self) -> None:
         self.camera.require_incident_zone = False
         self.camera.zones[0].behavior = "ignore"

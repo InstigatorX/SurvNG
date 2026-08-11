@@ -99,6 +99,8 @@ def apply_detection_zones(
                 continue
             detected["zones"] = []
             detected["zone_matches"] = []
+            detected["spatial_zones"] = []
+            detected["spatial_zone_matches"] = []
             detected.pop("zone_point", None)
             detected["incident_eligible"] = False
             detected["zone_eligible"] = False
@@ -142,6 +144,8 @@ def apply_detection_zones(
         # different camera or zone configuration cannot retain stale access.
         detected["zones"] = []
         detected["zone_matches"] = []
+        detected["spatial_zones"] = []
+        detected["spatial_zone_matches"] = []
         detected.pop("zone_point", None)
         detected["incident_eligible"] = False
         detected["zone_eligible"] = False
@@ -186,6 +190,14 @@ def apply_detection_zones(
             not spatial_ignored
             and (spatial_admitted or not (zone_required and has_incident_zones))
         )
+        # Preserve geometry independently of confidence. Temporal rescue uses
+        # this history to distinguish a real zone entry from repeated weak
+        # classifications at one fixed scene location.
+        detected["spatial_zones"] = [zone.name for zone in spatial_matches]
+        detected["spatial_zone_matches"] = [
+            {"name": zone.name, "behavior": zone.behavior, "color": zone.color}
+            for zone in spatial_matches
+        ]
         matches = []
         for zone in relevant:
             threshold = zone.confidence_threshold if zone.confidence_threshold is not None else label_threshold

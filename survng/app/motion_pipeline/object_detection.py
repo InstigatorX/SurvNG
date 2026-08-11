@@ -44,6 +44,7 @@ REPRESENTATIVE_DYNAMIC_PATH_RATIO = 0.025
 REPRESENTATIVE_MIN_EDGE_CLEARANCE_RATIO = 0.01
 REPRESENTATIVE_MIN_SUBJECT_AREA_RATIO = 0.0025
 REPRESENTATIVE_MIN_QUALITY_SCORE = 0.25
+SEMANTIC_RESCUE_THRESHOLD_FRACTION = 0.5
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,15 @@ def _eligible_detection(detected: dict[str, Any]) -> bool:
     return bool(detected.get("label") and detected.get("incident_eligible") is not False)
 
 
+def _semantic_rescue_threshold(detected: dict[str, Any]) -> float:
+    candidate = float(detected.get("temporal_candidate_threshold") or 0.0)
+    standard = float(detected.get("confidence_threshold") or 1.0)
+    return min(
+        0.99,
+        candidate + SEMANTIC_RESCUE_THRESHOLD_FRACTION * (standard - candidate),
+    )
+
+
 def _candidate_detection(detected: dict[str, Any]) -> bool:
     """Return whether a detector result can corroborate a temporal object track.
 
@@ -390,21 +400,26 @@ def _temporal_consensus(
         if len(track.winning_observations) >= required_by_track[id(track)]
         and any(_eligible_detection(item) for item in track.winning_observations)
     }
-    low_confidence_confirmed_ids = {
+    rescue_threshold_by_track = {
+        id(track): min(
+            0.99,
+            max(_semantic_rescue_threshold(item) for item in track.winning_observations),
+        )
+        for track in evidence
+        if track.winning_observations
+    }
+    rescue_candidate_ids = {
         id(track)
         for track in evidence
         if id(track) not in normally_confirmed_ids
         and len(track.winning_observations) >= max(3, required_by_track[id(track)])
-        and track.aggregate_confidence >= max(
-            float(item.get("temporal_candidate_threshold") or 0.0)
-            for item in track.winning_observations
-        )
+        and track.aggregate_confidence >= rescue_threshold_by_track[id(track)]
         and any(
             item.get("spatial_zone_eligible") is True
             for item in track.winning_observations
         )
     }
-    confirmed_ids = normally_confirmed_ids | low_confidence_confirmed_ids
+    confirmed_ids = normally_confirmed_ids | rescue_candidate_ids
     if confirmed_ids:
         confirmed_ids.update(
             id(track)
@@ -504,12 +519,16 @@ def _temporal_consensus(
         confirmed = id(track) in confirmed_ids
         label_confirmed_here = str(detected.get("label") or "").strip() == track.winning_label
         confirmed = confirmed and label_confirmed_here
-        incident_confirmed = confirmed and not bool(detected.get("auxiliary_detection"))
-        low_confidence_confirmed = id(track) in low_confidence_confirmed_ids
+        incident_confirmed = (
+            id(track) in normally_confirmed_ids
+            and label_confirmed_here
+            and not bool(detected.get("auxiliary_detection"))
+        )
+        rescue_candidate = id(track) in rescue_candidate_ids
         zone_eligible = any(
             _eligible_detection(item) for item in track.winning_observations
         ) or bool(
-            low_confidence_confirmed
+            rescue_candidate
             and any(
                 item.get("spatial_zone_eligible") is True
                 for item in track.winning_observations
@@ -519,6 +538,9 @@ def _temporal_consensus(
         enriched = {
             **detected,
             "label": track.winning_label,
+            # Rescue candidates remain evidence here. Only the downstream
+            # decision policy may promote them after causal motion and scene
+            # context have been evaluated.
             "incident_eligible": incident_confirmed,
             "zone_eligible": zone_eligible,
             "temporal_eligible": incident_confirmed,
@@ -526,10 +548,42 @@ def _temporal_consensus(
                 [] if incident_confirmed else
                 ["auxiliary_detection"] if detected.get("auxiliary_detection") else
                 ["outside_incident_zone"] if not zone_eligible else
+                ["pending_causal_confirmation"] if rescue_candidate else
                 ["temporal_unconfirmed"]
             ),
             "temporal_consensus": confirmed,
-            "temporal_low_confidence_confirmation": low_confidence_confirmed,
+            "temporal_low_confidence_confirmation": rescue_candidate,
+            "temporal_rescue_candidate": rescue_candidate,
+            "semantic_tier": (
+                "standard" if incident_confirmed else
+                "rescue_candidate" if rescue_candidate else
+                "evidence"
+            ),
+            "semantic_candidate_threshold": round(
+                max(
+                    float(item.get("temporal_candidate_threshold") or 0.0)
+                    for item in track.winning_observations
+                ),
+                4,
+            ),
+            "semantic_standard_threshold": round(
+                max(
+                    float(item.get("confidence_threshold") or 1.0)
+                    for item in track.winning_observations
+                ),
+                4,
+            ),
+            "semantic_rescue_threshold": round(
+                rescue_threshold_by_track.get(id(track), 0.0),
+                4,
+            ),
+            "semantic_rescue_threshold_fraction": SEMANTIC_RESCUE_THRESHOLD_FRACTION,
+            "semantic_median_confidence": round(track.aggregate_confidence, 4),
+            "semantic_min_confidence": round(
+                min((_confidence(item) for item in track.winning_observations), default=0.0),
+                4,
+            ),
+            "semantic_max_confidence": round(track.peak_confidence, 4),
             "temporal_sample_offset_seconds": selected.offset,
             "temporal_observations": len(track.winning_observations),
             "temporal_track_observations": len(track.observations),
@@ -590,13 +644,21 @@ def _temporal_consensus(
             )
             first_zones = set(
                 str(value)
-                for value in (track.observations[first_observation_index].get("zones") or [])
+                for value in (
+                    track.observations[first_observation_index].get("spatial_zones")
+                    or track.observations[first_observation_index].get("zones")
+                    or []
+                )
                 if str(value)
             )
             later_zones = {
                 str(value)
                 for index in observation_indices[1:]
-                for value in (track.observations[index].get("zones") or [])
+                for value in (
+                    track.observations[index].get("spatial_zones")
+                    or track.observations[index].get("zones")
+                    or []
+                )
                 if str(value)
             }
             enriched["temporal_zone_entry"] = bool(later_zones - first_zones)

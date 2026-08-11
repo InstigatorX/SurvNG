@@ -170,8 +170,12 @@ class ObjectActivityAttributor:
             "confidence_rejections": 0,
             "temporal_rejections": 0,
             "detector_admissions": 0,
+            "semantic_rescue_candidates": 0,
+            "semantic_rescue_admissions": 0,
+            "semantic_rescue_rejections": 0,
         }
         self._reasons: dict[str, int] = {}
+        self._semantic_rescue_by_source: dict[str, dict[str, int]] = {}
         self._context_memory: list[_SceneContextEntry] = []
 
     def attribute(
@@ -214,10 +218,38 @@ class ObjectActivityAttributor:
                 "mode": self.mode,
                 **self._counts,
                 "reasons": dict(self._reasons),
+                "semantic_rescue_by_source": {
+                    source: dict(counts)
+                    for source, counts in self._semantic_rescue_by_source.items()
+                },
                 "scene_context_memory_entries": len(self._context_memory),
                 "scene_context_memory_ttl_seconds": self.stationary_policy.scene_memory_ttl_seconds,
                 "stationary_policy": self.stationary_policy.as_dict(),
             }
+
+    def record_semantic_rescue(
+        self,
+        *,
+        source: str,
+        candidates: int,
+        admitted: int,
+        rejected: int,
+    ) -> None:
+        """Record final rescue outcomes after the admission policy runs."""
+        if candidates <= 0:
+            return
+        normalized_source = str(source or "unknown").strip().lower() or "unknown"
+        with self._lock:
+            self._counts["semantic_rescue_candidates"] += max(0, int(candidates))
+            self._counts["semantic_rescue_admissions"] += max(0, int(admitted))
+            self._counts["semantic_rescue_rejections"] += max(0, int(rejected))
+            counts = self._semantic_rescue_by_source.setdefault(
+                normalized_source,
+                {"candidates": 0, "admitted": 0, "rejected": 0},
+            )
+            counts["candidates"] += max(0, int(candidates))
+            counts["admitted"] += max(0, int(admitted))
+            counts["rejected"] += max(0, int(rejected))
 
     def reconfigure(self, mode: AttributionMode) -> None:
         with self._lock:
@@ -252,10 +284,11 @@ class ObjectActivityAttributor:
         )
         stable_observation = bool(
             observation.get("temporal_consensus") is True
-            and motion.stable(
-                maximum_displacement_ratio=self.stationary_policy.scene_stable_displacement_ratio,
-                maximum_path_ratio=self.stationary_policy.scene_stable_path_ratio,
-            )
+            and motion.temporal_evidence_available
+            and motion.displacement_ratio
+            <= self.stationary_policy.scene_stable_displacement_ratio
+            and motion.path_ratio <= self.stationary_policy.scene_stable_path_ratio
+            and not motion.zone_entry
         )
         memory_match, memory_sightings, memory_age = self._context_memory_evidence(
             observation,
@@ -273,10 +306,6 @@ class ObjectActivityAttributor:
                 )
             )
             reasons = ("credible_temporal_movement",)
-        elif motion.robust_new_appearance:
-            role = ObjectActivityRole.ACTIVE
-            confidence = 0.88
-            reasons = ("robust_new_appearance",)
         elif motion.zone_entry:
             role = ObjectActivityRole.ACTIVE
             confidence = 0.86
@@ -292,7 +321,11 @@ class ObjectActivityAttributor:
         else:
             role = ObjectActivityRole.INDETERMINATE
             confidence = 0.35 if motion.track_observations >= 2 else 0.15
-            reasons = ("insufficient_causal_evidence",)
+            reasons = (
+                ("robust_new_appearance_without_causal_motion",)
+                if motion.robust_new_appearance
+                else ("insufficient_causal_evidence",)
+            )
         result = self._result(
             observation,
             role,
@@ -317,8 +350,7 @@ class ObjectActivityAttributor:
                 observation,
                 event_key=event_key,
                 invalidate_location=bool(
-                    motion.robust_new_appearance
-                    or motion.zone_entry
+                    motion.zone_entry
                     or motion.displacement_ratio
                     >= max(0.02, motion.movement_threshold * 2.0)
                     or motion.path_ratio
