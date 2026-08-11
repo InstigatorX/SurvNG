@@ -5,3 +5,6 @@ torch>=2.5,<3
 torchvision>=0.20,<1
 huggingface_hub>=0.34,<2
 Pillow>=10,<13
+transformers>=4.49,<6
+tokenizers>=0.21,<1
+safetensors>=0.5,<1

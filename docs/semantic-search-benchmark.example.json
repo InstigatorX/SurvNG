@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "survng-reviewed-incidents",
+  "queries": [
+    {
+      "id": "white-delivery-truck",
+      "query": "white delivery truck",
+      "limit": 10,
+      "judged": true,
+      "relevant_event_ids": [101, 105]
+    },
+    {
+      "id": "black-pickup",
+      "query": "black pickup truck",
+      "limit": 10,
+      "judged": false,
+      "relevant_event_ids": []
+    }
+  ]
+}

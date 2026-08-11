@@ -3,10 +3,11 @@ uvicorn[standard]>=0.52,<1
 websockets>=16,<17
 opencv-python==4.10.0.84
 openvino==2026.3.0
+tokenizers>=0.22,<1
 ftfy>=6.1,<7
 regex>=2024.0,<2027
+Pillow>=10,<13
 coremltools>=8,<10; platform_system=="Darwin"
-Pillow>=10,<13; platform_system=="Darwin"
 onvif-zeep==0.2.12
 pydantic>=2.12,<3
 paho-mqtt>=2.1,<3

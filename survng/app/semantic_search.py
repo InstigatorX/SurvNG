@@ -8,11 +8,12 @@ import logging
 import queue
 import itertools
 import multiprocessing
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 import numpy as np
 import cv2
@@ -166,6 +167,57 @@ class SemanticEncoder(Protocol):
     def encode_text(self, texts: Sequence[str]) -> np.ndarray: ...
 
     def close(self) -> None: ...
+
+
+class SemanticTokenizer(Protocol):
+    def __call__(self, texts: Sequence[str]) -> dict[str, np.ndarray]: ...
+
+
+class OpenClipTokenizerAdapter:
+    """Expose the legacy OpenCLIP tokenizer through the manifest input contract."""
+
+    def __init__(self, path: Path, max_length: int) -> None:
+        self._tokenizer = OpenClipBpeTokenizer(path, context_length=max_length)
+
+    def __call__(self, texts: Sequence[str]) -> dict[str, np.ndarray]:
+        return {"input_ids": np.asarray(self._tokenizer(list(texts)), dtype=np.int64)}
+
+
+class HuggingFaceJsonTokenizer:
+    """Small offline tokenizer runtime for self-contained model packages."""
+
+    def __init__(self, path: Path, spec: Mapping[str, Any]) -> None:
+        try:
+            from tokenizers import Tokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "semantic package requires the tokenizers runtime dependency"
+            ) from exc
+        self._max_length = int(spec.get("max_length") or 0)
+        if not 1 <= self._max_length <= 4096:
+            raise RuntimeError("semantic tokenizer max_length must be between 1 and 4096")
+        self._tokenizer = Tokenizer.from_file(str(path))
+        self._tokenizer.enable_truncation(
+            max_length=self._max_length,
+            direction=str(spec.get("truncation_side") or "right"),
+        )
+        pad_id = int(spec.get("pad_token_id") or 0)
+        self._tokenizer.enable_padding(
+            length=self._max_length,
+            pad_id=pad_id,
+            pad_token=str(spec.get("pad_token") or "<pad>"),
+            direction=str(spec.get("padding_side") or "right"),
+        )
+
+    def __call__(self, texts: Sequence[str]) -> dict[str, np.ndarray]:
+        encodings = self._tokenizer.encode_batch(list(texts), add_special_tokens=True)
+        input_ids = np.asarray([encoding.ids for encoding in encodings], dtype=np.int64)
+        attention_mask = np.asarray(
+            [encoding.attention_mask for encoding in encodings], dtype=np.int64
+        )
+        if input_ids.ndim != 2 or input_ids.shape[1] != self._max_length:
+            raise RuntimeError("semantic tokenizer output length does not match the manifest")
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 def normalized_matrix(value: object, *, max_dimensions: int = 8192) -> np.ndarray:
@@ -650,6 +702,173 @@ def _semantic_model_identity(
     )
 
 
+def _semantic_tokenizer(
+    model_dir: Path,
+    text_spec: Mapping[str, Any],
+) -> SemanticTokenizer:
+    tokenizer_kind = str(text_spec.get("tokenizer_kind") or "openclip_bpe")
+    if tokenizer_kind == "openclip_bpe":
+        path = _semantic_package_path(
+            model_dir,
+            text_spec.get("tokenizer_path"),
+            "tokenizer/bpe_simple_vocab_16e6.txt.gz",
+        )
+        if not path.is_file():
+            raise RuntimeError("semantic tokenizer file is missing")
+        return OpenClipTokenizerAdapter(
+            path,
+            max_length=int(text_spec.get("max_length") or 77),
+        )
+    if tokenizer_kind == "huggingface_tokenizer_json":
+        path = _semantic_package_path(
+            model_dir,
+            text_spec.get("tokenizer_path"),
+            "tokenizer/tokenizer.json",
+        )
+        if not path.is_file():
+            raise RuntimeError("semantic tokenizer file is missing")
+        return HuggingFaceJsonTokenizer(path, text_spec)
+    raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
+
+
+def _semantic_text_inputs(
+    text_spec: Mapping[str, Any],
+    tokenized: Mapping[str, np.ndarray],
+    compiled_model: Any,
+) -> dict[str, np.ndarray]:
+    configured = text_spec.get("inputs")
+    if isinstance(configured, dict) and configured:
+        input_names = {str(key): str(value) for key, value in configured.items()}
+    else:
+        input_names = {
+            "input_ids": str(
+                text_spec.get("input") or compiled_model.input(0).get_any_name()
+            )
+        }
+    missing = sorted(set(input_names) - set(tokenized))
+    if missing:
+        raise RuntimeError(
+            "semantic tokenizer did not produce required inputs: " + ", ".join(missing)
+        )
+    return {
+        model_input: np.asarray(tokenized[logical_name], dtype=np.int64)
+        for logical_name, model_input in input_names.items()
+    }
+
+
+def _semantic_named_inputs(
+    spec: Mapping[str, Any],
+    prepared: Mapping[str, np.ndarray],
+    compiled_model: Any,
+) -> dict[str, np.ndarray]:
+    configured = spec.get("inputs")
+    if not isinstance(configured, dict) or not configured:
+        raise RuntimeError("semantic manifest is missing its input mapping")
+    names = {str(key): str(value) for key, value in configured.items()}
+    missing = sorted(set(names) - set(prepared))
+    if missing:
+        raise RuntimeError(
+            "semantic preprocessor did not produce required inputs: " + ", ".join(missing)
+        )
+    return {model_name: np.asarray(prepared[key]) for key, model_name in names.items()}
+
+
+def _siglip2_image_size(
+    height: int,
+    width: int,
+    patch_size: int,
+    max_patches: int,
+) -> tuple[int, int]:
+    def scaled(scale: float, value: int) -> int:
+        return max(patch_size, math.ceil(value * scale / patch_size) * patch_size)
+
+    lower, upper = 1e-6, 100.0
+    while upper - lower >= 1e-5:
+        scale = (lower + upper) / 2
+        target_height = scaled(scale, height)
+        target_width = scaled(scale, width)
+        if (target_height // patch_size) * (target_width // patch_size) <= max_patches:
+            lower = scale
+        else:
+            upper = scale
+    return scaled(lower, height), scaled(lower, width)
+
+
+def _prepare_siglip2_images(
+    images: Sequence[np.ndarray],
+    spec: Mapping[str, Any],
+) -> dict[str, np.ndarray]:
+    from PIL import Image
+
+    patch_size = int(spec.get("patch_size") or 16)
+    max_patches = int(spec.get("max_num_patches") or 256)
+    mean = np.asarray(spec.get("mean") or [0.5, 0.5, 0.5], dtype=np.float32)
+    std = np.asarray(spec.get("std") or [0.5, 0.5, 0.5], dtype=np.float32)
+    if patch_size <= 0 or max_patches <= 0 or mean.shape != (3,) or std.shape != (3,):
+        raise RuntimeError("invalid SigLIP2 image preprocessing manifest")
+    if np.any(std <= 0):
+        raise RuntimeError("semantic image normalization standard deviation must be positive")
+    batches: list[np.ndarray] = []
+    masks: list[np.ndarray] = []
+    shapes: list[tuple[int, int]] = []
+    for image in images:
+        height, width = image.shape[:2]
+        target_height, target_width = _siglip2_image_size(
+            height, width, patch_size, max_patches
+        )
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        resized = np.asarray(
+            Image.fromarray(rgb).resize(
+                (target_width, target_height), resample=Image.Resampling.BILINEAR
+            ),
+            dtype=np.float32,
+        ) / 255.0
+        chw = np.transpose((resized - mean) / std, (2, 0, 1))
+        rows, columns = target_height // patch_size, target_width // patch_size
+        patches = chw.reshape(3, rows, patch_size, columns, patch_size)
+        patches = patches.transpose(1, 3, 2, 4, 0).reshape(rows * columns, -1)
+        mask = np.zeros((max_patches,), dtype=np.int64)
+        mask[:patches.shape[0]] = 1
+        if patches.shape[0] < max_patches:
+            patches = np.pad(
+                patches,
+                ((0, max_patches - patches.shape[0]), (0, 0)),
+                mode="constant",
+            )
+        batches.append(patches.astype(np.float32))
+        masks.append(mask)
+        shapes.append((rows, columns))
+    return {
+        "pixel_values": np.stack(batches),
+        "pixel_attention_mask": np.stack(masks),
+        "spatial_shapes": np.asarray(shapes, dtype=np.int64),
+    }
+
+
+def _prepare_fixed_pil_images(
+    images: Sequence[np.ndarray],
+    spec: Mapping[str, Any],
+) -> np.ndarray:
+    from PIL import Image
+
+    size = int(spec.get("size") or 224)
+    mean = np.asarray(spec.get("mean") or [0.5, 0.5, 0.5], dtype=np.float32)
+    std = np.asarray(spec.get("std") or [0.5, 0.5, 0.5], dtype=np.float32)
+    if size <= 0 or mean.shape != (3,) or std.shape != (3,) or np.any(std <= 0):
+        raise RuntimeError("invalid fixed image preprocessing manifest")
+    prepared: list[np.ndarray] = []
+    for image in images:
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        resized = np.asarray(
+            Image.fromarray(rgb).resize(
+                (size, size), resample=Image.Resampling.BILINEAR
+            ),
+            dtype=np.float32,
+        ) / 255.0
+        prepared.append(np.transpose((resized - mean) / std, (2, 0, 1)))
+    return np.stack(prepared).astype(np.float32)
+
+
 class OpenVinoManifestEncoder:
     """OpenVINO dual-encoder loaded entirely from a local model package."""
 
@@ -675,18 +894,7 @@ class OpenVinoManifestEncoder:
         core = Core()
         self._image_model = core.compile_model(str(image_model), device)
         self._text_model = core.compile_model(str(text_model), device)
-        tokenizer_kind = str(text_spec.get("tokenizer_kind") or "openclip_bpe")
-        if tokenizer_kind != "openclip_bpe":
-            raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
-        tokenizer_path = _semantic_package_path(
-            self.model_dir,
-            text_spec.get("tokenizer_path"),
-            "tokenizer/bpe_simple_vocab_16e6.txt.gz",
-        )
-        self._tokenizer = OpenClipBpeTokenizer(
-            tokenizer_path,
-            context_length=int(text_spec.get("max_length") or 77),
-        )
+        self._tokenizer = _semantic_tokenizer(self.model_dir, text_spec)
         self._image_spec = image_spec
         self._text_spec = text_spec
         self._identity = identity or _semantic_model_identity(self.model_dir, manifest)
@@ -708,49 +916,73 @@ class OpenVinoManifestEncoder:
     def prepare_images(
         images: Sequence[np.ndarray],
         spec: dict[str, Any],
-    ) -> np.ndarray:
+    ) -> np.ndarray | dict[str, np.ndarray]:
+        if str(spec.get("processor_kind") or "") == "siglip2_patches":
+            return _prepare_siglip2_images(images, spec)
+        if str(spec.get("processor_kind") or "") == "fixed_pil":
+            return _prepare_fixed_pil_images(images, spec)
         size = int(spec.get("size") or 256)
         mean = np.asarray(spec.get("mean") or [0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
         std = np.asarray(spec.get("std") or [0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
         prepared = []
         for image in images:
             height, width = image.shape[:2]
-            scale = size / max(1, min(height, width))
-            resized = cv2.resize(
-                image,
-                (max(size, round(width * scale)), max(size, round(height * scale))),
-                interpolation=(
-                    cv2.INTER_CUBIC
-                    if str(spec.get("interpolation") or "bicubic").lower() == "bicubic"
-                    else cv2.INTER_AREA
-                ),
+            interpolation = (
+                cv2.INTER_CUBIC
+                if str(spec.get("interpolation") or "bicubic").lower() == "bicubic"
+                else cv2.INTER_AREA
             )
-            top = max(0, (resized.shape[0] - size) // 2)
-            left = max(0, (resized.shape[1] - size) // 2)
-            resized = resized[top:top + size, left:left + size]
+            resize_mode = str(spec.get("resize_mode") or "shortest_center_crop")
+            if resize_mode == "fixed":
+                resized = cv2.resize(image, (size, size), interpolation=interpolation)
+            elif resize_mode == "shortest_center_crop":
+                scale = size / max(1, min(height, width))
+                resized = cv2.resize(
+                    image,
+                    (max(size, round(width * scale)), max(size, round(height * scale))),
+                    interpolation=interpolation,
+                )
+                top = max(0, (resized.shape[0] - size) // 2)
+                left = max(0, (resized.shape[1] - size) // 2)
+                resized = resized[top:top + size, left:left + size]
+            else:
+                raise RuntimeError(f"unsupported semantic resize mode: {resize_mode}")
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             prepared.append(np.transpose((rgb - mean) / std, (2, 0, 1)))
         return np.stack(prepared).astype(np.float32)
 
-    def encode_prepared_images(self, batch: np.ndarray) -> np.ndarray:
+    def encode_prepared_images(
+        self, batch: np.ndarray | Mapping[str, np.ndarray]
+    ) -> np.ndarray:
         spec = self._image_spec
-        input_name = str(spec.get("input") or self._image_model.input(0).get_any_name())
-        result = self._image_model({input_name: batch})
+        batch_size = int(spec.get("batch_size") or 0)
+        row_count = (
+            len(next(iter(batch.values())))
+            if isinstance(batch, Mapping)
+            else len(batch)
+        )
+        if batch_size == 1 and row_count > 1:
+            return np.concatenate([
+                self.encode_prepared_images(
+                    {name: value[index:index + 1] for name, value in batch.items()}
+                    if isinstance(batch, Mapping)
+                    else batch[index:index + 1]
+                )
+                for index in range(row_count)
+            ])
+        if isinstance(batch, Mapping):
+            inputs = _semantic_named_inputs(spec, batch, self._image_model)
+        else:
+            input_name = str(spec.get("input") or self._image_model.input(0).get_any_name())
+            inputs = {input_name: batch}
+        result = self._image_model(inputs)
         return normalized_matrix(self._output(self._image_model, result, str(spec.get("output") or "")))
 
     def encode_text(self, texts: Sequence[str]) -> np.ndarray:
-        max_length = int(self._text_spec.get("max_length") or 77)
-        tokens = self._tokenizer(list(texts))
-        if tokens.shape[1] != max_length:
-            raise RuntimeError("semantic tokenizer output length does not match the manifest")
-        return self.encode_tokens(tokens)
+        return self.encode_tokens(self._tokenizer(list(texts)))
 
-    def encode_tokens(self, tokens: np.ndarray) -> np.ndarray:
-        input_name = str(
-            self._text_spec.get("input")
-            or self._text_model.input(0).get_any_name()
-        )
-        inputs = {input_name: tokens}
+    def encode_tokens(self, tokens: Mapping[str, np.ndarray]) -> np.ndarray:
+        inputs = _semantic_text_inputs(self._text_spec, tokens, self._text_model)
         result = self._text_model(inputs)
         return normalized_matrix(self._output(self._text_model, result, str(self._text_spec.get("output") or "")))
 
@@ -785,13 +1017,20 @@ def _semantic_encoder_worker_main(
                 return
             try:
                 if operation == "images":
-                    result = encoder.encode_prepared_images(
-                        np.asarray(request["batch"], dtype=np.float32)
-                    )
+                    raw_batch = request["batch"]
+                    if isinstance(raw_batch, dict):
+                        batch = {
+                            str(name): np.asarray(value)
+                            for name, value in raw_batch.items()
+                        }
+                    else:
+                        batch = np.asarray(raw_batch, dtype=np.float32)
+                    result = encoder.encode_prepared_images(batch)
                 elif operation == "text":
-                    result = encoder.encode_tokens(
-                        np.asarray(request["tokens"], dtype=np.int64)
-                    )
+                    result = encoder.encode_tokens({
+                        str(name): np.asarray(value, dtype=np.int64)
+                        for name, value in dict(request["inputs"]).items()
+                    })
                 else:
                     raise ValueError(f"unknown semantic inference operation: {operation}")
                 connection.send({"id": request_id, "type": "result", "value": result})
@@ -819,18 +1058,7 @@ class IsolatedOpenVinoManifestEncoder:
         self.device = str(device)
         self._image_spec = dict(manifest.get("image") or {})
         self._text_spec = dict(manifest.get("text") or {})
-        tokenizer_kind = str(self._text_spec.get("tokenizer_kind") or "openclip_bpe")
-        if tokenizer_kind != "openclip_bpe":
-            raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
-        tokenizer_path = _semantic_package_path(
-            self.model_dir,
-            self._text_spec.get("tokenizer_path"),
-            "tokenizer/bpe_simple_vocab_16e6.txt.gz",
-        )
-        self._tokenizer = OpenClipBpeTokenizer(
-            tokenizer_path,
-            context_length=int(self._text_spec.get("max_length") or 77),
-        )
+        self._tokenizer = _semantic_tokenizer(self.model_dir, self._text_spec)
         self._identity = _semantic_model_identity(self.model_dir, manifest)
         self._context = multiprocessing.get_context("spawn")
         self._connection: Any = None
@@ -927,7 +1155,7 @@ class IsolatedOpenVinoManifestEncoder:
         if stubborn:
             raise RuntimeError("semantic inference worker did not stop")
 
-    def _request(self, operation: str, field: str, value: np.ndarray) -> np.ndarray:
+    def _request(self, operation: str, field: str, value: Any) -> np.ndarray:
         with self._lock:
             if self._closed:
                 raise RuntimeError("semantic inference worker is closed")
@@ -968,11 +1196,7 @@ class IsolatedOpenVinoManifestEncoder:
         return self._request("images", "batch", batch)
 
     def encode_text(self, texts: Sequence[str]) -> np.ndarray:
-        tokens = self._tokenizer(list(texts))
-        max_length = int(self._text_spec.get("max_length") or 77)
-        if tokens.shape[1] != max_length:
-            raise RuntimeError("semantic tokenizer output length does not match the manifest")
-        return self._request("text", "tokens", tokens)
+        return self._request("text", "inputs", self._tokenizer(list(texts)))
 
     def close(self) -> None:
         self.abort()

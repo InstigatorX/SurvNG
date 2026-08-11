@@ -12,6 +12,8 @@ import numpy as np
 import cv2
 
 from survng.app.semantic_search import (
+    HuggingFaceJsonTokenizer,
+    OpenVinoManifestEncoder,
     SemanticEvidence,
     SemanticIndex,
     SemanticModelIdentity,
@@ -19,6 +21,9 @@ from survng.app.semantic_search import (
     _semantic_encoder_worker_main,
     fingerprint_model_package,
     normalized_matrix,
+    _semantic_text_inputs,
+    _prepare_siglip2_images,
+    _prepare_fixed_pil_images,
 )
 
 
@@ -34,6 +39,86 @@ class SemanticIndexTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_huggingface_json_tokenizer_emits_ids_and_attention_mask(self) -> None:
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+        from tokenizers.processors import TemplateProcessing
+
+        tokenizer = Tokenizer(WordLevel({"<pad>": 0, "<unk>": 1, "<bos>": 2, "<eos>": 3, "white": 4, "truck": 5}, unk_token="<unk>"))
+        tokenizer.pre_tokenizer = Whitespace()
+        tokenizer.post_processor = TemplateProcessing(
+            single="<bos> $A <eos>",
+            special_tokens=[("<bos>", 2), ("<eos>", 3)],
+        )
+        path = Path(self.temporary.name) / "tokenizer.json"
+        tokenizer.save(str(path))
+
+        runtime = HuggingFaceJsonTokenizer(path, {
+            "max_length": 6,
+            "pad_token_id": 0,
+            "pad_token": "<pad>",
+            "padding_side": "right",
+        })
+
+        encoded = runtime(["white truck"])
+        np.testing.assert_array_equal(encoded["input_ids"], [[2, 4, 5, 3, 0, 0]])
+        np.testing.assert_array_equal(encoded["attention_mask"], [[1, 1, 1, 1, 0, 0]])
+
+    def test_semantic_text_inputs_maps_multiple_manifest_inputs(self) -> None:
+        tokens = {
+            "input_ids": np.asarray([[1, 2]], dtype=np.int64),
+            "attention_mask": np.asarray([[1, 1]], dtype=np.int64),
+        }
+        mapped = _semantic_text_inputs({
+            "inputs": {
+                "input_ids": "tokens",
+                "attention_mask": "mask",
+            }
+        }, tokens, object())
+
+        self.assertEqual(set(mapped), {"tokens", "mask"})
+        np.testing.assert_array_equal(mapped["tokens"], tokens["input_ids"])
+        np.testing.assert_array_equal(mapped["mask"], tokens["attention_mask"])
+
+    def test_fixed_image_preprocessing_preserves_manifest_shape(self) -> None:
+        image = np.zeros((80, 240, 3), dtype=np.uint8)
+        prepared = OpenVinoManifestEncoder.prepare_images([image], {
+            "size": 224,
+            "resize_mode": "fixed",
+            "mean": [0.0, 0.0, 0.0],
+            "std": [1.0, 1.0, 1.0],
+        })
+
+        self.assertEqual(prepared.shape, (1, 3, 224, 224))
+
+    def test_siglip2_preprocessing_packs_aspect_aware_patches(self) -> None:
+        prepared = _prepare_siglip2_images(
+            [np.zeros((80, 240, 3), dtype=np.uint8)],
+            {
+                "patch_size": 16,
+                "max_num_patches": 256,
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.5, 0.5, 0.5],
+            },
+        )
+
+        self.assertEqual(prepared["pixel_values"].shape, (1, 256, 768))
+        self.assertEqual(prepared["pixel_attention_mask"].shape, (1, 256))
+        self.assertEqual(prepared["spatial_shapes"].shape, (1, 2))
+        rows, columns = prepared["spatial_shapes"][0]
+        self.assertEqual(int(prepared["pixel_attention_mask"].sum()), rows * columns)
+        self.assertGreater(columns, rows)
+
+    def test_fixed_pil_preprocessing_uses_manifest_normalization(self) -> None:
+        prepared = _prepare_fixed_pil_images(
+            [np.zeros((80, 240, 3), dtype=np.uint8)],
+            {"size": 224, "mean": [0.5] * 3, "std": [0.5] * 3},
+        )
+
+        self.assertEqual(prepared.shape, (1, 3, 224, 224))
+        np.testing.assert_array_equal(prepared, -1.0)
 
     def test_normalization_rejects_invalid_embeddings(self) -> None:
         with self.assertRaises(ValueError):
