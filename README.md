@@ -113,7 +113,7 @@ returned by the API or assistant.
 
 ONVIF includes event handling in its network interface specifications, and many Reolink cameras expose ONVIF and RTSP when enabled in the camera network settings. In practice, Reolink event topic names and support vary by model and firmware, so this app logs raw ONVIF event topics and treats events containing `motion`, `cellmotion`, `person`, `vehicle`, `animal`, or `alarm` as detection triggers by default.
 
-If ONVIF motion events are missing or unreliable, select **Visual-triggered** so adaptive visual analysis becomes the sole automatic trigger.
+If ONVIF motion events are missing or unreliable, select **EMA only** so Enhanced Motion Analysis becomes the sole automatic trigger.
 
 ## Requirements
 
@@ -392,25 +392,28 @@ The detector is optional. If OpenVINO or the model is missing, the app records a
 
 SurvNG learns each scene from a bounded, latest-frame analysis worker that is isolated from the live capture loop. Trigger selection and visual validation are separate decisions.
 
-The GUI exposes three trigger modes:
+The guided editor exposes four motion behaviors. The first two share the
+`camera` trigger mode and differ only in whether EMA validates ordinary camera
+notices:
 
 | GUI option | Configuration | What starts object detection? | Filtering behavior |
 | --- | --- | --- | --- |
-| **Camera-triggered (Recommended)** | `camera` | Camera ONVIF or manual notices only | EMA validation is optional; priority semantic notices bypass validation |
-| **Camera + visual backup** | `camera_rescue` | Camera ONVIF notices, or exceptionally strong persistent adaptive motion after ONVIF remains silent | ONVIF stays primary; cooldown and rate limits bound backup work; an eligible object must overlap that motion or move across detector samples |
-| **Visual-triggered** | `adaptive` | Accepted adaptive visual motion or manual tests | Ordinary ONVIF notices are diagnostics only |
+| **Camera only** | `camera` + validation bypass | Camera ONVIF or manual notices only | Every ordinary camera notice proceeds directly to object detection |
+| **Camera + EMA validation** | `camera` + EMA validation | Camera ONVIF or manual notices only | EMA validates ordinary camera notices but cannot trigger detection independently |
+| **Camera + EMA backup** | `camera_rescue` | Camera ONVIF notices, or exceptionally strong persistent EMA motion after ONVIF remains silent | ONVIF stays primary; cooldown and rate limits bound backup work; an eligible object must overlap that motion or move across detector samples |
+| **EMA only** | `adaptive` | Accepted EMA motion or manual tests | Ordinary ONVIF notices are diagnostics only |
 
-Camera-triggered mode never allows EMA to create an event. Camera + visual backup preserves the camera as primary but permits a tightly bounded EMA backup attempt. After the configured warmup, backup triggering waits for a quiet scene baseline; an eligible object must then overlap the credible EMA motion region or demonstrate movement across detector samples before an incident is created. This prevents a parked vehicle or other stationary object elsewhere in the frame from validating unrelated shadows, vegetation, or exposure changes. Visual-triggered mode never allows ordinary ONVIF notices to create an event. If EMA validation is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
+Camera only and Camera + EMA validation never allow EMA to create an event. Camera + EMA backup preserves the camera as primary but permits a tightly bounded EMA backup attempt. After the configured warmup, backup triggering waits for a quiet scene baseline; an eligible object must then overlap the credible EMA motion region or demonstrate movement across detector samples before an incident is created. This prevents a parked vehicle or other stationary object elsewhere in the frame from validating unrelated shadows, vegetation, or exposure changes. EMA only never allows ordinary ONVIF notices to create an event. If EMA validation is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
 Adaptive analysis uses the camera's live feed: `live_stream_url` when a substream is configured, otherwise `stream_url`. Frames are downscaled to `frame_width` (320 px by default), converted to grayscale, and sampled at `sample_fps` (5 FPS by default). Object detection after a trigger uses high-resolution frames from the main recording.
 
 All cameras remain eligible for analysis, but a shared application semaphore permits at most two cameras to execute the CPU-heavy visual pipeline simultaneously. Each camera has a bounded latest-frame queue, so stale pending analysis is replaced instead of accumulating. This limit does not restrict capture, continuous recording, live view, or the number of cameras with motion detection enabled.
 
-The built-in decision graph uses EMA validation. Guided settings can enable or disable that validation in Camera-triggered mode; Camera + visual backup and Visual-triggered modes require EMA. Incomplete or retired stage graphs are rejected before config is saved.
+The built-in decision graph uses EMA validation. The guided selector configures validation as part of the chosen behavior; Camera + EMA backup and EMA only require EMA. Incomplete or retired stage graphs are rejected before config is saved.
 
-Use the guided **Motion decision** panel under **Config > Detection** to select the trigger source and validators without editing stage graphs. Each camera can inherit the global choice or create a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
+Use the guided **Motion behavior** panel under **Admin > Camera Settings > Motion/Object** to select the complete trigger and validation behavior in one control. Each camera can inherit the global choice or select a camera-specific behavior. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with a guided behavior.
 
-For the normal setup, select **Camera-triggered** with **Enhanced Motion Analysis (EMA)** enabled. ONVIF remains the only automatic trigger and EMA validates ordinary notices. See [Motion triggers and validation](docs/adaptive-motion.md) for the complete data flow and performance model.
+For the normal setup, select **Camera + EMA validation**. ONVIF remains the only automatic trigger and EMA validates ordinary notices. See [Motion triggers and validation](docs/adaptive-motion.md) for the complete data flow and performance model.
 
 The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 

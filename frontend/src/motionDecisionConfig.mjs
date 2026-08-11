@@ -33,6 +33,68 @@ export const MOTION_MODE_OPTIONS = Object.freeze([
   }),
 ]);
 
+export const MOTION_BEHAVIOR_OPTIONS = Object.freeze([
+  Object.freeze({
+    value: "camera",
+    label: "Camera only",
+    status: "Camera notices trigger detection",
+    description: "Every ordinary ONVIF motion notice proceeds directly to object detection. EMA does not validate or independently trigger detection.",
+    mode: "camera",
+    adaptiveEnabled: false,
+  }),
+  Object.freeze({
+    value: "camera_validation",
+    label: "Camera + EMA validation",
+    status: "Camera trigger · EMA validation",
+    description: "ONVIF is required to start the event. EMA validates ordinary camera motion before object detection runs, but cannot trigger detection by itself.",
+    mode: "camera",
+    adaptiveEnabled: true,
+  }),
+  Object.freeze({
+    value: "camera_rescue",
+    label: "Camera + EMA backup",
+    status: "Camera primary · EMA backup",
+    description: "ONVIF remains primary and EMA validates it. Strong, persistent EMA motion may also rescue a missing camera notice using additional safeguards.",
+    mode: "camera_rescue",
+    adaptiveEnabled: true,
+  }),
+  Object.freeze({
+    value: "adaptive",
+    label: "EMA only",
+    status: "EMA triggers detection",
+    description: "EMA is the automatic trigger. ONVIF notices remain diagnostic and cannot start object detection.",
+    mode: "adaptive",
+    adaptiveEnabled: true,
+  }),
+]);
+
+export function motionBehaviorOption(value) {
+  return MOTION_BEHAVIOR_OPTIONS.find((option) => option.value === value)
+    || MOTION_BEHAVIOR_OPTIONS[1];
+}
+
+export function motionBehaviorValue(mode, settings) {
+  if (mode === "camera_rescue") return "camera_rescue";
+  if (mode === "adaptive") return "adaptive";
+  if (mode === "camera") {
+    return settings?.policy === "bypass" || settings?.includePrimary === false
+      ? "camera"
+      : "camera_validation";
+  }
+  return String(mode || "camera");
+}
+
+export function motionBehaviorSettings(current, behavior) {
+  const option = motionBehaviorOption(behavior);
+  return {
+    mode: option.mode,
+    settings: motionValidatorSettings(current, {
+      mode: option.mode,
+      adaptiveEnabled: option.adaptiveEnabled,
+    }),
+  };
+}
+
 const LEGACY_MODE_INFO = Object.freeze({
   audit: Object.freeze({
     value: "audit",

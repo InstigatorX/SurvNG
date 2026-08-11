@@ -4327,7 +4327,6 @@ section.detection-settings-card {
 }
 
 .motion-decision-heading span,
-.motion-decision-sources small,
 .motion-decision-fine-tuning p {
   color: var(--muted);
   font-size: 12px;
@@ -4338,6 +4337,17 @@ section.detection-settings-card {
   min-width: min(260px, 45%);
 }
 
+.motion-behavior-row {
+  display: grid;
+  grid-template-columns: minmax(220px, .8fr) minmax(0, 1.4fr);
+  align-items: end;
+  gap: 10px;
+}
+
+.motion-behavior-row > label {
+  min-width: 0;
+}
+
 .motion-decision-status {
   align-self: start;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
@@ -4346,22 +4356,6 @@ section.detection-settings-card {
   color: var(--ink) !important;
   font-weight: 760;
   padding: 4px 8px;
-}
-
-.motion-decision-explanation {
-  display: grid;
-  gap: 4px;
-  border-left: 3px solid var(--accent);
-  border-radius: 6px;
-  background: var(--control-muted);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-  padding: 9px 11px;
-}
-
-.motion-decision-explanation strong {
-  color: var(--ink);
 }
 
 .motion-decision-mode {
@@ -4404,32 +4398,6 @@ section.detection-settings-card {
 .motion-decision-mode.mode-adaptive {
   border-left: 3px solid var(--accent);
   color: var(--ink);
-}
-
-.motion-decision-explanation.policy-all {
-  border-left-color: var(--warning, #d98b25);
-}
-
-.motion-decision-sources {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 14px;
-  min-width: 0;
-  margin: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-}
-
-.motion-decision-sources legend {
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 760;
-  padding: 0 5px;
-}
-
-.motion-decision-sources small {
-  grid-column: 1 / -1;
 }
 
 .motion-decision-stability {
@@ -9791,7 +9759,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .config-panels,
   .inline-field,
   .motion-decision-stability,
-  .motion-decision-sources,
+  .motion-behavior-row,
   .motion-pipeline-runtime-grid {
     grid-template-columns: 1fr;
   }
@@ -9828,10 +9796,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .motion-decision-heading label {
     min-width: 0;
-  }
-
-  .motion-decision-sources small {
-    grid-column: auto;
   }
 
   .camera-tree .section-head {

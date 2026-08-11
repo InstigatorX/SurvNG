@@ -61,9 +61,10 @@ import {
 import "./styles.css";
 import {
   buildMotionDecisionFusion,
-  defaultMotionDecisionSettings,
-  MOTION_MODE_OPTIONS,
-  motionValidatorSettings,
+  MOTION_BEHAVIOR_OPTIONS,
+  motionBehaviorOption,
+  motionBehaviorSettings,
+  motionBehaviorValue,
   motionModeInfo,
   readMotionDecisionFusion,
 } from "./motionDecisionConfig.mjs";
@@ -7587,29 +7588,6 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
   );
 }
 
-const MOTION_DECISION_POLICIES = {
-  audit: {
-    label: "EMA validation",
-    description: "SurvNG's Enhanced Motion Analysis (EMA) must confirm the motion.",
-  },
-  bypass: {
-    label: "No visual validation",
-    description: "Every camera motion notice proceeds to object detection.",
-  },
-  any: {
-    label: "Either validator may confirm",
-    description: "Either configured signal may confirm motion. This is more sensitive.",
-  },
-  all: {
-    label: "Require both validators",
-    description: "All configured signals must agree. This is stricter and may miss subtle motion.",
-  },
-  weighted: {
-    label: "Blend signals by importance",
-    description: "Combines SurvNG analysis and supporting signals into one weighted confidence score.",
-  },
-};
-
 function MotionAnalysisPresetEditor({
   qualification,
   inherited = false,
@@ -7664,140 +7642,68 @@ function MotionDecisionEditor({
   const inheritedParsed = readMotionDecisionFusion(inheritedFusion);
   const effective = inherited ? inheritedParsed : parsed;
   const settings = effective.settings;
-  const policy = MOTION_DECISION_POLICIES[settings.policy] || MOTION_DECISION_POLICIES.audit;
   const effectiveMode = mode === "inherit" ? globalMode : mode;
   const legacyMode = ["audit", "off", "enforce"].includes(effectiveMode);
-  const adaptiveValidator = ["adaptive", "camera_rescue"].includes(effectiveMode)
-    || (settings.policy !== "bypass" && settings.includePrimary);
-  const modeInfo = motionModeInfo(effectiveMode);
-  const modeControl = (
-    <label>What starts object detection?<select value={mode} onChange={(event) => {
-      const nextMode = event.target.value;
-      onModeChange(nextMode);
-      updateSettings(motionValidatorSettings(settings, {
-        mode: nextMode,
-        adaptiveEnabled: adaptiveValidator,
-      }));
-    }}>
-      {onSetInherited ? <option value="inherit">Use global setting</option> : null}
-      {legacyMode && mode !== "inherit" ? <option value={mode}>{motionModeInfo(mode).label}</option> : null}
-      {MOTION_MODE_OPTIONS.map((option) => (
-        <option key={option.value} value={option.value}>{option.label}</option>
-      ))}
-    </select></label>
-  );
-  const modeExplanation = (
-    <>
-      <strong>{modeInfo.status}</strong>
-      <span>{modeInfo.description}</span>
-    </>
-  );
+  const fullyInherited = Boolean(onSetInherited && inherited && mode === "inherit");
+  const custom = (!inherited && parsed.custom) || (fullyInherited && inheritedParsed.custom);
+  const effectiveBehavior = motionBehaviorValue(effectiveMode, settings);
+  const selectedBehavior = fullyInherited
+    ? "inherit"
+    : custom
+      ? "custom"
+      : legacyMode
+        ? `legacy:${effectiveMode}`
+        : effectiveBehavior;
+  const behaviorInfo = custom
+    ? {
+      status: fullyInherited ? "Global advanced configuration" : "Advanced custom configuration",
+      description: "This pipeline was created outside the guided editor. Selecting a standard behavior will replace its decision stages.",
+    }
+    : legacyMode
+      ? motionModeInfo(effectiveMode)
+      : motionBehaviorOption(effectiveBehavior);
 
   function updateSettings(patch) {
     onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
   }
 
-  function setAdaptiveValidator(adaptiveEnabled) {
-    updateSettings(motionValidatorSettings(settings, {
-      mode: effectiveMode,
-      adaptiveEnabled,
-    }));
-  }
-
-  if (inherited) {
-    return (
-      <div className="motion-decision-editor">
-        <div className="motion-decision-heading">
-          <div>
-            <strong>Motion decision</strong>
-            <span>{inheritedParsed.custom ? "Uses the global advanced configuration." : `Uses global setting: ${policy.label}.`}</span>
-          </div>
-          <label>Decision settings<select value="inherit" onChange={() => onSetInherited(false)}>
-            <option value="inherit">Use global setting</option>
-            <option value="camera">Customize this camera</option>
-          </select></label>
-        </div>
-        {modeControl}
-        <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-      </div>
-    );
-  }
-
-  if (parsed.custom) {
-    return (
-      <div className="motion-decision-editor motion-decision-custom">
-        <div className="motion-decision-heading">
-          <div>
-            <strong>Advanced motion pipeline</strong>
-            <span>This configuration was created outside the guided editor, so SurvNG will not overwrite it.</span>
-          </div>
-          {onSetInherited ? <label>Decision settings<select value="camera" onChange={() => onSetInherited(true)}>
-            <option value="camera">Custom advanced setting</option>
-            <option value="inherit">Use global setting</option>
-          </select></label> : null}
-        </div>
-        {modeControl}
-        <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-        <button type="button" onClick={() => {
-          onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
-        }}>
-          Replace with recommended settings
-        </button>
-      </div>
-    );
-  }
-
-  if (legacyMode) {
-    return (
-      <div className="motion-decision-editor motion-decision-custom">
-        <div className="motion-decision-heading">
-          <div>
-            <strong>Legacy motion configuration</strong>
-            <span>This older combined behavior remains operational, but it does not match the two current trigger models.</span>
-          </div>
-        </div>
-        {modeControl}
-        <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-        <button type="button" onClick={() => {
-          onModeChange("camera");
-          onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
-        }}>Migrate to recommended camera-triggered mode</button>
-      </div>
-    );
+  function selectBehavior(value) {
+    if (value === "inherit") {
+      onModeChange("inherit");
+      onSetInherited?.(true);
+      return;
+    }
+    if (value === "custom" || value.startsWith("legacy:")) return;
+    const next = motionBehaviorSettings(settings, value);
+    onModeChange(next.mode);
+    onSetInherited?.(false);
+    onChange(buildMotionDecisionFusion(next.settings));
   }
 
   return (
-    <div className="motion-decision-editor">
+    <div className={`motion-decision-editor${custom || legacyMode ? " motion-decision-custom" : ""}`}>
       <div className="motion-decision-heading">
         <div>
-          <strong>Motion decision</strong>
-          <span>{cameraName ? `Choose how ${cameraName} confirms motion before object detection runs.` : "Choose how SurvNG confirms motion before object detection runs."}</span>
+          <strong>Motion behavior</strong>
+          <span>{cameraName ? `Choose what can start object detection for ${cameraName}.` : "Choose what can start object detection."}</span>
         </div>
-        {onSetInherited ? <label>Decision settings<select value="camera" onChange={() => onSetInherited(true)}>
-          <option value="camera">Customize this camera</option>
-          <option value="inherit">Use global setting</option>
-        </select></label> : parsed.usesDefaults ? <span className="motion-decision-status">Recommended default</span> : <span className="motion-decision-status">Customized</span>}
+        <span className="motion-decision-status">{fullyInherited ? "Inherited" : custom ? "Advanced" : legacyMode ? "Legacy" : parsed.usesDefaults ? "Recommended default" : "Customized"}</span>
       </div>
 
-      {modeControl}
-      <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
-
-      <div className="motion-decision-options-body">
-      <fieldset className="motion-decision-sources">
-        <legend>{effectiveMode !== "adaptive" ? "Validate camera motion before detection" : "Visual trigger confirmation"}</legend>
-        <label className="check-field"><input
-          type="checkbox"
-          checked={adaptiveValidator}
-          disabled={["adaptive", "camera_rescue"].includes(effectiveMode)}
-          onChange={(event) => setAdaptiveValidator(event.target.checked)}
-        /> Enhanced Motion Analysis (EMA){effectiveMode === "adaptive" ? " (required trigger)" : effectiveMode === "camera_rescue" ? " (required backup)" : ""}</label>
-        <small>If a selected validator is unavailable or still learning, SurvNG fails open and runs object detection.</small>
-      </fieldset>
-      <div className={`motion-decision-explanation policy-${settings.policy}`}>
-        <strong>{policy.label}</strong>
-        <span>{policy.description}</span>
-        {settings.policy === "all" ? <span>Use this cautiously: one low-confidence signal can prevent object detection.</span> : null}
+      <div className="motion-behavior-row">
+        <label>What starts object detection?<select value={selectedBehavior} onChange={(event) => selectBehavior(event.target.value)}>
+          {onSetInherited ? <option value="inherit">Use global setting</option> : null}
+          {custom ? <option value="custom">Advanced custom configuration</option> : null}
+          {legacyMode ? <option value={`legacy:${effectiveMode}`}>{motionModeInfo(effectiveMode).label}</option> : null}
+          {MOTION_BEHAVIOR_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+        </select></label>
+        <div className={`motion-decision-mode mode-${effectiveMode}`}>
+          <strong>{fullyInherited && !custom ? `Global · ${behaviorInfo.status}` : behaviorInfo.status}</strong>
+          <span>{behaviorInfo.description}</span>
+        </div>
       </div>
+
+      {!fullyInherited && !custom && !legacyMode ? <div className="motion-decision-options-body">
       <details className="motion-decision-options">
         <summary>Advanced timing options</summary>
       <div className="motion-decision-stability">
@@ -7831,7 +7737,7 @@ function MotionDecisionEditor({
         <label>Forget an unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
       </details>
       </details>
-      </div>
+      </div> : null}
     </div>
   );
 }
@@ -9490,6 +9396,29 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                 </div> : null}
                 {cameraSection === "motion" ? <div className="sub-panel">
                   <h3>Motion Triggers &amp; Filtering</h3>
+                  <MotionDecisionEditor
+                    cameraName={selectedCamera.name}
+                    fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
+                    mode={selectedCamera.motion_qualification?.mode || "inherit"}
+                    globalMode={config.motion_qualification?.mode || "camera"}
+                    inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
+                    inheritedFusion={config.motion_qualification?.pipeline?.fusion}
+                    onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
+                    onSetInherited={(shouldInherit) => {
+                      const pipeline = { ...(selectedCamera.motion_qualification?.pipeline || {}) };
+                      pipeline.fusion = shouldInherit
+                        ? null
+                        : buildMotionDecisionFusion(
+                          readMotionDecisionFusion(config.motion_qualification?.pipeline?.fusion).settings,
+                        );
+                      updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], pipeline);
+                    }}
+                    onChange={(fusion) => updateCamera(
+                      selectedCamera.id,
+                      ["motion_qualification", "pipeline"],
+                      { ...(selectedCamera.motion_qualification?.pipeline || {}), fusion },
+                    )}
+                  />
                   <MotionAnalysisPresetEditor
                     qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
                     inherited={selectedCamera.motion_qualification?.pipeline?.qualification == null}
@@ -9545,32 +9474,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   </details>
                 </div> : null}
               </div>
-
-              {cameraSection === "motion" ? <div className="sub-panel">
-                <MotionDecisionEditor
-                  cameraName={selectedCamera.name}
-                  fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
-                  mode={selectedCamera.motion_qualification?.mode || "inherit"}
-                  globalMode={config.motion_qualification?.mode || "camera"}
-                  inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
-                  inheritedFusion={config.motion_qualification?.pipeline?.fusion}
-                  onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
-                  onSetInherited={(shouldInherit) => {
-                    const pipeline = { ...(selectedCamera.motion_qualification?.pipeline || {}) };
-                    pipeline.fusion = shouldInherit
-                      ? null
-                      : buildMotionDecisionFusion(
-                        readMotionDecisionFusion(config.motion_qualification?.pipeline?.fusion).settings,
-                      );
-                    updateCamera(selectedCamera.id, ["motion_qualification", "pipeline"], pipeline);
-                  }}
-                  onChange={(fusion) => updateCamera(
-                    selectedCamera.id,
-                    ["motion_qualification", "pipeline"],
-                    { ...(selectedCamera.motion_qualification?.pipeline || {}), fusion },
-                  )}
-                />
-              </div> : null}
 
               {cameraSection === "zones" ? <ZoneEditor
                 camera={selectedCamera}

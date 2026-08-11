@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import {
   buildMotionDecisionFusion,
+  MOTION_BEHAVIOR_OPTIONS,
   MOTION_MODE_OPTIONS,
+  motionBehaviorSettings,
+  motionBehaviorValue,
   motionModeInfo,
   motionValidatorSettings,
   readMotionDecisionFusion,
 } from "../src/motionDecisionConfig.mjs";
 
 assert.deepEqual(MOTION_MODE_OPTIONS.map((option) => option.value), ["camera", "camera_rescue", "adaptive"]);
+assert.deepEqual(MOTION_BEHAVIOR_OPTIONS.map((option) => option.value), ["camera", "camera_validation", "camera_rescue", "adaptive"]);
 assert.match(motionModeInfo("camera").description, /Only camera ONVIF notices/);
 assert.match(motionModeInfo("camera_rescue").description, /must overlap that motion or move/);
 assert.match(motionModeInfo("adaptive").description, /ONVIF notices.*cannot trigger detection/);
@@ -53,6 +57,13 @@ const cameraUnvalidated = motionValidatorSettings(defaults.settings, {
 });
 assert.equal(cameraUnvalidated.policy, "bypass");
 assert.equal(cameraUnvalidated.includePrimary, false);
+assert.equal(motionBehaviorValue("camera", cameraUnvalidated), "camera");
+
+const cameraValidated = motionBehaviorSettings(cameraUnvalidated, "camera_validation");
+assert.equal(cameraValidated.mode, "camera");
+assert.equal(cameraValidated.settings.policy, "audit");
+assert.equal(cameraValidated.settings.includePrimary, true);
+assert.equal(motionBehaviorValue(cameraValidated.mode, cameraValidated.settings), "camera_validation");
 
 const rescue = motionValidatorSettings(cameraUnvalidated, {
   mode: "camera_rescue",
@@ -60,6 +71,8 @@ const rescue = motionValidatorSettings(cameraUnvalidated, {
 });
 assert.equal(rescue.policy, "audit");
 assert.equal(rescue.includePrimary, true);
+assert.equal(motionBehaviorSettings(defaults.settings, "camera_rescue").mode, "camera_rescue");
+assert.equal(motionBehaviorSettings(defaults.settings, "adaptive").mode, "adaptive");
 
 const scalarGraph = buildMotionDecisionFusion({
   ...defaults.settings,
