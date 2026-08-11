@@ -7729,13 +7729,8 @@ function MotionDecisionEditor({
           <option value={5}>5 seconds</option>
           <option value={10}>10 seconds</option>
         </select></label>
+        <label>Forget unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
       </div>
-
-      <details className="motion-decision-fine-tuning">
-        <summary>Fine tuning</summary>
-        <p>These values are already set to safe defaults. Change them only when reviewing motion audit results.</p>
-        <label>Forget an unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
-      </details>
       </details>
       </div> : null}
     </div>

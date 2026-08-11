@@ -4326,8 +4326,7 @@ section.detection-settings-card {
   font-size: 15px;
 }
 
-.motion-decision-heading span,
-.motion-decision-fine-tuning p {
+.motion-decision-heading span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
@@ -4402,29 +4401,7 @@ section.detection-settings-card {
 
 .motion-decision-stability {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.motion-decision-fine-tuning {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 9px 10px;
-}
-
-.motion-decision-fine-tuning summary {
-  cursor: pointer;
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 760;
-}
-
-.motion-decision-fine-tuning p {
-  margin: 8px 0;
-}
-
-.motion-decision-fine-tuning[open] {
-  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
