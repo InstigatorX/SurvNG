@@ -9,28 +9,32 @@ import {
 const catalog = {
   presets: [
     {
-      id: "modular",
+      id: "adaptive",
       graph: "qualification",
       recommended: true,
       available: true,
       stages: [{ stage_id: "preprocess", implementation: "gray_blur", options: {} }],
     },
-    {
-      id: "classic",
-      graph: "qualification",
-      available: true,
-      stages: [{ stage_id: "qualification", implementation: "legacy_qualifier", options: {} }],
-    },
   ],
 };
 
-assert.equal(availableQualificationPresets(catalog).length, 2);
-assert.equal(motionAnalysisPresetSelectionUseful(catalog), true);
+assert.equal(availableQualificationPresets(catalog).length, 1);
+assert.equal(motionAnalysisPresetSelectionUseful(catalog), false);
+assert.equal(motionAnalysisPresetSelectionUseful({
+  presets: [catalog.presets[0], {
+    id: "future",
+    graph: "qualification",
+    available: true,
+    stages: [{ stage_id: "future", implementation: "future" }],
+  }],
+}), true);
 assert.equal(motionAnalysisPresetSelectionUseful({ presets: [catalog.presets[0]] }), false);
 assert.equal(motionAnalysisPresetSelectionUseful({ presets: [] }), false);
-assert.equal(readMotionAnalysisPreset([], catalog).preset.id, "modular");
+assert.equal(readMotionAnalysisPreset([], catalog).preset.id, "adaptive");
 assert.equal(readMotionAnalysisPreset(null, catalog).inherited, true);
-assert.equal(readMotionAnalysisPreset(catalog.presets[1].stages, catalog).preset.id, "classic");
+assert.equal(readMotionAnalysisPreset([
+  { stage_id: "difference", implementation: "frame_difference", options: {} },
+], catalog).custom, true);
 assert.equal(readMotionAnalysisPreset([{ stage_id: "custom", implementation: "custom" }], catalog).custom, true);
 assert.equal(readMotionAnalysisPreset([
   { ...catalog.presets[0].stages[0], parallel_group: "sources" },

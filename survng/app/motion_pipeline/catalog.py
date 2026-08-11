@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .defaults import adaptive_motion_stage_configs, default_motion_stage_configs
+from .defaults import adaptive_motion_stage_configs
 from .factory import MotionStageConfig
 from .registry import MotionStageRegistry
 
@@ -60,16 +60,6 @@ def builtin_motion_pipeline_presets() -> tuple[MotionPipelinePreset, ...]:
             graph="qualification",
             stages=tuple(adaptive_motion_stage_configs()),
             recommended=True,
-        ),
-        MotionPipelinePreset(
-            preset_id="modular",
-            label="Modular motion analysis",
-            description=(
-                "Original fixed-threshold multi-stage analysis retained for comparison "
-                "and rollback."
-            ),
-            graph="qualification",
-            stages=tuple(default_motion_stage_configs()),
         ),
     )
 

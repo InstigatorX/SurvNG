@@ -965,6 +965,7 @@ class MotionPipelineTest(unittest.TestCase):
             {option["key"] for option in stages["dominant_centroid"]["options"]},
         )
         self.assertTrue(all(preset["available"] for preset in catalog["presets"]))
+        self.assertEqual([preset["id"] for preset in catalog["presets"]], ["adaptive"])
         self.assertTrue(stages["adaptive_ema_background"]["continuous_analysis"])
         self.assertEqual(stages["adaptive_ema_background"]["motion_source"], "adaptive_background")
         self.assertEqual(

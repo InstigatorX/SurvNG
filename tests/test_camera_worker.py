@@ -41,7 +41,7 @@ from survng.app.motion_pipeline import (
     MotionStageDependencies,
     RecordedMotionObjectDetectorFactory,
     build_builtin_motion_registry,
-    analysis_preset_selections,
+    default_motion_stage_configs,
     resolve_motion_pipeline_graphs,
 )
 
@@ -1062,12 +1062,16 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 111.75))
             self.assertTrue(worker.motion_analysis.visual_backup_readiness(stable, 112.5))
 
-    def test_visual_trigger_modes_run_replaceable_non_adaptive_qualifiers_continuously(self) -> None:
+    def test_visual_trigger_modes_run_custom_non_adaptive_qualifiers_continuously(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        modular_pipeline = {
+        custom_pipeline = {
             "qualification": [
-                stage.model_dump(mode="json")
-                for stage in analysis_preset_selections("modular")
+                {
+                    "stage_id": stage.stage_id,
+                    "implementation": stage.implementation,
+                    "options": dict(stage.options),
+                }
+                for stage in default_motion_stage_configs()
             ],
         }
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1076,7 +1080,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 motion_config=MotionQualificationConfig.model_validate({
                     "mode": "camera_rescue",
-                    "pipeline": modular_pipeline,
+                    "pipeline": custom_pipeline,
                 }),
             )
             visual = make_worker(
@@ -1084,7 +1088,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 motion_config=MotionQualificationConfig.model_validate({
                     "mode": "adaptive",
-                    "pipeline": modular_pipeline,
+                    "pipeline": custom_pipeline,
                 }),
             )
             camera_only = make_worker(
@@ -1092,7 +1096,7 @@ class CameraWorkerTest(unittest.TestCase):
                 Path(tmpdir),
                 motion_config=MotionQualificationConfig.model_validate({
                     "mode": "camera",
-                    "pipeline": modular_pipeline,
+                    "pipeline": custom_pipeline,
                 }),
             )
 

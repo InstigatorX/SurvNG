@@ -300,7 +300,8 @@ class AuditAiTest(unittest.TestCase):
             )
 
     def test_pipeline_recommendations_are_high_level_and_bounded(self) -> None:
-        self.assertEqual(validate_tuning_value("analysis_preset", "MODULAR"), "modular")
+        with self.assertRaisesRegex(ValueError, "must be adaptive"):
+            validate_tuning_value("analysis_preset", "MODULAR")
         self.assertEqual(validate_tuning_value("analysis_preset", "ADAPTIVE"), "adaptive")
         self.assertEqual(
             validate_tuning_value("stationary_object_tolerance", "high"),

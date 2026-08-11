@@ -123,8 +123,8 @@ class AuditAiAdvice(BaseModel):
 def validate_tuning_value(setting: str, value: Any) -> Any:
     if setting == "analysis_preset":
         normalized = str(value).strip().lower()
-        if normalized not in {"adaptive", "modular"}:
-            raise ValueError("analysis_preset must be adaptive or modular")
+        if normalized != "adaptive":
+            raise ValueError("analysis_preset must be adaptive")
         return normalized
     if setting in {"sensitivity", "stationary_object_tolerance"}:
         normalized = str(value)
@@ -238,8 +238,8 @@ downstream evidence about persistence and identity, never as evidence that cause
 
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed and prefer camera-scoped changes over global changes. Recommend
-settings only for active visual components. Use analysis_preset only to choose adaptive or modular
-analysis, and prefer adaptive unless telemetry shows a compatibility problem. Trigger mode,
+settings only for active visual components. Enhanced Motion Analysis (adaptive) is the only
+operator-selectable analysis preset. Trigger mode,
 validator selection, agreement policy, and fail-open behavior are operator-owned safety settings:
 explain relevant evidence, but never recommend changing their topology. Do not recommend lowering
 sensitivity merely because an object exists.

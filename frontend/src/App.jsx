@@ -9897,7 +9897,7 @@ const motionAiSettingLabels = {
 };
 
 function formatMotionAiValue(setting, value) {
-  if (setting === "analysis_preset") return ({ adaptive: "Enhanced Motion Analysis (EMA)", modular: "Fixed-threshold modular analysis", classic: "Classic compatibility" })[value] || String(value);
+  if (setting === "analysis_preset") return value === "adaptive" ? "Enhanced Motion Analysis (EMA)" : String(value);
   if (setting === "stationary_object_tolerance") return ({ low: "Light", balanced: "Standard", high: "Strong", inherit: "Use global setting" })[value] || String(value);
   return String(value);
 }

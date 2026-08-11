@@ -4,7 +4,7 @@
 
 Status: **Saved for later — not implemented**
 
-Add optical flow as an optional, independently registered observation stage. It should run as a parallel evidence source and publish an `optical_flow` confidence score for the existing fusion pipeline; it should not replace the default modular frame analysis initially.
+Add optical flow as an optional, independently registered observation stage. It should run as a parallel evidence source and publish an `optical_flow` confidence score for the existing fusion pipeline; it should not replace Enhanced Motion Analysis initially.
 
 Recommended first release:
 
@@ -24,4 +24,4 @@ Implementation path:
 4. Add global and per-camera GUI controls with an explicit CPU-cost warning.
 5. Benchmark multiple simultaneous cameras before enabling optical-flow validation.
 
-Reminder: revisit this item when adding the next motion algorithm or tuning cameras that remain unreliable with ONVIF plus modular frame analysis.
+Reminder: revisit this item when adding the next motion algorithm or tuning cameras that remain unreliable with ONVIF plus Enhanced Motion Analysis.
