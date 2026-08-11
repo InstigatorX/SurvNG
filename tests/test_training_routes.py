@@ -113,6 +113,7 @@ class TrainingRoutesTest(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(self.route.response_model.__name__, "TrainingSamplesResponse")
         self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["scanned_events"], 1)
         sample = payload["samples"][0]
         self.assertEqual(sample["event_id"], event["id"])
         self.assertEqual(len(sample["revision"]), 20)

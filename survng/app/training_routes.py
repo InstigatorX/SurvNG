@@ -321,10 +321,14 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             last_row: dict[str, Any] | None = None
             batch_limit = max(100, min(1000, limit * 4))
             while len(samples) < limit and scanned < MAX_SCANNED_EVENTS:
+                requested_rows = min(
+                    batch_limit,
+                    MAX_SCANNED_EVENTS - scanned,
+                )
                 rows = active_manager.events.page_between(
                     start_iso,
                     end_iso,
-                    limit=min(batch_limit, MAX_SCANNED_EVENTS - scanned),
+                    limit=requested_rows,
                     before_created_at=before_created_at,
                     before_id=before_id,
                     camera_ids=selected_cameras,
@@ -333,10 +337,10 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                 if not rows:
                     exhausted = True
                     break
-                scanned += len(rows)
                 processed_rows = 0
                 for event in rows:
                     processed_rows += 1
+                    scanned += 1
                     last_row = event
                     before_created_at = str(event.get("created_at") or "")
                     before_id = int(event.get("id") or 0)
@@ -383,10 +387,10 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                     if len(samples) >= limit:
                         break
                 if len(samples) >= limit:
-                    if processed_rows == len(rows) and len(rows) < batch_limit:
+                    if processed_rows == len(rows) and len(rows) < requested_rows:
                         exhausted = True
                     break
-                if len(rows) < batch_limit:
+                if len(rows) < requested_rows:
                     exhausted = True
                     break
 
