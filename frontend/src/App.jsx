@@ -99,7 +99,7 @@ import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, m
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
-import { insertZonePoint } from "./zoneGeometry.mjs";
+import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 import { nextFaceReviewObservation } from "./faceReview.mjs";
 
@@ -9508,6 +9508,7 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
   const zones = camera.zones || [];
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dragPoint, setDragPoint] = useState(null);
+  const [pointAddHistory, setPointAddHistory] = useState({});
   const [snapshotSize, setSnapshotSize] = useState(null);
   const [canvasSize, setCanvasSize] = useState(null);
   const canvasRef = useRef(null);
@@ -9517,6 +9518,7 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
   useEffect(() => {
     setSelectedIndex(0);
     setDragPoint(null);
+    setPointAddHistory({});
     setSnapshotSize(null);
   }, [camera.id]);
 
@@ -9587,12 +9589,30 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
 
   function removeZone(index) {
     onChange(zones.filter((_, zoneIndex) => zoneIndex !== index));
+    setPointAddHistory((current) => Object.fromEntries(
+      Object.entries(current).flatMap(([zoneIndex, history]) => {
+        const numericIndex = Number(zoneIndex);
+        if (numericIndex === index) return [];
+        return [[numericIndex > index ? numericIndex - 1 : numericIndex, history]];
+      }),
+    ));
     setSelectedIndex((current) => Math.max(0, Math.min(current, zones.length - 2)));
   }
 
   function undoPoint() {
-    if (!selectedZone?.points?.length) return;
-    replaceZone(selectedIndex, { points: selectedZone.points.slice(0, -1) });
+    const history = pointAddHistory[selectedIndex] || [];
+    const insertionIndex = history.at(-1);
+    const points = selectedZone?.points || [];
+    if (!selectedZone || insertionIndex == null || insertionIndex >= points.length) return;
+    replaceZone(selectedIndex, {
+      points: points.filter((_, pointIndex) => pointIndex !== insertionIndex),
+    });
+    setPointAddHistory((current) => {
+      const remaining = (current[selectedIndex] || [])
+        .slice(0, -1)
+        .map((pointIndex) => pointIndex > insertionIndex ? pointIndex - 1 : pointIndex);
+      return { ...current, [selectedIndex]: remaining };
+    });
   }
 
   function pointerPosition(event) {
@@ -9607,8 +9627,18 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
     if (!selectedZone || event.target !== event.currentTarget) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const point = pointerPosition(event);
+    const inserted = insertZonePointWithIndex(
+      selectedZone.points,
+      point,
+      { x: rect.width, y: rect.height },
+    );
+    setPointAddHistory((current) => {
+      const shifted = (current[selectedIndex] || [])
+        .map((pointIndex) => pointIndex >= inserted.insertionIndex ? pointIndex + 1 : pointIndex);
+      return { ...current, [selectedIndex]: [...shifted, inserted.insertionIndex] };
+    });
     replaceZone(selectedIndex, {
-      points: insertZonePoint(selectedZone.points, point, { x: rect.width, y: rect.height }),
+      points: inserted.points,
     });
   }
 
@@ -9624,7 +9654,7 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
       <div className="zone-settings-head">
         <div><h3>Detection Zones</h3><p>Objects match using the bottom-center of their detection box.</p></div>
         <div className="zone-settings-actions">
-          <button type="button" onClick={undoPoint} disabled={!selectedZone?.points?.length} title="Remove last point"><Undo2 size={15} /> Undo Point</button>
+          <button type="button" onClick={undoPoint} disabled={!(pointAddHistory[selectedIndex]?.length)} title="Remove the last point added"><Undo2 size={15} /> Undo Point</button>
           <button type="button" onClick={addZone}><Plus size={15} /> Add Zone</button>
           <button type="button" className="primary" onClick={onSave} disabled={saving}><Save size={15} /> {saving ? "Saving..." : "Save Zones"}</button>
         </div>

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { insertZonePoint } from "../src/zoneGeometry.mjs";
+import { insertZonePoint, insertZonePointWithIndex } from "../src/zoneGeometry.mjs";
 
 const square = [
   { x: 0.1, y: 0.1 },
@@ -12,6 +12,12 @@ const topPoint = { x: 0.55, y: 0.1 };
 assert.deepEqual(
   insertZonePoint(square, topPoint, { x: 640, y: 360 }),
   [square[0], topPoint, square[1], square[2], square[3]],
+);
+const insertedTopPoint = insertZonePointWithIndex(square, topPoint, { x: 640, y: 360 });
+assert.equal(insertedTopPoint.insertionIndex, 1);
+assert.deepEqual(
+  insertedTopPoint.points.filter((_, index) => index !== insertedTopPoint.insertionIndex),
+  square,
 );
 
 const leftPoint = { x: 0.1, y: 0.45 };

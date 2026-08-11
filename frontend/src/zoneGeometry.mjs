@@ -14,9 +14,11 @@ function pointToSegmentDistanceSquared(point, start, end, scale) {
   return ((px - nearestX) ** 2) + ((py - nearestY) ** 2);
 }
 
-export function insertZonePoint(points, point, scale = { x: 1, y: 1 }) {
+export function insertZonePointWithIndex(points, point, scale = { x: 1, y: 1 }) {
   const current = Array.isArray(points) ? points : [];
-  if (current.length < 3) return [...current, point];
+  if (current.length < 3) {
+    return { points: [...current, point], insertionIndex: current.length };
+  }
 
   let insertionIndex = current.length;
   let nearestDistance = Number.POSITIVE_INFINITY;
@@ -33,9 +35,16 @@ export function insertZonePoint(points, point, scale = { x: 1, y: 1 }) {
     }
   }
 
-  return [
-    ...current.slice(0, insertionIndex),
-    point,
-    ...current.slice(insertionIndex),
-  ];
+  return {
+    points: [
+      ...current.slice(0, insertionIndex),
+      point,
+      ...current.slice(insertionIndex),
+    ],
+    insertionIndex,
+  };
+}
+
+export function insertZonePoint(points, point, scale = { x: 1, y: 1 }) {
+  return insertZonePointWithIndex(points, point, scale).points;
 }
