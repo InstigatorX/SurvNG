@@ -33,8 +33,6 @@
     "rejected_sample_rate": 1.0,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
-    "mog2_audit_enabled": false,
-    "mog2_history_seconds": 30.0,
     "pipeline": {
       "qualification": [],
       "observation": [],

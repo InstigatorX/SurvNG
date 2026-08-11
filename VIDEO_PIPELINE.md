@@ -33,15 +33,12 @@ artifacts without invoking or depending on concrete neighboring stages. The
 original all-in-one `legacy_qualifier` and combined `legacy_motion_scorer`
 remain registered as parity/reference implementations.
 
-Continuous background evidence runs through a separate observation pipeline.
-Its registered `opencv_mog2_evidence` stage owns the OpenCV model in per-camera
-pipeline runtime and publishes samples to an injected, bounded
-`MotionEvidenceRepository`. A later `buffered_evidence_fusion` stage selects
-samples by event time and adds aggregated evidence to `MotionContext`. The
-registered `onvif_event_evidence` stage independently normalizes camera motion
-events into the same repository. The repository boundary allows additional
-optical-flow or AI sources to run independently and join the same fusion stage
-without calling each other.
+Supporting evidence runs through a separate observation pipeline. The built-in
+`onvif_event_evidence` stage normalizes camera motion events into an injected,
+bounded `MotionEvidenceRepository`. A later `buffered_evidence_fusion` stage
+selects samples by event time and adds aggregated evidence to `MotionContext`.
+The repository boundary allows future optical-flow or AI sources to run
+independently and join the same fusion stage without calling each other.
 
 New motion implementations are registered explicitly with a
 `MotionStageRegistry`; there is no mutable module-level plugin registry. The
@@ -281,33 +278,6 @@ independently. This does not open another camera connection. The ring is sized
 from the configured sample rate, analysis window, and post-trigger horizon with
 additional history for timestamp jitter.
 
-### Optional MOG2 validation and blob tracking
-
-When the resolved decision graph selects MOG2 validation,
-the same grayscale frame samples also feed a per-camera OpenCV MOG2 background
-model. No additional stream or camera connection is opened. The model warms for
-approximately two seconds, separates foreground from its learned background,
-and applies morphology before extracting connected blobs.
-
-`MotionAnalysisService` sends each sampled grayscale frame through the
-lightweight motion observation pipeline. The MOG2 stage retains its model in that
-pipeline's per-camera runtime and writes bounded evidence samples to the
-camera's injected repository. The event-time fusion pipeline reads only the
-requested time range. The composition root therefore owns neither the MOG2
-model nor its sample history and has no direct dependency on its aggregation
-algorithm.
-
-Blobs are associated across samples using normalized centroid distance and
-bounding-box overlap. Tracks survive short detection gaps and report
-persistence, age, hit count, area stability, direction coherence, edge
-occupancy, foreground ratio, and a separate `mog2_score`. The strongest track
-within an ONVIF event window is stored with the normal qualification features
-using the `mog2_` prefix.
-
-Audit entries also retain up to six active tracks as normalized bounding boxes
-and the last 30 centroid positions. The browser draws stable track IDs,
-outlines, and trails over the clean audit image; no annotated image is written.
-
 ### ONVIF event evidence
 
 Each accepted ONVIF motion notification also traverses the observation graph.
@@ -317,16 +287,10 @@ motion events default to `0.55`; semantic topics containing configured person,
 vehicle, animal, face, or manual keywords default to `0.95`. These values and
 keywords are stage options, not hard-coded fusion policy.
 
-Frame and event observations can arrive concurrently. Irrelevant stages no-op:
-MOG2 processes only frame contexts and ONVIF evidence processes only event
-contexts. The shared repository is thread-safe and bounded. Evidence-stage
-failure is logged but never blocks the established trigger queue.
-
-MOG2 evidence is optional. When selected as a validator it can corroborate an
-adaptive decision; otherwise its processor is disabled to save CPU. The model
-history is globally configurable. A decision graph that selects MOG2 is
-authoritative and automatically enables its observation stage, preventing a
-configuration mismatch from silently degrading into permanent fail-open.
+Frame and event observations can arrive concurrently. Irrelevant stages no-op
+based on the observation kind. The shared repository is thread-safe and
+bounded. Evidence-stage failure is logged but never blocks the established
+trigger queue.
 
 ### Burst coalescing
 
@@ -373,11 +337,10 @@ while `low` requires stronger temporal evidence.
 
 ### Trigger modes
 
-- `camera`: only ONVIF and manual notices enter the event queue. Adaptive and
-  MOG2 validation are optional and never create an event.
-- `adaptive`: accepted adaptive motion is the only automatic trigger. MOG2 may
-  reject an adaptive candidate but cannot rescue rejected adaptive motion.
-  Ordinary ONVIF notices remain diagnostic evidence only.
+- `camera`: only ONVIF and manual notices enter the event queue. EMA validation
+  is optional and never creates an event.
+- `adaptive`: accepted EMA motion is the only automatic trigger. Ordinary
+  ONVIF notices remain diagnostic evidence only.
 
 Semantic ONVIF topics containing person, people, human, vehicle, animal, or
 face bypass suppression. Manual test triggers also bypass it. If fewer than
@@ -743,8 +706,6 @@ Global motion qualification:
     "rejected_sample_rate": 0.05,
     "borderline_rescue_enabled": true,
     "borderline_margin": 0.03,
-    "mog2_audit_enabled": false,
-    "mog2_history_seconds": 30.0,
     "pipeline": {
       "qualification": [],
       "observation": [],
@@ -765,7 +726,6 @@ Per-camera override:
     "frame_width": null,
     "borderline_rescue_enabled": null,
     "borderline_margin": null,
-    "mog2_audit_enabled": null,
     "pipeline": {
       "qualification": null,
       "observation": null,
@@ -806,52 +766,12 @@ override.
 
 The built-in final graph uses adaptive validation, starts after one accepted
 decision, releases after three rejected decisions, applies a five-second
-cooldown, and expires state after 10 seconds of inactivity. A complete custom
-final graph can require adaptive and MOG2 consensus explicitly:
-
-```json
-{
-  "motion_qualification": {
-    "pipeline": {
-      "fusion": [
-        {
-          "stage_id": "evidence_fusion",
-          "implementation": "buffered_evidence_fusion",
-          "options": {
-            "sources": ["mog2"],
-            "policy": "all",
-            "source_thresholds": {"mog2": 0.55},
-            "minimum_sources": 1,
-            "require_warmed": true,
-            "include_primary": true,
-            "fail_open": true
-          }
-        },
-        {
-          "stage_id": "event_state",
-          "implementation": "score_event_state",
-          "options": {
-            "activation_frames": 2,
-            "release_frames": 2,
-            "cooldown_seconds": 3.0,
-            "state_timeout_seconds": 10.0
-          }
-        },
-        {
-          "stage_id": "trigger",
-          "implementation": "score_trigger",
-          "options": {}
-        }
-      ]
-    }
-  }
-}
-```
+cooldown, and expires state after 10 seconds of inactivity. Custom final graphs
+may select registered evidence sources through the generic fusion interface.
 
 Fusion policies are `bypass`, `audit` (adaptive only), `any`, `all`, and
-`weighted`. Guided visual-triggered configuration never uses `any`, because
-MOG2 is confirmation rather than an independent trigger. Unavailable or
-unwarmed selected validators fail open when `fail_open` is enabled. Generic
+`weighted`. Unavailable or unwarmed selected validators fail open when
+`fail_open` is enabled. Generic
 evidence producers only need to write
 `score` and optional `warmed` values to the per-camera repository. The final
 graph must provide a trigger `decision`; preflight validation rejects partial
@@ -873,9 +793,9 @@ AI audit advisor:
 }
 ```
 
-Start with camera-triggered mode and adaptive validation. Review representative
-daytime, nighttime, weather, insect, and headlight events before adding MOG2 or
-switching a camera with unreliable ONVIF to visual-triggered mode.
+Start with camera-triggered mode and EMA validation. Review representative
+daytime, nighttime, weather, insect, and headlight events before switching a
+camera with unreliable ONVIF to visual-triggered mode.
 
 ## 13. Verification
 
@@ -883,7 +803,7 @@ Relevant automated coverage includes:
 
 - Motion scoring for coherent movement, erratic edge movement, global
   brightness changes, and insufficient-frame fail-open behavior.
-- MOG2 warmup, persistent slow-blob tracking, evidence aggregation, and
+- EMA scene learning, persistent motion tracking, evidence aggregation, and
   fail-open validator behavior.
 - Concurrent ONVIF event normalization, semantic priority scoring, bounded
   storage, and event-window aggregation.
@@ -899,7 +819,7 @@ Relevant automated coverage includes:
 Run backend tests and build the production UI with:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -q
+scripts/run-tests.sh -q
 npm --prefix frontend run build
 ```
 
@@ -908,15 +828,12 @@ Chrome across repeated seeks and many segment boundaries.
 
 ## 14. Current Boundaries And Future Work
 
-The modular observation and fusion paths maintain optional MOG2 foreground
-tracks. MOG2 is disabled by default and participates only when selected as a
-validator.
 The repository and fusion stage accept multiple independently produced motion
 sources, but SurvNG does not yet calculate dense/sparse optical flow, maintain
 semantic object tracks, use a KNN background model, or consume vendor motion
 bounding boxes beyond normalized ONVIF event signals. Those remain possible
-source stages if audit data shows that frame differences plus MOG2 cannot
-separate scene motion from insects reliably enough.
+source stages if audit data shows that EMA cannot separate scene motion from
+insects reliably enough.
 
 The next evidence-driven progression is:
 
@@ -924,9 +841,7 @@ The next evidence-driven progression is:
 2. Review rejected samples and borderline rescues that produced objects.
 3. Tune per-camera sensitivity before changing global behavior.
 4. Use visual-triggered mode only for cameras with unreliable ONVIF.
-5. Compare `mog2_*` evidence with object-found and no-object audits before
-   defining any consensus suppression rule.
-6. Add optical flow only where measured failures justify the additional CPU
+5. Add optical flow only where measured failures justify the additional CPU
    and complexity.
 
 ## 15. MQTT Incident Lifecycle

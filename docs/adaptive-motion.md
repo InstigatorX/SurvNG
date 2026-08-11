@@ -7,20 +7,14 @@ SurvNG separates the signal that **starts** a motion event from the visual analy
 ```text
 ONVIF camera notice
   → optional adaptive validation
-  → optional MOG2 confirmation
   → high-resolution recorded-frame extraction
   → object detection
   → incident when an eligible object is found
 ```
 
-Only ONVIF camera notices and manual tests can start object detection. Adaptive analysis and MOG2 are validators, never independent triggers in this mode.
+Only ONVIF camera notices and manual tests can start object detection. EMA is a validator, never an independent trigger in this mode.
 
-Validation choices are:
-
-- neither validator: every camera notice runs object detection;
-- adaptive only: the recommended default;
-- MOG2 only: retained for compatibility and comparison; or
-- adaptive plus MOG2: require both for fewer false triggers, or allow either for greater sensitivity.
+EMA validation may be enabled (the recommended default) or disabled so every camera notice runs object detection.
 
 Semantic ONVIF notices naming a person, vehicle, animal, or face bypass ordinary visual validation. If a configured validator is unavailable or still warming up, SurvNG fails open and runs object detection rather than risking a missed event.
 
@@ -45,13 +39,12 @@ Use this mode when ONVIF is normally reliable but an occasional missing camera n
 ```text
 live/substream video
   → adaptive visual trigger
-  → optional MOG2 confirmation
   → event state and cooldown
   → high-resolution recorded-frame extraction
   → object detection
 ```
 
-Adaptive visual motion is the only automatic trigger. MOG2 can optionally corroborate it. Ordinary ONVIF notices are retained as diagnostic evidence but cannot start object detection. Manual tests remain available.
+Adaptive visual motion is the only automatic trigger. Ordinary ONVIF notices are retained as diagnostic evidence but cannot start object detection. Manual tests remain available.
 
 Use this mode only when ONVIF notifications are unavailable or unreliable. If the live analysis feed fails, automatic motion triggering is unavailable until that feed recovers.
 
@@ -85,4 +78,4 @@ Object confidence and confirmation are separate from activity. They establish th
 
 Only enabled visual processors consume analysis time. Camera + visual backup and Visual-triggered modes continuously run the selected qualification pipeline; the adaptive processor remains the recommended default. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded scheduling queues replace stale pending requests with the newest request.
 
-Capture, recording, and live view are not limited to two cameras. Enabling MOG2 adds a second background-analysis algorithm and therefore increases CPU usage. Runtime camera status reports analyzed frames, accepted candidates, dropped scheduling requests, delivered triggers, pipeline failures, and per-stage timing.
+Capture, recording, and live view are not limited to two cameras. Runtime camera status reports analyzed frames, accepted candidates, dropped scheduling requests, delivered triggers, pipeline failures, and per-stage timing.

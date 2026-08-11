@@ -396,29 +396,29 @@ The GUI exposes three trigger modes:
 
 | GUI option | Configuration | What starts object detection? | Filtering behavior |
 | --- | --- | --- | --- |
-| **Camera-triggered (Recommended)** | `camera` | Camera ONVIF or manual notices only | Adaptive and MOG2 validation are optional; priority semantic notices bypass validation |
+| **Camera-triggered (Recommended)** | `camera` | Camera ONVIF or manual notices only | EMA validation is optional; priority semantic notices bypass validation |
 | **Camera + visual backup** | `camera_rescue` | Camera ONVIF notices, or exceptionally strong persistent adaptive motion after ONVIF remains silent | ONVIF stays primary; cooldown and rate limits bound backup work; an eligible object must overlap that motion or move across detector samples |
-| **Visual-triggered** | `adaptive` | Accepted adaptive visual motion or manual tests | MOG2 may corroborate adaptive motion; ordinary ONVIF notices are diagnostics only |
+| **Visual-triggered** | `adaptive` | Accepted adaptive visual motion or manual tests | Ordinary ONVIF notices are diagnostics only |
 
-Camera-triggered mode never allows adaptive analysis or MOG2 to create an event. Camera + visual backup preserves the camera as primary but permits a tightly bounded adaptive backup attempt. After the configured warmup, backup triggering waits for a quiet scene baseline; an eligible object must then overlap the credible EMA motion region or demonstrate movement across detector samples before an incident is created. This prevents a parked vehicle or other stationary object elsewhere in the frame from validating unrelated shadows, vegetation, or exposure changes. Visual-triggered mode never allows ordinary ONVIF notices or MOG2 to create an event. If a selected validator is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
+Camera-triggered mode never allows EMA to create an event. Camera + visual backup preserves the camera as primary but permits a tightly bounded EMA backup attempt. After the configured warmup, backup triggering waits for a quiet scene baseline; an eligible object must then overlap the credible EMA motion region or demonstrate movement across detector samples before an incident is created. This prevents a parked vehicle or other stationary object elsewhere in the frame from validating unrelated shadows, vegetation, or exposure changes. Visual-triggered mode never allows ordinary ONVIF notices to create an event. If EMA validation is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
 Adaptive analysis uses the camera's live feed: `live_stream_url` when a substream is configured, otherwise `stream_url`. Frames are downscaled to `frame_width` (320 px by default), converted to grayscale, and sampled at `sample_fps` (5 FPS by default). Object detection after a trigger uses high-resolution frames from the main recording.
 
 All cameras remain eligible for analysis, but a shared application semaphore permits at most two cameras to execute the CPU-heavy visual pipeline simultaneously. Each camera has a bounded latest-frame queue, so stale pending analysis is replaced instead of accumulating. This limit does not restrict capture, continuous recording, live view, or the number of cameras with motion detection enabled.
 
-The built-in decision graph uses adaptive validation without MOG2. Guided settings can disable validation, use MOG2 alone, require adaptive and MOG2, or—in camera-triggered mode—allow either validator. Incomplete graphs are rejected before config is saved.
+The built-in decision graph uses EMA validation. Guided settings can enable or disable that validation in Camera-triggered mode; Camera + visual backup and Visual-triggered modes require EMA. Incomplete or retired stage graphs are rejected before config is saved.
 
 Use the guided **Motion decision** panel under **Config > Detection** to select the trigger source and validators without editing stage graphs. Each camera can inherit the global choice or create a camera-specific policy. Advanced stage graphs created outside the GUI remain protected until explicitly replaced with guided settings.
 
-For the normal setup, select **Camera-triggered with adaptive validation** and click **Use this setup**. ONVIF remains the only automatic trigger, adaptive analysis validates ordinary notices, and MOG2 stays off for lower CPU use. See [Motion triggers and validation](docs/adaptive-motion.md) for the complete data flow and performance model.
+For the normal setup, select **Camera-triggered** with **Enhanced Motion Analysis (EMA)** enabled. ONVIF remains the only automatic trigger and EMA validates ordinary notices. See [Motion triggers and validation](docs/adaptive-motion.md) for the complete data flow and performance model.
 
 The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 
-Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. The built-in MOG2 and ONVIF stages handle different observation kinds, so only the relevant stage runs for each frame or camera event.
+Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. Built-in ONVIF evidence is event-based, while future registered observation plugins may independently consume their supported observation kinds.
 
 Camera Settings also includes an on-demand **Motion Diagnostics** viewer for the original and processed frame, difference image, threshold and cleaned masks, blob/track overlay, decision score, and stage timings. Diagnostics are limited to one selected camera and one capture per second, retain only the latest encoded snapshot in memory, stop when the viewer closes, and expire automatically if the browser disconnects.
 
-MOG2 frame evidence and ONVIF event evidence are independent observation stages backed by the same per-camera, thread-safe repository. ONVIF evidence is never presented as a visual validator in the guided configuration.
+ONVIF event evidence is stored in the per-camera, thread-safe evidence repository for diagnostics. It is never presented as a visual validator in the guided configuration.
 
 ## Face Recognition
 
