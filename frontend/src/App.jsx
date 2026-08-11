@@ -70,6 +70,7 @@ import {
 } from "./motionDecisionConfig.mjs";
 import {
   availableQualificationPresets,
+  motionAnalysisPresetSelectionUseful,
   presetQualificationGraph,
   readMotionAnalysisPreset,
 } from "./motionAnalysisConfig.mjs";
@@ -7610,6 +7611,15 @@ function MotionAnalysisPresetEditor({
     }
     const preset = presets.find((candidate) => candidate.id === value);
     if (preset) onChange(presetQualificationGraph(preset));
+  }
+
+  if (!motionAnalysisPresetSelectionUseful(catalog)) {
+    return parsed.custom && !inherited ? (
+      <div className="motion-analysis-warning motion-analysis-custom-notice">
+        <strong>Advanced custom motion pipeline</strong>
+        <span>This externally configured pipeline remains active and protected from guided settings.</span>
+      </div>
+    ) : null;
   }
 
   return (

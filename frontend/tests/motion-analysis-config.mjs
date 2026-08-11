@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   availableQualificationPresets,
+  motionAnalysisPresetSelectionUseful,
   presetQualificationGraph,
   readMotionAnalysisPreset,
 } from "../src/motionAnalysisConfig.mjs";
@@ -24,6 +25,9 @@ const catalog = {
 };
 
 assert.equal(availableQualificationPresets(catalog).length, 2);
+assert.equal(motionAnalysisPresetSelectionUseful(catalog), true);
+assert.equal(motionAnalysisPresetSelectionUseful({ presets: [catalog.presets[0]] }), false);
+assert.equal(motionAnalysisPresetSelectionUseful({ presets: [] }), false);
 assert.equal(readMotionAnalysisPreset([], catalog).preset.id, "modular");
 assert.equal(readMotionAnalysisPreset(null, catalog).inherited, true);
 assert.equal(readMotionAnalysisPreset(catalog.presets[1].stages, catalog).preset.id, "classic");

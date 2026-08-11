@@ -4302,6 +4302,15 @@ section.detection-settings-card {
   padding: 7px 9px;
 }
 
+.motion-analysis-custom-notice {
+  display: grid;
+  gap: 3px;
+}
+
+.motion-analysis-custom-notice strong {
+  color: var(--ink);
+}
+
 .motion-decision-editor {
   display: grid;
   gap: 12px;

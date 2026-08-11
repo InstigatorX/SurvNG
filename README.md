@@ -415,7 +415,7 @@ Use the guided **Motion behavior** panel under **Admin > Camera Settings > Motio
 
 The default and recommended setup is **Camera + EMA backup**. ONVIF remains primary, EMA validates ordinary notices, and tightly bounded EMA rescue can recover an incident when the camera fails to notify SurvNG. See [Motion triggers and validation](docs/adaptive-motion.md) for the complete data flow and performance model.
 
-The adjacent **Motion analysis method** selector is populated from the runtime stage catalog at `GET /api/motion/pipeline/catalog`. It offers only presets whose implementations are registered and available. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
+When the runtime stage catalog at `GET /api/motion/pipeline/catalog` exposes two or more supported motion-analysis presets, the GUI automatically displays a **Motion analysis method** selector. With only the standard EMA pipeline available, SurvNG hides the redundant selector. Externally configured custom pipelines remain active and protected and receive a compact read-only notice. Camera Settings shows the effective analysis, observation, and decision graphs with live cycle counts, failures, and per-stage timing.
 
 Stages with the same non-empty `parallel_group` run concurrently when they are adjacent in a graph. Each branch receives an isolated `MotionContext`; the pipeline merges only artifacts declared by the stage registrations. Conflicting non-mergeable outputs are rejected during configuration validation. Built-in ONVIF evidence is event-based, while future registered observation plugins may independently consume their supported observation kinds.
 

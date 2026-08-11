@@ -23,6 +23,10 @@ export function availableQualificationPresets(catalog) {
   );
 }
 
+export function motionAnalysisPresetSelectionUseful(catalog) {
+  return availableQualificationPresets(catalog).length > 1;
+}
+
 export function readMotionAnalysisPreset(qualification, catalog) {
   const presets = availableQualificationPresets(catalog);
   const recommended = presets.find((preset) => preset.recommended) || presets[0] || null;
