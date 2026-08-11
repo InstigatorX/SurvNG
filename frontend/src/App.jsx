@@ -4,6 +4,7 @@ import {
   Activity,
   ArrowLeft,
   ArrowRight,
+  ArrowUpDown,
   Bike,
   Bot,
   BusFront,
@@ -8530,6 +8531,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [logLines, setLogLines] = useState([]);
   const [logFilter, setLogFilter] = useStoredState("survng.logFilter.v1", "");
   const [logLevel, setLogLevel] = useStoredState("survng.logLevel.v1", "INFO");
+  const [logOrder, setLogOrder] = useStoredState("survng.logOrder.v1", "newest");
   const [auditItems, setAuditItems] = useState([]);
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditPage, setAuditPage] = useState(0);
@@ -9244,8 +9246,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             lines={logLines}
             filter={logFilter}
             setFilter={setLogFilter}
-            level={logLevel}
-            setLevel={setLogLevel}
+            order={logOrder}
+            setOrder={setLogOrder}
             timeZone={timeZone}
           />
         </section>
@@ -9790,14 +9792,29 @@ function ZoneEditor({ camera, classOptions = [], onChange, onSave, saving = fals
   );
 }
 
-function LogViewer({ lines, filter, setFilter, level, setLevel, timeZone }) {
+function LogViewer({ lines, filter, setFilter, order, setOrder, timeZone }) {
+  const displayedLines = order === "oldest" ? lines : [...lines].reverse();
   return (
     <div className="log-viewer">
       <div className="log-toolbar">
-        <label>Filter<input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="logger, text, error..." /></label>
+        <div className="log-filter-control">
+          <label htmlFor="log-filter-input">Filter</label>
+          <div className="log-filter-row">
+            <input id="log-filter-input" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="logger, text, error..." />
+            <button
+              type="button"
+              className="log-order-button"
+              onClick={() => setOrder(order === "newest" ? "oldest" : "newest")}
+              title={order === "newest" ? "Show oldest messages first" : "Show newest messages first"}
+              aria-label={order === "newest" ? "Newest messages first; switch to oldest first" : "Oldest messages first; switch to newest first"}
+            >
+              <ArrowUpDown size={15} /> {order === "newest" ? "Newest first" : "Oldest first"}
+            </button>
+          </div>
+        </div>
       </div>
       <div className="log-lines" role="log" aria-live="polite">
-        {lines.length ? lines.map((line, index) => (
+        {displayedLines.length ? displayedLines.map((line, index) => (
           <div className={`log-line ${String(line.level || "").toLowerCase()}`} key={`${line.time}-${index}`}>
             <time>{formatTimeOnly(line.time, timeZone)}</time>
             <span>{line.level}</span>
