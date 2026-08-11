@@ -2605,6 +2605,7 @@ button.status-pill.hud-toggle:disabled {
 .object-box-layer {
   position: absolute;
   inset: 0;
+  z-index: 3;
   pointer-events: none;
 }
 
