@@ -456,6 +456,41 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         validate_motion_pipeline_configuration(config)
 
+    def test_application_preflight_rejects_retired_mog2_flag(self) -> None:
+        config = AppConfig.model_validate({
+            "motion_qualification": {"mog2_audit_enabled": True},
+        })
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "MOG2 has been retired.*EMA",
+        ):
+            validate_motion_pipeline_configuration(config)
+
+    def test_application_preflight_rejects_retired_camera_mog2_source(self) -> None:
+        config = AppConfig.model_validate({
+            "cameras": [{
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsp://example.invalid/main",
+                "motion_qualification": {
+                    "pipeline": {
+                        "fusion": [{
+                            "stage_id": "fusion",
+                            "implementation": "buffered_evidence_fusion",
+                            "options": {"sources": " MOG2 "},
+                        }],
+                    },
+                },
+            }],
+        })
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "camera 'gate'.*MOG2 stage/source.*EMA",
+        ):
+            validate_motion_pipeline_configuration(config)
+
     def test_application_preflight_closes_temporary_pipelines(self) -> None:
         config = AppConfig.model_validate({
             "cameras": [{

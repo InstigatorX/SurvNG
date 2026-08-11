@@ -74,6 +74,42 @@ class ManagerShutdownIncompleteError(RuntimeError):
 
 
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
+    def selected_sources(value: object) -> set[str]:
+        if isinstance(value, str):
+            values = (value,)
+        elif isinstance(value, (list, tuple)):
+            values = value
+        else:
+            return set()
+        return {
+            str(source).strip().lower()
+            for source in values
+            if str(source).strip()
+        }
+
+    def reject_retired_mog2(scope: str, motion_config: object) -> None:
+        if bool(getattr(motion_config, "mog2_audit_enabled", False)):
+            raise ValueError(
+                f"invalid motion pipeline for {scope}: MOG2 has been retired; "
+                "use Enhanced Motion Analysis (EMA) validation"
+            )
+        pipeline = getattr(motion_config, "pipeline", None)
+        for graph_name in ("qualification", "observation", "fusion"):
+            stages = getattr(pipeline, graph_name, None) if pipeline is not None else None
+            for stage in stages or ():
+                implementation = str(stage.implementation).strip().lower()
+                sources = selected_sources(stage.options.get("sources"))
+                if implementation in {"opencv_mog2", "opencv_mog2_evidence"} or "mog2" in sources:
+                    raise ValueError(
+                        f"invalid motion pipeline for {scope}: MOG2 stage/source "
+                        f"in {graph_name} has been retired; use Enhanced Motion "
+                        "Analysis (EMA) validation"
+                    )
+
+    reject_retired_mog2("global configuration", config.motion_qualification)
+    for camera in config.cameras:
+        reject_retired_mog2(f"camera {camera.id!r}", camera.motion_qualification)
+
     registry = build_builtin_motion_registry()
     targets = [("global", CameraMotionQualificationConfig())] + [
         (camera.id, camera.motion_qualification)
