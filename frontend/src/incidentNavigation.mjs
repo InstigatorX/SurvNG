@@ -132,6 +132,58 @@ export function incidentMosaicPage(events, page, pageSize = 6) {
   };
 }
 
+function eventEpoch(event) {
+  for (const value of [event?.created_epoch, event?.created_at]) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = new Date(value || 0).getTime() / 1000;
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function largestTrackFrame(tracking) {
+  let best = null;
+  for (const track of Array.isArray(tracking?.tracks) ? tracking.tracks : []) {
+    for (const sample of Array.isArray(track?.box_history) ? track.box_history : []) {
+      const [capturedAt, x1, y1, x2, y2] = sample.map(Number);
+      const area = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+      if (Number.isFinite(capturedAt) && capturedAt > 0 && (!best || area > best.area)) {
+        best = { epoch: capturedAt, area, label: track.label || "object" };
+      }
+    }
+  }
+  return best;
+}
+
+export function incidentEvidenceFrames(event) {
+  const epoch = eventEpoch(event);
+  if (!epoch) return [];
+  const objects = Array.isArray(event?.objects) ? event.objects : [];
+  const primary = objects
+    .filter((object) => object?.label && object?.incident_eligible !== false)
+    .sort((left, right) => Number(right.temporal_peak_confidence || right.confidence || 0) - Number(left.temporal_peak_confidence || left.confidence || 0))[0];
+  const hasPeakOffset = Number.isFinite(Number(primary?.temporal_peak_confidence_offset_seconds));
+  const detectionOffset = Number(primary?.temporal_peak_confidence_offset_seconds ?? primary?.temporal_sample_offset_seconds);
+  const selectedOffset = Number(primary?.temporal_sample_offset_seconds);
+  const selectedEpoch = Number.isFinite(selectedOffset) ? epoch + selectedOffset : epoch;
+  const tracking = largestTrackFrame(event?.object_tracking);
+  return [
+    { key: "trigger", label: "Trigger", epoch, kind: "recording" },
+    {
+      key: "detection",
+      label: primary?.label
+        ? `${hasPeakOffset ? "Best" : "Detected"} ${primary.label}`
+        : "Detection",
+      epoch: Number.isFinite(detectionOffset) ? epoch + detectionOffset : selectedEpoch,
+      kind: "recording",
+      confidence: Number(primary?.temporal_peak_confidence || primary?.confidence || 0),
+    },
+    { key: "selected", label: "Selected", epoch: selectedEpoch, kind: "snapshot" },
+    ...(tracking ? [{ key: "tracking", label: `Best ${tracking.label} track`, epoch: tracking.epoch, kind: "recording" }] : []),
+  ];
+}
+
 export function incidentIndexForEvent(incidents, event) {
   if (!Array.isArray(incidents) || !event) return -1;
   return incidents.findIndex((incident) => (

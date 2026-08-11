@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -30,6 +30,32 @@ assert.deepEqual(incidentMosaicEvents({}), []);
 assert.deepEqual(incidentMosaicPage(mosaicEvents, 0, 2), { items: mosaicEvents.slice(0, 2), page: 0, pageCount: 2 });
 assert.deepEqual(incidentMosaicPage(mosaicEvents, 99, 2), { items: mosaicEvents.slice(2), page: 1, pageCount: 2 });
 assert.deepEqual(incidentMosaicPage([], 0), { items: [], page: 0, pageCount: 1 });
+const evidenceFrames = incidentEvidenceFrames({
+  id: 10,
+  created_at: "2026-08-08T12:00:00Z",
+  objects: [{
+    label: "person",
+    confidence: 0.8,
+    temporal_peak_confidence: 0.94,
+    temporal_peak_confidence_offset_seconds: 4.5,
+    temporal_sample_offset_seconds: 8,
+  }],
+  object_tracking: { tracks: [{ label: "person", box_history: [
+    [1775649601, 0, 0, 10, 10],
+    [1775649603, 0, 0, 20, 20],
+  ] }] },
+});
+assert.deepEqual(evidenceFrames.map(({ key, label, epoch, kind }) => ({ key, label, epoch, kind })), [
+  { key: "trigger", label: "Trigger", epoch: 1786190400, kind: "recording" },
+  { key: "detection", label: "Best person", epoch: 1786190404.5, kind: "recording" },
+  { key: "selected", label: "Selected", epoch: 1786190408, kind: "snapshot" },
+  { key: "tracking", label: "Best person track", epoch: 1775649603, kind: "recording" },
+]);
+assert.equal(incidentEvidenceFrames({
+  created_epoch: 100,
+  objects: [{ label: "car", temporal_sample_offset_seconds: 8 }],
+})[1].label, "Detected car");
+assert.deepEqual(incidentEvidenceFrames({}), []);
 
 assert.equal(showIncidentCardAnnotations(false, true), true);
 assert.equal(showIncidentCardAnnotations(false, false), false);

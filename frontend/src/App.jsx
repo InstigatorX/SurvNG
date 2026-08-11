@@ -26,6 +26,7 @@ import {
   Film,
   Gauge,
   Grid2X2,
+  Images,
   GripVertical,
   HardDrive,
   Search,
@@ -98,7 +99,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
@@ -737,6 +738,7 @@ const WebRtcLive = forwardRef(function WebRtcLive({
 });
 
 function eventSnapshotUrl(event) {
+  if (event?.snapshot_url) return appUrl(event.snapshot_url);
   const eventId = Number(event?.representative_event_id || event?.id);
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/snapshot.jpg`) : "";
 }
@@ -747,6 +749,7 @@ function eventSnapshotDownloadUrl(event) {
 }
 
 function eventThumbnailUrl(event, width = 720, quality = 82) {
+  if (event?.snapshot_url) return appUrl(event.snapshot_url);
   const eventId = Number(event?.representative_event_id || event?.id);
   return Number.isFinite(eventId) ? appUrl(`/api/events/${eventId}/thumbnail.jpg?width=${width}&quality=${quality}`) : "";
 }
@@ -2168,7 +2171,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   const boxCoordinateSize = incidentDetectionFrameSize(event);
   const trackCoordinateSize = incidentTrackingFrameSize(event);
   const coordinateSize = showTracking ? trackCoordinateSize : boxCoordinateSize;
-  const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}`;
+  const progressiveImageKey = `${event?.representative_event_id || event?.id || "none"}:${event?.snapshot_path || "none"}:${event?.snapshot_url || "stored"}`;
   const frameRef = useRef(null);
   const [imageSize, setImageSize] = useState(() => coordinateSize);
   const [loadedImageKey, setLoadedImageKey] = useState("");
@@ -2644,8 +2647,12 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const showSubEvents = rawEvents.length > 1 || motionObservations.length > 0;
   const [selectedPreview, setSelectedPreview] = useState(null);
   const [workspaceView, setWorkspaceView] = useState(() => {
-    try { return window.sessionStorage.getItem("survng.incidentWorkspaceView.v1") === "mosaic" ? "mosaic" : "focus"; } catch { return "focus"; }
+    try {
+      const stored = window.sessionStorage.getItem("survng.incidentWorkspaceView.v1");
+      return ["mosaic", "evidence"].includes(stored) ? stored : "focus";
+    } catch { return "focus"; }
   });
+  const [selectedEvidence, setSelectedEvidence] = useState(null);
   const [mosaicPageIndex, setMosaicPageIndex] = useState(0);
   const [subEventsOpen, setSubEventsOpen] = useState(false);
   const [inlineVideoActive, setInlineVideoActive] = useState(false);
@@ -2653,11 +2660,38 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   const previewRef = useRef(null);
   const snapshotZoomRef = useRef(snapshotZoom);
   const panGestureRef = useRef({ pointerId: null, startX: 0, startY: 0, panX: 0, panY: 0, moved: false });
-  const preview = selectedPreview || incident;
+  const replayRequestRef = useRef(replayRequest);
+  const evidenceSource = selectedPreview || incident;
+  const evidenceFrames = useMemo(() => incidentEvidenceFrames(evidenceSource), [evidenceSource]);
+  const evidenceItems = useMemo(() => evidenceFrames.map((frame) => {
+    if (frame.kind === "snapshot") return {
+      ...frame,
+      event: {
+        ...evidenceSource,
+        created_at: new Date(frame.epoch * 1000).toISOString(),
+      },
+    };
+    const snapshotUrl = `/api/cameras/${encodeURIComponent(incident.camera_id)}/recordings/preview.jpg?epoch=${encodeURIComponent(frame.epoch)}&source=main&width=1280&exact=true`;
+    return {
+      ...frame,
+      event: {
+        ...evidenceSource,
+        snapshot_path: "recording-evidence",
+        snapshot_url: snapshotUrl,
+        created_at: new Date(frame.epoch * 1000).toISOString(),
+        objects: [],
+        object_tracking: null,
+      },
+    };
+  }), [evidenceFrames, evidenceSource, incident.camera_id]);
+  const preview = selectedEvidence?.event || selectedPreview || incident;
   const mosaicEvents = useMemo(() => incidentMosaicEvents(incident), [incident]);
   const mosaic = useMemo(() => incidentMosaicPage(mosaicEvents, mosaicPageIndex), [mosaicEvents, mosaicPageIndex]);
   const canShowMosaic = desktopWorkspace && expanded && mosaicEvents.length > 1;
-  const activeWorkspaceView = canShowMosaic ? workspaceView : "focus";
+  const canShowEvidence = desktopWorkspace && expanded && evidenceItems.length > 0;
+  const activeWorkspaceView = workspaceView === "mosaic" && !canShowMosaic
+    ? "focus"
+    : workspaceView === "evidence" && !canShowEvidence ? "focus" : workspaceView;
   const trackingPreview = incidentTrackingSource(preview, incident) || preview;
   const labels = incidentLabels(incident);
   const eventCount = incident.event_count || rawEvents.length || 1;
@@ -2684,9 +2718,11 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   useEffect(() => {
     setSelectedPreview(null);
+    setSelectedEvidence(null);
     setMosaicPageIndex(0);
     setSubEventsOpen(false);
     setInlineVideoActive(false);
+    replayRequestRef.current = replayRequest;
   }, [incident.id]);
 
   useEffect(() => {
@@ -2699,11 +2735,13 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   }, [preview.id, preview.created_at]);
 
   useEffect(() => {
-    if (expanded && replayRequest > 0) setInlineVideoActive(true);
+    const previousRequest = replayRequestRef.current;
+    replayRequestRef.current = replayRequest;
+    if (expanded && replayRequest > previousRequest) setInlineVideoActive(true);
   }, [expanded, replayRequest]);
 
   useEffect(() => {
-    if (activeWorkspaceView === "mosaic") setInlineVideoActive(false);
+    if (activeWorkspaceView !== "focus") setInlineVideoActive(false);
   }, [activeWorkspaceView]);
 
   useEffect(() => {
@@ -2823,7 +2861,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   function selectWorkspaceView(view) {
     setWorkspaceView(view);
-    if (view === "mosaic") {
+    if (view !== "focus") {
       setInlineVideoActive(false);
       resetSnapshotZoom();
     }
@@ -2831,6 +2869,13 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   function selectMosaicEvent(event) {
     setSelectedPreview(event);
+    setSelectedEvidence(null);
+    setInlineVideoActive(false);
+    setWorkspaceView("focus");
+  }
+
+  function selectEvidenceItem(item) {
+    setSelectedEvidence(item);
     setInlineVideoActive(false);
     setWorkspaceView("focus");
   }
@@ -2847,7 +2892,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
     >
       <div
         ref={previewRef}
-        className={`incident-preview ${activeWorkspaceView === "mosaic" ? "mosaic-view" : ""} ${desktopWorkspace && expanded && activeWorkspaceView === "focus" ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
+        className={`incident-preview ${activeWorkspaceView !== "focus" ? "mosaic-view" : ""} ${desktopWorkspace && expanded && activeWorkspaceView === "focus" ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
         onClick={activeWorkspaceView === "focus" ? openPreview : (event) => event.stopPropagation()}
         onDoubleClick={(pointerEvent) => {
           if (!desktopWorkspace || !expanded) return;
@@ -2894,6 +2939,20 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
               </div>
             ) : null}
           </div>
+        ) : activeWorkspaceView === "evidence" ? (
+          <div className={`incident-evidence incident-evidence-${evidenceItems.length}`} role="group" aria-label="Incident evidence frames">
+            {evidenceItems.map((item) => (
+              <button type="button" className="incident-evidence-tile" key={item.key} onClick={(event) => { event.stopPropagation(); selectEvidenceItem(item); }} aria-label={`Focus ${item.label.toLowerCase()} frame`}>
+                <SnapshotImage event={item.event} alt={`${item.label} evidence frame`} className="incident-evidence-snapshot" thumbnail allowObjectFocus={false} showAnnotations={item.kind === "snapshot"} showTracking={false}>
+                  <div className="incident-evidence-hud">
+                    <strong>{item.label}</strong>
+                    <time>{formatTimeOnly(item.event.created_at, timeZone)}</time>
+                    {item.confidence > 0 ? <span>{Math.round(item.confidence * 100)}%</span> : null}
+                  </div>
+                </SnapshotImage>
+              </button>
+            ))}
+          </div>
         ) : (
           <SnapshotImage
             event={preview}
@@ -2933,10 +2992,11 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
               : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
           </SnapshotImage>
         )}
-        {canShowMosaic ? (
+        {canShowMosaic || canShowEvidence ? (
           <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
             <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
-            <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button>
+            {canShowMosaic ? <button type="button" className={activeWorkspaceView === "mosaic" ? "active" : ""} onClick={() => selectWorkspaceView("mosaic")} aria-pressed={activeWorkspaceView === "mosaic"} title="Show all incident events"><Grid2X2 size={14} /><span>Mosaic</span></button> : null}
+            {canShowEvidence ? <button type="button" className={activeWorkspaceView === "evidence" ? "active" : ""} onClick={() => selectWorkspaceView("evidence")} aria-pressed={activeWorkspaceView === "evidence"} title="Compare trigger, detection, selected, and tracking frames"><Images size={14} /><span>Evidence</span></button> : null}
           </div>
         ) : null}
       </div>
@@ -2969,7 +3029,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
                   const eventLabelText = eventLabels.length ? eventLabels.join(", ") : "motion";
                   const isActive = (preview.id || incident.id) === event.id && (preview.created_at || incident.created_at) === event.created_at;
                   return (
-                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setInlineVideoActive(false); }}>
+                    <button type="button" key={`${event.id || "event"}-${index}`} className={isActive ? "active" : ""} onClick={() => { setSelectedPreview(event); setSelectedEvidence(null); setInlineVideoActive(false); }}>
                       <span>{formatTimeOnly(event.created_at || incident.created_at, timeZone)}</span>
                       <strong>{eventLabelText}</strong>
                     </button>
@@ -2987,7 +3047,6 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEventId, cameraNameById, timeZone, onSelect, onReturn }) {
   const [matches, setMatches] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!Number.isInteger(Number(anchorEventId)) || Number(anchorEventId) <= 0) {
@@ -2997,7 +3056,6 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
-    setError("");
     fetch(`/api/events/${Number(anchorEventId)}/related-incidents?hours=24&limit=16`, {
       signal: controller.signal,
     })
@@ -3008,7 +3066,6 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
       .catch((requestError) => {
         if (!cancelled && requestError?.name !== "AbortError") {
           setMatches([]);
-          setError(requestError.message || "Related incidents unavailable");
         }
       })
       .finally(() => {
@@ -3020,15 +3077,15 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
     };
   }, [anchorEventId]);
 
+  if (!loading && !matches.length) return null;
+
   return (
     <section className="incident-related">
       <div className="incident-related-head">
-        <div><h3>Related incidents</h3><small>Visual matches and nearby camera sequence candidates</small></div>
+        <h3>Related incidents</h3>
         {selectedEventId ? <button type="button" onClick={onReturn}>Selected incident</button> : null}
       </div>
       {loading ? <p>Finding related incidents…</p> : null}
-      {!loading && error ? <p>{error}</p> : null}
-      {!loading && !error && !matches.length ? <p>No related appearances or nearby camera events.</p> : null}
       {matches.length ? <div className="incident-related-grid">
         {matches.map((match) => {
           const eventId = Number(match.event_id);
@@ -3043,7 +3100,6 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
           );
         })}
       </div> : null}
-      <small>Visual similarity supports an investigation. “Expected route” follows your configured camera map; “Likely sequence” uses time and object family only. Neither claims identity without appearance evidence.</small>
     </section>
   );
 }
@@ -3075,7 +3131,6 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
           <button type="button" className={analysisMode === "tracks" ? "active" : ""} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
           <button type="button" className={analysisMode === "ai" ? "active" : ""} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
         </div>
-        <p>Click the incident image to replay using the selected analysis mode.</p>
         {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
       </section>
@@ -3091,18 +3146,6 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
             </div>
           );
         }) : <p>No eligible object detections.</p>}
-      </section>
-      <section>
-        <h3>Tracked objects</h3>
-        {objectTracks.length ? <p>{String(incidentTracking?.implementation || "tracker").replaceAll("_", " ")} sampled at {Number(incidentTracking?.sample_fps || 0) || "?"} FPS.</p> : <p>No stored tracks for this incident.</p>}
-        {incidentTracking?.coverage_incomplete ? <small className="analysis-error">Tracking was interrupted by a {Number(incidentTracking.maximum_coverage_gap_seconds || 0).toFixed(1)}s frame coverage gap. Later movement may be incomplete.</small> : null}
-        {objectTracks.map((track) => <div className={`inspector-detection inspector-track object-track-color-${Math.abs(Number(track.track_id) || 0) % 6}`} key={track.track_id}>
-          <div><strong>#{track.track_id} {track.label}</strong><span>{track.state}</span></div>
-          <small>{track.observations} samples · {formatDuration(track.duration_seconds || 0)}{track.reid_matches ? ` · ${track.reid_matches} ReID recover${track.reid_matches === 1 ? "y" : "ies"}` : ""}{track.zones?.length ? ` · ${track.zones.join(", ")}` : ""}</small>
-          {(track.reid_recovery_history || []).map((recovery, index) => (
-            <small key={`${track.track_id}-recovery-${recovery.captured_at}-${index}`}>ReID preserved this ID at {formatTimeOnly(new Date(Number(recovery.captured_at) * 1000).toISOString(), timeZone)} · {Math.round(Number(recovery.similarity || 0) * 100)}% similar</small>
-          ))}
-        </div>)}
       </section>
       <section>
         <h3>Faces</h3>

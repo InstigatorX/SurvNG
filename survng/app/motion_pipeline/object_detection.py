@@ -605,6 +605,17 @@ def _temporal_consensus(
         }
         observation_indices = sorted(track.observations)
         if observation_indices:
+            peak_observation_index = max(
+                (
+                    index
+                    for index, item in track.observations.items()
+                    if str(item.get("label") or "").strip() == track.winning_label
+                ),
+                key=lambda index: _confidence(track.observations[index]),
+            )
+            enriched["temporal_peak_confidence_offset_seconds"] = samples[
+                peak_observation_index
+            ].offset
             first_observation_index = observation_indices[0]
             last_observation_index = observation_indices[-1]
             enriched["temporal_first_observation_offset_seconds"] = samples[

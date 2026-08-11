@@ -29,10 +29,10 @@ export function relatedEvidenceLabel(match) {
   const hasTime = Number.isFinite(seconds);
   const hasAppearance = Boolean(match?.visually_similar) && Number.isFinite(similarity);
   const expectedRoute = ["appearance_route", "expected_route"].includes(String(match?.relation_type || ""));
-  if (expectedRoute && hasAppearance && hasTime) return `Expected route · Appearance ${Math.round(similarity * 100)}% · ${Math.round(seconds)}s`;
-  if (expectedRoute && hasTime) return `Expected route · ${Math.round(seconds)}s`;
+  if (expectedRoute && hasAppearance && hasTime) return `Expected · Appearance ${Math.round(similarity * 100)}% · ${Math.round(seconds)}s`;
+  if (expectedRoute && hasTime) return `Expected · ${Math.round(seconds)}s`;
   if (hasAppearance && hasTime) return `Appearance ${Math.round(similarity * 100)}% · ${Math.round(seconds)}s`;
   if (hasAppearance) return `Appearance ${Math.round(similarity * 100)}%`;
-  if (hasTime) return `Likely sequence · ${Math.round(seconds)}s`;
+  if (hasTime) return `Likely · ${Math.round(seconds)}s`;
   return "Related incident";
 }

@@ -641,7 +641,15 @@ class RecordingMediaRuntime:
             raise HTTPException(status_code=404, detail='recording fragment cache entry disappeared')
         return FileResponse(path, media_type=media_type, headers={'Cache-Control': 'private, max-age=86400'})
 
-    def _recording_preview_path(self, row: dict, epoch: float, *, active_manager: AppManager | None=None) -> Path:
+    def _recording_preview_path(
+        self,
+        row: dict,
+        epoch: float,
+        *,
+        width: int = 480,
+        exact: bool = False,
+        active_manager: AppManager | None = None,
+    ) -> Path:
         """Return a small cached JPEG near an epoch without mutating playback."""
         selected_manager = active_manager or self.manager
         selected_config = getattr(selected_manager, 'config', self.config)
@@ -652,12 +660,25 @@ class RecordingMediaRuntime:
             raise HTTPException(status_code=404, detail='no recording exists at this time')
         duration = max(0.05, end_epoch - start_epoch)
         raw_offset = max(0.0, epoch - start_epoch)
-        preview_offset = min(max(0.0, math.floor(raw_offset / self.recording_preview_interval_seconds) * self.recording_preview_interval_seconds), max(0.0, duration - 0.05))
+        requested_width = max(320, min(1920, int(width)))
+        preview_offset = min(
+            max(
+                0.0,
+                raw_offset
+                if exact
+                else math.floor(raw_offset / self.recording_preview_interval_seconds)
+                * self.recording_preview_interval_seconds,
+            ),
+            max(0.0, duration - 0.05),
+        )
         try:
             stat = source_path.stat()
         except OSError as exc:
             raise HTTPException(status_code=404, detail='recording file not found') from exc
-        fingerprint = f'v1:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:{preview_offset:.3f}:480'
+        fingerprint = (
+            f'v2:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'{preview_offset:.3f}:{requested_width}'
+        )
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
         cache_dir = selected_manager.database_dir / 'recording-preview-cache'
         preview_path = cache_dir / f'{cache_key}.jpg'
@@ -673,7 +694,8 @@ class RecordingMediaRuntime:
             temporary = cache_dir / f'.{cache_key}.{os.getpid()}.{threading.get_ident()}.tmp.jpg'
             try:
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', "scale='min(480,iw)':-2", '-q:v', '5', '-y', str(temporary)]
+                jpeg_quality = 3 if requested_width > 480 else 5
+                command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', f"scale='min({requested_width},iw)':-2", '-q:v', str(jpeg_quality), '-y', str(temporary)]
                 try:
                     result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
                 except subprocess.TimeoutExpired as exc:

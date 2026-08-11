@@ -880,6 +880,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
         self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 8.0)
+        self.assertEqual(objects[0]["temporal_peak_confidence_offset_seconds"], 8.0)
 
     def test_initial_detection_defers_sparse_late_stages_and_reports_phase_timings(self) -> None:
         event_epoch = 1_800_000_000.0

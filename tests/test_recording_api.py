@@ -510,6 +510,50 @@ class RecordingApiTest(unittest.TestCase):
             self.assertEqual(command[command.index("-ss") + 1], "5.000")
             self.assertIn(str(manager.database_dir / "recording-preview-cache"), str(first))
 
+    def test_recording_preview_can_extract_an_exact_display_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recordings_dir = root / "recordings"
+            recordings_dir.mkdir()
+            source_path = recordings_dir / "segment.mp4"
+            source_path.write_bytes(b"recording")
+            manager = SimpleNamespace(
+                database_dir=root / "database",
+                recorder=SimpleNamespace(recordings_dir=recordings_dir),
+            )
+
+            def create_preview(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                Path(command[-1]).write_bytes(b"jpeg")
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            row = {
+                "path": str(source_path),
+                "start_epoch": 100.0,
+                "end_epoch": 110.0,
+            }
+            with (
+                patch.object(main, "manager", manager),
+                patch(
+                    "survng.app.recording_media_runtime.subprocess.run",
+                    side_effect=create_preview,
+                ) as run,
+                patch.object(
+                    main._recording_media_runtime,
+                    "_maintain_recording_preview_cache",
+                ),
+            ):
+                preview = main._recording_media_runtime._recording_preview_path(
+                    row,
+                    107.9,
+                    width=1280,
+                    exact=True,
+                )
+
+            self.assertEqual(preview.read_bytes(), b"jpeg")
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("-ss") + 1], "7.900")
+            self.assertIn("min(1280,iw)", command[command.index("-vf") + 1])
+
     def test_recording_preview_reports_index_gap_without_storage_scan(self) -> None:
         recorder = Mock()
         recorder.recording_rows_between.return_value = []

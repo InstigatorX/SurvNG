@@ -613,10 +613,18 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
 
     @router.get("/api/cameras/{camera_id}/recordings/preview.jpg")
     @guard_manager_generation(deps.manager_access, deps.manager_lock, deps.get_manager)
-    def recording_preview(camera_id: str, epoch: float, source: str = "main") -> FileResponse:
+    def recording_preview(
+        camera_id: str,
+        epoch: float,
+        source: str = "main",
+        width: int = 480,
+        exact: bool = False,
+    ) -> FileResponse:
         active_manager = _require_recording_camera(deps, camera_id)
         if not math.isfinite(epoch) or epoch <= 0:
             raise HTTPException(status_code=400, detail="invalid recording preview time")
+        if width < 320 or width > 1920:
+            raise HTTPException(status_code=400, detail="invalid recording preview width")
         selected_source = recording_source(source)
         rows = active_manager.recorder.recording_rows_between(
             camera_id,
@@ -635,7 +643,13 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
         )
         if row is None:
             raise HTTPException(status_code=404, detail="no recording exists at this time")
-        preview_path = deps.recording_preview_path(active_manager, row, epoch)
+        preview_path = deps.recording_preview_path(
+            active_manager,
+            row,
+            epoch,
+            width=width,
+            exact=exact,
+        )
         return FileResponse(
             preview_path,
             media_type="image/jpeg",
