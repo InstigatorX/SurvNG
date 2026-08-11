@@ -3595,6 +3595,52 @@ button.status-pill.hud-toggle:disabled {
   padding: 14px;
 }
 
+.camera-section-tabs {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--subtle);
+  padding: 5px;
+  scrollbar-width: thin;
+}
+
+.camera-section-tabs button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding-inline: 12px;
+}
+
+.camera-section-tabs button:hover {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.camera-section-tabs button.active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  background: color-mix(in srgb, var(--accent) 14%, var(--control));
+  color: var(--accent);
+}
+
+.camera-identity-fields,
+.camera-info-fields,
+.camera-object-policy-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.config-form > .config-panels {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .field-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -4483,6 +4529,8 @@ section.detection-settings-card {
 
 .zone-canvas {
   position: relative;
+  display: grid;
+  place-items: start center;
   overflow: hidden;
   min-height: 180px;
   border: 1px solid var(--line);
@@ -4492,13 +4540,20 @@ section.detection-settings-card {
 
 .zone-canvas-media {
   position: relative;
-  width: 100%;
+  display: inline-block;
+  width: auto;
+  max-width: 100%;
+  max-height: max(180px, calc(100dvh - 350px));
+  line-height: 0;
 }
 
 .zone-canvas-media img {
   display: block;
-  width: 100%;
+  width: auto;
   height: auto;
+  max-width: 100%;
+  max-height: max(180px, calc(100dvh - 350px));
+  object-fit: contain;
 }
 
 .zone-canvas-media svg {

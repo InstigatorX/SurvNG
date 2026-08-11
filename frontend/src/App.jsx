@@ -8602,6 +8602,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [motionCatalog, setMotionCatalog] = useState(null);
   const [settingsTab, setSettingsTab] = useStoredState("survng.configTab", "general");
   const [generalSection, setGeneralSection] = useStoredState("survng.generalSection.v1", "general");
+  const [cameraSection, setCameraSection] = useStoredState("survng.cameraSection.v1", "settings");
   const [selectedId, setSelectedId] = useState("");
   const [saveNotice, setSaveNotice] = useState(null);
   const [configLoadError, setConfigLoadError] = useState("");
@@ -8640,9 +8641,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     onAssistantContextChange?.({
       page: "config",
       camera_id: settingsTab === "cameras" ? selectedId : "",
-      filters: { section: settingsTab, general_section: generalSection },
+      filters: { section: settingsTab, general_section: generalSection, camera_section: cameraSection },
     });
-  }, [generalSection, onAssistantContextChange, selectedId, settingsTab]);
+  }, [cameraSection, generalSection, onAssistantContextChange, selectedId, settingsTab]);
 
   async function load() {
     const sequence = ++configLoadSequence.current;
@@ -9132,6 +9133,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
 
   async function probeCamera(camera) {
     setProbe({ loading: true });
+    setCameraSection("info");
+    setCameraSection("info");
     const probeCameraConfig = cameraWithDerivedConnection(camera);
     if (probeCameraConfig !== camera) {
       setConfig((current) => ({
@@ -9416,10 +9419,20 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         <div className="config-form">
           {selectedCamera ? (
             <>
-              <div className="field-row">
+              <div className="camera-section-tabs" role="tablist" aria-label={`${selectedCamera.name} settings sections`}>
+                <button type="button" className={cameraSection === "settings" ? "active" : ""} onClick={() => setCameraSection("settings")} role="tab" aria-selected={cameraSection === "settings"}><Cog size={15} />Settings</button>
+                <button type="button" className={cameraSection === "motion" ? "active" : ""} onClick={() => setCameraSection("motion")} role="tab" aria-selected={cameraSection === "motion"}><Activity size={15} />Motion/Object</button>
+                <button type="button" className={cameraSection === "zones" ? "active" : ""} onClick={() => setCameraSection("zones")} role="tab" aria-selected={cameraSection === "zones"}><Crop size={15} />Zones</button>
+                <button type="button" className={cameraSection === "info" ? "active" : ""} onClick={() => setCameraSection("info")} role="tab" aria-selected={cameraSection === "info"}><Gauge size={15} />Info</button>
+              </div>
+
+              {cameraSection === "settings" ? <>
+              <div className="field-row camera-identity-fields">
                 <label>Name<input value={selectedCamera.name} onChange={(event) => updateCamera(selectedCamera.id, ["name"], event.target.value)} /></label>
-                <label>Generated Camera ID<input value={slugify(selectedCamera.name || selectedCamera.id || "camera")} readOnly /></label>
-                <label>Detected Backend<input value={inferredBackendLabel(selectedCamera)} readOnly /></label>
+              </div>
+              </> : null}
+
+              {cameraSection === "motion" ? <div className="field-row camera-object-policy-fields">
                 <label>Incident eligibility<select value={selectedCamera.require_incident_zone == null ? "" : String(selectedCamera.require_incident_zone)} onChange={(event) => updateCamera(selectedCamera.id, ["require_incident_zone"], event.target.value === "" ? null : event.target.value === "true")}>
                   <option value="">Use global ({(config.detector?.require_incident_zone ?? true) ? "Zones" : "Zones + Full Frame"})</option>
                   <option value="true">Zones</option>
@@ -9431,7 +9444,14 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   <option value="shadow">Observe only</option>
                   <option value="off">Off</option>
                 </select><small>Controls whether stable objects repeatedly seen in one location can remain evidence without labeling the incident.</small></label>
-              </div>
+              </div> : null}
+
+              {cameraSection === "info" ? <div className="field-row camera-info-fields">
+                <label>Generated Camera ID<input value={slugify(selectedCamera.name || selectedCamera.id || "camera")} readOnly /></label>
+                <label>Detected Backend<input value={inferredBackendLabel(selectedCamera)} readOnly /></label>
+              </div> : null}
+
+              {cameraSection === "settings" ? <>
               <div className="field-row stream-field-row">
                 <div className="stream-field">
                   <div className="stream-field-head">
@@ -9455,9 +9475,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   <label>Substream history<input type="number" min="1" max="3650" step="1" placeholder={`Global: ${config.retention?.live_days ?? 21} days`} value={selectedCamera.retention?.live_days ?? ""} onChange={(event) => updateCamera(selectedCamera.id, ["retention", "live_days"], event.target.value === "" ? null : Number(event.target.value))} /><small>Leave blank to inherit the global policy.</small></label>
                 </div>
               </details>
+              </> : null}
 
               <div className="config-panels">
-                <div className="sub-panel">
+                {cameraSection === "settings" ? <div className="sub-panel">
                   <h3>ONVIF</h3>
                   <label className="check-field"><input type="checkbox" checked={selectedCamera.onvif?.enabled || false} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "enabled"], event.target.checked)} /> Enabled</label>
                   <div className="onvif-field-grid">
@@ -9466,8 +9487,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     <label>Username<input value={selectedCamera.onvif?.username || ""} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "username"], event.target.value)} /></label>
                     <label>Password<input type="password" value={secretInputValue(selectedCamera.onvif?.password)} placeholder={secretInputHint(selectedCamera.onvif?.password)} onChange={(event) => updateCamera(selectedCamera.id, ["onvif", "password"], event.target.value)} /></label>
                   </div>
-                </div>
-                <div className="sub-panel">
+                </div> : null}
+                {cameraSection === "motion" ? <div className="sub-panel">
                   <h3>Motion Triggers &amp; Filtering</h3>
                   <MotionAnalysisPresetEditor
                     qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
@@ -9522,10 +9543,10 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   <label>Double-check filtered motion<select value={selectedCamera.motion_qualification?.suppression_verification_rate == null ? "" : String(selectedCamera.motion_qualification.suppression_verification_rate)} onChange={(event) => updateCamera(selectedCamera.id, ["motion_qualification", "suppression_verification_rate"], event.target.value === "" ? null : Number(event.target.value))}><option value="">Use global setting</option><option value="0">Off</option><option value="0.01">About 1 in 100</option><option value="0.05">About 1 in 20</option><option value="0.1">About 1 in 10</option></select><small>Runs object detection on a small sample that visual motion would filter. A configured object safely restores the incident.</small></label>
                     </div>
                   </details>
-                </div>
+                </div> : null}
               </div>
 
-              <div className="sub-panel">
+              {cameraSection === "motion" ? <div className="sub-panel">
                 <MotionDecisionEditor
                   cameraName={selectedCamera.name}
                   fusion={selectedCamera.motion_qualification?.pipeline?.fusion}
@@ -9549,19 +9570,21 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                     { ...(selectedCamera.motion_qualification?.pipeline || {}), fusion },
                   )}
                 />
-              </div>
+              </div> : null}
 
-              <ZoneEditor
+              {cameraSection === "zones" ? <ZoneEditor
                 camera={selectedCamera}
                 classOptions={zoneClassOptions}
                 onChange={(zones) => updateCamera(selectedCamera.id, ["zones"], zones)}
                 onSave={() => saveZones(selectedCamera)}
                 saving={zonesSaving}
-              />
+              /> : null}
 
-              <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} motionCatalog={motionCatalog} />
-              <MotionDebugViewer cameraId={selectedCamera.id} timeZone={timeZone} />
-              {probe ? <ProbeResult probe={probe} /> : null}
+              {cameraSection === "info" ? <>
+                <RuntimeStatus status={selectedRuntimeStatus} timeZone={timeZone} motionCatalog={motionCatalog} />
+                <MotionDebugViewer cameraId={selectedCamera.id} timeZone={timeZone} />
+                {probe ? <ProbeResult probe={probe} /> : null}
+              </> : null}
             </>
           ) : (
             <div className="empty-state">Add a camera to begin.</div>
