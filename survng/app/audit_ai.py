@@ -22,7 +22,6 @@ StructuredResponse = TypeVar("StructuredResponse", bound=BaseModel)
 
 
 ALLOWED_GLOBAL_SETTINGS = {
-    "analysis_preset",
     "sensitivity",
     "stationary_object_tolerance",
     "illumination_filter_enabled",
@@ -42,7 +41,6 @@ ALLOWED_GLOBAL_SETTINGS = {
     "visual_backup_max_triggers_5m",
 }
 ALLOWED_CAMERA_SETTINGS = {
-    "analysis_preset",
     "sensitivity",
     "stationary_object_tolerance",
     "illumination_filter_enabled",
@@ -97,7 +95,6 @@ class AuditAiChange(BaseModel):
         "visual_backup_min_consecutive",
         "visual_backup_cooldown_seconds",
         "visual_backup_max_triggers_5m",
-        "analysis_preset",
     ]
     value: str | int | float | bool
     reason: str = Field(min_length=1, max_length=500)
@@ -121,11 +118,6 @@ class AuditAiAdvice(BaseModel):
 
 
 def validate_tuning_value(setting: str, value: Any) -> Any:
-    if setting == "analysis_preset":
-        normalized = str(value).strip().lower()
-        if normalized != "adaptive":
-            raise ValueError("analysis_preset must be adaptive")
-        return normalized
     if setting in {"sensitivity", "stationary_object_tolerance"}:
         normalized = str(value)
         if normalized not in {"high", "balanced", "low"}:
@@ -135,9 +127,6 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         if not isinstance(value, bool):
             raise ValueError(f"{setting} must be boolean")
         return value
-    if isinstance(value, bool):
-        raise ValueError(f"{setting} must be numeric")
-    number = float(value)
     bounds = {
         "frame_width": (240.0, 960.0),
         "sample_fps": (2.0, 10.0),
@@ -155,6 +144,9 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
     }
     if setting not in bounds:
         raise ValueError(f"unsupported motion tuning setting: {setting}")
+    if isinstance(value, bool):
+        raise ValueError(f"{setting} must be numeric")
+    number = float(value)
     low, high = bounds[setting]
     if not low <= number <= high:
         raise ValueError(f"{setting} must be between {low:g} and {high:g}")
@@ -217,8 +209,8 @@ that later timestamp and required any detected object to correlate with the new 
 the later evidence anchor independently without treating the original active motion as a duplicate.
 
 An audit can represent motion suppressed before object detection or a decision that proceeded
-because it qualified, bypassed validation, was rescued as borderline, used legacy audit/off behavior,
-or was selected for suppression verification. Use decision_outcome.object_detection_ran and
+because it qualified, bypassed validation, was rescued as borderline, or was selected for
+suppression verification. Use decision_outcome.object_detection_ran and
 decision_outcome.object_detection_completed to distinguish those cases. A null object_detected
 usually means detection did not run; when object_detection_ran is true and
 object_detection_completed is false, detection was attempted but did not complete. Neither case
@@ -233,19 +225,38 @@ temporal_track_observations includes alternate labels for the same physical obje
 temporal_incident_observations counts winning-label frames admitted by full-frame or zone policy, and event
 confidence is the median winning-label confidence rather than the single highest score. Compare
 temporal_observations with temporal_required_observations before characterizing a classification.
+semantic_tier separates below-candidate evidence, evidence-only observations, rescue candidates,
+and standard-confidence detections. A rescue candidate is not incident eligible merely because its
+median confidence exceeded semantic_rescue_threshold. It remains pending until final admission finds
+independent causal evidence such as credible displacement or path, confidence-independent zone entry,
+or robust new appearance combined with reliable aligned EMA overlap. New appearance alone never proves
+motion. Unreliable stream alignment may preserve an already-standard object when temporal evidence is
+unavailable, but it must never promote a subthreshold rescue candidate. Use
+semantic_rescue_admitted and incident_admission_reason as the final policy outcome.
 Object tracking starts only after the initial detector decision. Treat object_tracking as useful
 downstream evidence about persistence and identity, never as evidence that caused the initial trigger.
 
+Stationary-object handling is deliberately layered. EMA background learning gradually absorbs stable
+visual foreground; EMA scoring penalizes stationary or jittering motion regions; and semantic scene
+memory identifies repeatedly stable detected objects as scene context. These layers are complementary.
+A stable object appearing after the trigger can build scene memory, and appearance alone must not erase
+that memory. Only credible movement, a real zone transition, replacement/vacancy evidence, or expiry
+should invalidate it.
+
 Distinguish real subjects from insects, weather, lighting, vegetation, and camera artifacts.
 Recommend the fewest changes needed and prefer camera-scoped changes over global changes. Recommend
-settings only for active visual components. Enhanced Motion Analysis (adaptive) is the only
-operator-selectable analysis preset. Trigger mode,
+settings only for active visual components. Enhanced Motion Analysis (EMA) is the production visual
+analysis pipeline. Trigger mode,
 validator selection, agreement policy, and fail-open behavior are operator-owned safety settings:
 explain relevant evidence, but never recommend changing their topology. Do not recommend lowering
 sensitivity merely because an object exists.
 Use stationary_object_tolerance only when repeated evidence shows a stable foreground object with
 minor outline or centroid jitter; prefer a camera-scoped increase and do not use it to suppress
 genuine slow or distant travel.
+The supplied image is one representative frame. It can establish what is visibly present, but it
+cannot by itself prove movement, persistence, entry, causality, or the absence of a subject elsewhere
+in the recorded sequence. Use temporal and correlation telemetry for those claims and state when that
+evidence is missing or unreliable.
 Do not invent settings, alter model confidence, or recommend values outside the supplied bounds.
 Return only the requested JSON structure."""
 
@@ -360,7 +371,7 @@ def motion_paradigm_context(
         onvif_role = "legacy_trigger"
 
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "paradigm": paradigm,
         "configured_mode": mode,
         "automatic_trigger": {
@@ -388,6 +399,30 @@ def motion_paradigm_context(
         "incident_eligibility": {
             "policy": "zones_only" if require_incident_zone else "zones_plus_full_frame",
             "configured_zones_still_apply_class_filters": True,
+        },
+        "semantic_object_admission": {
+            "tiers": [
+                "below_candidate",
+                "evidence",
+                "rescue_candidate",
+                "standard",
+            ],
+            "rescue_requires_temporal_consensus": True,
+            "rescue_requires_final_causal_evidence": True,
+            "new_appearance_alone_is_sufficient": False,
+            "unreliable_alignment_can_promote_rescue": False,
+            "authoritative_fields": [
+                "semantic_rescue_admitted",
+                "incident_admission_reason",
+            ],
+        },
+        "stationary_object_policy": {
+            "layers": [
+                "ema_background_absorption",
+                "ema_stationary_region_scoring",
+                "semantic_scene_memory",
+            ],
+            "appearance_alone_invalidates_scene_memory": False,
         },
         "operator_owned_topology": [
             "configured_mode",
@@ -425,6 +460,16 @@ def audit_analysis_prompt(context_json: str) -> str:
     )
 
 
+def current_audit_ai_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove retired recommendation controls before telemetry reaches the model."""
+    current = copy.deepcopy(dict(context))
+    for section_name in ("effective_settings", "setting_bounds"):
+        section = current.get(section_name)
+        if isinstance(section, dict):
+            section.pop("analysis_preset", None)
+    return current
+
+
 class AuditAiAdvisor:
     def __init__(self, config: AuditAiConfig):
         self.config = config
@@ -436,7 +481,7 @@ class AuditAiAdvisor:
             raise AuditAiError("AI audit API key is not configured")
         try:
             context_json = json.dumps(
-                context,
+                current_audit_ai_context(context),
                 separators=(",", ":"),
                 default=str,
                 allow_nan=False,

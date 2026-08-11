@@ -874,6 +874,7 @@ class EventApiSerializationTest(unittest.TestCase):
                 "temporal_required_observations": 3,
                 "temporal_samples": 3,
                 "temporal_peak_confidence": 0.91,
+                "temporal_peak_confidence_offset_seconds": 8.0,
                 "temporal_label_votes": {"robot_lawnmower": 2, "car": 1},
                 "track_id": 7,
                 "track_state": "confirmed",
@@ -911,6 +912,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(detected["temporal_incident_observations"], 1)
         self.assertEqual(detected["temporal_required_observations"], 3)
         self.assertEqual(detected["temporal_label_votes"]["car"], 1)
+        self.assertEqual(detected["temporal_peak_confidence_offset_seconds"], 8.0)
         self.assertEqual(detected["track_id"], 7)
         self.assertEqual(context["object_tracking"]["state"], "complete")
         self.assertEqual(context["effective_settings"]["object_confirmation_frames"], 2)

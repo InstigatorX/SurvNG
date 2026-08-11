@@ -493,7 +493,7 @@ class AssistantApiTest(unittest.TestCase):
                 "_assistant_camera_evidence",
                 return_value=[],
             ),
-            patch.object(IncidentVisualReviewer, "review", return_value=advice),
+            patch.object(IncidentVisualReviewer, "review", return_value=advice) as review,
         ):
             evidence = main._intelligence_route_bundle.service._assistant_visual_incident_evidence(
                 42, active_config, active_manager
@@ -511,6 +511,19 @@ class AssistantApiTest(unittest.TestCase):
             evidence.client_payload()["image_url"],
             "/api/events/42/thumbnail.jpg?width=960&quality=82",
         )
+        review_context = review.call_args.args[1]
+        self.assertEqual(
+            review_context["motion_paradigm"]["schema_version"],
+            5,
+        )
+        self.assertIn(
+            "semantic_object_admission",
+            review_context["motion_paradigm"],
+        )
+        self.assertTrue(any(
+            "cannot prove" in limitation
+            for limitation in review_context["limitations"]
+        ))
 
     def test_motion_change_preview_resolves_camera_inheritance_and_deduplicates(self) -> None:
         from survng.app import main

@@ -19,6 +19,7 @@ from survng.app.audit_ai import (
     SYSTEM_PROMPT,
     ai_provider_configured,
     audit_analysis_prompt,
+    current_audit_ai_context,
     motion_audit_interpretation,
     motion_paradigm_context,
     validate_tuning_value,
@@ -146,6 +147,10 @@ class AuditAiTest(unittest.TestCase):
         self.assertIn("starts only after the initial detector decision", SYSTEM_PROMPT)
         self.assertIn("audit category of visual_backup", SYSTEM_PROMPT)
         self.assertIn("audit category of active_followup", SYSTEM_PROMPT)
+        self.assertIn("rescue candidate is not incident eligible", SYSTEM_PROMPT)
+        self.assertIn("New appearance alone never proves", SYSTEM_PROMPT)
+        self.assertIn("Stationary-object handling is deliberately layered", SYSTEM_PROMPT)
+        self.assertIn("one representative frame", SYSTEM_PROMPT)
 
     def test_audit_prompt_is_neutral_about_decision_outcome(self) -> None:
         prompt = audit_analysis_prompt('{"decision_outcome":{"object_detection_ran":true}}')
@@ -172,8 +177,26 @@ class AuditAiTest(unittest.TestCase):
         self.assertEqual(context["adaptive_visual"]["role"], "validator")
         self.assertEqual(context["onvif"]["role"], "automatic_trigger")
         self.assertTrue(context["validator_decision"]["fail_open"])
-        self.assertEqual(context["schema_version"], 4)
+        self.assertEqual(context["schema_version"], 5)
         self.assertEqual(context["incident_eligibility"]["policy"], "zones_only")
+        self.assertTrue(
+            context["semantic_object_admission"][
+                "rescue_requires_final_causal_evidence"
+            ]
+        )
+        self.assertFalse(
+            context["semantic_object_admission"][
+                "unreliable_alignment_can_promote_rescue"
+            ]
+        )
+        self.assertEqual(
+            context["stationary_object_policy"]["layers"],
+            [
+                "ema_background_absorption",
+                "ema_stationary_region_scoring",
+                "semantic_scene_memory",
+            ],
+        )
 
     def test_camera_visual_backup_paradigm_explains_conservative_rescue(self) -> None:
         context = motion_paradigm_context(
@@ -258,6 +281,15 @@ class AuditAiTest(unittest.TestCase):
         camera_settings = camera_variant["properties"]["setting"]["enum"]
         self.assertNotIn("sample_fps", camera_settings)
         self.assertNotIn("window_seconds", camera_settings)
+        self.assertNotIn("analysis_preset", camera_settings)
+        global_variant = next(
+            variant for variant in variants
+            if variant["properties"]["scope"]["enum"] == ["global"]
+        )
+        self.assertNotIn(
+            "analysis_preset",
+            global_variant["properties"]["setting"]["enum"],
+        )
 
     def test_advice_accepts_bounded_camera_change(self) -> None:
         advice = AuditAiAdvice.model_validate({
@@ -300,9 +332,17 @@ class AuditAiTest(unittest.TestCase):
             )
 
     def test_pipeline_recommendations_are_high_level_and_bounded(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must be adaptive"):
+        with self.assertRaisesRegex(ValueError, "unsupported"):
             validate_tuning_value("analysis_preset", "MODULAR")
-        self.assertEqual(validate_tuning_value("analysis_preset", "ADAPTIVE"), "adaptive")
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            validate_tuning_value("analysis_preset", "ADAPTIVE")
+        with self.assertRaises(ValidationError):
+            AuditAiChange(
+                scope="camera",
+                setting="analysis_preset",
+                value="adaptive",
+                reason="Retired recommendation surface.",
+            )
         self.assertEqual(
             validate_tuning_value("stationary_object_tolerance", "high"),
             "high",
@@ -329,6 +369,22 @@ class AuditAiTest(unittest.TestCase):
                 value=["onvif"],
                 reason="Do not let AI change validator topology.",
             )
+
+    def test_retired_analysis_preset_is_removed_from_provider_context(self) -> None:
+        context = current_audit_ai_context({
+            "effective_settings": {
+                "analysis_preset": "adaptive",
+                "sensitivity": "balanced",
+            },
+            "setting_bounds": {
+                "analysis_preset": ["adaptive", "modular"],
+                "sensitivity": ["low", "balanced", "high"],
+            },
+        })
+
+        self.assertNotIn("analysis_preset", context["effective_settings"])
+        self.assertNotIn("analysis_preset", context["setting_bounds"])
+        self.assertEqual(context["effective_settings"]["sensitivity"], "balanced")
 
     def test_oversized_audit_image_is_rejected_before_provider_request(self) -> None:
         advisor = AuditAiAdvisor(AuditAiConfig(enabled=True, provider="openai", api_key="secret"))

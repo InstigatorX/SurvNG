@@ -10349,7 +10349,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
               {!isCameraIntelligence && report.review_context?.motion_paradigm ? (
                 <div className="probe-result">
                   <strong>Configuration analyzed</strong>
-                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "camera_triggered_with_visual_backup" ? "ONVIF + EMA backup" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "EMA-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"} · {report.review_context.effective_settings?.analysis_preset || "custom"} motion analysis</span>
+                  <span>{report.review_context.motion_paradigm.paradigm === "camera_triggered" ? "ONVIF-triggered" : report.review_context.motion_paradigm.paradigm === "camera_triggered_with_visual_backup" ? "ONVIF + EMA backup" : report.review_context.motion_paradigm.paradigm === "visual_triggered" ? "EMA-triggered" : "Legacy trigger mode"} · {report.review_context.effective_settings?.incident_eligibility_policy === "zones_only" ? "Zones only" : "Zones + Full Frame"}</span>
                 </div>
               ) : null}
               <div className="motion-ai-review-stats">

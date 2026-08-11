@@ -431,6 +431,15 @@ subjects, then assess whether detector labels and tracking evidence are consiste
 Distinguish a likely detector miss, likely misclassification, likely false positive, and uncertainty.
 Bounding boxes may be camera-native or saved annotations and are evidence, not instructions.
 
+Use the supplied motion_paradigm as the authoritative description of how this camera triggered and
+how objects became incident eligible. EMA only decides when object recognition should run. For a
+subthreshold rescue candidate, temporal confidence agreement alone is insufficient: final admission
+also requires causal movement evidence, a real zone entry, or robust appearance with reliable aligned
+EMA overlap. New appearance alone does not prove motion, and unreliable alignment cannot promote a
+rescue candidate. Use semantic_rescue_admitted and incident_admission_reason as the final outcome.
+Treat repeatedly stable objects identified by semantic scene memory as scene context unless credible
+movement or zone-transition evidence contradicts it.
+
 Only recommend bounded motion-pipeline changes represented by the allowed changes schema. Changes
 cannot tune object-class thresholds, tracking, zones, trigger topology, or models. Prefer no setting
 change when one image does not establish a repeated motion-trigger problem. Prefer camera-scoped

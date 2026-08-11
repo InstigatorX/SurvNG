@@ -32,7 +32,7 @@ from .incident_queries import IncidentQueryService, _filter_incident_summaries, 
 from .incident_utils import DEFAULT_INCIDENT_GAP_SECONDS, event_snapshot_path, snapshot_media_type
 from .manager import AppManager, validate_motion_pipeline_configuration
 from .motion_ai_review import aggregate_motion_ai_review
-from .motion_pipeline import analysis_preset_selections, guided_fusion_settings, identify_analysis_preset, resolve_motion_pipeline_graphs
+from .motion_pipeline import guided_fusion_settings, identify_analysis_preset, resolve_motion_pipeline_graphs
 from .recording_routes import recording_source
 from .security import redact_secret_text
 
@@ -185,7 +185,9 @@ class IntelligenceService:
                             'temporal_observations', 'temporal_track_observations',
                             'temporal_incident_observations',
                             'temporal_required_observations', 'temporal_samples',
-                            'temporal_peak_confidence', 'temporal_label_votes',
+                            'temporal_peak_confidence',
+                            'temporal_peak_confidence_offset_seconds',
+                            'temporal_label_votes',
                             'temporal_center_displacement_ratio',
                             'temporal_center_path_ratio',
                             'temporal_first_observation_offset_seconds',
@@ -214,6 +216,7 @@ class IntelligenceService:
         suppression_verification_rate = active_config.motion_qualification.suppression_verification_rate if override.suppression_verification_rate is None else override.suppression_verification_rate
         visual_backup = {'grace_seconds': active_config.motion_qualification.visual_backup_grace_seconds if override.visual_backup_grace_seconds is None else override.visual_backup_grace_seconds, 'minimum_score': active_config.motion_qualification.visual_backup_min_score if override.visual_backup_min_score is None else override.visual_backup_min_score, 'minimum_consecutive': active_config.motion_qualification.visual_backup_min_consecutive if override.visual_backup_min_consecutive is None else override.visual_backup_min_consecutive, 'cooldown_seconds': active_config.motion_qualification.visual_backup_cooldown_seconds if override.visual_backup_cooldown_seconds is None else override.visual_backup_cooldown_seconds, 'maximum_triggers_5m': active_config.motion_qualification.visual_backup_max_triggers_5m if override.visual_backup_max_triggers_5m is None else override.visual_backup_max_triggers_5m}
         effective = {'mode': effective_mode, 'sensitivity': active_config.motion_qualification.sensitivity if override.sensitivity == 'inherit' else override.sensitivity, 'stationary_object_tolerance': active_config.motion_qualification.stationary_object_tolerance if override.stationary_object_tolerance == 'inherit' else override.stationary_object_tolerance, 'object_activity_attribution': object_activity_attribution, 'illumination_filter_enabled': active_config.motion_qualification.illumination_filter_enabled if override.illumination_filter_enabled is None else override.illumination_filter_enabled, 'frame_width': override.frame_width or active_config.motion_qualification.frame_width, 'borderline_rescue_enabled': active_config.motion_qualification.borderline_rescue_enabled if override.borderline_rescue_enabled is None else override.borderline_rescue_enabled, 'borderline_margin': active_config.motion_qualification.borderline_margin if override.borderline_margin is None else override.borderline_margin, 'sample_fps': active_config.motion_qualification.sample_fps, 'window_seconds': active_config.motion_qualification.window_seconds, 'post_trigger_seconds': active_config.motion_qualification.post_trigger_seconds, 'burst_quiet_seconds': active_config.motion_qualification.burst_quiet_seconds, 'camera_mode_background_fps': active_config.motion_qualification.camera_mode_background_fps, 'visual_backup_warmup_seconds': active_config.motion_qualification.visual_backup_warmup_seconds, 'visual_backup_grace_seconds': visual_backup['grace_seconds'], 'visual_backup_min_score': visual_backup['minimum_score'], 'visual_backup_score_margin': active_config.motion_qualification.visual_backup_score_margin, 'visual_backup_min_consecutive': visual_backup['minimum_consecutive'], 'visual_backup_cooldown_seconds': visual_backup['cooldown_seconds'], 'visual_backup_max_triggers_5m': visual_backup['maximum_triggers_5m'], 'rejected_sample_rate': active_config.motion_qualification.rejected_sample_rate, 'suppression_verification_rate': suppression_verification_rate, 'analysis_preset': identify_analysis_preset(graphs.qualification), 'object_confirmation_frames': active_config.detector.event_confirmation_frames, 'object_class_confirmation_frames': dict(active_config.detector.event_class_confirmation_frames), 'object_class_confidence_thresholds': dict(active_config.detector.event_class_confidence_thresholds), 'incident_eligibility_policy': 'zones_only' if require_incident_zone else 'zones_plus_full_frame', 'object_tracking': {'enabled': active_config.detector.tracking.enabled, 'implementation': active_config.detector.tracking.implementation, 'sample_fps': active_config.detector.tracking.sample_fps, 'reid_enabled': active_config.detector.tracking.reid_enabled, 'vehicle_reid_enabled': active_config.detector.tracking.vehicle_reid_enabled}, 'fusion': fusion, 'pipeline_origins': graphs.origins}
+        effective.pop('analysis_preset', None)
         recent, _ = active_manager.events.motion_audits(limit=50, camera_id=camera_id)
         reason_counts: dict[str, int] = {}
         object_matches = 0
@@ -250,9 +253,6 @@ class IntelligenceService:
 
     def _apply_pipeline_ai_change(self, next_config: AppConfig, camera: CameraConfig, change: AuditAiChange, value: object) -> None:
         target = next_config.motion_qualification if change.scope == 'global' else camera.motion_qualification
-        if change.setting == 'analysis_preset':
-            target.pipeline.qualification = analysis_preset_selections(str(value))
-            return
         setattr(target, change.setting, value)
 
     def motion_audit(self, limit: int=24, offset: int=0, camera_id: str='', outcome: str='all', category: str='all') -> dict:
@@ -1097,7 +1097,9 @@ class IntelligenceService:
                     'incident_admission_reason', 'temporal_observations',
                     'temporal_required_observations',
                     'temporal_center_displacement_ratio',
-                    'temporal_center_path_ratio', 'temporal_robust_new_appearance',
+                    'temporal_center_path_ratio',
+                    'temporal_peak_confidence_offset_seconds',
+                    'temporal_robust_new_appearance',
                     'temporal_zone_entry', 'activity_role', 'motion_correlated',
                     'motion_correlation', 'track_id', 'track_state',
                 )})
@@ -1129,11 +1131,6 @@ class IntelligenceService:
         return self._assistant_incident_evidence(incident, event_id)
 
     def _assistant_motion_change_current_value(self, active_config: AppConfig, camera: CameraConfig, change: AuditAiChange) -> object:
-        if change.setting == 'analysis_preset':
-            if change.scope == 'global':
-                return identify_analysis_preset(active_config.motion_qualification.pipeline.qualification)
-            graphs = resolve_motion_pipeline_graphs(active_config.motion_qualification, camera.motion_qualification)
-            return identify_analysis_preset(graphs.qualification)
         if change.scope == 'global':
             return getattr(active_config.motion_qualification, change.setting)
         override = getattr(camera.motion_qualification, change.setting)
@@ -1213,7 +1210,44 @@ class IntelligenceService:
         config_evidence = self._assistant_configuration_evidence(active_config).data
         camera_configuration = next((item for item in config_evidence.get('cameras', []) if item.get('id') == camera.id), {})
         camera_evidence = self._assistant_camera_evidence(active_manager, camera.id)
-        context = {'incident': self._assistant_incident_payload(incident), 'camera_health': camera_evidence[0].data if camera_evidence else {}, 'active_configuration': {'global_motion': config_evidence.get('motion') or {}, 'detector': config_evidence.get('detector') or {}, 'camera': camera_configuration}, 'image_source_event_id': source_event_id, 'limitations': ['The image is one representative moment, not the full recording.', 'Tracking begins after the initial object decision.', 'Only bounded motion settings may be proposed from this review.']}
+        motion_override = camera.motion_qualification
+        motion_graphs = resolve_motion_pipeline_graphs(
+            active_config.motion_qualification,
+            motion_override,
+        )
+        effective_mode = (
+            active_config.motion_qualification.mode
+            if motion_override.mode == 'inherit'
+            else motion_override.mode
+        )
+        require_incident_zone = (
+            active_config.detector.require_incident_zone
+            if camera.require_incident_zone is None
+            else camera.require_incident_zone
+        )
+        context = {
+            'motion_paradigm': motion_paradigm_context(
+                mode=effective_mode,
+                onvif_enabled=camera.onvif.enabled,
+                has_live_substream=bool(camera.live_stream_url),
+                fusion=guided_fusion_settings(motion_graphs.fusion),
+                require_incident_zone=require_incident_zone,
+            ),
+            'incident': self._assistant_incident_payload(incident),
+            'camera_health': camera_evidence[0].data if camera_evidence else {},
+            'active_configuration': {
+                'global_motion': config_evidence.get('motion') or {},
+                'detector': config_evidence.get('detector') or {},
+                'camera': camera_configuration,
+            },
+            'image_source_event_id': source_event_id,
+            'limitations': [
+                'The image is one representative moment, not the full recording.',
+                'Movement and causal correlation require temporal telemetry; the image alone cannot prove them.',
+                'Tracking begins after the initial object decision.',
+                'Only bounded motion settings may be proposed from this review.',
+            ],
+        }
         advice = IncidentVisualReviewer(active_config.audit_ai).review(snapshot_path, context)
         changes, previews = self._assistant_motion_change_previews(active_config, camera, [change for change in advice.changes if change.scope == 'camera'])
         advice_payload = advice.model_dump(mode='json')
