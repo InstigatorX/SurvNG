@@ -5,13 +5,13 @@ import copy
 import json
 from pathlib import Path
 from typing import Any, Literal, Mapping, TypeVar
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from pydantic import BaseModel, Field, model_validator
 
 from .config import AuditAiConfig
+from .ai_provider_transport import AiProviderTransportError, request_provider_json
 from .incident_utils import snapshot_media_type
 
 
@@ -518,27 +518,17 @@ class AuditAiAdvisor:
         return "gpt-4.1-mini"
 
     def _request(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-        request = Request(
-            url,
-            data=json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8"),
-            headers={"Content-Type": "application/json", **headers},
-            method="POST",
-        )
         try:
-            with urlopen(request, timeout=float(self.config.timeout_seconds)) as response:
-                raw = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
-                if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
-                    raise AuditAiError("AI provider response was too large")
-                decoded = json.loads(raw.decode("utf-8"))
-                if not isinstance(decoded, dict):
-                    raise AuditAiError("AI provider returned an invalid response object")
-                return decoded
-        except HTTPError as exc:
-            raise AuditAiError(f"AI provider returned HTTP {exc.code}") from exc
-        except AuditAiError:
-            raise
-        except (URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise AuditAiError(f"AI provider request failed ({type(exc).__name__})") from exc
+            return request_provider_json(
+                url,
+                payload,
+                headers,
+                timeout_seconds=self.config.timeout_seconds,
+                max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
+                opener=urlopen,
+            )
+        except AiProviderTransportError as exc:
+            raise AuditAiError(str(exc)) from exc
 
     @staticmethod
     def _data_url(image_bytes: bytes, mime_type: str) -> str:
