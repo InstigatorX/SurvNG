@@ -826,6 +826,48 @@ class EventStoreTest(unittest.TestCase):
             self.assertNotIn("message", rows[0])
             self.assertTrue(rows[0]["snapshot_path"])
 
+    def test_page_between_uses_stable_cursor_and_camera_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            first = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                snapshot_path="snapshots/gate/first.webp",
+                created_at="2026-08-10T12:00:00+00:00",
+            )
+            second = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                snapshot_path="snapshots/gate/second.webp",
+                created_at="2026-08-10T12:00:00+00:00",
+            )
+            store.add_event(
+                camera_id="foyer",
+                kind="motion",
+                snapshot_path="snapshots/foyer/third.webp",
+                created_at="2026-08-10T12:00:01+00:00",
+            )
+
+            page_one = store.page_between(
+                "2026-08-10T11:59:00+00:00",
+                "2026-08-10T12:01:00+00:00",
+                limit=1,
+                camera_ids=("gate",),
+                require_snapshot=True,
+            )
+            page_two = store.page_between(
+                "2026-08-10T11:59:00+00:00",
+                "2026-08-10T12:01:00+00:00",
+                limit=1,
+                before_created_at=page_one[-1]["created_at"],
+                before_id=int(page_one[-1]["id"]),
+                camera_ids=("gate",),
+                require_snapshot=True,
+            )
+
+            self.assertEqual([row["id"] for row in page_one], [second["id"]])
+            self.assertEqual([row["id"] for row in page_two], [first["id"]])
+
     def test_get_many_hydrates_only_requested_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

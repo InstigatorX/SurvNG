@@ -2432,6 +2432,50 @@ class EventStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def page_between(
+        self,
+        start_at: str,
+        end_at: str,
+        *,
+        limit: int = 500,
+        before_created_at: str | None = None,
+        before_id: int | None = None,
+        camera_ids: tuple[str, ...] = (),
+        require_snapshot: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return a stable newest-first event page inside a half-open time range."""
+        bounded_limit = max(1, min(int(limit), 5000))
+        normalized_cameras = tuple(dict.fromkeys(
+            str(camera_id).strip()
+            for camera_id in camera_ids
+            if str(camera_id).strip()
+        ))
+        clauses = ["created_at >= ?", "created_at < ?"]
+        parameters: list[Any] = [start_at, end_at]
+        if before_created_at is not None and before_id is not None:
+            clauses.append("(created_at < ? or (created_at = ? and id < ?))")
+            parameters.extend([
+                before_created_at,
+                before_created_at,
+                int(before_id),
+            ])
+        if normalized_cameras:
+            placeholders = ",".join("?" for _ in normalized_cameras)
+            clauses.append(f"camera_id in ({placeholders})")
+            parameters.extend(normalized_cameras)
+        if require_snapshot:
+            clauses.append("snapshot_path != ''")
+        parameters.append(bounded_limit)
+        query = f"""
+            select * from events
+            where {' and '.join(clauses)}
+            order by created_at desc, id desc
+            limit ?
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
     def get_many(self, event_ids: list[int]) -> list[dict[str, Any]]:
         unique_ids = sorted({int(event_id) for event_id in event_ids if int(event_id) > 0})
         if not unique_ids:

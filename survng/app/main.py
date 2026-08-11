@@ -80,6 +80,7 @@ from .system_telemetry import (
     create_system_telemetry_router,
 )
 from .system_routes import SystemRouteDependencies, create_system_router
+from .training_routes import TrainingRouteDependencies, create_training_router
 from .security import redact_secret_text
 from .storage_maintenance import StorageMaintenanceRunner
 
@@ -877,6 +878,18 @@ event_appearance_matches = _appearance_route_bundle.handlers["event_appearance_m
 event_related_incidents = _appearance_route_bundle.handlers["event_related_incidents"]
 appearance_index_status = _appearance_route_bundle.handlers["appearance_index_status"]
 queue_appearance_backfill = _appearance_route_bundle.handlers["queue_appearance_backfill"]
+
+
+app.include_router(
+    create_training_router(
+        TrainingRouteDependencies(
+            get_config=lambda: config,
+            get_manager=lambda: manager,
+            manager_lock=MANAGER_RELOAD_LOCK,
+            manager_access=MANAGER_ACCESS,
+        )
+    )
+)
 
 
 _face_route_bundle = create_face_router(
