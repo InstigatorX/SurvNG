@@ -1027,7 +1027,6 @@ function defaultCamera(cameras, seed = {}) {
       borderline_rescue_enabled: seed.motion_qualification?.borderline_rescue_enabled ?? null,
       borderline_margin: seed.motion_qualification?.borderline_margin ?? null,
       suppression_verification_rate: seed.motion_qualification?.suppression_verification_rate ?? null,
-      mog2_audit_enabled: seed.motion_qualification?.mog2_audit_enabled ?? null,
       spatial_alignment: structuredClone(seed.motion_qualification?.spatial_alignment || {}),
       pipeline: structuredClone(seed.motion_qualification?.pipeline || {}),
     },
@@ -7599,11 +7598,11 @@ const MOTION_DECISION_POLICIES = {
   },
   any: {
     label: "Either validator may confirm",
-    description: "EMA or MOG2 may confirm motion. This is more sensitive.",
+    description: "Either configured signal may confirm motion. This is more sensitive.",
   },
   all: {
     label: "Require both validators",
-    description: "EMA and MOG2 must agree. This is stricter and may miss subtle motion.",
+    description: "All configured signals must agree. This is stricter and may miss subtle motion.",
   },
   weighted: {
     label: "Blend signals by importance",
@@ -7658,7 +7657,6 @@ function MotionDecisionEditor({
   inheritedFusion,
   onSetInherited,
   onModeChange,
-  onMog2Change,
   onChange,
   cameraName,
 }) {
@@ -7671,7 +7669,6 @@ function MotionDecisionEditor({
   const legacyMode = ["audit", "off", "enforce"].includes(effectiveMode);
   const adaptiveValidator = ["adaptive", "camera_rescue"].includes(effectiveMode)
     || (settings.policy !== "bypass" && settings.includePrimary);
-  const mog2Validator = settings.sources.includes("mog2");
   const modeInfo = motionModeInfo(effectiveMode);
   const modeControl = (
     <label>What starts object detection?<select value={mode} onChange={(event) => {
@@ -7680,8 +7677,6 @@ function MotionDecisionEditor({
       updateSettings(motionValidatorSettings(settings, {
         mode: nextMode,
         adaptiveEnabled: adaptiveValidator,
-        mog2Enabled: mog2Validator,
-        agreement: settings.policy,
       }));
     }}>
       {onSetInherited ? <option value="inherit">Use global setting</option> : null}
@@ -7702,18 +7697,11 @@ function MotionDecisionEditor({
     onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
   }
 
-  function updateNested(key, child, value) {
-    updateSettings({ [key]: { ...settings[key], [child]: value } });
-  }
-
-  function setValidators(adaptiveEnabled, mog2Enabled) {
+  function setAdaptiveValidator(adaptiveEnabled) {
     updateSettings(motionValidatorSettings(settings, {
       mode: effectiveMode,
       adaptiveEnabled,
-      mog2Enabled,
-      agreement: settings.policy,
     }));
-    onMog2Change?.(mog2Enabled);
   }
 
   if (inherited) {
@@ -7752,7 +7740,6 @@ function MotionDecisionEditor({
         <div className={`motion-decision-mode mode-${effectiveMode}`}>{modeExplanation}</div>
         <button type="button" onClick={() => {
           onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
-          onMog2Change?.(false);
         }}>
           Replace with recommended settings
         </button>
@@ -7774,7 +7761,6 @@ function MotionDecisionEditor({
         <button type="button" onClick={() => {
           onModeChange("camera");
           onChange(buildMotionDecisionFusion(defaultMotionDecisionSettings()));
-          onMog2Change?.(false);
         }}>Migrate to recommended camera-triggered mode</button>
       </div>
     );
@@ -7803,19 +7789,10 @@ function MotionDecisionEditor({
           type="checkbox"
           checked={adaptiveValidator}
           disabled={["adaptive", "camera_rescue"].includes(effectiveMode)}
-          onChange={(event) => setValidators(event.target.checked, mog2Validator)}
+          onChange={(event) => setAdaptiveValidator(event.target.checked)}
         /> Enhanced Motion Analysis (EMA){effectiveMode === "adaptive" ? " (required trigger)" : effectiveMode === "camera_rescue" ? " (required backup)" : ""}</label>
-        <label className="check-field"><input
-          type="checkbox"
-          checked={mog2Validator}
-          onChange={(event) => setValidators(adaptiveValidator, event.target.checked)}
-        /> Require MOG2 background confirmation <small>(higher CPU)</small></label>
         <small>If a selected validator is unavailable or still learning, SurvNG fails open and runs object detection.</small>
       </fieldset>
-      {["camera", "camera_rescue"].includes(effectiveMode) && adaptiveValidator && mog2Validator ? <label>When validators disagree<select value={settings.policy === "any" ? "any" : "all"} onChange={(event) => updateSettings({ policy: event.target.value })}>
-        <option value="all">Require both (fewer false triggers)</option>
-        <option value="any">Allow either (more sensitive)</option>
-      </select></label> : null}
       <div className={`motion-decision-explanation policy-${settings.policy}`}>
         <strong>{policy.label}</strong>
         <span>{policy.description}</span>
@@ -7851,19 +7828,6 @@ function MotionDecisionEditor({
       <details className="motion-decision-fine-tuning">
         <summary>Fine tuning</summary>
         <p>These values are already set to safe defaults. Change them only when reviewing motion audit results.</p>
-        {mog2Validator ? (
-          <div className="field-row">
-            <label>MOG2 confidence needed<input type="number" min="0" max="1" step="0.05" value={settings.sourceThresholds.mog2} onChange={(event) => updateNested("sourceThresholds", "mog2", Number(event.target.value))} /></label>
-          </div>
-        ) : null}
-        {settings.policy === "weighted" ? (
-          <div className="field-row">
-            <label>Normal motion importance<input type="number" min="0" max="10" step="0.25" value={settings.sourceWeights.primary} onChange={(event) => updateNested("sourceWeights", "primary", Number(event.target.value))} /></label>
-            <label>Camera signal importance<input type="number" min="0" max="10" step="0.25" value={settings.sourceWeights.onvif} onChange={(event) => updateNested("sourceWeights", "onvif", Number(event.target.value))} /></label>
-            <label>Visual change importance<input type="number" min="0" max="10" step="0.25" value={settings.sourceWeights.mog2} onChange={(event) => updateNested("sourceWeights", "mog2", Number(event.target.value))} /></label>
-            <label>Combined confidence needed<input type="number" min="0" max="1" step="0.05" value={settings.weightedThreshold} onChange={(event) => updateSettings({ weightedThreshold: Number(event.target.value) })} /></label>
-          </div>
-        ) : null}
         <label>Forget an unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
       </details>
       </details>
@@ -9570,7 +9534,6 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   inherited={selectedCamera.motion_qualification?.pipeline?.fusion == null}
                   inheritedFusion={config.motion_qualification?.pipeline?.fusion}
                   onModeChange={(mode) => updateCamera(selectedCamera.id, ["motion_qualification", "mode"], mode)}
-                  onMog2Change={(enabled) => updateCamera(selectedCamera.id, ["motion_qualification", "mog2_audit_enabled"], enabled)}
                   onSetInherited={(shouldInherit) => {
                     const pipeline = { ...(selectedCamera.motion_qualification?.pipeline || {}) };
                     pipeline.fusion = shouldInherit
@@ -9860,7 +9823,6 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
           const features = Object.entries(item.features || {}).filter(([name, value]) => (
             typeof value === "number"
             && Number.isFinite(value)
-            && (!name.startsWith("mog2_") || ["mog2_score", "mog2_track_persistence"].includes(name))
           ));
           return (
             <article className="motion-audit-card" key={item.id}>
@@ -9895,33 +9857,6 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
         <span>{total ? `${page * pageSize + 1}-${Math.min(total, (page + 1) * pageSize)} of ${total}` : "0 entries"}</span>
         <button type="button" aria-label="Next audit page" onClick={() => setPage(Math.min(pageCount - 1, page + 1))} disabled={page >= pageCount - 1 || loading}><ChevronRight size={16} /></button>
       </div>
-    </div>
-  );
-}
-
-function Mog2TrackOverlay({ tracks, bounds }) {
-  if (!bounds || !Array.isArray(tracks) || !tracks.length) return null;
-  return (
-    <div className="mog2-track-overlay" style={bounds} aria-hidden="true">
-      <svg viewBox="0 0 1000 1000" preserveAspectRatio="none">
-        {tracks.map((track, index) => {
-          const box = Array.isArray(track.box) ? track.box : [];
-          const path = Array.isArray(track.path) ? track.path : [];
-          const points = path.map(([x, y]) => `${Number(x) * 1000},${Number(y) * 1000}`).join(" ");
-          if (box.length !== 4) return null;
-          return (
-            <g className={`mog2-track-color-${index % 6}`} key={track.id ?? index}>
-              {points ? <polyline className="mog2-track-trail" points={points} vectorEffect="non-scaling-stroke" /> : null}
-              <rect className="mog2-track-box" x={Number(box[0]) * 1000} y={Number(box[1]) * 1000} width={(Number(box[2]) - Number(box[0])) * 1000} height={(Number(box[3]) - Number(box[1])) * 1000} vectorEffect="non-scaling-stroke" />
-            </g>
-          );
-        })}
-      </svg>
-      {tracks.map((track, index) => {
-        const box = Array.isArray(track.box) ? track.box : [];
-        if (box.length !== 4) return null;
-        return <span className={`mog2-track-label mog2-track-color-${index % 6}`} style={{ left: `${Number(box[0]) * 100}%`, top: `${Number(box[1]) * 100}%` }} key={track.id ?? index}>M{track.id}</span>;
-      })}
     </div>
   );
 }
@@ -9970,11 +9905,6 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiApplying, setAiApplying] = useState(false);
   const [imageSize, setImageSize] = useState(null);
-  const [showMog2Tracks, setShowMog2Tracks] = useState(true);
-  const [trackBounds, setTrackBounds] = useState(null);
-  const mediaRef = useRef(null);
-  const imageRef = useRef(null);
-  const mog2Tracks = Array.isArray(item.features?.mog2_tracks) ? item.features.mog2_tracks : [];
   const pipelineTelemetry = item.features?.pipeline_telemetry;
 
   useEffect(() => {
@@ -9983,33 +9913,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
     setAiLoading(false);
     setAiApplying(false);
     setImageSize(null);
-    setShowMog2Tracks(true);
-    setTrackBounds(null);
   }, [item.id]);
-
-  useEffect(() => {
-    const media = mediaRef.current;
-    const image = imageRef.current;
-    if (!media || !image) return undefined;
-    function updateBounds() {
-      const mediaRect = media.getBoundingClientRect();
-      const imageRect = image.getBoundingClientRect();
-      setTrackBounds({
-        left: `${imageRect.left - mediaRect.left}px`,
-        top: `${imageRect.top - mediaRect.top}px`,
-        width: `${imageRect.width}px`,
-        height: `${imageRect.height}px`,
-      });
-    }
-    const observer = new ResizeObserver(updateBounds);
-    observer.observe(media);
-    observer.observe(image);
-    const frame = window.requestAnimationFrame(updateBounds);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, [item.id, imageSize]);
 
   const overlayStyle = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height) return undefined;
@@ -10087,7 +9991,6 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
         <header className="motion-audit-overlay-head">
           <div><h2>{item.camera_id}</h2><time>{formatDateTime(item.created_at, timeZone)}</time></div>
           <div className="overlay-actions">
-            {mog2Tracks.length ? <button type="button" className={`icon-only mog2-track-toggle ${showMog2Tracks ? "active" : ""}`} onClick={() => setShowMog2Tracks((visible) => !visible)} aria-label={`${showMog2Tracks ? "Hide" : "Show"} MOG2 tracks`} title={`${showMog2Tracks ? "Hide" : "Show"} ${mog2Tracks.length} MOG2 track${mog2Tracks.length === 1 ? "" : "s"}`}><Radar size={19} /></button> : null}
             <button type="button" className="icon-only" onClick={() => move(-1)} disabled={items.length < 2} aria-label="Previous audit image"><ChevronLeft size={19} /></button>
             <span>{currentIndex + 1} / {items.length}</span>
             <button type="button" className="icon-only" onClick={() => move(1)} disabled={items.length < 2} aria-label="Next audit image"><ChevronRight size={19} /></button>
@@ -10095,9 +9998,9 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
           </div>
         </header>
         <div className="motion-audit-overlay-content">
-          <div className="motion-audit-overlay-media" ref={mediaRef}>
+          <div className="motion-audit-overlay-media">
             {item.has_snapshot
-              ? <><img ref={imageRef} src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />{showMog2Tracks ? <Mog2TrackOverlay tracks={mog2Tracks} bounds={trackBounds} /> : null}</>
+              ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
               : <div className="empty-thumb"><Camera size={42} /><span>Audit image unavailable</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
@@ -10107,7 +10010,6 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
             <div className="motion-audit-meter"><i style={{ width: `${Math.max(0, Math.min(100, Number(item.score || 0) * 100))}%` }} /><b style={{ left: `${Math.max(0, Math.min(100, Number(item.threshold || 0) * 100))}%` }} /></div>
             <dl>
               {Object.entries(item.features || {}).filter(([, value]) => typeof value === "number").map(([name, value]) => <div key={name}><dt>{name.replaceAll("_", " ")}</dt><dd>{Number(value).toFixed(3)}</dd></div>)}
-              {mog2Tracks.length ? <div><dt>MOG2 tracks</dt><dd>{mog2Tracks.length}</dd></div> : null}
               <div><dt>Mode</dt><dd>{item.mode}</dd></div>
               <div><dt>Sensitivity</dt><dd>{item.sensitivity}</dd></div>
               <div><dt>Triggers</dt><dd>{item.trigger_count}</dd></div>
@@ -10892,14 +10794,12 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <label>Double-check filtered motion<select value={String(config.motion_qualification?.suppression_verification_rate ?? 0.05)} onChange={(event) => updateConfig(["motion_qualification", "suppression_verification_rate"], Number(event.target.value))}><option value="0">Off</option><option value="0.01">About 1 in 100</option><option value="0.05">About 1 in 20 (Recommended)</option><option value="0.1">About 1 in 10</option></select><small>Runs object detection on a sample of visual rejections. If a configured object is found, SurvNG restores the incident; otherwise only Motion Audit records the check.</small></label>
           <label className="check-field"><input type="checkbox" checked={config.motion_qualification?.borderline_rescue_enabled ?? true} onChange={(event) => updateConfig(["motion_qualification", "borderline_rescue_enabled"], event.target.checked)} /> Borderline object rescue</label>
           <label>Rescue Margin<input type="number" min="0" max="0.1" step="0.005" value={config.motion_qualification?.borderline_margin ?? 0.03} onChange={(event) => updateConfig(["motion_qualification", "borderline_margin"], Number(event.target.value))} /></label>
-          <label>Background Learning Time (seconds)<input type="number" min="5" max="300" step="5" value={config.motion_qualification?.mog2_history_seconds ?? 30} onChange={(event) => updateConfig(["motion_qualification", "mog2_history_seconds"], Number(event.target.value))} disabled={!readMotionDecisionFusion(config.motion_qualification?.pipeline?.fusion).settings.sources.includes("mog2")} /></label>
           </div>
         </details>
         <MotionDecisionEditor
           fusion={config.motion_qualification?.pipeline?.fusion}
           mode={config.motion_qualification?.mode || "camera"}
           onModeChange={(mode) => updateConfig(["motion_qualification", "mode"], mode)}
-          onMog2Change={(enabled) => updateConfig(["motion_qualification", "mog2_audit_enabled"], enabled)}
           onChange={(fusion) => updateConfig(
             ["motion_qualification", "pipeline"],
             { ...(config.motion_qualification?.pipeline || {}), fusion },
@@ -11267,7 +11167,7 @@ function RuntimeStatus({ status, timeZone, motionCatalog }) {
           <div className="motion-evidence-runtime">
             {Object.entries(status.motion_qualification.evidence_sources || {}).map(([source, evidence]) => (
               <span key={source} className={evidence.enabled ? "enabled" : "disabled"}>
-                <strong>{source === "mog2" ? "Visual background" : source === "onvif" ? "Camera signal" : source}</strong>
+                <strong>{source === "onvif" ? "Camera signal" : source}</strong>
                 {evidence.enabled ? `${evidence.sample_count || 0} samples${evidence.last?.score != null ? ` · ${Math.round(Number(evidence.last.score) * 100)}% last confidence` : ""}` : "Disabled"}
               </span>
             ))}

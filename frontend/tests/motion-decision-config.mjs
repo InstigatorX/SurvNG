@@ -39,28 +39,17 @@ assert.equal(roundTrip.settings.activationFrames, 2);
 assert.equal(roundTrip.settings.includePrimary, true);
 assert.equal(roundTrip.settings.failOpen, true);
 
-const cameraEither = motionValidatorSettings(defaults.settings, {
-  mode: "camera",
-  adaptiveEnabled: true,
-  mog2Enabled: true,
-  agreement: "any",
-});
-assert.equal(cameraEither.policy, "any");
-assert.deepEqual(cameraEither.sources, ["mog2"]);
-
-const visualConfirmation = motionValidatorSettings(cameraEither, {
+const visualConfirmation = motionValidatorSettings(defaults.settings, {
   mode: "adaptive",
   adaptiveEnabled: true,
-  mog2Enabled: true,
-  agreement: "any",
 });
-assert.equal(visualConfirmation.policy, "all");
+assert.equal(visualConfirmation.policy, "audit");
 assert.equal(visualConfirmation.includePrimary, true);
+assert.deepEqual(visualConfirmation.sources, []);
 
 const cameraUnvalidated = motionValidatorSettings(defaults.settings, {
   mode: "camera",
   adaptiveEnabled: false,
-  mog2Enabled: false,
 });
 assert.equal(cameraUnvalidated.policy, "bypass");
 assert.equal(cameraUnvalidated.includePrimary, false);
@@ -68,7 +57,6 @@ assert.equal(cameraUnvalidated.includePrimary, false);
 const rescue = motionValidatorSettings(cameraUnvalidated, {
   mode: "camera_rescue",
   adaptiveEnabled: false,
-  mog2Enabled: false,
 });
 assert.equal(rescue.policy, "audit");
 assert.equal(rescue.includePrimary, true);
@@ -76,12 +64,12 @@ assert.equal(rescue.includePrimary, true);
 const scalarGraph = buildMotionDecisionFusion({
   ...defaults.settings,
   policy: "all",
-  sources: ["mog2"],
+  sources: ["onvif"],
 });
-scalarGraph[0].options.sources = " MOG2 ";
+scalarGraph[0].options.sources = " ONVIF ";
 scalarGraph[0].options.policy = " ALL ";
 const scalarSource = readMotionDecisionFusion(scalarGraph);
-assert.deepEqual(scalarSource.settings.sources, ["mog2"]);
+assert.deepEqual(scalarSource.settings.sources, ["onvif"]);
 assert.equal(scalarSource.settings.policy, "all");
 
 const custom = readMotionDecisionFusion([

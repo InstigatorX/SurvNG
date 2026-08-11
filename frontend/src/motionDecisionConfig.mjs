@@ -3,8 +3,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   sources: [],
   includePrimary: true,
   failOpen: true,
-  sourceThresholds: { mog2: 0.5, onvif: 0.5 },
-  sourceWeights: { primary: 1, mog2: 1, onvif: 1 },
+  sourceThresholds: { onvif: 0.5 },
+  sourceWeights: { primary: 1, onvif: 1 },
   weightedThreshold: 0.5,
   activationFrames: 1,
   releaseFrames: 3,
@@ -29,7 +29,7 @@ export const MOTION_MODE_OPTIONS = Object.freeze([
     value: "adaptive",
     label: "EMA-triggered",
     status: "SurvNG EMA triggers",
-    description: "Enhanced Motion Analysis (EMA) starts object detection. Ordinary ONVIF notices are recorded as diagnostics but cannot trigger detection; MOG2 can optionally be required as confirmation.",
+    description: "Enhanced Motion Analysis (EMA) starts object detection. Ordinary ONVIF notices are recorded as diagnostics but cannot trigger detection.",
   }),
 ]);
 
@@ -108,7 +108,7 @@ function knownMotionSources(value) {
   const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
   return [...new Set(values
     .map((source) => String(source).trim().toLowerCase())
-    .filter((source) => source === "mog2" || source === "onvif"))];
+    .filter((source) => source === "onvif"))];
 }
 
 export function defaultMotionDecisionSettings() {
@@ -117,24 +117,16 @@ export function defaultMotionDecisionSettings() {
 
 export function motionValidatorSettings(
   current,
-  { mode, adaptiveEnabled = true, mog2Enabled = false, agreement = "all" },
+  { mode, adaptiveEnabled = true },
 ) {
   const includePrimary = ["adaptive", "camera_rescue"].includes(mode)
     ? true
     : Boolean(adaptiveEnabled);
-  const sources = mog2Enabled ? ["mog2"] : [];
-  let policy = "bypass";
-  if (includePrimary && !mog2Enabled) policy = "audit";
-  else if (mog2Enabled && !includePrimary) policy = "all";
-  else if (includePrimary && mog2Enabled) {
-    // In visual-triggered mode MOG2 may corroborate adaptive motion, but it
-    // must never become an independent trigger by rescuing a rejected primary.
-    policy = mode === "adaptive" ? "all" : agreement === "any" ? "any" : "all";
-  }
+  const policy = includePrimary ? "audit" : "bypass";
   return {
     ...current,
     policy,
-    sources,
+    sources: [],
     includePrimary,
     failOpen: true,
   };
@@ -170,12 +162,10 @@ export function readMotionDecisionFusion(fusion) {
       includePrimary: fusionOptions.include_primary ?? defaults.includePrimary,
       failOpen: fusionOptions.fail_open ?? defaults.failOpen,
       sourceThresholds: {
-        mog2: clamp(fusionOptions.source_thresholds?.mog2, 0, 1, defaults.sourceThresholds.mog2),
         onvif: clamp(fusionOptions.source_thresholds?.onvif, 0, 1, defaults.sourceThresholds.onvif),
       },
       sourceWeights: {
         primary: clamp(fusionOptions.source_weights?.primary, 0, 10, defaults.sourceWeights.primary),
-        mog2: clamp(fusionOptions.source_weights?.mog2, 0, 10, defaults.sourceWeights.mog2),
         onvif: clamp(fusionOptions.source_weights?.onvif, 0, 10, defaults.sourceWeights.onvif),
       },
       weightedThreshold: clamp(
@@ -223,12 +213,10 @@ export function buildMotionDecisionFusion(settings) {
         sources,
         policy: normalized.policy,
         source_thresholds: {
-          mog2: clamp(normalized.sourceThresholds?.mog2, 0, 1, 0.5),
           onvif: clamp(normalized.sourceThresholds?.onvif, 0, 1, 0.5),
         },
         source_weights: {
           primary: clamp(normalized.sourceWeights?.primary, 0, 10, 1),
-          mog2: clamp(normalized.sourceWeights?.mog2, 0, 10, 1),
           onvif: clamp(normalized.sourceWeights?.onvif, 0, 10, 1),
         },
         weighted_threshold: clamp(normalized.weightedThreshold, 0, 1, 0.5),
