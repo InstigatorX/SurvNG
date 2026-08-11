@@ -940,7 +940,7 @@ class EventStoreTest(unittest.TestCase):
                 trigger_count=2,
                 features={
                     "persistence": 0.2,
-                    "mog2_tracks": [{
+                    "motion_tracks": [{
                         "id": 3,
                         "score": 0.71,
                         "persistence": 0.8,
@@ -955,7 +955,7 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(total, 1)
             self.assertEqual(rows[0]["id"], audit["id"])
             self.assertIsNone(rows[0]["object_detected"])
-            tracks = json.loads(rows[0]["features_json"])["mog2_tracks"]
+            tracks = json.loads(rows[0]["features_json"])["motion_tracks"]
             self.assertEqual(tracks[0]["id"], 3)
             self.assertEqual(tracks[0]["path"][-1], [0.2, 0.3])
 

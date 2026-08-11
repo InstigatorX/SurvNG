@@ -60,7 +60,6 @@ from .evidence import MotionEvidenceRepository, MotionEvidenceSample
 from .evidence_stages import (
     EVIDENCE_REPOSITORY_SERVICE,
     BufferedMotionFusionStage,
-    Mog2EvidenceSourceStage,
     OnvifEventEvidenceStage,
     register_evidence_stages,
 )
@@ -155,7 +154,6 @@ __all__ = [
     "MotionStageRegistration",
     "MotionStageRegistry",
     "MotionTrack",
-    "Mog2EvidenceSourceStage",
     "OnvifEventEvidenceStage",
     "OpenCloseMorphologyStage",
     "ObjectDetectionTriggerStage",

@@ -22,7 +22,6 @@ MOTION_SETTINGS = {
     "burst_quiet_seconds",
     "borderline_rescue_enabled",
     "borderline_margin",
-    "mog2_history_seconds",
     "visual_backup_warmup_seconds",
     "visual_backup_grace_seconds",
     "visual_backup_min_score",

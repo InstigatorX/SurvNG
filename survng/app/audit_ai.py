@@ -33,7 +33,6 @@ ALLOWED_GLOBAL_SETTINGS = {
     "burst_quiet_seconds",
     "borderline_rescue_enabled",
     "borderline_margin",
-    "mog2_history_seconds",
     "visual_backup_warmup_seconds",
     "visual_backup_grace_seconds",
     "visual_backup_min_score",
@@ -91,7 +90,6 @@ class AuditAiChange(BaseModel):
         "burst_quiet_seconds",
         "borderline_rescue_enabled",
         "borderline_margin",
-        "mog2_history_seconds",
         "visual_backup_warmup_seconds",
         "visual_backup_grace_seconds",
         "visual_backup_min_score",
@@ -147,7 +145,6 @@ def validate_tuning_value(setting: str, value: Any) -> Any:
         "post_trigger_seconds": (0.5, 6.0),
         "burst_quiet_seconds": (0.1, 2.0),
         "borderline_margin": (0.0, 0.10),
-        "mog2_history_seconds": (5.0, 300.0),
         "visual_backup_warmup_seconds": (0.0, 120.0),
         "visual_backup_grace_seconds": (0.0, 5.0),
         "visual_backup_min_score": (0.0, 1.0),
@@ -201,12 +198,12 @@ whether the expensive object detector should run; it does not classify subjects.
 
 SurvNG has three current trigger models:
 1. camera_triggered: ONVIF camera notices are the only automatic trigger. Enhanced Motion Analysis (EMA)
-   and MOG2 are optional validators. Manual and semantic ONVIF notices bypass ordinary validation.
+   may validate them. Manual and semantic ONVIF notices bypass ordinary validation.
 2. camera_triggered_with_visual_backup: ONVIF remains primary, but exceptionally strong,
    persistent adaptive motion may start object detection when no recent camera notice arrived.
    A backup object must overlap credible EMA motion or move across detector samples before creating
    an incident; a stationary object elsewhere in the frame is diagnostic evidence only.
-3. visual_triggered: Enhanced Motion Analysis (EMA) is the only automatic trigger. MOG2 may validate it.
+3. visual_triggered: Enhanced Motion Analysis (EMA) is the only automatic trigger.
    ONVIF notices are diagnostic only and cannot start object detection.
 Selected validators fail open while unavailable or warming so real events are not silently lost.
 
@@ -324,21 +321,11 @@ def motion_paradigm_context(
     onvif_enabled: bool,
     has_live_substream: bool,
     fusion: Mapping[str, Any],
-    mog2_available: bool,
     require_incident_zone: bool = True,
 ) -> dict[str, Any]:
     guided = bool(fusion.get("guided", True))
     policy = str(fusion.get("policy") or "audit").strip().lower()
     include_primary = bool(fusion.get("include_primary", True))
-    raw_sources = fusion.get("sources", [])
-    if isinstance(raw_sources, str):
-        raw_sources = [raw_sources]
-    sources = {
-        str(source).strip().lower()
-        for source in raw_sources
-        if str(source).strip()
-    } if isinstance(raw_sources, (list, tuple, set)) else set()
-    mog2_selected = "mog2" in sources
     fail_open = bool(fusion.get("fail_open", True))
 
     if mode in {"camera", "camera_rescue"}:
@@ -390,15 +377,6 @@ def motion_paradigm_context(
             "role": adaptive_role,
             "backup_trigger_enabled": mode == "camera_rescue",
             "analysis_feed": "live_substream" if has_live_substream else "main_stream_fallback",
-        },
-        "mog2": {
-            "role": (
-                "custom_decision_pipeline"
-                if not guided and mog2_available
-                else "validator" if mog2_selected else "disabled"
-            ),
-            "selected": mog2_selected,
-            "available": mog2_available,
         },
         "validator_decision": {
             "guided": guided,

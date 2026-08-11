@@ -209,14 +209,11 @@ class AppConfigTest(unittest.TestCase):
         )
         self.assertTrue(config.motion_qualification.borderline_rescue_enabled)
         self.assertEqual(config.motion_qualification.borderline_margin, 0.03)
-        self.assertFalse(config.motion_qualification.mog2_audit_enabled)
-        self.assertEqual(config.motion_qualification.mog2_history_seconds, 30.0)
         self.assertEqual(config.motion_qualification.rejected_sample_rate, 1.0)
         self.assertEqual(config.motion_qualification.suppression_verification_rate, 0.05)
         self.assertIsNone(
             config.cameras[0].motion_qualification.suppression_verification_rate
         )
-        self.assertIsNone(config.cameras[0].motion_qualification.mog2_audit_enabled)
         self.assertTrue(config.detector.require_incident_zone)
         self.assertEqual(config.cameras[0].object_activity_attribution, "inherit")
         self.assertEqual(config.detector.event_confirmation_frames, 2)

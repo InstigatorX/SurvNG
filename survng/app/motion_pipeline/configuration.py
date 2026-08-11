@@ -75,20 +75,6 @@ def _normalized_sources(value: object) -> tuple[str, ...]:
     ))
 
 
-def _fusion_uses_mog2(fusion: tuple[MotionStageConfig, ...]) -> bool:
-    for stage in fusion:
-        if stage.implementation != "buffered_evidence_fusion":
-            continue
-        policy = str(stage.options.get("policy", "audit")).strip().lower()
-        sources = _normalized_sources(stage.options.get("sources", []))
-        if (
-            policy != "bypass"
-            and "mog2" in sources
-        ):
-            return True
-    return False
-
-
 def _validate_trigger_source_separation(
     mode: str,
     fusion: tuple[MotionStageConfig, ...],
@@ -106,23 +92,6 @@ def _validate_trigger_source_separation(
             )
 
 
-def _validate_required_observation_sources(
-    fusion: tuple[MotionStageConfig, ...],
-    observation: tuple[MotionStageConfig, ...],
-) -> None:
-    if not _fusion_uses_mog2(fusion):
-        return
-    if any(
-        stage.implementation == "opencv_mog2_evidence"
-        and bool(stage.options.get("enabled", True))
-        for stage in observation
-    ):
-        return
-    raise ValueError(
-        "motion fusion selects MOG2, but the observation graph has no enabled MOG2 source"
-    )
-
-
 def resolved_trigger_mode(mode: str) -> str:
     """Resolve legacy modes to an explicit trigger model."""
     if mode in {"adaptive", "enforce"}:
@@ -137,11 +106,6 @@ def resolve_motion_pipeline_graphs(
     camera_config: CameraMotionQualificationConfig,
 ) -> ResolvedMotionPipelineGraphs:
     mode = global_config.mode if camera_config.mode == "inherit" else camera_config.mode
-    mog2_requested = (
-        global_config.mog2_audit_enabled
-        if camera_config.mog2_audit_enabled is None
-        else camera_config.mog2_audit_enabled
-    )
     qualification, qualification_origin = _resolve_graph(
         "qualification",
         global_config.pipeline.qualification,
@@ -155,27 +119,12 @@ def resolve_motion_pipeline_graphs(
         default_motion_fusion_stage_configs(),
     )
     _validate_trigger_source_separation(mode, fusion)
-    # A decision graph that selects MOG2 is authoritative. The legacy flag is
-    # retained only for audit-mode compatibility and must never silently turn a
-    # configured validator into permanent fail-open behavior.
-    mog2_enabled = bool(
-        mode != "off"
-        and (
-            _fusion_uses_mog2(fusion)
-            or (mode == "audit" and mog2_requested)
-        )
-    )
     observation, observation_origin = _resolve_graph(
         "observation",
         global_config.pipeline.observation,
         camera_config.pipeline.observation,
-        default_motion_observation_stage_configs(
-            mog2_enabled=mog2_enabled,
-            sample_fps=global_config.sample_fps,
-            mog2_history_seconds=global_config.mog2_history_seconds,
-        ),
+        default_motion_observation_stage_configs(),
     )
-    _validate_required_observation_sources(fusion, observation)
     return ResolvedMotionPipelineGraphs(
         qualification=qualification,
         observation=observation,

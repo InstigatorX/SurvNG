@@ -35,7 +35,7 @@ def _service(*, enabled: bool = True, live_clock: float | None = 99.0):
     analysis.visual_backup_snapshot.return_value = {"scene_ready": True}
     evidence = Mock()
     evidence.status.return_value = {
-        "mog2": {"enabled": True, "last": {"score": 0.7}}
+        "onvif": {"enabled": True, "last": {"active": True}}
     }
     onvif_values = {
         "connected": True,
@@ -152,7 +152,7 @@ def test_status_snapshot_preserves_api_shape_and_dynamic_subsystem_state() -> No
     assert motion["generation_clean"] is True
     assert motion["event_runtime"]["queue_high_water"] == 3
     assert motion["visual_backup"]["scene_ready"] is True
-    assert motion["mog2_audit_enabled"] is True
+    assert motion["evidence_sources"]["onvif"]["enabled"] is True
 
 
 def test_disabled_or_stale_camera_is_not_reported_connected() -> None:

@@ -112,42 +112,25 @@ def default_motion_stage_configs() -> list[MotionStageConfig]:
     ]
 
 
-def default_motion_observation_stage_configs(
-    *,
-    mog2_enabled: bool,
-    sample_fps: float,
-    mog2_history_seconds: float,
-) -> list[MotionStageConfig]:
-    stages: list[MotionStageConfig] = []
-    if mog2_enabled:
-        stages.append(MotionStageConfig(
-            stage_id="mog2_source",
-            implementation="opencv_mog2_evidence",
-            options={
-                "enabled": mog2_enabled,
-                "sample_fps": sample_fps,
-                "history_seconds": mog2_history_seconds,
-            },
-        ))
-    stages.append(MotionStageConfig(
-            stage_id="onvif_source",
-            implementation="onvif_event_evidence",
-            options={
-                "enabled": True,
-                "base_score": 0.55,
-                "priority_score": 0.95,
-                "priority_keywords": [
-                    "manual",
-                    "person",
-                    "people",
-                    "human",
-                    "vehicle",
-                    "animal",
-                    "face",
-                ],
-            },
-        ))
-    return stages
+def default_motion_observation_stage_configs() -> list[MotionStageConfig]:
+    return [MotionStageConfig(
+        stage_id="onvif_source",
+        implementation="onvif_event_evidence",
+        options={
+            "enabled": True,
+            "base_score": 0.55,
+            "priority_score": 0.95,
+            "priority_keywords": [
+                "manual",
+                "person",
+                "people",
+                "human",
+                "vehicle",
+                "animal",
+                "face",
+            ],
+        },
+    )]
 
 
 def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:

@@ -147,6 +147,23 @@ def _validate_unique_motion_stage_ids(
             raise ValueError(f"duplicate motion stage ID in {graph_name} graph")
 
 
+def _reject_enabled_retired_mog2(value: object) -> object:
+    """Reject active legacy MOG2 flags while accepting disabled old config files."""
+    if not isinstance(value, dict):
+        return value
+    raw = value.get("mog2_audit_enabled")
+    enabled = (
+        raw.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(raw, str)
+        else bool(raw)
+    )
+    if enabled:
+        raise ValueError(
+            "MOG2 has been retired; use Enhanced Motion Analysis (EMA) validation"
+        )
+    return value
+
+
 class MotionPipelineConfig(BaseModel):
     qualification: list[MotionStageSelection] = Field(default_factory=list)
     observation: list[MotionStageSelection] = Field(default_factory=list)
@@ -205,9 +222,12 @@ class MotionQualificationConfig(BaseModel):
     suppression_verification_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     borderline_rescue_enabled: bool = True
     borderline_margin: float = Field(default=0.03, ge=0.0, le=0.10)
-    mog2_audit_enabled: bool = False
-    mog2_history_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     pipeline: MotionPipelineConfig = Field(default_factory=MotionPipelineConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_enabled_retired_mog2(cls, value: object) -> object:
+        return _reject_enabled_retired_mog2(value)
 
 
 class MotionSpatialAlignmentConfig(BaseModel):
@@ -233,11 +253,15 @@ class CameraMotionQualificationConfig(BaseModel):
     borderline_rescue_enabled: bool | None = None
     borderline_margin: float | None = Field(default=None, ge=0.0, le=0.10)
     suppression_verification_rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    mog2_audit_enabled: bool | None = None
     spatial_alignment: MotionSpatialAlignmentConfig = Field(
         default_factory=MotionSpatialAlignmentConfig
     )
     pipeline: CameraMotionPipelineConfig = Field(default_factory=CameraMotionPipelineConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_enabled_retired_mog2(cls, value: object) -> object:
+        return _reject_enabled_retired_mog2(value)
 
 
 class CameraRetentionConfig(BaseModel):

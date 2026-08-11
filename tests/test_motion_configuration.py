@@ -47,7 +47,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         {
                             "stage_id": "evidence_fusion",
                             "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": " ALL ", "sources": " MOG2 "},
+                            "options": {"policy": " ALL ", "sources": " AUX "},
                         },
                         {"stage_id": "event_state", "implementation": "score_event_state"},
                         {"stage_id": "trigger", "implementation": "score_trigger"},
@@ -59,7 +59,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         settings = guided_fusion_settings(graphs.fusion)
         self.assertEqual(settings["policy"], "all")
-        self.assertEqual(settings["sources"], ["mog2"])
+        self.assertEqual(settings["sources"], ["aux"])
 
     def test_empty_global_graphs_resolve_to_compatible_defaults(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
@@ -121,98 +121,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         self.assertEqual(overridden.origins["qualification"], "camera_legacy_migrated")
         self.assertEqual(overridden.qualification[1].implementation, "adaptive_ema_background")
 
-    def test_mog2_observation_runs_when_enforced_fusion_uses_it(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "mode": "enforce",
-                "mog2_audit_enabled": True,
-                "pipeline": {
-                    "fusion": [
-                        {
-                            "stage_id": "evidence_fusion",
-                            "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": "any", "sources": ["mog2", "onvif"]},
-                        },
-                        {
-                            "stage_id": "event_state",
-                            "implementation": "score_event_state",
-                        },
-                        {"stage_id": "trigger", "implementation": "score_trigger"},
-                    ],
-                },
-            }),
-            CameraMotionQualificationConfig(),
-        )
-
-        self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
-        self.assertTrue(graphs.observation[0].options["enabled"])
-
-    def test_mog2_decision_graph_is_authoritative_over_legacy_enable_flag(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "mode": "camera",
-                "mog2_audit_enabled": False,
-                "pipeline": {
-                    "fusion": [
-                        {
-                            "stage_id": "evidence_fusion",
-                            "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": "all", "sources": ["mog2"]},
-                        },
-                        {"stage_id": "event_state", "implementation": "score_event_state"},
-                        {"stage_id": "trigger", "implementation": "score_trigger"},
-                    ],
-                },
-            }),
-            CameraMotionQualificationConfig(),
-        )
-
-        self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
-        self.assertTrue(graphs.observation[0].options["enabled"])
-
-    def test_mog2_audit_graph_is_authoritative_over_legacy_enable_flag(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "mode": "camera",
-                "mog2_audit_enabled": False,
-                "pipeline": {
-                    "fusion": [
-                        {
-                            "stage_id": "evidence_fusion",
-                            "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": "audit", "sources": ["mog2"]},
-                        },
-                        {"stage_id": "event_state", "implementation": "score_event_state"},
-                        {"stage_id": "trigger", "implementation": "score_trigger"},
-                    ],
-                },
-            }),
-            CameraMotionQualificationConfig(),
-        )
-
-        self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
-
-    def test_scalar_mog2_source_is_normalized_during_graph_resolution(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "mode": "camera",
-                "pipeline": {
-                    "fusion": [
-                        {
-                            "stage_id": "evidence_fusion",
-                            "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": "all", "sources": " MOG2 "},
-                        },
-                        {"stage_id": "event_state", "implementation": "score_event_state"},
-                        {"stage_id": "trigger", "implementation": "score_trigger"},
-                    ],
-                },
-            }),
-            CameraMotionQualificationConfig(),
-        )
-
-        self.assertEqual(graphs.observation[0].implementation, "opencv_mog2_evidence")
-
     def test_scalar_onvif_source_cannot_bypass_new_mode_separation(self) -> None:
         config = MotionQualificationConfig.model_validate({
             "mode": "camera",
@@ -230,75 +138,6 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         })
 
         with self.assertRaisesRegex(ValueError, "ONVIF cannot be a validation source"):
-            resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
-
-    def test_bypass_graph_does_not_run_unused_mog2_source(self) -> None:
-        graphs = resolve_motion_pipeline_graphs(
-            MotionQualificationConfig.model_validate({
-                "mode": "camera",
-                "pipeline": {
-                    "fusion": [
-                        {
-                            "stage_id": "evidence_fusion",
-                            "implementation": "buffered_evidence_fusion",
-                            "options": {"policy": "bypass", "sources": ["mog2"]},
-                        },
-                        {"stage_id": "event_state", "implementation": "score_event_state"},
-                        {"stage_id": "trigger", "implementation": "score_trigger"},
-                    ],
-                },
-            }),
-            CameraMotionQualificationConfig(),
-        )
-
-        self.assertEqual(len(graphs.observation), 1)
-        self.assertEqual(graphs.observation[0].implementation, "onvif_event_evidence")
-
-    def test_custom_observation_graph_cannot_omit_required_mog2_source(self) -> None:
-        config = MotionQualificationConfig.model_validate({
-            "mode": "camera",
-            "pipeline": {
-                "observation": [{
-                    "stage_id": "onvif_source",
-                    "implementation": "onvif_event_evidence",
-                }],
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {"policy": "all", "sources": ["mog2"]},
-                    },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
-                ],
-            },
-        })
-
-        with self.assertRaisesRegex(ValueError, "no enabled MOG2 source"):
-            resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
-
-    def test_custom_observation_graph_cannot_disable_required_mog2_source(self) -> None:
-        config = MotionQualificationConfig.model_validate({
-            "mode": "camera",
-            "pipeline": {
-                "observation": [{
-                    "stage_id": "mog2_source",
-                    "implementation": "opencv_mog2_evidence",
-                    "options": {"enabled": False},
-                }],
-                "fusion": [
-                    {
-                        "stage_id": "evidence_fusion",
-                        "implementation": "buffered_evidence_fusion",
-                        "options": {"policy": "all", "sources": ["mog2"]},
-                    },
-                    {"stage_id": "event_state", "implementation": "score_event_state"},
-                    {"stage_id": "trigger", "implementation": "score_trigger"},
-                ],
-            },
-        })
-
-        with self.assertRaisesRegex(ValueError, "no enabled MOG2 source"):
             resolve_motion_pipeline_graphs(config, CameraMotionQualificationConfig())
 
     def test_new_modes_reject_onvif_as_a_validation_source(self) -> None:
@@ -457,15 +296,30 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
         validate_motion_pipeline_configuration(config)
 
     def test_application_preflight_rejects_retired_mog2_flag(self) -> None:
-        config = AppConfig.model_validate({
-            "motion_qualification": {"mog2_audit_enabled": True},
-        })
-
         with self.assertRaisesRegex(
-            ValueError,
+            ValidationError,
             "MOG2 has been retired.*EMA",
         ):
-            validate_motion_pipeline_configuration(config)
+            AppConfig.model_validate({
+                "motion_qualification": {"mog2_audit_enabled": True},
+            })
+
+    def test_disabled_retired_mog2_flags_remain_loadable(self) -> None:
+        config = AppConfig.model_validate({
+            "motion_qualification": {"mog2_audit_enabled": False},
+            "cameras": [{
+                "id": "gate",
+                "name": "Gate",
+                "stream_url": "rtsp://example.invalid/main",
+                "motion_qualification": {"mog2_audit_enabled": None},
+            }],
+        })
+
+        self.assertNotIn("mog2_audit_enabled", config.motion_qualification.model_dump())
+        self.assertNotIn(
+            "mog2_audit_enabled",
+            config.cameras[0].motion_qualification.model_dump(),
+        )
 
     def test_application_preflight_rejects_retired_camera_mog2_source(self) -> None:
         config = AppConfig.model_validate({
@@ -574,7 +428,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
                         "stage_id": "fusion",
                         "implementation": "buffered_evidence_fusion",
                         "options": {
-                            "source_thresholds": {"mog2": float("nan")},
+                            "source_thresholds": {"aux": float("nan")},
                         },
                     }, {
                         "stage_id": "state",
@@ -589,7 +443,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "source threshold for mog2 must be finite",
+            "source threshold for aux must be finite",
         ):
             validate_motion_pipeline_configuration(config)
 

@@ -873,8 +873,6 @@ class CameraWorkerTest(unittest.TestCase):
             )
             self.assertEqual(worker.motion_analysis.frames[-1][1].ndim, 2)
             self.assertEqual(worker.motion_analysis.color_frames[-1][1].ndim, 3)
-            self.assertFalse(worker.status()["motion_qualification"]["mog2_audit_enabled"])
-            self.assertIsNone(worker.status()["motion_qualification"]["mog2_last"])
             worker._stop.set()
             worker.motion_analysis.request_stop()
             thread.join(timeout=1)
@@ -1551,7 +1549,7 @@ class CameraWorkerTest(unittest.TestCase):
                         "implementation": "buffered_evidence_fusion",
                         "options": {
                             "policy": "all",
-                            "sources": ["mog2"],
+                            "sources": ["aux"],
                             "include_primary": True,
                         },
                     },
@@ -1593,7 +1591,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertGreaterEqual(analyze.call_count, 2)
             fuse.assert_called_once()
 
-    def test_mog2_only_validation_waits_for_post_trigger_evidence(self) -> None:
+    def test_external_only_validation_waits_for_post_trigger_evidence(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig.model_validate({
             "mode": "camera",
@@ -1605,7 +1603,7 @@ class CameraWorkerTest(unittest.TestCase):
                         "implementation": "buffered_evidence_fusion",
                         "options": {
                             "policy": "all",
-                            "sources": ["mog2"],
+                            "sources": ["aux"],
                             "include_primary": False,
                         },
                     },
@@ -1649,7 +1647,7 @@ class CameraWorkerTest(unittest.TestCase):
                         "implementation": "buffered_evidence_fusion",
                         "options": {
                             "policy": "all",
-                            "sources": "mog2",
+                            "sources": "aux",
                             "include_primary": False,
                         },
                     },
@@ -2955,7 +2953,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(result.accepted)
             self.assertEqual(result.reason, "no_temporal_signal")
             self.assertGreater(diagnostics["windows_evaluated"], 0)
-            self.assertNotIn("mog2_warmed", result.features)
+            self.assertNotIn("external_evidence_warmed", result.features)
             self.assertEqual(result.features["event_state_phase"], "active")
 
     def test_camera_validation_reuses_continuous_qualification_result(self) -> None:

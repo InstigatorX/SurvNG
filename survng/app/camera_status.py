@@ -102,7 +102,6 @@ class CameraStatusService:
         capture = self.capture.status()
         analysis = self.motion_analysis.status()
         evidence = self.motion_evidence.status()
-        mog2 = evidence.get("mog2", {})
         now = self.monotonic()
         live_age = self._age(capture["live_frame_monotonic"], now)
         main_age = self._age(capture["main_frame_monotonic"], now)
@@ -144,9 +143,6 @@ class CameraStatusService:
             ),
             "borderline_rescue_enabled": rescue_enabled,
             "borderline_margin": rescue_margin,
-            "mog2_audit_enabled": bool(mog2.get("enabled", False)),
-            "mog2_history_seconds": self.motion_config.mog2_history_seconds,
-            "mog2_last": mog2.get("last"),
             "evidence_sources": evidence,
             "pipeline_origins": dict(self.pipeline_origins),
             "queue_depth": motion_runtime["event_queue_depth"],

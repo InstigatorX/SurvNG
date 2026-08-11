@@ -154,24 +154,22 @@ class AuditAiTest(unittest.TestCase):
         self.assertIn("incident-eligibility", prompt)
         self.assertNotIn("rejected motion audit", prompt)
 
-    def test_camera_triggered_paradigm_identifies_optional_validators(self) -> None:
+    def test_camera_triggered_paradigm_identifies_ema_validator(self) -> None:
         context = motion_paradigm_context(
             mode="camera",
             onvif_enabled=True,
             has_live_substream=True,
             fusion={
                 "policy": "all",
-                "sources": ["mog2"],
+                "sources": [],
                 "include_primary": True,
                 "fail_open": True,
             },
-            mog2_available=True,
         )
 
         self.assertEqual(context["paradigm"], "camera_triggered")
         self.assertEqual(context["automatic_trigger"]["source"], "onvif_camera_notice")
         self.assertEqual(context["adaptive_visual"]["role"], "validator")
-        self.assertEqual(context["mog2"]["role"], "validator")
         self.assertEqual(context["onvif"]["role"], "automatic_trigger")
         self.assertTrue(context["validator_decision"]["fail_open"])
         self.assertEqual(context["schema_version"], 4)
@@ -183,7 +181,6 @@ class AuditAiTest(unittest.TestCase):
             onvif_enabled=True,
             has_live_substream=True,
             fusion={"policy": "audit", "sources": [], "include_primary": True},
-            mog2_available=False,
         )
 
         self.assertEqual(context["paradigm"], "camera_triggered_with_visual_backup")
@@ -197,14 +194,12 @@ class AuditAiTest(unittest.TestCase):
             onvif_enabled=True,
             has_live_substream=False,
             fusion={"policy": "audit", "sources": [], "include_primary": True},
-            mog2_available=True,
         )
 
         self.assertEqual(context["paradigm"], "visual_triggered")
         self.assertEqual(context["adaptive_visual"]["role"], "required_trigger")
         self.assertEqual(context["adaptive_visual"]["analysis_feed"], "main_stream_fallback")
         self.assertEqual(context["onvif"]["role"], "diagnostic_only")
-        self.assertEqual(context["mog2"]["role"], "disabled")
 
     def _advice_json(self) -> str:
         return json.dumps({
@@ -295,8 +290,7 @@ class AuditAiTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "numeric"):
             validate_tuning_value("borderline_margin", False)
 
-    def test_mog2_tuning_is_bounded_but_validator_topology_is_operator_owned(self) -> None:
-        self.assertEqual(validate_tuning_value("mog2_history_seconds", 45), 45.0)
+    def test_validator_topology_is_operator_owned(self) -> None:
         with self.assertRaises(ValidationError):
             AuditAiChange(
                 scope="camera",
@@ -304,8 +298,6 @@ class AuditAiTest(unittest.TestCase):
                 value=False,
                 reason="Do not let AI change validator topology.",
             )
-        with self.assertRaises(ValueError):
-            validate_tuning_value("mog2_history_seconds", 301)
 
     def test_pipeline_recommendations_are_high_level_and_bounded(self) -> None:
         self.assertEqual(validate_tuning_value("analysis_preset", "MODULAR"), "modular")

@@ -88,11 +88,6 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
         }
 
     def reject_retired_mog2(scope: str, motion_config: object) -> None:
-        if bool(getattr(motion_config, "mog2_audit_enabled", False)):
-            raise ValueError(
-                f"invalid motion pipeline for {scope}: MOG2 has been retired; "
-                "use Enhanced Motion Analysis (EMA) validation"
-            )
         pipeline = getattr(motion_config, "pipeline", None)
         for graph_name in ("qualification", "observation", "fusion"):
             stages = getattr(pipeline, graph_name, None) if pipeline is not None else None

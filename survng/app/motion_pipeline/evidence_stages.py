@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import math
-import threading
 from typing import Any, Mapping
 
-from ..motion import BackgroundMotionTracker, aggregate_mog2_evidence
 from .context import MotionContext
 from .evidence import MotionEvidenceRepository, MotionEvidenceSample
 from .registry import (
@@ -33,53 +31,6 @@ def _safe_unit_score(value: object, default: float = 0.0) -> float:
     if not math.isfinite(number):
         return default
     return max(0.0, min(1.0, number))
-
-
-class Mog2EvidenceSourceStage:
-    observation_kinds = frozenset({"frame"})
-
-    def __init__(
-        self,
-        stage_id: str,
-        repository: MotionEvidenceRepository,
-        *,
-        enabled: bool,
-        sample_fps: float,
-        history_seconds: float,
-    ) -> None:
-        self._stage_id = stage_id
-        self.repository = repository
-        self.enabled = bool(enabled)
-        self.sample_fps = max(1.0, float(sample_fps))
-        self.history_seconds = max(1.0, float(history_seconds))
-        self._update_lock = threading.Lock()
-        repository.configure_source(
-            "mog2",
-            enabled=self.enabled,
-            implementation="opencv_mog2",
-            sample_fps=self.sample_fps,
-            history_seconds=self.history_seconds,
-        )
-
-    @property
-    def stage_id(self) -> str:
-        return self._stage_id
-
-    def process(self, context: MotionContext) -> MotionContext:
-        if not self.enabled or context.original_frame is None:
-            return context
-        tracker = context.runtime.state_for(
-            self.stage_id,
-            lambda: BackgroundMotionTracker(
-                sample_fps=self.sample_fps,
-                history_seconds=self.history_seconds,
-            ),
-        )
-        with self._update_lock:
-            evidence = tracker.update(context.original_frame)
-        self.repository.append("mog2", context.captured_at, evidence)
-        context.source_evidence["mog2"] = dict(evidence)
-        return context
 
 
 class OnvifEventEvidenceStage:
@@ -157,7 +108,7 @@ class BufferedMotionFusionStage:
         self,
         stage_id: str,
         repository: MotionEvidenceRepository,
-        sources: tuple[str, ...] = ("mog2",),
+        sources: tuple[str, ...] = (),
         *,
         policy: str = "audit",
         source_thresholds: Mapping[str, float] | None = None,
@@ -208,12 +159,7 @@ class BufferedMotionFusionStage:
         ended_at = float(context.configuration.get("evidence_ended_at", context.captured_at))
         for source in self.sources:
             samples = self.repository.window(source, started_at, ended_at)
-            if source == "mog2":
-                aggregate = aggregate_mog2_evidence(
-                    [dict(sample.values) for sample in samples]
-                )
-            else:
-                aggregate = self._aggregate_generic_source(source, samples)
+            aggregate = self._aggregate_generic_source(source, samples)
             context.source_evidence[source] = aggregate
             context.scoring.features.update(aggregate)
         self._apply_policy(context)
@@ -350,20 +296,6 @@ def _repository(dependencies: MotionStageDependencies) -> MotionEvidenceReposito
     return repository
 
 
-def _build_mog2_source(
-    stage_id: str,
-    options: Mapping[str, Any],
-    dependencies: MotionStageDependencies,
-) -> Mog2EvidenceSourceStage:
-    return Mog2EvidenceSourceStage(
-        stage_id,
-        _repository(dependencies),
-        enabled=bool(options.get("enabled", True)),
-        sample_fps=float(options.get("sample_fps", 5.0)),
-        history_seconds=float(options.get("history_seconds", 30.0)),
-    )
-
-
 def _build_onvif_source(
     stage_id: str,
     options: Mapping[str, Any],
@@ -394,7 +326,7 @@ def _build_buffered_fusion(
     options: Mapping[str, Any],
     dependencies: MotionStageDependencies,
 ) -> BufferedMotionFusionStage:
-    raw_sources = options.get("sources", ("mog2",))
+    raw_sources = options.get("sources", ())
     if isinstance(raw_sources, str):
         source_values = (raw_sources,)
     elif isinstance(raw_sources, (list, tuple)):
@@ -439,24 +371,6 @@ def _build_buffered_fusion(
 def register_evidence_stages(registry: MotionStageRegistry) -> None:
     registry.register(
         MotionStageRegistration(
-            implementation="opencv_mog2_evidence",
-            builder=_build_mog2_source,
-            requires=frozenset({"original_frame"}),
-            provides=frozenset({"source_evidence"}),
-            graph="observation",
-            category="background",
-            observation_kinds=frozenset({"frame"}),
-            display_name="Adaptive background (MOG2)",
-            description="Learns the normal scene and reports foreground changes.",
-            options=(
-                MotionStageOption("enabled", "Enabled", "boolean", True),
-                MotionStageOption("sample_fps", "Samples per second", "number", 5.0, minimum=0.1, maximum=30),
-                MotionStageOption("history_seconds", "Learning time", "number", 30.0, minimum=1, maximum=600),
-            ),
-        )
-    )
-    registry.register(
-        MotionStageRegistration(
             implementation="onvif_event_evidence",
             builder=_build_onvif_source,
             requires=frozenset({"configuration"}),
@@ -485,7 +399,7 @@ def register_evidence_stages(registry: MotionStageRegistry) -> None:
             display_name="Buffered evidence fusion",
             description="Combines the normal motion score with recent independent evidence.",
             options=(
-                MotionStageOption("sources", "Extra sources", "string_list", ["mog2", "onvif"]),
+                MotionStageOption("sources", "Extra sources", "string_list", ["onvif"]),
                 MotionStageOption("policy", "Decision style", "string", "audit", choices=("audit", "bypass", "any", "all", "weighted")),
                 MotionStageOption("source_thresholds", "Source confidence levels", "object", {}, advanced=True),
                 MotionStageOption("source_weights", "Source importance", "object", {}, advanced=True),
