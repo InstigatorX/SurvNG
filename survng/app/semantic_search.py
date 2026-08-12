@@ -450,6 +450,52 @@ class SemanticIndex:
             "event_count": int(row["event_count"] if row else 0),
         }
 
+    def clone_image_generation(
+        self,
+        source: SemanticModelIdentity,
+        target: SemanticModelIdentity,
+    ) -> int:
+        """Reuse stored image vectors after external image-tower validation.
+
+        Semantic embeddings contain image evidence only. Callers must first
+        prove that image model artifacts and preprocessing are identical.
+        """
+        if source.dimensions != target.dimensions:
+            raise ValueError("semantic generation dimensions do not match")
+        if source.generation == target.generation:
+            return 0
+        with self._lock, self._connect() as connection:
+            before = connection.total_changes
+            connection.execute(
+                """
+                insert into semantic_embeddings (
+                    event_id, camera_id, captured_at, source_kind, source_key,
+                    image_path, object_label, bbox_json, implementation,
+                    model_fingerprint, preprocessing_fingerprint, embedding_size,
+                    embedding_blob, created_at
+                )
+                select event_id, camera_id, captured_at, source_kind, source_key,
+                    image_path, object_label, bbox_json, ?, ?, ?, ?,
+                    embedding_blob, ?
+                from semantic_embeddings
+                where model_fingerprint = ? and preprocessing_fingerprint = ?
+                on conflict(
+                    event_id, source_kind, source_key,
+                    model_fingerprint, preprocessing_fingerprint
+                ) do nothing
+                """,
+                (
+                    target.implementation,
+                    target.model_fingerprint,
+                    target.preprocessing_fingerprint,
+                    target.dimensions,
+                    datetime.now(timezone.utc).isoformat(),
+                    source.model_fingerprint,
+                    source.preprocessing_fingerprint,
+                ),
+            )
+            return connection.total_changes - before
+
     def event_indexed(self, event_id: int, identity: SemanticModelIdentity) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -600,6 +646,31 @@ def load_semantic_manifest(model_dir: Path) -> dict[str, Any]:
     return payload
 
 
+def validate_semantic_runtime_manifest(manifest: Mapping[str, Any]) -> None:
+    """Reject model packages that lack required cross-modal validation."""
+    implementation = str(manifest.get("implementation") or "")
+    if implementation != "siglip2_openvino":
+        return
+    validation = manifest.get("validation")
+    cross_modal = validation.get("cross_modal") if isinstance(validation, Mapping) else None
+    raw_error = (
+        cross_modal.get("maximum_cosine_error")
+        if isinstance(cross_modal, Mapping)
+        else None
+    )
+    try:
+        maximum_error = float(raw_error)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            "SigLIP2 package is missing cross-modal export validation"
+        ) from exc
+    if not np.isfinite(maximum_error) or maximum_error > 5e-4:
+        raise RuntimeError(
+            "SigLIP2 package failed cross-modal export validation "
+            f"(maximum cosine error {maximum_error:.6g})"
+        )
+
+
 class DisabledSemanticSearch:
     """Stable no-op service used when semantic search is disabled."""
 
@@ -664,6 +735,7 @@ def build_semantic_search(
         return UnavailableSemanticSearch(config, index, f"model directory does not exist: {model_dir}")
     try:
         manifest = load_semantic_manifest(model_dir)
+        validate_semantic_runtime_manifest(manifest)
     except RuntimeError as exc:
         return UnavailableSemanticSearch(config, index, str(exc))
     return SemanticSearchService(config, index, model_dir, manifest)

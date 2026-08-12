@@ -24,6 +24,7 @@ from survng.app.semantic_search import (
     _semantic_text_inputs,
     _prepare_siglip2_images,
     _prepare_fixed_pil_images,
+    validate_semantic_runtime_manifest,
 )
 
 
@@ -65,6 +66,21 @@ class SemanticIndexTest(unittest.TestCase):
         encoded = runtime(["white truck"])
         np.testing.assert_array_equal(encoded["input_ids"], [[2, 4, 5, 3, 0, 0]])
         np.testing.assert_array_equal(encoded["attention_mask"], [[1, 1, 1, 1, 0, 0]])
+
+    def test_siglip2_runtime_requires_cross_modal_validation(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing cross-modal"):
+            validate_semantic_runtime_manifest({"implementation": "siglip2_openvino"})
+
+        with self.assertRaisesRegex(RuntimeError, "failed cross-modal"):
+            validate_semantic_runtime_manifest({
+                "implementation": "siglip2_openvino",
+                "validation": {"cross_modal": {"maximum_cosine_error": 0.001}},
+            })
+
+        validate_semantic_runtime_manifest({
+            "implementation": "siglip2_openvino",
+            "validation": {"cross_modal": {"maximum_cosine_error": 0.00005}},
+        })
 
     def test_semantic_text_inputs_maps_multiple_manifest_inputs(self) -> None:
         tokens = {
@@ -258,6 +274,23 @@ class SemanticIndexTest(unittest.TestCase):
         })
         self.assertEqual(encoder.calls[1], [(60, 100, 3)])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 4, "event_count": 2})
+
+    def test_clone_image_generation_preserves_source_and_is_idempotent(self) -> None:
+        target = SemanticModelIdentity("siglip2", "model-new", "preprocess-new", 3)
+        self.index.upsert(
+            [SemanticEvidence(1, "gate", "now", "full_frame", "frame", "x.webp")],
+            [[1, 0, 0]],
+            self.identity,
+        )
+
+        self.assertEqual(self.index.clone_image_generation(self.identity, target), 1)
+        self.assertEqual(self.index.clone_image_generation(self.identity, target), 0)
+        self.assertEqual(self.index.coverage(self.identity)["evidence_count"], 1)
+        self.assertEqual(self.index.coverage(target)["evidence_count"], 1)
+
+        incompatible = SemanticModelIdentity("siglip2", "other", "other-pre", 4)
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            self.index.clone_image_generation(self.identity, incompatible)
 
     def test_object_crops_are_scaled_ranked_and_bounded(self) -> None:
         from survng.app.config import SemanticSearchConfig

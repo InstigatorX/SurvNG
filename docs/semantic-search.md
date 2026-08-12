@@ -64,7 +64,9 @@ Search. Keep the included `LICENSE` with the package.
 The exporter downloads `google/siglip2-base-patch16-224`, creates isolated
 image and text OpenVINO FP16 encoders, bundles its tokenizer and Apache-2.0
 license, and validates source/OpenVINO embedding parity plus exact runtime
-preprocessing and tokenization before retaining the package.
+preprocessing and tokenization before retaining the package. Validation also
+compares source and OpenVINO image-to-text cosine scores so independently valid
+but incompatible tower inputs cannot produce a deployable package.
 
 The model's official fixed-resolution processor is represented explicitly in
 the manifest. Other SigLIP2 checkpoints that use aspect-aware packed patches

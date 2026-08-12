@@ -74,6 +74,7 @@ frames/
 models/mobileclip2-b-openvino-fp16/
 models/.mobileclip2-download-cache/
 models/siglip2-base-patch16-224-openvino-fp16/
+models/siglip2-base-patch16-224-openvino-fp16-corrected/
 models/.siglip2-download-cache/
 *.onnx
 *.pt

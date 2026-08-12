@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import resource
@@ -24,8 +25,10 @@ from survng.app.semantic_search import (
     IsolatedOpenVinoManifestEncoder,
     SemanticIndex,
     SemanticSearchService,
+    _semantic_model_identity,
     load_semantic_manifest,
     semantic_event_objects,
+    validate_semantic_runtime_manifest,
 )
 
 SQLITE_LOCK_RETRY_ATTEMPTS = 8
@@ -47,6 +50,34 @@ def _process_memory_mb(pid: int) -> tuple[float, float]:
             except (IndexError, ValueError):
                 continue
     return values.get("VmRSS", 0.0), values.get("VmHWM", 0.0)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _image_contract(model_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    package_root = model_dir.resolve()
+    model_path = (
+        package_root / str(manifest.get("image_model") or "image_encoder.xml")
+    ).resolve()
+    try:
+        model_path.relative_to(package_root)
+    except ValueError as exc:
+        raise RuntimeError("semantic image model path escapes the package") from exc
+    binary_path = model_path.with_suffix(".bin")
+    if not model_path.is_file() or not binary_path.is_file():
+        raise RuntimeError("semantic image model artifacts are missing")
+    return {
+        "dimensions": int(manifest.get("dimensions") or 0),
+        "image": dict(manifest.get("image") or {}),
+        "xml_sha256": _file_sha256(model_path),
+        "bin_sha256": _file_sha256(binary_path),
+    }
 
 
 def _event_pages(database: Path, page_size: int) -> Iterator[list[dict[str, Any]]]:
@@ -118,8 +149,10 @@ def build(
     pause_seconds: float,
     limit: int,
     progress_every: int,
+    reuse_image_model_dir: Path | None = None,
 ) -> dict[str, Any]:
     manifest = load_semantic_manifest(model_dir)
+    validate_semantic_runtime_manifest(manifest)
     index = SemanticIndex(database)
     config = SemanticSearchConfig(
         enabled=True,
@@ -130,11 +163,25 @@ def build(
         index_object_crops=True,
         max_object_crops_per_event=24,
     )
+    target_identity = _semantic_model_identity(model_dir, manifest)
+    before = index.coverage(target_identity)
+    reused_evidence = 0
+    if reuse_image_model_dir is not None:
+        source_manifest = load_semantic_manifest(reuse_image_model_dir)
+        if _image_contract(model_dir, manifest) != _image_contract(
+            reuse_image_model_dir, source_manifest
+        ):
+            raise RuntimeError(
+                "cannot reuse semantic evidence: image encoder contract differs"
+            )
+        reused_evidence = index.clone_image_generation(
+            _semantic_model_identity(reuse_image_model_dir, source_manifest),
+            target_identity,
+        )
     service = SemanticSearchService(config, index, model_dir, manifest)
     encoder = IsolatedOpenVinoManifestEncoder(model_dir, manifest, device)
     service.encoder = encoder
     service._storage_dir = storage_dir
-    before = index.coverage(encoder.identity)
     started = time.monotonic()
     eligible = 0
     attempted = 0
@@ -200,6 +247,7 @@ def build(
         "attempted_events": attempted,
         "encoded_events": encoded,
         "written_evidence": written_evidence,
+        "reused_evidence": reused_evidence,
         "eligible_events_seen": eligible,
         "new_events": after["event_count"] - before["event_count"],
         "new_evidence": after["evidence_count"] - before["evidence_count"],
@@ -228,6 +276,11 @@ def main() -> int:
     parser.add_argument("--pause-seconds", type=float, default=0.01)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=100)
+    parser.add_argument(
+        "--reuse-image-model-dir",
+        type=Path,
+        help="reuse evidence only when image artifacts and preprocessing are identical",
+    )
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.page_size < 1 or args.page_size > 10000:
@@ -252,6 +305,7 @@ def main() -> int:
             pause_seconds=args.pause_seconds,
             limit=args.limit,
             progress_every=max(0, args.progress_every),
+            reuse_image_model_dir=args.reuse_image_model_dir,
         )
     rendered = json.dumps(report, indent=2) + "\n"
     if args.report:

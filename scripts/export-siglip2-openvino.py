@@ -76,6 +76,24 @@ def _validate_pair(
     }
 
 
+def _validate_cross_modal(
+    reference_images: np.ndarray,
+    reference_text: np.ndarray,
+    candidate_images: np.ndarray,
+    candidate_text: np.ndarray,
+    maximum_error: float = 5e-4,
+) -> dict[str, float]:
+    source_scores = _normalized(reference_text) @ _normalized(reference_images).T
+    candidate_scores = _normalized(candidate_text) @ _normalized(candidate_images).T
+    difference = float(np.max(np.abs(source_scores - candidate_scores)))
+    if not np.isfinite(difference) or difference > maximum_error:
+        raise RuntimeError(
+            "cross-modal OpenVINO parity failed: maximum cosine error "
+            f"{difference:.6f} exceeds {maximum_error:.6f}"
+        )
+    return {"maximum_cosine_error": round(difference, 8)}
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -129,14 +147,21 @@ def build_package(
     max_length = int(model.config.text_config.max_position_embeddings)
     images = _validation_images(image_type)
     image_inputs = image_processor(images=images, return_tensors="pt")
-    text_inputs = tokenizer(
-        VALIDATION_PROMPTS,
+    # Use the model's official combined processor contract. SigLIP2's fixed
+    # padded text tower intentionally omits attention_mask; supplying one
+    # changes the embedding space even though the token IDs are identical.
+    text_inputs = processor(
+        text=VALIDATION_PROMPTS,
         padding="max_length",
         truncation=True,
         max_length=max_length,
-        return_attention_mask=True,
         return_tensors="pt",
     )
+    text_input_names = [
+        name for name in ("input_ids", "attention_mask") if name in text_inputs
+    ]
+    if "input_ids" not in text_input_names:
+        raise RuntimeError("source processor did not produce input_ids")
 
     packed_images = all(
         name in image_inputs
@@ -180,11 +205,8 @@ def build_package(
             super().__init__()
             self.source = source
 
-        def forward(self, input_ids: Any, attention_mask: Any) -> Any:
-            return self.source.get_text_features(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            ).pooler_output
+        def forward(self, input_ids: Any) -> Any:
+            return self.source.get_text_features(input_ids=input_ids).pooler_output
 
     image_encoder = (
         PackedImageEncoder(model).eval()
@@ -193,7 +215,11 @@ def build_package(
     )
     text_encoder = TextEncoder(model).eval()
     one_image = tuple(image_inputs[name][:1] for name in image_input_names)
-    text_example = (text_inputs["input_ids"], text_inputs["attention_mask"])
+    if text_input_names != ["input_ids"]:
+        raise RuntimeError(
+            "this SigLIP2 exporter expects the official input_ids-only text contract"
+        )
+    text_example = (text_inputs["input_ids"],)
     with torch.inference_mode():
         reference_images = np.concatenate([
             image_encoder(*(image_inputs[name][index:index + 1] for name in image_input_names))
@@ -217,16 +243,13 @@ def build_package(
         ov.save_model(ov_image, temporary / "image_encoder.xml", compress_to_fp16=True)
 
         print("Converting dynamic-batch text encoder to OpenVINO IR", flush=True)
-        ov_text = ov.convert_model(text_encoder, example_input=(
-            text_example[0][:1], text_example[1][:1]
-        ))
+        ov_text = ov.convert_model(text_encoder, example_input=(text_example[0][:1],))
         if int(text_example[0].shape[1]) != max_length:
             raise RuntimeError("source tokenizer did not honor the model text context length")
         ov_text.reshape({
             "input_ids": [-1, max_length],
-            "attention_mask": [-1, max_length],
         })
-        _set_names(ov_text, ["input_ids", "attention_mask"], "text_features")
+        _set_names(ov_text, ["input_ids"], "text_features")
         ov.save_model(ov_text, temporary / "text_encoder.xml", compress_to_fp16=True)
 
         tokenizer_dir = temporary / "tokenizer"
@@ -277,7 +300,6 @@ def build_package(
         text_spec = {
             "inputs": {
                 "input_ids": "input_ids",
-                "attention_mask": "attention_mask",
             },
             "output": "text_features",
             "tokenizer_kind": "huggingface_tokenizer_json",
@@ -309,9 +331,6 @@ def build_package(
         np.testing.assert_array_equal(
             runtime_tokens["input_ids"], text_inputs["input_ids"].numpy()
         )
-        np.testing.assert_array_equal(
-            runtime_tokens["attention_mask"], text_inputs["attention_mask"].numpy()
-        )
 
         core = ov.Core()
         compiled_image = core.compile_model(temporary / "image_encoder.xml", "CPU")
@@ -323,7 +342,12 @@ def build_package(
             })["image_features"])
             for index in range(len(images))
         ])
-        candidate_text = compiled_text(runtime_tokens)["text_features"]
+        candidate_text = compiled_text({
+            name: runtime_tokens[name] for name in text_input_names
+        })["text_features"]
+        cross_modal_validation = _validate_cross_modal(
+            reference_images, reference_text, candidate_images, candidate_text
+        )
         validation = {
             "image": _validate_pair(
                 reference_images, candidate_images, "image encoder", minimum_cosine
@@ -333,6 +357,7 @@ def build_package(
             ),
             "runtime_preprocessing": "exact",
             "runtime_tokenizer": "exact",
+            "cross_modal": cross_modal_validation,
         }
         manifest = {
             "schema_version": 2,

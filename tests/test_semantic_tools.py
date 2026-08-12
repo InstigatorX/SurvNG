@@ -112,6 +112,42 @@ def test_index_builder_retries_only_database_lock_errors() -> None:
         raise AssertionError("non-lock SQLite errors must not be retried")
 
 
+def test_image_contract_covers_model_bytes_and_preprocessing(tmp_path: Path) -> None:
+    (tmp_path / "image.xml").write_text("xml", encoding="utf-8")
+    (tmp_path / "image.bin").write_bytes(b"bin")
+    manifest = {
+        "dimensions": 768,
+        "image_model": "image.xml",
+        "image": {"size": 224, "mean": [0.5, 0.5, 0.5]},
+    }
+
+    first = BUILDER._image_contract(tmp_path, manifest)
+    assert first == BUILDER._image_contract(tmp_path, manifest)
+
+    (tmp_path / "image.bin").write_bytes(b"changed")
+    assert first != BUILDER._image_contract(tmp_path, manifest)
+    changed_preprocess = {**manifest, "image": {"size": 384}}
+    assert first != BUILDER._image_contract(tmp_path, changed_preprocess)
+
+
+def test_image_contract_rejects_artifacts_outside_package(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    (tmp_path / "image.xml").write_text("xml", encoding="utf-8")
+    (tmp_path / "image.bin").write_bytes(b"bin")
+
+    try:
+        BUILDER._image_contract(package, {
+            "dimensions": 768,
+            "image_model": "../image.xml",
+            "image": {"size": 224},
+        })
+    except RuntimeError as exc:
+        assert "escapes the package" in str(exc)
+    else:
+        raise AssertionError("package traversal must be rejected")
+
+
 def test_example_benchmark_is_valid_json() -> None:
     path = Path(__file__).parents[1] / "docs" / "semantic-search-benchmark.example.json"
     assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
