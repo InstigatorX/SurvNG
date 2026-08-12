@@ -28,7 +28,6 @@ from .onvif_events import OnvifEventListener, OnvifStopTicket
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_analysis_service import MotionAnalysisService
 from .motion_qualification_service import MotionQualificationService
-from .motion_coordinator import VisualBackupCoordinator
 from .motion_events import MotionEventCoordinator
 from .motion_decisions import MotionDecisionOrchestrator
 from .motion_incidents import MotionIncidentService
@@ -173,7 +172,6 @@ class CameraWorker:
             retry_limit=MOTION_EVENT_MAX_RETRIES,
             camera_id=camera.id,
         )
-        self.visual_backup = VisualBackupCoordinator()
         self.motion_qualification = MotionQualificationService(
             camera=camera,
             config=self.motion_config,
@@ -194,7 +192,6 @@ class CameraWorker:
             limiter=motion_analysis_limiter,
             events=self.motion_events,
             evidence=self.motion_evidence,
-            visual_backup=self.visual_backup,
             audit_recorder=self.motion_decision_handler,
             debug_store=self.motion_debug,
             config=self.motion_config,

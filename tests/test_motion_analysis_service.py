@@ -16,12 +16,7 @@ from survng.app.motion_analysis_service import (
     MotionAnalysisService,
     MotionFrameSubmission,
 )
-from survng.app.motion_coordinator import (
-    VisualBackupAction,
-    VisualBackupCoordinator,
-    VisualBackupDecision,
-    VisualBackupPolicy,
-)
+from survng.app.ema_v2 import EmaPolicy
 from survng.app.motion_events import MotionEventCoordinator
 from survng.app.motion_pipeline import MotionDebugSnapshotStore
 from survng.app.config import MotionQualificationConfig
@@ -56,7 +51,7 @@ def _hooks(
             "cooldown_seconds": 20.0,
             "maximum_triggers_5m": 3,
         }
-    qualification.visual_backup_policy.return_value = VisualBackupPolicy(
+    qualification.visual_backup_policy.return_value = EmaPolicy(
             warmup_seconds=10.0,
             grace_seconds=2.0,
             minimum_score=0.7,
@@ -105,7 +100,6 @@ def _service(dependencies: SimpleNamespace, queue_size: int = 1) -> MotionAnalys
             camera_id="gate",
         ),
         evidence=Mock(),
-        visual_backup=VisualBackupCoordinator(),
         audit_recorder=Mock(),
         debug_store=MotionDebugSnapshotStore(),
         config=dependencies.config,
@@ -901,21 +895,9 @@ def test_visual_backup_does_not_audit_one_frame_below_gate_noise() -> None:
     service = _service(dependencies)
     accepted = MotionQualificationResult(True, 0.69, 0.48, "qualified", 3, {})
     quiet = MotionQualificationResult(False, 0.1, 0.48, "low_score", 3, {})
-    service.visual_backup.evaluate = Mock(side_effect=[
-        VisualBackupDecision(
-            VisualBackupAction.IGNORED,
-            accepted,
-            required_score=0.73,
-            scene_ready=True,
-            count_nonpromotion=True,
-        ),
-        VisualBackupDecision(
-            VisualBackupAction.IGNORED,
-            quiet,
-            required_score=0.73,
-            scene_ready=True,
-        ),
-    ])
+    service.ema_v2.scene_ready = True
+    service.ema_v2.analysis_started_at = 90.0
+    service.ema_v2.observation_count = 3
     frame = np.zeros((90, 160, 3), dtype=np.uint8)
 
     service.consider_visual_backup(accepted, [(100.0, frame)], 100.0)

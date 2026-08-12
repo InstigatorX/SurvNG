@@ -1289,7 +1289,7 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertFalse(process_event.call_args.kwargs["require_eligible_object"])
         self.assertFalse(process_event.call_args.kwargs["require_motion_correlation"])
         record_audit.assert_not_called()
-        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 1)
+        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 0)
 
     def test_visual_backup_audits_uncorrelated_object_rejection(self) -> None:
         camera = CameraConfig(id="front-door", name="Front Door", stream_url="rtsp://example.invalid/main")

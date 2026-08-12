@@ -12,7 +12,7 @@ import numpy as np
 
 from .config import CameraConfig, MotionQualificationConfig
 from .motion import MotionQualificationResult
-from .motion_coordinator import VisualBackupPolicy
+from .ema_v2 import EmaPolicy
 from .motion_pipeline import (
     MotionContext,
     MotionDebugSnapshotStore,
@@ -119,9 +119,9 @@ class MotionQualificationService:
             ),
         }
 
-    def visual_backup_policy(self) -> VisualBackupPolicy:
+    def visual_backup_policy(self) -> EmaPolicy:
         settings = self.visual_backup_settings()
-        return VisualBackupPolicy(
+        return EmaPolicy(
             warmup_seconds=self.config.visual_backup_warmup_seconds,
             grace_seconds=float(settings["grace_seconds"]),
             minimum_score=float(settings["minimum_score"]),

@@ -22,17 +22,13 @@ from .motion import MotionQualificationResult, preprocess_motion_frame
 from .config import MotionQualificationConfig
 from .domain_events import MotionObserved
 from .ema_v2 import (
+    EmaPolicy,
     EmaSignalAction,
     EmaSignalConditioner,
     EpisodeDecisionReason,
     MotionSource,
 )
 from .motion_analysis import FairMotionAnalysisLimiter
-from .motion_coordinator import (
-    VisualBackupAction,
-    VisualBackupCoordinator,
-    VisualBackupPolicy,
-)
 from .motion_decisions import (
     MotionAuditRecorder,
     audit_features,
@@ -59,7 +55,7 @@ class MotionAnalysisQualification(Protocol):
         self, result: MotionQualificationResult, *args: Any, **kwargs: Any
     ) -> MotionQualificationResult: ...
     def visual_backup_settings(self) -> dict[str, float | int]: ...
-    def visual_backup_policy(self) -> VisualBackupPolicy: ...
+    def visual_backup_policy(self) -> EmaPolicy: ...
     def suppression_verification_rate(self) -> float: ...
     def reset_runtime(self, **kwargs: Any) -> None: ...
 
@@ -131,7 +127,6 @@ class MotionAnalysisService:
         limiter: FairMotionAnalysisLimiter,
         events: MotionEventCoordinator,
         evidence: MotionEvidenceRepository,
-        visual_backup: VisualBackupCoordinator,
         audit_recorder: MotionAuditRecorder,
         debug_store: MotionDebugSnapshotStore,
         config: MotionQualificationConfig,
@@ -145,7 +140,6 @@ class MotionAnalysisService:
         self.limiter = limiter
         self.events = events
         self.evidence = evidence
-        self.visual_backup = visual_backup
         self.ema_v2 = EmaSignalConditioner(camera_id)
         self.active_motion_followup = ActiveMotionFollowupPolicy()
         self.audit_recorder = audit_recorder
@@ -298,7 +292,6 @@ class MotionAnalysisService:
             self._analysis_request_deferred = False
         self.clear_queue()
         with self._visual_lock:
-            self.visual_backup.reset()
             self.ema_v2.reset()
             self._visual_nonpromotion_episode = None
         self.active_motion_followup.reset()
@@ -473,7 +466,7 @@ class MotionAnalysisService:
             self._analysis_request_deferred = False
         self.limiter.cancel(self.camera_id)
         with self._visual_lock:
-            self.visual_backup.reset()
+            self.ema_v2.reset()
         self.active_motion_followup.reset()
         self.events.reset_timebase()
         with self._telemetry_lock:
@@ -652,10 +645,6 @@ class MotionAnalysisService:
         with self._visual_lock:
             return self.ema_v2.snapshot()
 
-    def record_visual_camera_match(self, observed_at: float) -> bool:
-        with self._visual_lock:
-            return self.visual_backup.record_camera_match(observed_at)
-
     def visual_backup_readiness(
         self,
         result: MotionQualificationResult,
@@ -679,10 +668,6 @@ class MotionAnalysisService:
     def visual_backup_stable_samples(self) -> int:
         with self._visual_lock:
             return self.ema_v2.observation_count
-
-    def reset_visual_backup_candidate(self) -> None:
-        with self._visual_lock:
-            self.visual_backup.reset_candidate()
 
     def run(self, stop_event: threading.Event) -> None:
         try:
@@ -1276,21 +1261,6 @@ class MotionAnalysisService:
             self.config.post_trigger_seconds
             + self.config.burst_quiet_seconds,
         )
-
-    def _reserve_visual_backup_trigger(self, captured_at: float) -> bool:
-        with self._visual_lock:
-            allowed = self.events.reserve_with(
-                lambda pending, last_completed_at: self.visual_backup.reserve_trigger(
-                    captured_at,
-                    self.qualification.visual_backup_policy(),
-                    trigger_pending=pending,
-                    last_completed_at=last_completed_at,
-                ),
-                observed_at=captured_at,
-            )
-        if not allowed:
-            self.state.increment_stat("visual_backup_rate_limited", 1)
-        return allowed
 
     def record_visual_backup_readiness_audit(
         self,

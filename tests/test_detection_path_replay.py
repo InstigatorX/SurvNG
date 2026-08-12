@@ -10,12 +10,7 @@ import numpy as np
 
 from survng.app.config import CameraConfig, DetectionZone
 from survng.app.motion import MotionQualificationResult
-from survng.app.motion_coordinator import (
-    VisualBackupAction,
-    VisualBackupPolicy,
-    VisualBackupReplaySample,
-    replay_visual_backup,
-)
+from survng.app.ema_v2 import EmaPolicy, EmaSignalAction, replay_ema_signal
 from survng.app.motion_pipeline import MotionDecisionHandler
 from survng.app.zones import apply_detection_zones
 
@@ -46,7 +41,7 @@ def _qualification(accepted: bool, score: float, reason: str) -> MotionQualifica
 
 
 def _replay_scenario() -> dict[str, Any]:
-    policy = VisualBackupPolicy(
+    policy = EmaPolicy(
         warmup_seconds=0.0,
         grace_seconds=1.0,
         minimum_score=0.7,
@@ -60,14 +55,12 @@ def _replay_scenario() -> dict[str, Any]:
     stable = _qualification(False, 0.0, "no_motion_blobs")
     credible = _qualification(True, 0.82, "credible_motion")
     samples = tuple(
-        VisualBackupReplaySample(at, stable)
-        for at in (90.0, 90.75, 91.5)
+        (at, at, stable) for at in (90.0, 90.75, 91.5)
     ) + tuple(
-        VisualBackupReplaySample(at, credible)
-        for at in (100.0, 100.5, 101.0)
+        (at, at, credible) for at in (100.0, 100.5, 101.0)
     )
-    decisions = replay_visual_backup(policy, samples)
-    assert decisions[-1].action == VisualBackupAction.READY
+    decisions = replay_ema_signal("gate", policy, samples)
+    assert decisions[-1].action == EmaSignalAction.QUALIFIED
 
     camera = CameraConfig(
         id="gate",

@@ -22,11 +22,33 @@ from enum import StrEnum
 from typing import Iterable
 
 from .motion import MotionQualificationResult
-from .motion_coordinator import (
-    UNSTABLE_BASELINE_REASONS,
-    VISUAL_BACKUP_EXCLUDED_REASONS,
-    VisualBackupPolicy,
-)
+VISUAL_BACKUP_EXCLUDED_REASONS = frozenset({
+    "global_illumination_change",
+    "illumination_change",
+    "insect_like_motion",
+    "persistent_scene_motion",
+    "stationary_foreground",
+    "stationary_region",
+})
+UNSTABLE_BASELINE_REASONS = frozenset({
+    "global_illumination_change",
+    "illumination_change",
+    "insufficient_frames",
+    "validation_unavailable_fail_open",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class EmaPolicy:
+    warmup_seconds: float
+    grace_seconds: float
+    minimum_score: float
+    score_margin: float
+    minimum_consecutive: int
+    cooldown_seconds: float
+    maximum_triggers_5m: int
+    sample_fps: float
+    background_fps: float
 
 
 class EmaSignalAction(StrEnum):
@@ -92,7 +114,7 @@ class EmaSignalConditioner:
         result: MotionQualificationResult,
         captured_at: float,
         observed_monotonic: float,
-        policy: VisualBackupPolicy,
+        policy: EmaPolicy,
         *,
         detection_enabled: bool,
     ) -> EmaSignalDecision:
@@ -603,7 +625,7 @@ class MotionEpisodeController:
 
 def replay_ema_signal(
     camera_id: str,
-    policy: VisualBackupPolicy,
+    policy: EmaPolicy,
     samples: Iterable[tuple[float, float, MotionQualificationResult]],
 ) -> tuple[EmaSignalDecision, ...]:
     conditioner = EmaSignalConditioner(camera_id)

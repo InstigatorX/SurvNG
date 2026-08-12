@@ -6,12 +6,12 @@ from survng.app.ema_v2 import (
     EmaSignalConditioner,
     EpisodeDecisionReason,
     MotionEpisodeController,
+    EmaPolicy,
 )
 from survng.app.motion import MotionQualificationResult
-from survng.app.motion_coordinator import VisualBackupPolicy
 
 
-def _policy(**changes: object) -> VisualBackupPolicy:
+def _policy(**changes: object) -> EmaPolicy:
     values = {
         "warmup_seconds": 1.0,
         "grace_seconds": 1.0,
@@ -24,7 +24,7 @@ def _policy(**changes: object) -> VisualBackupPolicy:
         "background_fps": 2.0,
     }
     values.update(changes)
-    return VisualBackupPolicy(**values)
+    return EmaPolicy(**values)
 
 
 def _result(score: float, *, accepted: bool = True, reason: str = "credible_motion") -> MotionQualificationResult:

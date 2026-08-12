@@ -16,7 +16,6 @@ from survng.app.camera_lifecycle import (
 from survng.app.config import MotionQualificationConfig
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_analysis_service import MotionAnalysisService
-from survng.app.motion_coordinator import VisualBackupCoordinator
 from survng.app.motion_decisions import MotionDecisionOrchestrator
 from survng.app.motion_events import MotionEventCoordinator
 from survng.app.motion_ingress import MotionEventIngressService
@@ -124,7 +123,6 @@ def _stress_runtime() -> tuple[CameraLifecycleService, SimpleNamespace]:
         limiter=FairMotionAnalysisLimiter(1),
         events=events,
         evidence=evidence,
-        visual_backup=VisualBackupCoordinator(),
         audit_recorder=Mock(),
         debug_store=MotionDebugSnapshotStore(),
         config=config,

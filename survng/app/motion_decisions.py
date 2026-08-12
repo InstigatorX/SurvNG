@@ -56,10 +56,6 @@ class MotionDecisionMedia(Protocol):
     ) -> str: ...
 
 
-class MotionDecisionAnalysis(Protocol):
-    def record_visual_camera_match(self, observed_at: float) -> bool: ...
-
-
 class MotionDecisionState(Protocol):
     def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
     def record_decision(self, **kwargs: Any) -> None: ...
@@ -282,11 +278,6 @@ class MotionDecisionOrchestrator:
             item.topic == "adaptive/active_followup" for item in triggers
         )
         active_followup = adaptive_only and active_followup_queued
-        if visual_backup_queued and not visual_backup:
-            matched_camera_at = self._events.latest_camera_motion()
-            if self._analysis.record_visual_camera_match(matched_camera_at):
-                self._state.increment_stat("visual_backup_onvif_matches", 1)
-
         result, diagnostics = self._qualification_result(
             triggers=triggers,
             event_at=event_at,
