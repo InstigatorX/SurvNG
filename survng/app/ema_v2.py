@@ -257,6 +257,7 @@ class DetectionRequestStatus(StrEnum):
     ADMITTED = "admitted"
     RUNNING = "running"
     COMPLETED = "completed"
+    FAILED = "failed"
     ABORTED = "aborted"
 
 
@@ -268,6 +269,7 @@ class EpisodeDecisionReason(StrEnum):
     REQUEST_ADMITTED = "request_admitted"
     REQUEST_RUNNING = "request_running"
     REQUEST_COMPLETED = "request_completed"
+    DETECTOR_FAILED = "detector_failed"
     FOLLOWUP_RESERVED = "followup_reserved"
     FOLLOWUP_DUPLICATE = "followup_duplicate"
     FOLLOWUP_RATE_LIMITED = "followup_rate_limited"
@@ -375,6 +377,7 @@ class MotionEpisodeController:
         self._transitions: deque[EpisodeTransition] = deque(
             maxlen=max(16, transition_limit)
         )
+        self._decision_counts = {reason.value: 0 for reason in EpisodeDecisionReason}
 
     def start_generation(self, generation: int) -> None:
         with self._lock:
@@ -602,6 +605,22 @@ class MotionEpisodeController:
                 episode.intent,
             )
 
+    def fail(
+        self, intent_id: str, *, occurred_monotonic: float
+    ) -> EpisodeDecision:
+        with self._lock:
+            episode = self._require_intent(intent_id)
+            episode.status = DetectionRequestStatus.FAILED
+            episode.completed_monotonic = occurred_monotonic
+            self._last_completed_monotonic = occurred_monotonic
+            return self._decision(
+                EpisodeDecisionReason.DETECTOR_FAILED,
+                episode.intent.primary_source,
+                occurred_monotonic,
+                episode,
+                episode.intent,
+            )
+
     def transitions(self) -> tuple[EpisodeTransition, ...]:
         with self._lock:
             return tuple(self._transitions)
@@ -628,6 +647,7 @@ class MotionEpisodeController:
                 "request_count": episode.request_count if episode else 0,
                 "followup_count": episode.followup_count if episode else 0,
                 "incident_event_id": episode.incident_event_id if episode else None,
+                "decision_counts": dict(self._decision_counts),
             }
 
     def current_sequence(self) -> int:
@@ -815,6 +835,7 @@ class MotionEpisodeController:
             source=source,
             intent_id=intent.intent_id if intent is not None else None,
         ))
+        self._decision_counts[reason.value] += 1
         return EpisodeDecision(reason, episode_id, intent)
 
 

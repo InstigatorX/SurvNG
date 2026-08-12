@@ -204,7 +204,7 @@ class MotionDecisionOrchestrator:
                 if failed_triggers and not stop_event.is_set():
                     disposition = self.retry_batch(failed_triggers, stop_event)
                     if disposition == RetryDisposition.DROPPED:
-                        self._complete_adaptive_trigger(failed_triggers)
+                        self._fail_episode_intents(failed_triggers)
 
     def retry_batch(
         self,
@@ -830,6 +830,19 @@ class MotionDecisionOrchestrator:
                 self._events.episode_controller.mark_running(
                     intent_id,
                     occurred_monotonic=started_monotonic,
+                )
+            except ValueError:
+                pass
+
+    def _fail_episode_intents(self, triggers: MotionTriggerBatch) -> None:
+        failed_monotonic = time.monotonic()
+        for intent_id in {
+            item.detection_intent_id for item in triggers if item.detection_intent_id
+        }:
+            try:
+                self._events.episode_controller.fail(
+                    intent_id,
+                    occurred_monotonic=failed_monotonic,
                 )
             except ValueError:
                 pass

@@ -240,6 +240,34 @@ def test_episode_transitions_explain_every_request_boundary() -> None:
         EpisodeDecisionReason.REQUEST_RUNNING,
         EpisodeDecisionReason.REQUEST_COMPLETED,
     ]
+    assert controller.snapshot()["decision_counts"] == {
+        reason.value: (1 if reason in {
+            EpisodeDecisionReason.REQUEST_RESERVED,
+            EpisodeDecisionReason.REQUEST_ADMITTED,
+            EpisodeDecisionReason.REQUEST_RUNNING,
+            EpisodeDecisionReason.REQUEST_COMPLETED,
+        } else 0)
+        for reason in EpisodeDecisionReason
+    }
+
+
+def test_terminal_detector_failure_is_distinct_from_policy_abort() -> None:
+    controller = MotionEpisodeController("gate")
+    decision = controller.observe_ema(_qualified("gate"), generation=0)
+    assert decision.intent is not None
+    controller.acknowledge_admission(
+        decision.intent.intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.mark_running(decision.intent.intent_id, occurred_monotonic=1011.2)
+
+    failed = controller.fail(
+        decision.intent.intent_id, occurred_monotonic=1012.0
+    )
+
+    assert failed.reason is EpisodeDecisionReason.DETECTOR_FAILED
+    snapshot = controller.snapshot()
+    assert snapshot["request_status"] == "failed"
+    assert snapshot["decision_counts"]["detector_failed"] == 1
 
 
 def test_distinct_later_track_reserves_bounded_followup_in_same_episode() -> None:

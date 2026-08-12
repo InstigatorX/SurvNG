@@ -30,7 +30,7 @@ strong persistent EMA motion                       │
 
 This default mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. After a startup learning period lets the adaptive background stabilize, an EMA backup is considered only when motion is accepted, exceeds both an absolute confidence floor and a margin above the learned scene threshold, persists for multiple samples, and does not match known illumination, insect, persistent-scene, or stationary-foreground rejection reasons.
 
-SurvNG waits briefly for the camera notice before taking the backup path. A recent ONVIF notice suppresses the backup, and per-camera cooldown plus a five-minute rate limit bounds detector work during a noisy scene. A backup invocation does not create an empty incident: high-resolution object detection must find an incident-eligible object. Every completed backup attempt is stored under **Admin > Motion Audit > EMA backup**, including attempts where no object was found.
+Camera notices and qualified EMA evidence enter one per-camera motion episode. An ONVIF notice suppresses duplicate EMA work only after an object-detection request for that episode was actually admitted; an observed notice whose work could not be queued cannot hide a later EMA rescue. A backup invocation does not create an empty incident: high-resolution object detection must find an incident-eligible object. Every completed backup attempt is stored under **Admin > Motion Audit > EMA backup**, including attempts where no object was found.
 
 This is the recommended general-purpose behavior when ONVIF is normally reliable but an occasional missing camera notice is unacceptable. It costs more CPU than Camera-triggered mode because EMA must continuously inspect the live/substream feed. It remains more conservative than EMA-only mode.
 
@@ -76,6 +76,10 @@ Object confidence and confirmation are separate from activity. They establish th
 
 ## CPU and queue behavior
 
-Only enabled visual processors consume analysis time. Camera + EMA backup and EMA-only modes continuously run the selected qualification pipeline; the EMA processor remains the default. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded scheduling queues replace stale pending requests with the newest request.
+Only enabled visual processors consume analysis time. Camera + EMA backup and EMA-only modes continuously run EMA qualification. A shared semaphore permits no more than two cameras to execute visual analysis at the same instant. Cameras waiting for a slot retain recent frames, while their bounded latest-frame mailboxes replace stale pending requests with the newest request.
+
+## Episode admission
+
+EMA scene learning and score persistence produce a single qualified edge rather than detector work for every sampled frame. A generation-tagged episode controller then merges that edge with camera notices and is the sole owner of detector reservation, admission, follow-up limits, completion, and incident linkage. A qualified edge is never passed through a second motion state machine. Queue rejection aborts the reservation without starting cooldown, detector retry exhaustion is recorded separately from nuisance rejection, and an old lifecycle generation cannot mutate the replacement camera runtime.
 
 Capture, recording, and live view are not limited to two cameras. Runtime camera status reports analyzed frames, accepted candidates, dropped scheduling requests, delivered triggers, pipeline failures, and per-stage timing.
