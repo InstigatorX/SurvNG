@@ -939,7 +939,8 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertGreaterEqual(analyze.call_count, 1)
             trigger = worker.motion_events.queue.get_nowait()
             self.assertEqual(trigger.topic, "adaptive/motion")
-            self.assertIs(trigger.prequalified, accepted)
+            self.assertTrue(trigger.prequalified.features["ema_v2"])
+            self.assertEqual(trigger.prequalified.score, accepted.score)
             worker._stop.set()
             worker.motion_analysis.request_stop()
             thread.join(timeout=1)
@@ -1472,10 +1473,8 @@ class CameraWorkerTest(unittest.TestCase):
                 worker.motion_analysis.analyze_continuous(11.0)
 
             self.assertEqual(worker.motion_events.queue.qsize(), worker.motion_events.queue.maxsize)
-            self.assertEqual(worker.motion_state._stats["triggers"], 1)
-            self.assertEqual(worker.motion_state._stats["dropped_triggers"], 1)
-            self.assertEqual(worker.motion_state._stats["adaptive_triggers_deferred"], 1)
-            self.assertFalse(worker.motion_events.adaptive_trigger_pending)
+            self.assertEqual(worker.motion_state._stats["triggers"], 2)
+            self.assertEqual(worker.motion_state._stats["dropped_triggers"], 2)
             self.assertEqual(published, [])
 
     def test_adaptive_rejection_updates_state_without_allowing_source_rescue(self) -> None:
@@ -1503,15 +1502,11 @@ class CameraWorkerTest(unittest.TestCase):
             ):
                 worker.motion_analysis.analyze_continuous(2.0)
 
-            self.assertTrue(fuse.call_args.kwargs["require_primary_trigger"])
+            fuse.assert_not_called()
             self.assertTrue(worker.motion_events.queue.empty())
             self.assertEqual(
                 worker.motion_analysis.last_continuous_result.reason,
-                "primary_trigger_rejected",
-            )
-            self.assertEqual(
-                worker.motion_analysis.last_continuous_result.features["event_state_phase"],
-                "rejected",
+                "noise",
             )
 
     def test_camera_validation_pipeline_failure_fails_open(self) -> None:
@@ -2369,7 +2364,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(qualification["reason"], "priority_topic")
             self.assertTrue(qualification["effective_accepted"])
 
-    def test_priority_onvif_defers_the_next_adaptive_trigger_in_enforce_mode(self) -> None:
+    def test_priority_onvif_and_adaptive_evidence_share_one_episode(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(mode="enforce", burst_quiet_seconds=0.1)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2391,15 +2386,14 @@ class CameraWorkerTest(unittest.TestCase):
                 while process_event.call_count == 0 and time.monotonic() < deadline:
                     time.sleep(0.01)
 
-                self.assertFalse(worker.motion_analysis.reserve_adaptive_trigger(time.time()))
-                distinct_event_at = time.time() + worker.motion_analysis._priority_dedup_seconds() + 0.1
-                self.assertTrue(worker.motion_analysis.reserve_adaptive_trigger(distinct_event_at))
+                snapshot = worker.motion_events.episode_controller.snapshot()
+                self.assertEqual(snapshot["request_count"], 1)
+                self.assertEqual(snapshot["request_status"], "completed")
                 worker._stop.set()
                 worker.motion_events.queue.put_nowait(None)
                 thread.join(timeout=1)
 
             process_event.assert_called_once()
-            self.assertGreater(worker.motion_state._stats["adaptive_triggers_deferred"], 0)
 
     def test_priority_results_still_use_event_state_deduplication(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

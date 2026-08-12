@@ -591,10 +591,12 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
     trigger = service.events.next_trigger(timeout=0.01)
     assert trigger is not None
     assert trigger.topic == "adaptive/motion"
-    assert trigger.prequalified is accepted
+    assert trigger.prequalified.features["ema_v2"] is True
+    assert trigger.prequalified.score == accepted.score
+    assert trigger.detection_intent_id
     set_last_motion_at.assert_called_once()
     publish_event.assert_called_once()
-    assert service.events.adaptive_trigger_pending
+    assert service.events.episode_controller.snapshot()["request_status"] == "admitted"
     cached = run_pipeline.call_args.kwargs["processed_frames"]
     assert cached[0] is first_processed
     assert cached[1] is second_processed
@@ -607,8 +609,7 @@ def test_adaptive_analysis_promotes_accepted_fused_motion() -> None:
     assert telemetry["cached_derivative_reuse_bytes"] == 90 * 160 * 2
 
 
-def test_adaptive_analysis_anchors_new_track_during_active_event() -> None:
-    raw = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
+def test_adaptive_analysis_anchors_new_track_during_active_episode() -> None:
     activation = MotionQualificationResult(
         True,
         0.8,
@@ -624,10 +625,10 @@ def test_adaptive_analysis_anchors_new_track_during_active_event() -> None:
         },
     )
     active_new_track = MotionQualificationResult(
-        False,
+        True,
         0.82,
         0.48,
-        "event_state_active",
+        "qualified",
         3,
         {
             "event_state_phase": "active",
@@ -639,11 +640,11 @@ def test_adaptive_analysis_anchors_new_track_during_active_event() -> None:
     )
     stats = Mock()
     service = _service(_hooks(
-        run_pipeline=Mock(return_value=raw),
-        with_source_evidence=Mock(side_effect=[activation, active_new_track]),
+        run_pipeline=Mock(side_effect=[activation, active_new_track]),
         increment_stat=stats,
         trigger_mode="adaptive",
     ))
+    service.events.episode_controller.minimum_followup_interval_seconds = 0.0
     with service.frame_lock:
         service.color_frames.extend([
             (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
@@ -651,18 +652,24 @@ def test_adaptive_analysis_anchors_new_track_during_active_event() -> None:
         ])
 
     service.analyze_continuous(100.0)
+    first = service.events.next_trigger(timeout=0.01)
+    now_monotonic = time.monotonic()
+    service.events.episode_controller.mark_running(
+        first.detection_intent_id, occurred_monotonic=now_monotonic
+    )
+    service.events.episode_controller.complete(
+        first.detection_intent_id, occurred_monotonic=now_monotonic
+    )
     service.analyze_continuous(103.0)
 
-    first = service.events.next_trigger(timeout=0.01)
     second = service.events.next_trigger(timeout=0.01)
     assert first is not None and first.topic == "adaptive/motion"
     assert second is not None and second.topic == "adaptive/active_followup"
     assert second.event_at.timestamp() == 103.0
     assert second.prequalified is not None
     assert second.prequalified.accepted
-    assert second.prequalified.reason == "active_event_new_motion"
-    assert second.prequalified.features["active_event_followup_track_id"] == 7
-    stats.assert_any_call("active_followup_candidates", 1)
+    assert second.prequalified.reason == "ema_v2_qualified"
+    assert second.prequalified.features["active_event_followup"] is True
     stats.assert_any_call("active_followup_triggers", 1)
 
 
@@ -797,7 +804,7 @@ def test_adaptive_enqueue_failure_releases_reservation() -> None:
     assert not service.events.adaptive_trigger_pending
 
 
-def test_stop_requested_during_adaptive_fusion_prevents_publication() -> None:
+def test_stop_requested_before_adaptive_admission_prevents_publication() -> None:
     accepted = MotionQualificationResult(True, 0.8, 0.48, "qualified", 3, {})
     publish_event = Mock()
     fusion = Mock()
@@ -810,11 +817,7 @@ def test_stop_requested_during_adaptive_fusion_prevents_publication() -> None:
         )
     )
 
-    def stop_during_fusion(*_args: object, **_kwargs: object) -> MotionQualificationResult:
-        service.request_stop()
-        return accepted
-
-    fusion.side_effect = stop_during_fusion
+    service.request_stop()
     with service.frame_lock:
         service.color_frames.extend(
             [
@@ -825,7 +828,6 @@ def test_stop_requested_during_adaptive_fusion_prevents_publication() -> None:
 
     service.analyze_continuous(100.0)
 
-    assert not service.events.adaptive_trigger_pending
     assert list(service.events.queue.queue) == []
     publish_event.assert_not_called()
 

@@ -268,6 +268,10 @@ class EpisodeDecisionReason(StrEnum):
     REQUEST_ADMITTED = "request_admitted"
     REQUEST_RUNNING = "request_running"
     REQUEST_COMPLETED = "request_completed"
+    FOLLOWUP_RESERVED = "followup_reserved"
+    FOLLOWUP_DUPLICATE = "followup_duplicate"
+    FOLLOWUP_RATE_LIMITED = "followup_rate_limited"
+    FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
     STALE_GENERATION = "stale_generation"
 
 
@@ -318,6 +322,13 @@ class _Episode:
     intent: DetectionIntent | None = None
     status: DetectionRequestStatus | None = None
     completed_monotonic: float | None = None
+    request_count: int = 0
+    followup_count: int = 0
+    last_request_monotonic: float = 0.0
+    known_track_ids: set[int] = field(default_factory=set)
+    covered_regions: list[tuple[float, float, float, float]] = field(
+        default_factory=list
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,10 +348,24 @@ class MotionEpisodeController:
         episode_gap_seconds: float = 30.0,
         cooldown_seconds: float = 0.0,
         transition_limit: int = 256,
+        maximum_followups: int = 2,
+        minimum_followup_interval_seconds: float = 1.5,
+        followup_maximum_overlap: float = 0.10,
+        followup_minimum_center_distance: float = 0.10,
     ) -> None:
         self.camera_id = camera_id
         self.episode_gap_seconds = max(0.1, float(episode_gap_seconds))
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        self.maximum_followups = max(0, int(maximum_followups))
+        self.minimum_followup_interval_seconds = max(
+            0.0, float(minimum_followup_interval_seconds)
+        )
+        self.followup_maximum_overlap = min(
+            1.0, max(0.0, float(followup_maximum_overlap))
+        )
+        self.followup_minimum_center_distance = min(
+            1.0, max(0.0, float(followup_minimum_center_distance))
+        )
         self._lock = threading.RLock()
         self._generation = 0
         self._sequence = 0
@@ -416,7 +441,6 @@ class MotionEpisodeController:
                 DetectionRequestStatus.RESERVED,
                 DetectionRequestStatus.ADMITTED,
                 DetectionRequestStatus.RUNNING,
-                DetectionRequestStatus.COMPLETED,
             }:
                 # Refresh the immutable request so downstream diagnostics see
                 # every source associated with this same episode.
@@ -440,6 +464,26 @@ class MotionEpisodeController:
                     episode,
                     episode.intent,
                 )
+            if episode.status is DetectionRequestStatus.COMPLETED:
+                if ema is None:
+                    return self._decision(
+                        EpisodeDecisionReason.MERGED_WITH_REQUEST,
+                        source,
+                        observed_monotonic,
+                        episode,
+                        episode.intent,
+                    )
+                followup_reason = self._followup_reason(
+                    episode, ema, observed_monotonic
+                )
+                if followup_reason is not EpisodeDecisionReason.FOLLOWUP_RESERVED:
+                    return self._decision(
+                        followup_reason,
+                        source,
+                        observed_monotonic,
+                        episode,
+                        episode.intent,
+                    )
             if (
                 self._last_completed_monotonic is not None
                 and observed_monotonic - self._last_completed_monotonic
@@ -451,8 +495,10 @@ class MotionEpisodeController:
                     observed_monotonic,
                     episode,
                 )
+            episode.request_count += 1
+            followup = episode.request_count > 1
             intent = DetectionIntent(
-                intent_id=f"{episode.episode_id}:request",
+                intent_id=f"{episode.episode_id}:request:{episode.request_count}",
                 episode_id=episode.episode_id,
                 camera_id=self.camera_id,
                 generation=generation,
@@ -465,8 +511,17 @@ class MotionEpisodeController:
             )
             episode.intent = intent
             episode.status = DetectionRequestStatus.RESERVED
+            episode.last_request_monotonic = observed_monotonic
+            if followup:
+                episode.followup_count += 1
+            if ema is not None:
+                self._remember_ema(episode, ema)
             return self._decision(
-                EpisodeDecisionReason.REQUEST_RESERVED,
+                (
+                    EpisodeDecisionReason.FOLLOWUP_RESERVED
+                    if followup
+                    else EpisodeDecisionReason.REQUEST_RESERVED
+                ),
                 source,
                 observed_monotonic,
                 episode,
@@ -488,6 +543,7 @@ class MotionEpisodeController:
             else:
                 episode.status = DetectionRequestStatus.ABORTED
                 episode.intent = None
+                episode.request_count = max(0, episode.request_count - 1)
                 reason = EpisodeDecisionReason.REQUEST_ABORTED
             return self._decision(
                 reason,
@@ -507,6 +563,7 @@ class MotionEpisodeController:
             source = episode.intent.primary_source
             episode.status = DetectionRequestStatus.ABORTED
             episode.intent = None
+            episode.request_count = max(0, episode.request_count - 1)
             return self._decision(
                 EpisodeDecisionReason.REQUEST_ABORTED,
                 source,
@@ -566,6 +623,8 @@ class MotionEpisodeController:
                     episode.intent.intent_id if episode and episode.intent else None
                 ),
                 "transition_count": len(self._transitions),
+                "request_count": episode.request_count if episode else 0,
+                "followup_count": episode.followup_count if episode else 0,
             }
 
     def reset(self) -> None:
@@ -602,6 +661,109 @@ class MotionEpisodeController:
         ):
             raise ValueError("unknown or stale detection intent")
         return episode
+
+    def _followup_reason(
+        self,
+        episode: _Episode,
+        ema: EmaQualified,
+        observed_monotonic: float,
+    ) -> EpisodeDecisionReason:
+        if episode.followup_count >= self.maximum_followups:
+            self._remember_ema(episode, ema)
+            return EpisodeDecisionReason.FOLLOWUP_LIMIT_REACHED
+        if (
+            observed_monotonic - episode.last_request_monotonic
+            < self.minimum_followup_interval_seconds
+        ):
+            return EpisodeDecisionReason.FOLLOWUP_RATE_LIMITED
+        track_id = self._track_id(ema.result.features.get("motion_region_track_id"))
+        regions = self._regions(ema.result.features.get("motion_regions"))
+        if track_id is not None and track_id in episode.known_track_ids:
+            self._remember_ema(episode, ema)
+            return EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+        if not regions:
+            return EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+        candidate = regions[-1]
+        overlap = max(
+            (self._intersection_over_union(candidate, known) for known in episode.covered_regions),
+            default=0.0,
+        )
+        center_distance = min(
+            (self._center_distance(candidate, known) for known in episode.covered_regions),
+            default=1.0,
+        )
+        if episode.covered_regions and (
+            overlap > self.followup_maximum_overlap
+            or center_distance < self.followup_minimum_center_distance
+        ):
+            self._remember_ema(episode, ema)
+            return EpisodeDecisionReason.FOLLOWUP_DUPLICATE
+        return EpisodeDecisionReason.FOLLOWUP_RESERVED
+
+    @classmethod
+    def _remember_ema(cls, episode: _Episode, ema: EmaQualified) -> None:
+        track_id = cls._track_id(ema.result.features.get("motion_region_track_id"))
+        if track_id is not None:
+            episode.known_track_ids.add(track_id)
+        episode.covered_regions.extend(
+            cls._regions(ema.result.features.get("motion_regions"))
+        )
+        if len(episode.covered_regions) > 32:
+            del episode.covered_regions[:-32]
+
+    @staticmethod
+    def _track_id(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            track_id = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return track_id if track_id > 0 else None
+
+    @staticmethod
+    def _regions(value: object) -> list[tuple[float, float, float, float]]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        regions: list[tuple[float, float, float, float]] = []
+        for item in value:
+            if not isinstance(item, (list, tuple)) or len(item) != 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (float(component) for component in item)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not all(math.isfinite(component) for component in (x1, y1, x2, y2)):
+                continue
+            x1, x2 = sorted((min(1.0, max(0.0, x1)), min(1.0, max(0.0, x2))))
+            y1, y2 = sorted((min(1.0, max(0.0, y1)), min(1.0, max(0.0, y2))))
+            if x2 > x1 and y2 > y1:
+                regions.append((x1, y1, x2, y2))
+        return regions
+
+    @staticmethod
+    def _intersection_over_union(
+        left: tuple[float, float, float, float],
+        right: tuple[float, float, float, float],
+    ) -> float:
+        intersection = max(0.0, min(left[2], right[2]) - max(left[0], right[0])) * max(
+            0.0, min(left[3], right[3]) - max(left[1], right[1])
+        )
+        if intersection <= 0.0:
+            return 0.0
+        left_area = (left[2] - left[0]) * (left[3] - left[1])
+        right_area = (right[2] - right[0]) * (right[3] - right[1])
+        return intersection / max(1e-9, left_area + right_area - intersection)
+
+    @staticmethod
+    def _center_distance(
+        left: tuple[float, float, float, float],
+        right: tuple[float, float, float, float],
+    ) -> float:
+        return math.dist(
+            ((left[0] + left[2]) / 2.0, (left[1] + left[3]) / 2.0),
+            ((right[0] + right[2]) / 2.0, (right[1] + right[3]) / 2.0),
+        )
 
     def _decision(
         self,

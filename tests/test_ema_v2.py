@@ -58,6 +58,44 @@ def _qualified(camera: str = "gate"):
     return decisions[-1].qualified
 
 
+def _qualified_region(
+    *,
+    camera: str = "gate",
+    track_id: int,
+    region: tuple[float, float, float, float],
+    started_at: float,
+):
+    result = _result(0.8)
+    result = MotionQualificationResult(
+        accepted=result.accepted,
+        score=result.score,
+        threshold=result.threshold,
+        reason=result.reason,
+        frame_count=result.frame_count,
+        features={
+            "motion_region_track_id": track_id,
+            "motion_regions": [list(region)],
+        },
+        telemetry={},
+    )
+    conditioner = EmaSignalConditioner(camera)
+    policy = _policy(warmup_seconds=0.0)
+    for at in (1.0, 1.5, 2.0):
+        conditioner.evaluate(
+            _result(0.0, accepted=False, reason="no_motion_blobs"),
+            at,
+            at + 1000.0,
+            policy,
+            detection_enabled=True,
+        )
+    decisions = [
+        conditioner.evaluate(result, at, at + 1000.0, policy, detection_enabled=True)
+        for at in (started_at, started_at + 0.5, started_at + 1.0)
+    ]
+    assert decisions[-1].qualified is not None
+    return decisions[-1].qualified
+
+
 def test_busy_scene_readiness_is_not_coupled_to_rejected_motion() -> None:
     conditioner = EmaSignalConditioner("gate")
     policy = _policy()
@@ -202,3 +240,48 @@ def test_episode_transitions_explain_every_request_boundary() -> None:
         EpisodeDecisionReason.REQUEST_RUNNING,
         EpisodeDecisionReason.REQUEST_COMPLETED,
     ]
+
+
+def test_distinct_later_track_reserves_bounded_followup_in_same_episode() -> None:
+    controller = MotionEpisodeController("gate", minimum_followup_interval_seconds=1.0)
+    controller.start_generation(1)
+    first = controller.observe_ema(
+        _qualified_region(track_id=1, region=(0.05, 0.1, 0.2, 0.4), started_at=10.0),
+        generation=1,
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1012.0)
+
+    followup = controller.observe_ema(
+        _qualified_region(track_id=2, region=(0.70, 0.1, 0.9, 0.5), started_at=14.0),
+        generation=1,
+    )
+
+    assert followup.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
+    assert followup.intent is not None
+    assert followup.intent.episode_id == first.intent.episode_id
+    assert followup.intent.intent_id.endswith(":request:2")
+
+
+def test_same_track_cannot_create_followup_request() -> None:
+    controller = MotionEpisodeController("gate", minimum_followup_interval_seconds=0.0)
+    controller.start_generation(1)
+    first = controller.observe_ema(
+        _qualified_region(track_id=1, region=(0.05, 0.1, 0.2, 0.4), started_at=10.0),
+        generation=1,
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1012.0)
+
+    duplicate = controller.observe_ema(
+        _qualified_region(track_id=1, region=(0.08, 0.1, 0.23, 0.4), started_at=14.0),
+        generation=1,
+    )
+
+    assert duplicate.reason is EpisodeDecisionReason.FOLLOWUP_DUPLICATE
