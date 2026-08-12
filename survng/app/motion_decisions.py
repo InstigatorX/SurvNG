@@ -445,18 +445,7 @@ class MotionDecisionOrchestrator:
             ),
             None,
         )
-        if adaptive_only and self._matches_recent_priority_motion(
-            event_at.timestamp()
-        ):
-            result = MotionQualificationResult(
-                False,
-                0.0,
-                1.0,
-                "priority_event_deduplicated",
-                0,
-                {"primary_motion_source": "adaptive_background"},
-            )
-        elif mode == "off":
+        if mode == "off":
             result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
         elif priority:
             result = MotionQualificationResult(
@@ -818,19 +807,6 @@ class MotionDecisionOrchestrator:
             category="visual_backup",
         )
 
-    def _priority_dedup_seconds(self) -> float:
-        return max(
-            2.0,
-            self._config.post_trigger_seconds
-            + self._config.burst_quiet_seconds,
-        )
-
-    def _matches_recent_priority_motion(self, event_at: float) -> bool:
-        return self._events.matches_recent_priority(
-            event_at,
-            rearm_seconds=self._priority_dedup_seconds(),
-        )
-
     def _complete_adaptive_trigger(self, triggers: MotionTriggerBatch) -> None:
         completed_monotonic = time.monotonic()
         for intent_id in {
@@ -844,7 +820,6 @@ class MotionDecisionOrchestrator:
             except ValueError:
                 # A stopped generation may already have aborted the reservation.
                 pass
-        self._events.complete_adaptive(triggers, time.time())
 
     def _mark_episode_intents_running(self, triggers: MotionTriggerBatch) -> None:
         started_monotonic = time.monotonic()

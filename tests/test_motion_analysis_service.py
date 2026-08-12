@@ -801,7 +801,7 @@ def test_adaptive_enqueue_failure_releases_reservation() -> None:
     else:
         raise AssertionError("enqueue failure should remain visible to the worker")
 
-    assert not service.events.adaptive_trigger_pending
+    assert service.events.episode_controller.snapshot()["request_status"] == "aborted"
 
 
 def test_stop_requested_before_adaptive_admission_prevents_publication() -> None:

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 
 from survng.app.motion import MotionQualificationResult
+from survng.app.ema_v2 import CameraNotice
 from survng.app.motion_decisions import (
     MotionDecisionOrchestrator,
     audit_features,
@@ -150,7 +151,6 @@ def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> Non
     )
     batch = MotionTriggerBatch((adaptive,))
     events.set_active(batch)
-    events.adaptive_trigger_pending = True
     qualification = Mock()
     qualification.settings.return_value = ("camera", "default", 640)
     qualification.rescue_settings.return_value = (False, 0.0)
@@ -171,7 +171,6 @@ def test_stopping_batch_skips_qualification_and_releases_adaptive_state() -> Non
     orchestrator._process_batch(batch, stop_event)
 
     qualification.qualify_burst.assert_not_called()
-    assert not events.adaptive_trigger_pending
     assert events.active_triggers is None
 
 
@@ -282,7 +281,6 @@ def test_learned_camera_nuisance_remains_suppressed_without_forced_check() -> No
 
 def test_active_followup_requires_correlated_object_and_records_audit() -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
-    events.adaptive_trigger_pending = True
     now = datetime.now(timezone.utc)
     result = MotionQualificationResult(
         True,
@@ -319,6 +317,10 @@ def test_active_followup_requires_correlated_object_and_records_audit() -> None:
     }))
     audit = Mock()
     state = Mock()
+    events.episode_controller.observe_camera(
+        CameraNotice("camera", now.timestamp(), 100.0, "onvif/motion"),
+        generation=0,
+    )
     events.link_incident(42)
     orchestrator = MotionDecisionOrchestrator(
         camera_id="gate",
@@ -342,7 +344,6 @@ def test_active_followup_requires_correlated_object_and_records_audit() -> None:
     assert audit_kwargs["related_event_id"] == 42
     assert audit_kwargs["object_detected"] is False
     state.increment_stat.assert_any_call("active_followup_no_object", 1)
-    assert not events.adaptive_trigger_pending
 
 
 def test_refined_active_followup_updates_completed_outcome_telemetry() -> None:

@@ -1131,7 +1131,7 @@ class MotionAnalysisService:
                 else "adaptive",
             )
         finally:
-            if not trigger_enqueued and self._stopping():
+            if not trigger_enqueued:
                 try:
                     self.events.episode_controller.acknowledge_admission(
                         intent.intent_id,

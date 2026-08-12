@@ -1017,7 +1017,6 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
-            worker.motion_events.remember_camera_motion(100.75)
             for captured_at in (100.0, 100.5, 101.0):
                 worker.motion_analysis.consider_visual_backup(accepted, samples, captured_at)
             for captured_at in (102.0, 102.5, 103.0):
@@ -1251,7 +1250,6 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            worker.motion_events.remember_camera_motion(event_at.timestamp())
             with (
                 patch.object(
                     worker.motion_incidents,
@@ -1414,7 +1412,7 @@ class CameraWorkerTest(unittest.TestCase):
             thread.join(timeout=1)
             self.assertLess(elapsed, 0.1)
 
-    def test_adaptive_trigger_pending_flag_bounds_queue_during_chatter(self) -> None:
+    def test_episode_controller_bounds_queue_during_chatter(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         accepted = MotionQualificationResult(True, 0.8, 0.5, "qualified", 2, {})
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2052,7 +2050,6 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             worker._stop.clear()
-            worker.motion_events.adaptive_trigger_pending = True
             with patch.object(
                     worker.motion_incidents,
                     "process",
@@ -2074,13 +2071,9 @@ class CameraWorkerTest(unittest.TestCase):
                     worker.motion_state._stats["event_retry_drops"] == 0
                     and time.monotonic() < deadline
                 ):
-                    self.assertTrue(worker.motion_events.adaptive_trigger_pending)
                     time.sleep(0.01)
-                while worker.motion_events.adaptive_trigger_pending and time.monotonic() < deadline:
-                    time.sleep(0.005)
 
             self.assertEqual(worker.motion_state._stats["event_retry_drops"], 1)
-            self.assertFalse(worker.motion_events.adaptive_trigger_pending)
             worker._stop.set()
             worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
@@ -2316,56 +2309,6 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertTrue(first.accepted)
             self.assertTrue(second.accepted)
             self.assertEqual(second.reason, "priority_topic")
-
-    def test_active_and_cooldown_results_link_to_the_active_incident_event(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir))
-            worker.motion_events.remember_camera_motion(time.time())
-            worker.motion_events.link_incident(42)
-
-            active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
-            cooldown = MotionQualificationResult(False, 0.7, 0.5, "event_state_cooldown", 2, {})
-            unrelated = MotionQualificationResult(False, 0.2, 0.5, "low_score", 2, {})
-
-            self.assertEqual(worker.motion_decisions._related_incident_event_id(active), 42)
-            self.assertEqual(worker.motion_decisions._related_incident_event_id(cooldown), 42)
-            self.assertIsNone(worker.motion_decisions._related_incident_event_id(unrelated))
-
-    def test_active_incident_activity_is_linked_without_saving_duplicate_image(self) -> None:
-        camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
-        config = MotionQualificationConfig(
-            mode="camera",
-            burst_quiet_seconds=0.1,
-            suppression_verification_rate=0.0,
-        )
-        active = MotionQualificationResult(False, 0.7, 0.5, "event_state_active", 2, {})
-        with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir), motion_config=config)
-            worker.motion_events.remember_camera_motion(time.time())
-            worker.motion_events.link_incident(42)
-            worker._stop.clear()
-            with (
-                patch.object(worker.motion_qualification, "qualify_burst", return_value=(active, {})),
-                patch.object(worker.media, "sample_rejected_motion") as sample_rejected,
-                patch.object(worker.motion_decision_handler, "record_audit") as record_audit,
-                patch.object(worker.motion_incidents, "process") as process_event,
-            ):
-                thread = threading.Thread(target=worker.motion_decisions.run, args=(worker._stop,))
-                thread.start()
-                worker.handle_motion_event("onvif/motion", "continued activity")
-                deadline = time.monotonic() + 2
-                while record_audit.call_count == 0 and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                worker._stop.set()
-                worker.motion_events.queue.put_nowait(None)
-                thread.join(timeout=2)
-
-            record_audit.assert_called_once()
-            self.assertEqual(record_audit.call_args.kwargs["snapshot_path"], "")
-            self.assertEqual(record_audit.call_args.kwargs["related_event_id"], 42)
-            sample_rejected.assert_not_called()
-            process_event.assert_not_called()
 
     def test_powered_off_worker_does_not_start_snapshot_source(self) -> None:
         camera = CameraConfig(

@@ -173,11 +173,6 @@ class MotionEventIngressService:
                 # Camera notices remain diagnostic evidence in visual-trigger mode,
                 # but cannot create object-detection jobs.
                 return
-            if priority_motion_topic(topic):
-                self.events.remember_priority(received_at)
-            if not manual:
-                self.events.remember_camera_motion(received_at)
-
             self.state.publish_event(
                 "motion",
                 MotionObserved(

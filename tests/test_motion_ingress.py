@@ -63,8 +63,6 @@ def test_camera_notice_is_normalized_observed_published_and_enqueued() -> None:
         normalized,
         1_700_000_000.0,
     )
-    owned.events.remember_priority.assert_called_once_with(1_700_000_000.0)
-    owned.events.remember_camera_motion.assert_called_once_with(1_700_000_000.0)
     payload = owned.publish_event.call_args.args[1]
     assert payload["camera_id"] == "gate"
     assert payload["timestamp"] == normalized.isoformat()
@@ -142,7 +140,6 @@ def test_adaptive_mode_retains_camera_evidence_without_queuing_detection() -> No
 
     owned.observe_event.assert_called_once()
     owned.events.enqueue.assert_not_called()
-    owned.events.remember_camera_motion.assert_not_called()
     owned.publish_event.assert_not_called()
 
 
@@ -152,8 +149,6 @@ def test_manual_topic_matching_is_case_insensitive() -> None:
     service.handle("Manual/test", "operator trigger")
 
     owned.events.enqueue.assert_called_once()
-    owned.events.remember_priority.assert_called_once_with(1_700_000_000.0)
-    owned.events.remember_camera_motion.assert_not_called()
     assert owned.publish_event.call_args.args[1]["source"] == "manual"
 
 

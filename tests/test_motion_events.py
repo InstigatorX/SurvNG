@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from survng.app.ema_v2 import CameraNotice
 from survng.app.motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -108,35 +109,6 @@ def test_retry_batch_is_prioritized_and_bounded() -> None:
     assert runtime["retry_high_water"] == 1
 
 
-def test_adaptive_reservation_deduplicates_priority_and_rearms() -> None:
-    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    coordinator.remember_priority(100.0)
-    assert not coordinator.reserve_adaptive(
-        101.0,
-        rearm_seconds=5.0,
-        priority_tolerance_seconds=2.0,
-    )
-    assert coordinator.reserve_adaptive(
-        110.0,
-        rearm_seconds=5.0,
-        priority_tolerance_seconds=2.0,
-    )
-    coordinator.complete_adaptive(
-        [_trigger(topic="adaptive/visual_backup")],
-        completed_at=110.0,
-    )
-    assert not coordinator.reserve_adaptive(
-        112.0,
-        rearm_seconds=5.0,
-        priority_tolerance_seconds=2.0,
-    )
-    assert coordinator.reserve_adaptive(
-        116.0,
-        rearm_seconds=5.0,
-        priority_tolerance_seconds=2.0,
-    )
-
-
 def test_clear_removes_primary_and_retry_queues() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     coordinator.queue.put_nowait(_trigger())
@@ -158,76 +130,45 @@ def test_timebase_reset_preserves_queued_work_and_active_reservation() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
     trigger = _trigger()
     coordinator.enqueue(trigger)
-    coordinator.adaptive_trigger_pending = True
-    coordinator.adaptive_last_completed_at = 100.0
-    coordinator.remember_priority(101.0)
-    coordinator.remember_camera_motion(102.0)
+    coordinator.episode_controller.observe_camera(
+        CameraNotice("camera", 102.0, 102.0, "onvif/motion"), generation=0
+    )
     sequence = coordinator.current_episode_sequence()
     coordinator.link_incident(42)
 
     coordinator.reset_timebase()
 
     assert coordinator.next_trigger(timeout=0.001) is trigger
-    assert coordinator.adaptive_trigger_pending is True
-    assert coordinator.adaptive_last_completed_at == 0.0
-    assert tuple(coordinator.priority_motion_times) == ()
-    assert coordinator.camera_motion_snapshot() == ()
     assert coordinator.current_episode_sequence() == sequence + 1
     assert coordinator.active_incident_event_id() is None
     assert not coordinator.link_incident(84, expected_sequence=sequence)
 
 
-def test_episode_ledger_unifies_source_history_and_incident_linkage() -> None:
+def test_episode_controller_owns_incident_linkage() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    coordinator.remember_camera_motion(100.0)
-    coordinator.remember_priority(101.0)
-    coordinator.link_incident(42)
-
-    snapshot = coordinator.episode_snapshot()
-
-    assert snapshot["sequence"] == 1
-    assert [item.source for item in snapshot["observations"]] == ["camera", "priority"]
-    assert coordinator.camera_motion_snapshot() == (100.0,)
-    assert coordinator.active_incident_event_id() == 42
-
-    coordinator.remember_camera_motion(140.0)
-
-    assert coordinator.episode_snapshot()["sequence"] == 2
-    assert coordinator.active_incident_event_id() is None
-
-
-def test_adaptive_reservation_starts_an_episode_without_camera_observation() -> None:
-    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-
-    assert coordinator.reserve_adaptive(
-        100.0,
-        rearm_seconds=5.0,
-        priority_tolerance_seconds=2.0,
+    coordinator.episode_controller.observe_camera(
+        CameraNotice("camera", 100.0, 100.0, "onvif/motion"), generation=0
     )
+    assert coordinator.link_incident(42)
 
     snapshot = coordinator.episode_snapshot()
+
     assert snapshot["sequence"] == 1
-    assert snapshot["observations"][0].source == "adaptive"
+    assert coordinator.active_incident_event_id() == 42
 
 
 def test_stale_refinement_cannot_link_into_a_new_episode() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    coordinator.remember_camera_motion(100.0)
+    coordinator.episode_controller.observe_camera(
+        CameraNotice("camera", 100.0, 100.0, "onvif/motion"), generation=0
+    )
     sequence = coordinator.current_episode_sequence()
-    coordinator.remember_camera_motion(140.0)
+    coordinator.episode_controller.observe_camera(
+        CameraNotice("camera", 140.0, 140.0, "onvif/motion"), generation=0
+    )
 
     assert not coordinator.link_incident(42, expected_sequence=sequence)
     assert coordinator.active_incident_event_id() is None
-
-
-def test_out_of_order_observation_does_not_move_episode_clock_backwards() -> None:
-    coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    coordinator.remember_camera_motion(100.0)
-    coordinator.remember_camera_motion(90.0)
-    coordinator.remember_camera_motion(125.0)
-
-    assert coordinator.current_episode_sequence() == 1
-    assert coordinator.episode_snapshot()["latest_observed_at"] == 125.0
 
 
 def test_retry_queue_depth_reports_coordinator_owned_state() -> None:
@@ -272,17 +213,8 @@ def test_typed_batch_assignments_do_not_change_trigger_order() -> None:
     assert batch.triggers == (first, second)
 
 
-def test_failed_adaptive_batch_remains_reserved_until_retry_finishes() -> None:
+def test_failed_batch_is_coordinator_owned_until_retry_finishes() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    adaptive = _trigger(topic="adaptive/visual_backup")
-    batch = MotionTriggerBatch((adaptive,))
+    batch = MotionTriggerBatch((_trigger(topic="adaptive/visual_backup"),))
     coordinator.set_active(batch)
-    coordinator.adaptive_trigger_pending = True
-
     assert coordinator.take_failed_active() is batch
-    assert coordinator.adaptive_trigger_pending
-    assert not coordinator.reserve_adaptive(
-        adaptive.received_at + 10.0,
-        rearm_seconds=5.0,
-        priority_tolerance_seconds=2.0,
-    )

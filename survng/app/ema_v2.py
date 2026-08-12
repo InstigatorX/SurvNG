@@ -329,6 +329,7 @@ class _Episode:
     covered_regions: list[tuple[float, float, float, float]] = field(
         default_factory=list
     )
+    incident_event_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +612,7 @@ class MotionEpisodeController:
             return {
                 "generation": self._generation,
                 "episode_id": episode.episode_id if episode else None,
+                "sequence": episode.sequence if episode else self._sequence,
                 "sources": (
                     tuple(sorted(source.value for source in episode.sources))
                     if episode
@@ -625,7 +627,38 @@ class MotionEpisodeController:
                 "transition_count": len(self._transitions),
                 "request_count": episode.request_count if episode else 0,
                 "followup_count": episode.followup_count if episode else 0,
+                "incident_event_id": episode.incident_event_id if episode else None,
             }
+
+    def current_sequence(self) -> int:
+        with self._lock:
+            return self._episode.sequence if self._episode else self._sequence
+
+    def link_incident(
+        self,
+        event_id: int | None,
+        *,
+        expected_sequence: int | None = None,
+    ) -> bool:
+        with self._lock:
+            episode = self._episode
+            if episode is None or (
+                expected_sequence is not None
+                and expected_sequence != episode.sequence
+            ):
+                return False
+            episode.incident_event_id = event_id
+            return True
+
+    def active_incident_event_id(self) -> int | None:
+        with self._lock:
+            return self._episode.incident_event_id if self._episode else None
+
+    def reset_timebase(self) -> None:
+        with self._lock:
+            self._episode = None
+            self._last_completed_monotonic = None
+            self._sequence += 1
 
     def reset(self) -> None:
         with self._lock:
