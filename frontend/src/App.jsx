@@ -9995,7 +9995,6 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   const [aiError, setAiError] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiApplying, setAiApplying] = useState(false);
-  const [imageSize, setImageSize] = useState(null);
   const pipelineTelemetry = item.features?.pipeline_telemetry;
 
   useEffect(() => {
@@ -10003,14 +10002,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
     setAiError("");
     setAiLoading(false);
     setAiApplying(false);
-    setImageSize(null);
   }, [item.id]);
-
-  const overlayStyle = useMemo(() => {
-    if (!imageSize?.width || !imageSize?.height) return undefined;
-    const ratio = imageSize.width / imageSize.height;
-    return { "--motion-audit-panel-fit-width": `calc(${ratio * 88}dvh + 316px)` };
-  }, [imageSize]);
 
   async function analyzeWithAi() {
     if (aiLoading || !item.has_snapshot) return;
@@ -10078,7 +10070,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
   return (
     <div className="motion-audit-overlay" role="dialog" aria-modal="true" aria-label="Motion audit image">
       <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close motion audit image" />
-      <section className="motion-audit-overlay-panel" style={overlayStyle}>
+      <section className="motion-audit-overlay-panel">
         <header className="motion-audit-overlay-head">
           <div><h2>{item.camera_id}</h2><time>{formatDateTime(item.created_at, timeZone)}</time></div>
           <div className="overlay-actions">
@@ -10091,7 +10083,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
         <div className="motion-audit-overlay-content">
           <div className="motion-audit-overlay-media">
             {item.has_snapshot
-              ? <MotionAuditAnnotatedImage item={item} alt={`${item.camera_id} rejected motion`} onImageSize={setImageSize} />
+              ? <MotionAuditAnnotatedImage item={item} alt={`${item.camera_id} rejected motion`} />
               : <div className="empty-thumb"><Camera size={42} /><span>Audit image unavailable</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
