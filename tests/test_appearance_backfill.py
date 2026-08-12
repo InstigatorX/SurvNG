@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 import cv2
 import numpy as np
@@ -41,6 +43,28 @@ class _Encoder:
 
 
 class DeferredAppearanceBackfillTest(unittest.TestCase):
+    def test_worker_retries_transient_database_lock_when_claiming(self) -> None:
+        service = DeferredAppearanceBackfill.__new__(DeferredAppearanceBackfill)
+        service.config = ObjectTrackingConfig(
+            reid_enabled=True,
+            reid_model_path="person.xml",
+            deferred_reid_enabled=True,
+        )
+        service._stop = threading.Event()
+        service._wake = threading.Event()
+
+        def claim():
+            if service._claim.call_count == 1:
+                raise sqlite3.OperationalError("database is locked")
+            service._stop.set()
+            return None
+
+        service._claim = Mock(side_effect=claim)
+
+        service._run()
+
+        self.assertEqual(service._claim.call_count, 2)
+
     def test_jobs_are_removed_when_their_event_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "events.db"

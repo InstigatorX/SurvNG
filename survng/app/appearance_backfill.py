@@ -282,7 +282,24 @@ class DeferredAppearanceBackfill:
     def _run(self) -> None:
         interval = max(0.5, 60.0 / max(1, self.config.deferred_reid_rate_per_minute))
         while not self._stop.is_set():
-            job = self._claim()
+            try:
+                job = self._claim()
+            except sqlite3.OperationalError as exc:
+                # Startup and incident persistence can briefly hold SQLite's
+                # single writer lock. This durable worker must remain alive and
+                # retry queued work instead of permanently losing backfill.
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    LOGGER.info("deferred appearance backfill waiting for database writer")
+                    self._stop.wait(0.5)
+                    continue
+                LOGGER.exception("deferred appearance backfill could not claim work")
+                self._stop.wait(1.0)
+                continue
+            except Exception:
+                LOGGER.exception("deferred appearance backfill could not claim work")
+                self._stop.wait(1.0)
+                continue
             if job is None:
                 self._wake.clear()
                 self._wake.wait(timeout=1.0)
