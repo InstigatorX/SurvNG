@@ -10,18 +10,21 @@ export function semanticIncidentRequest({ query, cameraFilter, objectFilter, sta
 }
 
 export function rankSemanticIncidentDetails(details, zoneFilter = "all") {
+  const semanticRank = (detail) => Number(
+    detail?.semantic_search?.rank_score ?? detail?.semantic_search?.score ?? -1,
+  );
   const unique = new Map();
   for (const detail of Array.isArray(details) ? details : []) {
     if (!detail?.id) continue;
     const zones = Array.isArray(detail.zones) ? detail.zones : [];
     if (zoneFilter && zoneFilter !== "all" && !zones.includes(zoneFilter)) continue;
     const current = unique.get(detail.id);
-    if (!current || Number(detail.semantic_search?.score || -1) > Number(current.semantic_search?.score || -1)) {
+    if (!current || semanticRank(detail) > semanticRank(current)) {
       unique.set(detail.id, detail);
     }
   }
   return Array.from(unique.values()).sort(
-    (left, right) => Number(right.semantic_search?.score || -1) - Number(left.semantic_search?.score || -1),
+    (left, right) => semanticRank(right) - semanticRank(left),
   );
 }
 

@@ -88,6 +88,12 @@ def create_semantic_router(deps: SemanticRouteDependencies) -> SemanticRouteBund
                     continue
                 results.append({
                     "score": round(hit.score, 6),
+                    "rank_score": round(
+                        hit.rank_score if hit.rank_score is not None else hit.score,
+                        6,
+                    ),
+                    "match_strength": hit.match_strength,
+                    "component_scores": dict(hit.component_scores or {}),
                     "evidence": {
                         "source_kind": hit.source_kind,
                         "source_key": hit.source_key,

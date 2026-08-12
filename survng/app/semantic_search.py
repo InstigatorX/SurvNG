@@ -71,6 +71,73 @@ class SemanticSearchHit:
     object_label: str
     bbox: tuple[int, int, int, int] | None
     score: float
+    rank_score: float | None = None
+    match_strength: str = "visual_similarity"
+    component_scores: Mapping[str, float] | None = None
+
+
+@dataclass(frozen=True)
+class SemanticQueryPlan:
+    """A bounded set of prompts used to evaluate a compound visual query."""
+
+    original: str
+    prompts: Mapping[str, str]
+    required: tuple[str, ...] = ()
+    contradictions: tuple[str, ...] = ()
+
+    @property
+    def composed(self) -> bool:
+        return bool(self.required)
+
+
+SEMANTIC_COLORS = (
+    "black", "blue", "brown", "gold", "gray", "green", "grey",
+    "orange", "red", "silver", "white", "yellow",
+)
+SEMANTIC_VEHICLE_WORDS = frozenset({
+    "bus", "car", "cars", "motorcycle", "pickup", "suv", "truck",
+    "trucks", "van", "vehicle", "vehicles",
+})
+
+
+def semantic_query_plan(query: str) -> SemanticQueryPlan:
+    """Decompose color-qualified vehicle searches without pretending to parse NLP.
+
+    This intentionally handles only a high-confidence grammar. Unknown queries
+    retain the original single-vector behavior instead of receiving guessed
+    semantics.
+    """
+    original = " ".join(str(query).strip().split())
+    lowered = original.lower()
+    words = lowered.replace("-", " ").split()
+    colors = [color for color in SEMANTIC_COLORS if color in words]
+    if len(colors) != 1 or not SEMANTIC_VEHICLE_WORDS.intersection(words):
+        return SemanticQueryPlan(original, {"full": original})
+    color = colors[0]
+    subject_words = [word for word in words if word != color]
+    while subject_words and subject_words[0] in {"a", "an", "the"}:
+        subject_words.pop(0)
+    subject = " ".join(subject_words).strip()
+    if not subject:
+        return SemanticQueryPlan(original, {"full": original})
+    prompts: dict[str, str] = {
+        "full": original,
+        "subject": f"a {subject}",
+        "attribute": f"a {color} vehicle",
+    }
+    contradictions: list[str] = []
+    for other in SEMANTIC_COLORS:
+        if other in {color, "grey" if color == "gray" else "gray" if color == "grey" else ""}:
+            continue
+        name = f"not_{other}"
+        prompts[name] = f"a {other} vehicle"
+        contradictions.append(name)
+    return SemanticQueryPlan(
+        original,
+        prompts,
+        required=("subject", "attribute"),
+        contradictions=tuple(contradictions),
+    )
 
 
 def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -317,6 +384,7 @@ class SemanticIndex:
         query_embedding: object,
         identity: SemanticModelIdentity,
         *,
+        query_plan: SemanticQueryPlan | None = None,
         camera_ids: Sequence[str] = (),
         object_labels: Sequence[str] = (),
         start_at: str = "",
@@ -325,7 +393,9 @@ class SemanticIndex:
         minimum_score: float = -1.0,
     ) -> list[SemanticSearchHit]:
         query = normalized_matrix(query_embedding)
-        if query.shape != (1, identity.dimensions):
+        plan = query_plan or SemanticQueryPlan("", {"full": ""})
+        component_names = tuple(plan.prompts)
+        if query.shape != (len(component_names), identity.dimensions):
             raise ValueError("semantic query dimensions do not match the model")
         clauses = ["model_fingerprint = ?", "preprocessing_fingerprint = ?"]
         parameters: list[Any] = [
@@ -368,11 +438,45 @@ class SemanticIndex:
                 candidates.append((row, vector))
         if not candidates:
             return []
-        scores = np.stack([item[1] for item in candidates]) @ query[0]
-        ordered = np.argsort(scores)[::-1]
+        component_matrix = np.stack([item[1] for item in candidates]) @ query.T
+        component_indexes = {name: index for index, name in enumerate(component_names)}
+        full_scores = component_matrix[:, component_indexes["full"]]
+        if plan.composed:
+            required_scores = np.stack([
+                component_matrix[:, component_indexes[name]] for name in plan.required
+            ], axis=1)
+            weakest_required = required_scores.min(axis=1)
+            contradiction_scores = np.stack([
+                component_matrix[:, component_indexes[name]]
+                for name in plan.contradictions
+            ], axis=1)
+            strongest_contradiction = contradiction_scores.max(axis=1)
+            attribute_scores = component_matrix[:, component_indexes["attribute"]]
+            contradiction_margin = attribute_scores - strongest_contradiction
+            rank_scores = (
+                full_scores * 0.45
+                + required_scores.mean(axis=1) * 0.55
+                + np.minimum(0.04, contradiction_margin) * 0.35
+            )
+            eligible = contradiction_margin >= -0.005
+            if np.any(eligible):
+                best_rank = float(rank_scores[eligible].max())
+                best_required = required_scores[eligible].max(axis=0)
+                eligible &= rank_scores >= best_rank - 0.05
+                eligible &= np.all(required_scores >= best_required - 0.07, axis=1)
+            else:
+                best_rank = 1.0
+        else:
+            weakest_required = full_scores
+            rank_scores = full_scores
+            eligible = np.ones(len(candidates), dtype=bool)
+            best_rank = float(rank_scores.max())
+        ordered = np.argsort(rank_scores)[::-1]
         hits: list[SemanticSearchHit] = []
         for candidate_index in ordered:
-            score = float(scores[candidate_index])
+            if not bool(eligible[candidate_index]):
+                continue
+            score = float(full_scores[candidate_index])
             if score < minimum_score:
                 continue
             row = candidates[int(candidate_index)][0]
@@ -383,11 +487,26 @@ class SemanticIndex:
                     bbox = tuple(int(value) for value in values)  # type: ignore[assignment]
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
+            rank_score = float(rank_scores[candidate_index])
+            distance = best_rank - rank_score
+            match_strength = (
+                "strong_match" if plan.composed and distance <= 0.02
+                else "possible_match" if plan.composed
+                else "visual_similarity"
+            )
+            component_scores = {
+                name: round(float(component_matrix[candidate_index, index]), 6)
+                for name, index in component_indexes.items()
+                if name == "full" or name in plan.required
+            }
             hits.append(SemanticSearchHit(
                 event_id=int(row["event_id"]), camera_id=str(row["camera_id"]),
                 captured_at=str(row["captured_at"]), source_kind=str(row["source_kind"]),
                 source_key=str(row["source_key"]), image_path=str(row["image_path"]),
                 object_label=str(row["object_label"]), bbox=bbox, score=score,
+                rank_score=rank_score,
+                match_strength=match_strength,
+                component_scores=component_scores,
             ))
             if len(hits) >= max(1, min(int(limit), 500)):
                 break
@@ -1470,12 +1589,18 @@ class SemanticSearchService(DisabledSemanticSearch):
         text = str(query).strip()
         if not text:
             raise ValueError("semantic search query cannot be empty")
+        plan = semantic_query_plan(text)
         with self._encoder_lock:
             if self.encoder is None:
                 raise RuntimeError(self._error or "semantic search is unavailable")
-            embedding = self.encoder.encode_text([text])
+            embedding = self.encoder.encode_text(list(plan.prompts.values()))
             identity = self.encoder.identity
-        return self.index.search(embedding, identity, **filters)
+        return self.index.search(
+            embedding,
+            identity,
+            query_plan=plan,
+            **filters,
+        )
 
     def status(self) -> dict[str, Any]:
         identity = self.encoder.identity if self.encoder else None

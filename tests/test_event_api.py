@@ -58,6 +58,10 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(response["count"], 1)
         self.assertEqual(response["results"][0]["score"], 0.91)
+        self.assertEqual(response["results"][0]["rank_score"], 0.91)
+        self.assertEqual(
+            response["results"][0]["match_strength"], "visual_similarity"
+        )
         self.assertEqual(response["results"][0]["snapshot_url"], "/survng/api/events/7/snapshot.jpg")
         self.assertNotIn("objects_json", response["results"][0]["event"])
         self.assertEqual(

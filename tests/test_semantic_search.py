@@ -16,10 +16,12 @@ from survng.app.semantic_search import (
     SemanticEvidence,
     SemanticIndex,
     SemanticModelIdentity,
+    SemanticQueryPlan,
     SemanticSearchService,
     _semantic_encoder_worker_main,
     fingerprint_model_package,
     normalized_matrix,
+    semantic_query_plan,
     _semantic_text_inputs,
 )
 
@@ -52,6 +54,54 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(set(mapped), {"tokens", "mask"})
         np.testing.assert_array_equal(mapped["tokens"], tokens["input_ids"])
         np.testing.assert_array_equal(mapped["mask"], tokens["attention_mask"])
+
+    def test_color_vehicle_query_is_decomposed_conservatively(self) -> None:
+        plan = semantic_query_plan("white delivery truck")
+
+        self.assertTrue(plan.composed)
+        self.assertEqual(plan.prompts["subject"], "a delivery truck")
+        self.assertEqual(plan.prompts["attribute"], "a white vehicle")
+        self.assertIn("not_black", plan.contradictions)
+        self.assertFalse(semantic_query_plan("person carrying a box").composed)
+
+    def test_compound_query_rejects_contradictory_attribute_match(self) -> None:
+        evidence = [
+            SemanticEvidence(1, "gate", "now", "object_crop", "car:0", "one.webp", "car"),
+            SemanticEvidence(2, "gate", "now", "object_crop", "car:0", "two.webp", "car"),
+        ]
+        # Candidate 1 supports the complete query, subject, and requested color.
+        # Candidate 2 has a strong complete-query score but matches black better.
+        self.index.upsert(
+            evidence,
+            [[0.8, 0.5, 0.3], [0.8, 0.5, -0.3]],
+            self.identity,
+        )
+        plan = SemanticQueryPlan(
+            "white delivery truck",
+            {
+                "full": "white delivery truck",
+                "subject": "a delivery truck",
+                "attribute": "a white vehicle",
+                "not_black": "a black vehicle",
+            },
+            required=("subject", "attribute"),
+            contradictions=("not_black",),
+        )
+        queries = normalized_matrix([
+            [1.0, 0.0, 0.0],
+            [0.8, 0.6, 0.0],
+            [0.8, 0.0, 0.6],
+            [0.8, 0.0, -0.6],
+        ])
+
+        hits = self.index.search(queries, self.identity, query_plan=plan, limit=10)
+
+        self.assertEqual([hit.event_id for hit in hits], [1])
+        self.assertEqual(hits[0].match_strength, "strong_match")
+        self.assertEqual(
+            set(hits[0].component_scores or {}),
+            {"full", "subject", "attribute"},
+        )
 
     def test_fixed_image_preprocessing_preserves_manifest_shape(self) -> None:
         image = np.zeros((80, 240, 3), dtype=np.uint8)

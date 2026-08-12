@@ -17,9 +17,9 @@ assert.deepEqual(semanticIncidentRequest({
 });
 
 const ranked = rankSemanticIncidentDetails([
-  { id: "a", zones: ["Road"], semantic_search: { score: 0.4 } },
-  { id: "b", zones: ["Road"], semantic_search: { score: 0.8 } },
-  { id: "a", zones: ["Road"], semantic_search: { score: 0.6 } },
+  { id: "a", zones: ["Road"], semantic_search: { score: 0.9, rank_score: 0.4 } },
+  { id: "b", zones: ["Road"], semantic_search: { score: 0.8, rank_score: 0.8 } },
+  { id: "a", zones: ["Road"], semantic_search: { score: 0.6, rank_score: 0.6 } },
   { id: "c", zones: ["Porch"], semantic_search: { score: 0.9 } },
 ], "Road");
 assert.deepEqual(ranked.map((item) => [item.id, item.semantic_search.score]), [["b", 0.8], ["a", 0.6]]);

@@ -4236,7 +4236,18 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
         const detailResponse = await fetch(`/api/incidents/by-event/${eventId}`, { signal: controller.signal });
         if (!detailResponse.ok) return null;
         const detail = await detailResponse.json();
-        return { ...detail, semantic_search: { query: queryText, score: Number(hit.score), evidence: hit.evidence || null, event_id: eventId } };
+        return {
+          ...detail,
+          semantic_search: {
+            query: queryText,
+            score: Number(hit.score),
+            rank_score: Number(hit.rank_score ?? hit.score),
+            match_strength: hit.match_strength || "visual_similarity",
+            component_scores: hit.component_scores || null,
+            evidence: hit.evidence || null,
+            event_id: eventId,
+          },
+        };
       });
       if (semanticIncidentRequestRef.current !== controller) return;
       setSemanticIncidentResults(rankSemanticIncidentDetails(hydrated, incidentZoneFilter));
@@ -5879,7 +5890,8 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
         {visibleResults.map((result) => {
           const item = result.event || {};
           const context = incidentRecordingContext(item);
-          return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span>{Math.round(Math.max(0, Math.min(1, Number(result.score || 0))) * 100)}% similar</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
+          const matchLabel = ({ strong_match: "Strong match", possible_match: "Possible match" })[result.match_strength] || "Visually similar";
+          return <article key={item.id}><a href={appUrl(`/incidents?event_ids=${item.id}`)}><img src={result.snapshot_url} alt="" loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></a><footer><div><strong>{cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id}</strong><small>{formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone)}</small></div><a href={recordingsHref(context)}><Play size={14} />View recording</a></footer></article>;
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
