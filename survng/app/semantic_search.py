@@ -8,7 +8,6 @@ import logging
 import queue
 import itertools
 import multiprocessing
-import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -181,43 +180,6 @@ class OpenClipTokenizerAdapter:
 
     def __call__(self, texts: Sequence[str]) -> dict[str, np.ndarray]:
         return {"input_ids": np.asarray(self._tokenizer(list(texts)), dtype=np.int64)}
-
-
-class HuggingFaceJsonTokenizer:
-    """Small offline tokenizer runtime for self-contained model packages."""
-
-    def __init__(self, path: Path, spec: Mapping[str, Any]) -> None:
-        try:
-            from tokenizers import Tokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "semantic package requires the tokenizers runtime dependency"
-            ) from exc
-        self._max_length = int(spec.get("max_length") or 0)
-        if not 1 <= self._max_length <= 4096:
-            raise RuntimeError("semantic tokenizer max_length must be between 1 and 4096")
-        self._tokenizer = Tokenizer.from_file(str(path))
-        self._tokenizer.enable_truncation(
-            max_length=self._max_length,
-            direction=str(spec.get("truncation_side") or "right"),
-        )
-        pad_id = int(spec.get("pad_token_id") or 0)
-        self._tokenizer.enable_padding(
-            length=self._max_length,
-            pad_id=pad_id,
-            pad_token=str(spec.get("pad_token") or "<pad>"),
-            direction=str(spec.get("padding_side") or "right"),
-        )
-
-    def __call__(self, texts: Sequence[str]) -> dict[str, np.ndarray]:
-        encodings = self._tokenizer.encode_batch(list(texts), add_special_tokens=True)
-        input_ids = np.asarray([encoding.ids for encoding in encodings], dtype=np.int64)
-        attention_mask = np.asarray(
-            [encoding.attention_mask for encoding in encodings], dtype=np.int64
-        )
-        if input_ids.ndim != 2 or input_ids.shape[1] != self._max_length:
-            raise RuntimeError("semantic tokenizer output length does not match the manifest")
-        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 def normalized_matrix(value: object, *, max_dimensions: int = 8192) -> np.ndarray:
@@ -646,31 +608,6 @@ def load_semantic_manifest(model_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def validate_semantic_runtime_manifest(manifest: Mapping[str, Any]) -> None:
-    """Reject model packages that lack required cross-modal validation."""
-    implementation = str(manifest.get("implementation") or "")
-    if implementation != "siglip2_openvino":
-        return
-    validation = manifest.get("validation")
-    cross_modal = validation.get("cross_modal") if isinstance(validation, Mapping) else None
-    raw_error = (
-        cross_modal.get("maximum_cosine_error")
-        if isinstance(cross_modal, Mapping)
-        else None
-    )
-    try:
-        maximum_error = float(raw_error)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise RuntimeError(
-            "SigLIP2 package is missing cross-modal export validation"
-        ) from exc
-    if not np.isfinite(maximum_error) or maximum_error > 5e-4:
-        raise RuntimeError(
-            "SigLIP2 package failed cross-modal export validation "
-            f"(maximum cosine error {maximum_error:.6g})"
-        )
-
-
 class DisabledSemanticSearch:
     """Stable no-op service used when semantic search is disabled."""
 
@@ -735,7 +672,6 @@ def build_semantic_search(
         return UnavailableSemanticSearch(config, index, f"model directory does not exist: {model_dir}")
     try:
         manifest = load_semantic_manifest(model_dir)
-        validate_semantic_runtime_manifest(manifest)
     except RuntimeError as exc:
         return UnavailableSemanticSearch(config, index, str(exc))
     return SemanticSearchService(config, index, model_dir, manifest)
@@ -791,15 +727,6 @@ def _semantic_tokenizer(
             path,
             max_length=int(text_spec.get("max_length") or 77),
         )
-    if tokenizer_kind == "huggingface_tokenizer_json":
-        path = _semantic_package_path(
-            model_dir,
-            text_spec.get("tokenizer_path"),
-            "tokenizer/tokenizer.json",
-        )
-        if not path.is_file():
-            raise RuntimeError("semantic tokenizer file is missing")
-        return HuggingFaceJsonTokenizer(path, text_spec)
     raise RuntimeError(f"unsupported semantic tokenizer: {tokenizer_kind}")
 
 
@@ -843,102 +770,6 @@ def _semantic_named_inputs(
             "semantic preprocessor did not produce required inputs: " + ", ".join(missing)
         )
     return {model_name: np.asarray(prepared[key]) for key, model_name in names.items()}
-
-
-def _siglip2_image_size(
-    height: int,
-    width: int,
-    patch_size: int,
-    max_patches: int,
-) -> tuple[int, int]:
-    def scaled(scale: float, value: int) -> int:
-        return max(patch_size, math.ceil(value * scale / patch_size) * patch_size)
-
-    lower, upper = 1e-6, 100.0
-    while upper - lower >= 1e-5:
-        scale = (lower + upper) / 2
-        target_height = scaled(scale, height)
-        target_width = scaled(scale, width)
-        if (target_height // patch_size) * (target_width // patch_size) <= max_patches:
-            lower = scale
-        else:
-            upper = scale
-    return scaled(lower, height), scaled(lower, width)
-
-
-def _prepare_siglip2_images(
-    images: Sequence[np.ndarray],
-    spec: Mapping[str, Any],
-) -> dict[str, np.ndarray]:
-    from PIL import Image
-
-    patch_size = int(spec.get("patch_size") or 16)
-    max_patches = int(spec.get("max_num_patches") or 256)
-    mean = np.asarray(spec.get("mean") or [0.5, 0.5, 0.5], dtype=np.float32)
-    std = np.asarray(spec.get("std") or [0.5, 0.5, 0.5], dtype=np.float32)
-    if patch_size <= 0 or max_patches <= 0 or mean.shape != (3,) or std.shape != (3,):
-        raise RuntimeError("invalid SigLIP2 image preprocessing manifest")
-    if np.any(std <= 0):
-        raise RuntimeError("semantic image normalization standard deviation must be positive")
-    batches: list[np.ndarray] = []
-    masks: list[np.ndarray] = []
-    shapes: list[tuple[int, int]] = []
-    for image in images:
-        height, width = image.shape[:2]
-        target_height, target_width = _siglip2_image_size(
-            height, width, patch_size, max_patches
-        )
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        resized = np.asarray(
-            Image.fromarray(rgb).resize(
-                (target_width, target_height), resample=Image.Resampling.BILINEAR
-            ),
-            dtype=np.float32,
-        ) / 255.0
-        chw = np.transpose((resized - mean) / std, (2, 0, 1))
-        rows, columns = target_height // patch_size, target_width // patch_size
-        patches = chw.reshape(3, rows, patch_size, columns, patch_size)
-        patches = patches.transpose(1, 3, 2, 4, 0).reshape(rows * columns, -1)
-        mask = np.zeros((max_patches,), dtype=np.int64)
-        mask[:patches.shape[0]] = 1
-        if patches.shape[0] < max_patches:
-            patches = np.pad(
-                patches,
-                ((0, max_patches - patches.shape[0]), (0, 0)),
-                mode="constant",
-            )
-        batches.append(patches.astype(np.float32))
-        masks.append(mask)
-        shapes.append((rows, columns))
-    return {
-        "pixel_values": np.stack(batches),
-        "pixel_attention_mask": np.stack(masks),
-        "spatial_shapes": np.asarray(shapes, dtype=np.int64),
-    }
-
-
-def _prepare_fixed_pil_images(
-    images: Sequence[np.ndarray],
-    spec: Mapping[str, Any],
-) -> np.ndarray:
-    from PIL import Image
-
-    size = int(spec.get("size") or 224)
-    mean = np.asarray(spec.get("mean") or [0.5, 0.5, 0.5], dtype=np.float32)
-    std = np.asarray(spec.get("std") or [0.5, 0.5, 0.5], dtype=np.float32)
-    if size <= 0 or mean.shape != (3,) or std.shape != (3,) or np.any(std <= 0):
-        raise RuntimeError("invalid fixed image preprocessing manifest")
-    prepared: list[np.ndarray] = []
-    for image in images:
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        resized = np.asarray(
-            Image.fromarray(rgb).resize(
-                (size, size), resample=Image.Resampling.BILINEAR
-            ),
-            dtype=np.float32,
-        ) / 255.0
-        prepared.append(np.transpose((resized - mean) / std, (2, 0, 1)))
-    return np.stack(prepared).astype(np.float32)
 
 
 class OpenVinoManifestEncoder:
@@ -989,10 +820,6 @@ class OpenVinoManifestEncoder:
         images: Sequence[np.ndarray],
         spec: dict[str, Any],
     ) -> np.ndarray | dict[str, np.ndarray]:
-        if str(spec.get("processor_kind") or "") == "siglip2_patches":
-            return _prepare_siglip2_images(images, spec)
-        if str(spec.get("processor_kind") or "") == "fixed_pil":
-            return _prepare_fixed_pil_images(images, spec)
         size = int(spec.get("size") or 256)
         mean = np.asarray(spec.get("mean") or [0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
         std = np.asarray(spec.get("std") or [0.26862954, 0.26130258, 0.27577711], dtype=np.float32)

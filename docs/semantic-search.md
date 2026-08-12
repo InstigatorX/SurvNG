@@ -9,15 +9,9 @@ AI assistant provider.
 
 Use **MobileCLIP2-B exported to OpenVINO FP16**. It offers a practical accuracy,
 memory, and throughput balance for an Intel GPU. SurvNG deliberately keeps the
-encoder interface and every stored generation versioned; a future MobileCLIP2,
-SigLIP2, or other dual-encoder package can build a new index without deleting
-or mixing the previous generation.
-
-For stronger natural-language and visual-attribute matching, SurvNG also ships
-an exporter for Google's official **SigLIP2 Base Patch16 224** checkpoint. Its
-OpenVINO package is about 726 MB and produces 768-dimensional embeddings, so it
-uses more disk, accelerator memory, and indexing time than MobileCLIP2-B. Build
-and evaluate it as a separate generation before switching production search.
+encoder interface and every stored generation versioned; a future compatible
+dual-encoder package can build a new index without deleting or mixing the
+previous generation.
 
 Smart Search is disabled by default. Put a self-contained model package on a
 local filesystem, then enable it under **Admin → Object Detection → Smart
@@ -52,33 +46,6 @@ host directory read-only at `/config/models/mobileclip2-b-openvino-fp16` and
 use the container path. Select `GPU` on an Intel GPU host, then enable Smart
 Search. Keep the included `LICENSE` with the package.
 
-## Build SigLIP2 Base
-
-```bash
-.venv/bin/pip install -r requirements-semantic-export.txt
-.venv/bin/python scripts/export-siglip2-openvino.py \
-  --output models/siglip2-base-patch16-224-openvino-fp16 \
-  --cache-dir models/.siglip2-download-cache
-```
-
-The exporter downloads `google/siglip2-base-patch16-224`, creates isolated
-image and text OpenVINO FP16 encoders, bundles its tokenizer and Apache-2.0
-license, and validates source/OpenVINO embedding parity plus exact runtime
-preprocessing and tokenization before retaining the package. Validation also
-compares source and OpenVINO image-to-text cosine scores so independently valid
-but incompatible tower inputs cannot produce a deployable package.
-
-The model's official fixed-resolution processor is represented explicitly in
-the manifest. Other SigLIP2 checkpoints that use aspect-aware packed patches
-are also supported by the runtime contract. Production uses only OpenVINO,
-Pillow, and the lightweight `tokenizers` package; PyTorch and Transformers are
-export-only dependencies.
-
-Do not point the active configuration at this package until comparison is
-complete. When selected later, use the generic `openvino_manifest`
-implementation and the package's absolute model path. Its fingerprint and
-768-dimensional space automatically create a separate index generation.
-
 ## Repeatable ranking benchmark
 
 Create a reviewed benchmark from real incident IDs using
@@ -107,10 +74,10 @@ already-complete full-frame and crop evidence is skipped.
 .venv/bin/python scripts/build-semantic-index.py \
   --database runtime/database/survng.sqlite3 \
   --storage-dir /path/to/survng/storage \
-  --model-dir models/siglip2-base-patch16-224-openvino-fp16 \
+  --model-dir /path/to/candidate-openvino-package \
   --device GPU \
   --pause-seconds 0.03 \
-  --report siglip2-index-report.json
+  --report candidate-index-report.json
 ```
 
 Only one offline comparison build may use a database at a time. Progress and
@@ -123,10 +90,10 @@ it in the application:
 
 ```bash
 .venv/bin/python scripts/evaluate-semantic-search.py benchmark.json \
-  --model-dir models/siglip2-base-patch16-224-openvino-fp16 \
+  --model-dir /path/to/candidate-openvino-package \
   --database runtime/database/survng.sqlite3 \
   --device GPU \
-  --output siglip2-comparison.json
+  --output candidate-comparison.json
 ```
 
 The evaluator de-duplicates crop and whole-frame matches to the best result per

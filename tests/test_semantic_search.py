@@ -12,7 +12,6 @@ import numpy as np
 import cv2
 
 from survng.app.semantic_search import (
-    HuggingFaceJsonTokenizer,
     OpenVinoManifestEncoder,
     SemanticEvidence,
     SemanticIndex,
@@ -22,9 +21,6 @@ from survng.app.semantic_search import (
     fingerprint_model_package,
     normalized_matrix,
     _semantic_text_inputs,
-    _prepare_siglip2_images,
-    _prepare_fixed_pil_images,
-    validate_semantic_runtime_manifest,
 )
 
 
@@ -40,47 +36,6 @@ class SemanticIndexTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
-
-    def test_huggingface_json_tokenizer_emits_ids_and_attention_mask(self) -> None:
-        from tokenizers import Tokenizer
-        from tokenizers.models import WordLevel
-        from tokenizers.pre_tokenizers import Whitespace
-        from tokenizers.processors import TemplateProcessing
-
-        tokenizer = Tokenizer(WordLevel({"<pad>": 0, "<unk>": 1, "<bos>": 2, "<eos>": 3, "white": 4, "truck": 5}, unk_token="<unk>"))
-        tokenizer.pre_tokenizer = Whitespace()
-        tokenizer.post_processor = TemplateProcessing(
-            single="<bos> $A <eos>",
-            special_tokens=[("<bos>", 2), ("<eos>", 3)],
-        )
-        path = Path(self.temporary.name) / "tokenizer.json"
-        tokenizer.save(str(path))
-
-        runtime = HuggingFaceJsonTokenizer(path, {
-            "max_length": 6,
-            "pad_token_id": 0,
-            "pad_token": "<pad>",
-            "padding_side": "right",
-        })
-
-        encoded = runtime(["white truck"])
-        np.testing.assert_array_equal(encoded["input_ids"], [[2, 4, 5, 3, 0, 0]])
-        np.testing.assert_array_equal(encoded["attention_mask"], [[1, 1, 1, 1, 0, 0]])
-
-    def test_siglip2_runtime_requires_cross_modal_validation(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "missing cross-modal"):
-            validate_semantic_runtime_manifest({"implementation": "siglip2_openvino"})
-
-        with self.assertRaisesRegex(RuntimeError, "failed cross-modal"):
-            validate_semantic_runtime_manifest({
-                "implementation": "siglip2_openvino",
-                "validation": {"cross_modal": {"maximum_cosine_error": 0.001}},
-            })
-
-        validate_semantic_runtime_manifest({
-            "implementation": "siglip2_openvino",
-            "validation": {"cross_modal": {"maximum_cosine_error": 0.00005}},
-        })
 
     def test_semantic_text_inputs_maps_multiple_manifest_inputs(self) -> None:
         tokens = {
@@ -108,33 +63,6 @@ class SemanticIndexTest(unittest.TestCase):
         })
 
         self.assertEqual(prepared.shape, (1, 3, 224, 224))
-
-    def test_siglip2_preprocessing_packs_aspect_aware_patches(self) -> None:
-        prepared = _prepare_siglip2_images(
-            [np.zeros((80, 240, 3), dtype=np.uint8)],
-            {
-                "patch_size": 16,
-                "max_num_patches": 256,
-                "mean": [0.5, 0.5, 0.5],
-                "std": [0.5, 0.5, 0.5],
-            },
-        )
-
-        self.assertEqual(prepared["pixel_values"].shape, (1, 256, 768))
-        self.assertEqual(prepared["pixel_attention_mask"].shape, (1, 256))
-        self.assertEqual(prepared["spatial_shapes"].shape, (1, 2))
-        rows, columns = prepared["spatial_shapes"][0]
-        self.assertEqual(int(prepared["pixel_attention_mask"].sum()), rows * columns)
-        self.assertGreater(columns, rows)
-
-    def test_fixed_pil_preprocessing_uses_manifest_normalization(self) -> None:
-        prepared = _prepare_fixed_pil_images(
-            [np.zeros((80, 240, 3), dtype=np.uint8)],
-            {"size": 224, "mean": [0.5] * 3, "std": [0.5] * 3},
-        )
-
-        self.assertEqual(prepared.shape, (1, 3, 224, 224))
-        np.testing.assert_array_equal(prepared, -1.0)
 
     def test_normalization_rejects_invalid_embeddings(self) -> None:
         with self.assertRaises(ValueError):
@@ -276,7 +204,7 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 4, "event_count": 2})
 
     def test_clone_image_generation_preserves_source_and_is_idempotent(self) -> None:
-        target = SemanticModelIdentity("siglip2", "model-new", "preprocess-new", 3)
+        target = SemanticModelIdentity("candidate", "model-new", "preprocess-new", 3)
         self.index.upsert(
             [SemanticEvidence(1, "gate", "now", "full_frame", "frame", "x.webp")],
             [[1, 0, 0]],
@@ -288,7 +216,7 @@ class SemanticIndexTest(unittest.TestCase):
         self.assertEqual(self.index.coverage(self.identity)["evidence_count"], 1)
         self.assertEqual(self.index.coverage(target)["evidence_count"], 1)
 
-        incompatible = SemanticModelIdentity("siglip2", "other", "other-pre", 4)
+        incompatible = SemanticModelIdentity("candidate", "other", "other-pre", 4)
         with self.assertRaisesRegex(ValueError, "dimensions"):
             self.index.clone_image_generation(self.identity, incompatible)
 

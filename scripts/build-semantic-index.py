@@ -28,7 +28,6 @@ from survng.app.semantic_search import (
     _semantic_model_identity,
     load_semantic_manifest,
     semantic_event_objects,
-    validate_semantic_runtime_manifest,
 )
 
 SQLITE_LOCK_RETRY_ATTEMPTS = 8
@@ -152,7 +151,6 @@ def build(
     reuse_image_model_dir: Path | None = None,
 ) -> dict[str, Any]:
     manifest = load_semantic_manifest(model_dir)
-    validate_semantic_runtime_manifest(manifest)
     index = SemanticIndex(database)
     config = SemanticSearchConfig(
         enabled=True,
