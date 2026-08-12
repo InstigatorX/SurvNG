@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { relatedEvidenceLabel, visibleRelatedAppearances } from "../src/relatedIncidents.mjs";
+import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "../src/relatedIncidents.mjs";
+
+assert.equal(relatedIncidentsPath(42), "/api/events/42/related-incidents?hours=24&limit=16");
+assert.equal(relatedIncidentsPath(42, 48, 8), "/api/events/42/related-incidents?hours=48&limit=8");
+assert.equal(relatedIncidentThumbnailPath(42), "/api/events/42/thumbnail.jpg?width=360&quality=80");
+assert.equal(relatedIncidentThumbnailPath(42, 720, 92), "/api/events/42/thumbnail.jpg?width=720&quality=92");
 
 const matches = visibleRelatedAppearances({ matches: [
   { event_id: 7, similarity: 1, visually_similar: true },

@@ -104,7 +104,7 @@ import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
-import { relatedEvidenceLabel, visibleRelatedAppearances } from "./relatedIncidents.mjs";
+import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 import { nextFaceReviewObservation } from "./faceReview.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
@@ -3051,7 +3051,7 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
     const controller = new AbortController();
     let cancelled = false;
     setLoading(true);
-    fetch(`/api/events/${Number(anchorEventId)}/related-incidents?hours=24&limit=16`, {
+    fetch(appUrl(relatedIncidentsPath(anchorEventId)), {
       signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("Related incidents unavailable")))
@@ -3088,7 +3088,7 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
           const pending = eventId === Number(loadingEventId);
           return (
             <button type="button" className={selected ? "selected" : ""} key={eventId} onClick={() => onSelect(match)} disabled={pending} aria-pressed={selected} title={match.route_name ? `${match.route_name}: ${relatedEvidenceLabel(match)}` : `Preview related incident from ${cameraNameById.get(match.camera_id) || match.camera_id}`}>
-              <img src={`/api/events/${eventId}/thumbnail.jpg?width=360&quality=80`} alt={`${cameraNameById.get(match.camera_id) || match.camera_id} related incident`} loading="lazy" />
+              <img src={appUrl(relatedIncidentThumbnailPath(eventId))} alt={`${cameraNameById.get(match.camera_id) || match.camera_id} related incident`} loading="lazy" />
               <span><strong>{cameraNameById.get(match.camera_id) || match.camera_id}</strong><b>{relatedEvidenceLabel(match)}</b></span>
               <small>{pending ? "Loading…" : formatDateTime(match.created_at, timeZone)}</small>
             </button>

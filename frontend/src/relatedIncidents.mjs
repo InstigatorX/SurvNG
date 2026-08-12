@@ -1,3 +1,16 @@
+export function relatedIncidentsPath(anchorEventId, hours = 24, limit = 16) {
+  const eventId = Number(anchorEventId);
+  const boundedHours = Math.max(1, Math.min(168, Number(hours) || 24));
+  const boundedLimit = Math.max(1, Math.min(100, Number(limit) || 16));
+  return `/api/events/${eventId}/related-incidents?hours=${boundedHours}&limit=${boundedLimit}`;
+}
+
+export function relatedIncidentThumbnailPath(eventId, width = 360, quality = 80) {
+  const boundedWidth = Math.max(64, Math.min(1920, Number(width) || 360));
+  const boundedQuality = Math.max(1, Math.min(100, Number(quality) || 80));
+  return `/api/events/${Number(eventId)}/thumbnail.jpg?width=${boundedWidth}&quality=${boundedQuality}`;
+}
+
 export function visibleRelatedAppearances(payload, anchorEventId, limit = 8) {
   const anchor = Number(anchorEventId);
   const boundedLimit = Math.max(1, Math.min(24, Number(limit) || 8));
