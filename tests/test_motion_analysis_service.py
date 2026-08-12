@@ -71,6 +71,7 @@ def _hooks(
     qualification.reset_runtime = reset_temporal_runtime or Mock()
     state = Mock()
     state.detection_enabled.return_value = True
+    state.lifecycle_generation.return_value = 0
     state.publish_event = publish_event or Mock()
     state.set_last_motion_at = set_last_motion_at or Mock()
     state.increment_stat = increment_stat or Mock()
@@ -98,7 +99,11 @@ def _service(dependencies: SimpleNamespace, queue_size: int = 1) -> MotionAnalys
         ring_size=8,
         queue_size=queue_size,
         limiter=FairMotionAnalysisLimiter(1),
-        events=MotionEventCoordinator(queue_size=4, retry_limit=2),
+        events=MotionEventCoordinator(
+            queue_size=4,
+            retry_limit=2,
+            camera_id="gate",
+        ),
         evidence=Mock(),
         visual_backup=VisualBackupCoordinator(),
         audit_recorder=Mock(),
@@ -831,36 +836,28 @@ def test_stop_requested_during_adaptive_fusion_prevents_publication() -> None:
     publish_event.assert_not_called()
 
 
-def test_visual_fusion_failure_releases_reservation_and_candidate() -> None:
+def test_ema_v2_qualified_edge_bypasses_legacy_fusion_gate() -> None:
     accepted = MotionQualificationResult(True, 0.9, 0.48, "qualified", 3, {})
     service = _service(
         _hooks(
             with_source_evidence=Mock(side_effect=RuntimeError("fusion unavailable")),
         )
     )
-    service.visual_backup.evaluate = Mock(
-        return_value=VisualBackupDecision(
-            VisualBackupAction.READY,
-            accepted,
-            required_score=0.7,
-            consecutive=3,
-            scene_ready=True,
-        )
-    )
+    service.ema_v2.scene_ready = True
+    service.ema_v2.analysis_started_at = 90.0
+    service.ema_v2.observation_count = 3
     samples = [
         (99.5, np.zeros((90, 160, 3), dtype=np.uint8)),
         (100.0, np.zeros((90, 160, 3), dtype=np.uint8)),
     ]
 
-    try:
-        service.consider_visual_backup(accepted, samples, 100.0)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("fusion failure should remain visible to the worker")
+    for captured_at in (100.0, 101.0, 102.0):
+        service.consider_visual_backup(accepted, samples, captured_at)
 
-    assert not service.events.adaptive_trigger_pending
-    assert service.visual_backup.consecutive == 0
+    service.qualification.with_source_evidence.assert_not_called()
+    trigger = service.events.queue.get_nowait()
+    assert trigger.prequalified.reason == "ema_v2_qualified"
+    assert trigger.detection_intent_id
 
 
 def test_visual_backup_audits_one_summary_for_sustained_below_gate_episode() -> None:
@@ -871,24 +868,9 @@ def test_visual_backup_audits_one_summary_for_sustained_below_gate_episode() -> 
         for score in (0.61, 0.69, 0.65)
     ]
     quiet = MotionQualificationResult(False, 0.1, 0.48, "low_score", 3, {})
-    service.visual_backup.evaluate = Mock(side_effect=[
-        *[
-            VisualBackupDecision(
-                VisualBackupAction.IGNORED,
-                result,
-                required_score=0.73,
-                scene_ready=True,
-                count_nonpromotion=True,
-            )
-            for result in below_gate
-        ],
-        VisualBackupDecision(
-            VisualBackupAction.IGNORED,
-            quiet,
-            required_score=0.73,
-            scene_ready=True,
-        ),
-    ])
+    service.ema_v2.scene_ready = True
+    service.ema_v2.analysis_started_at = 90.0
+    service.ema_v2.observation_count = 3
     frames = [
         np.full((90, 160, 3), value, dtype=np.uint8)
         for value in (10, 20, 30, 40)
@@ -906,7 +888,7 @@ def test_visual_backup_audits_one_summary_for_sustained_below_gate_episode() -> 
     assert audit["category"] == "visual_backup"
     assert audit["reason"] == "visual_backup_below_threshold"
     assert audit["score"] == 0.69
-    assert audit["features"]["visual_backup_required_score"] == 0.73
+    assert audit["features"]["visual_backup_required_score"] == 0.7
     assert audit["features"]["visual_backup_credible_frames"] == 3
     assert audit["features"]["visual_backup_episode_duration_seconds"] == 1.0
     dependencies.media.sample_rejected_motion_frame.assert_called_once()

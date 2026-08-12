@@ -21,6 +21,12 @@ from .active_motion_followup import (
 from .motion import MotionQualificationResult, preprocess_motion_frame
 from .config import MotionQualificationConfig
 from .domain_events import MotionObserved
+from .ema_v2 import (
+    EmaSignalAction,
+    EmaSignalConditioner,
+    EpisodeDecisionReason,
+    MotionSource,
+)
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_coordinator import (
     VisualBackupAction,
@@ -64,6 +70,7 @@ class MotionAnalysisState(Protocol):
     def set_last_motion_at(self, value: str) -> None: ...
     def increment_stat(self, name: str, amount: int = 1) -> None: ...
     def record_analysis_wait(self, wait_ms: float) -> None: ...
+    def lifecycle_generation(self) -> int: ...
 
 
 class MotionAnalysisMedia(Protocol):
@@ -139,6 +146,7 @@ class MotionAnalysisService:
         self.events = events
         self.evidence = evidence
         self.visual_backup = visual_backup
+        self.ema_v2 = EmaSignalConditioner(camera_id)
         self.active_motion_followup = ActiveMotionFollowupPolicy()
         self.audit_recorder = audit_recorder
         self.debug_store = debug_store
@@ -291,6 +299,7 @@ class MotionAnalysisService:
         self.clear_queue()
         with self._visual_lock:
             self.visual_backup.reset()
+            self.ema_v2.reset()
             self._visual_nonpromotion_episode = None
         self.active_motion_followup.reset()
 
@@ -641,7 +650,7 @@ class MotionAnalysisService:
 
     def visual_backup_snapshot(self) -> dict[str, Any]:
         with self._visual_lock:
-            return self.visual_backup.snapshot()
+            return self.ema_v2.snapshot()
 
     def record_visual_camera_match(self, observed_at: float) -> bool:
         with self._visual_lock:
@@ -653,21 +662,23 @@ class MotionAnalysisService:
         captured_at: float,
     ) -> bool:
         with self._visual_lock:
-            return self.visual_backup.readiness(
+            return self.ema_v2.evaluate(
                 result,
                 captured_at,
+                time.monotonic(),
                 self.qualification.visual_backup_policy(),
-            )
+                detection_enabled=True,
+            ).scene_ready
 
     @property
     def visual_backup_scene_ready(self) -> bool:
         with self._visual_lock:
-            return self.visual_backup.scene_ready
+            return self.ema_v2.scene_ready
 
     @property
     def visual_backup_stable_samples(self) -> int:
         with self._visual_lock:
-            return self.visual_backup.stable_samples
+            return self.ema_v2.observation_count
 
     def reset_visual_backup_candidate(self) -> None:
         with self._visual_lock:
@@ -1062,17 +1073,26 @@ class MotionAnalysisService:
                 self.qualification.suppression_verification_rate(),
             )
         )
+        if illumination_probe_allowed:
+            result = MotionQualificationResult(
+                accepted=True,
+                score=result.score,
+                threshold=result.threshold,
+                reason="illumination_verification_probe",
+                frame_count=result.frame_count,
+                features={**result.features, "illumination_verification_probe": True},
+                telemetry=dict(result.telemetry),
+            )
         with self._visual_lock:
-            decision = self.visual_backup.evaluate(
+            decision = self.ema_v2.evaluate(
                 result,
                 captured_at,
+                time.monotonic(),
                 self.qualification.visual_backup_policy(),
                 detection_enabled=self.state.detection_enabled(),
-                camera_motion_times=self.events.camera_motion_snapshot(),
-                illumination_probe_allowed=illumination_probe_allowed,
             )
         result = decision.result
-        if decision.action in {VisualBackupAction.DISABLED, VisualBackupAction.IGNORED}:
+        if decision.action in {EmaSignalAction.DISABLED, EmaSignalAction.REJECTED}:
             if decision.count_nonpromotion:
                 self.state.increment_stat("visual_backup_not_promoted", 1)
                 self._observe_visual_backup_nonpromotion(
@@ -1089,61 +1109,64 @@ class MotionAnalysisService:
         # learning means the preceding low-score observations were not a
         # completed missed-rescue episode.
         self._discard_visual_backup_nonpromotion()
-        if decision.action == VisualBackupAction.NOT_READY:
+        if decision.action == EmaSignalAction.LEARNING:
             self.state.increment_stat("visual_backup_not_ready", 1)
             if decision.readiness_audit_needed:
                 self.record_visual_backup_readiness_audit(result, captured_at)
             return
-        if decision.action in {
-            VisualBackupAction.ACCUMULATING,
-            VisualBackupAction.CAMERA_NOTICE,
-            VisualBackupAction.READY,
-        }:
+        if decision.action in {EmaSignalAction.ACCUMULATING, EmaSignalAction.QUALIFIED}:
             self.state.increment_stat("visual_backup_candidates", 1)
-        if decision.action == VisualBackupAction.ACCUMULATING:
+        if decision.action == EmaSignalAction.ACCUMULATING:
             return
-        if decision.action == VisualBackupAction.CAMERA_NOTICE:
-            if decision.new_camera_match:
+        if decision.action != EmaSignalAction.QUALIFIED or decision.qualified is None:
+            return
+        episode = self.events.episode_controller.observe_ema(
+            decision.qualified,
+            generation=self.state.lifecycle_generation(),
+        )
+        if episode.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST:
+            if (
+                episode.intent is not None
+                and MotionSource.CAMERA in episode.intent.sources
+            ):
                 self.state.increment_stat("visual_backup_onvif_matches", 1)
             return
-        if decision.action != VisualBackupAction.READY:
-            return
-        if not self._reserve_visual_backup_trigger(captured_at):
+        if episode.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
             self.state.increment_stat("visual_backup_not_promoted", 1)
-            self.reset_visual_backup_candidate()
+            return
+        intent = episode.intent
+        if intent is None:
             return
 
         trigger_enqueued = False
         try:
             if self._stopping():
                 return
-            fused = self.qualification.with_source_evidence(
-                result,
-                samples[0][0],
-                captured_at,
-                include_telemetry=False,
-                require_primary_trigger=True,
-            )
-            self.last_continuous_result = fused
-            if self._stopping() or not fused.accepted:
-                return
             fused = MotionQualificationResult(
-                accepted=fused.accepted,
-                score=fused.score,
-                threshold=fused.threshold,
-                reason=fused.reason,
-                frame_count=fused.frame_count,
+                accepted=True,
+                score=result.score,
+                threshold=result.threshold,
+                reason=(
+                    result.reason
+                    if result.reason == "illumination_verification_probe"
+                    else "ema_v2_qualified"
+                ),
+                frame_count=result.frame_count,
                 features={
-                    **fused.features,
+                    **result.features,
                     "visual_backup": True,
+                    "ema_v2": True,
+                    "motion_episode_id": intent.episode_id,
                     "visual_backup_required_score": round(
                         decision.required_score, 4
                     ),
-                    "visual_backup_consecutive": decision.consecutive,
+                    "visual_backup_consecutive": decision.qualifying_samples,
+                    "visual_backup_window_samples": decision.window_samples,
                     "visual_backup_grace_seconds": settings["grace_seconds"],
                 },
-                telemetry=dict(fused.telemetry),
+                telemetry=dict(result.telemetry),
             )
+            self.last_continuous_result = fused
             event_at = datetime.fromtimestamp(captured_at, timezone.utc)
             trigger_enqueued = self._enqueue_trigger(
                 MotionTrigger(
@@ -1152,22 +1175,34 @@ class MotionAnalysisService:
                     event_at=event_at,
                     received_at=captured_at,
                     prequalified=fused,
+                    episode_id=intent.episode_id,
+                    detection_intent_id=intent.intent_id,
+                    lifecycle_generation=intent.generation,
                 )
+            )
+            self.events.episode_controller.acknowledge_admission(
+                intent.intent_id,
+                admitted=trigger_enqueued,
+                occurred_monotonic=time.monotonic(),
             )
             if not trigger_enqueued:
                 return
             self.state.increment_stat("visual_backup_triggers", 1)
             self.state.increment_stat(
                 "illumination_verification_probes",
-                int(decision.illumination_probe),
+                int(illumination_probe_allowed),
             )
-            with self._visual_lock:
-                self.visual_backup.record_trigger(captured_at)
             self._publish_motion(event_at, "visual_backup")
         finally:
-            if not trigger_enqueued:
-                self.events.defer_adaptive(captured_at)
-            self.reset_visual_backup_candidate()
+            if not trigger_enqueued and self._stopping():
+                try:
+                    self.events.episode_controller.acknowledge_admission(
+                        intent.intent_id,
+                        admitted=False,
+                        occurred_monotonic=time.monotonic(),
+                    )
+                except ValueError:
+                    pass
 
     def capture_debug(self, captured_at: float) -> None:
         samples = self.samples()

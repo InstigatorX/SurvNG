@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from survng.app.motion_ingress import MotionEventClock, MotionEventIngressService
+from survng.app.ema_v2 import MotionEpisodeController
 
 
 def _service(
@@ -17,6 +18,8 @@ def _service(
 ) -> tuple[MotionEventIngressService, Mock]:
     owned = Mock()
     owned.events.enqueue.return_value = True
+    owned.events.episode_controller = MotionEpisodeController("gate")
+    owned.events.episode_controller.start_generation(1)
     owned.state.accepting_events.return_value = accepting
     owned.state.detection_enabled.return_value = detection_enabled
     owned.state.begin_ingress.return_value = (

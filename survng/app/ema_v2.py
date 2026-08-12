@@ -323,6 +323,7 @@ class MotionEpisodeController:
         self._generation = 0
         self._sequence = 0
         self._episode: _Episode | None = None
+        self._last_completed_monotonic: float | None = None
         self._transitions: deque[EpisodeTransition] = deque(
             maxlen=max(16, transition_limit)
         )
@@ -334,6 +335,7 @@ class MotionEpisodeController:
             if generation != self._generation:
                 self._generation = generation
                 self._episode = None
+                self._last_completed_monotonic = None
 
     def observe_camera(
         self, notice: CameraNotice, *, generation: int
@@ -417,8 +419,8 @@ class MotionEpisodeController:
                     episode.intent,
                 )
             if (
-                episode.completed_monotonic is not None
-                and observed_monotonic - episode.completed_monotonic
+                self._last_completed_monotonic is not None
+                and observed_monotonic - self._last_completed_monotonic
                 < self.cooldown_seconds
             ):
                 return self._decision(
@@ -475,6 +477,21 @@ class MotionEpisodeController:
                 episode.intent,
             )
 
+    def abort(
+        self, intent_id: str, *, occurred_monotonic: float
+    ) -> EpisodeDecision:
+        with self._lock:
+            episode = self._require_intent(intent_id)
+            source = episode.intent.primary_source
+            episode.status = DetectionRequestStatus.ABORTED
+            episode.intent = None
+            return self._decision(
+                EpisodeDecisionReason.REQUEST_ABORTED,
+                source,
+                occurred_monotonic,
+                episode,
+            )
+
     def mark_running(
         self, intent_id: str, *, occurred_monotonic: float
     ) -> EpisodeDecision:
@@ -496,6 +513,7 @@ class MotionEpisodeController:
             episode = self._require_intent(intent_id)
             episode.status = DetectionRequestStatus.COMPLETED
             episode.completed_monotonic = occurred_monotonic
+            self._last_completed_monotonic = occurred_monotonic
             return self._decision(
                 EpisodeDecisionReason.REQUEST_COMPLETED,
                 episode.intent.primary_source,
@@ -531,6 +549,7 @@ class MotionEpisodeController:
     def reset(self) -> None:
         with self._lock:
             self._episode = None
+            self._last_completed_monotonic = None
             self._transitions.clear()
 
     def _episode_for(self, observed_monotonic: float) -> _Episode:

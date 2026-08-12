@@ -26,6 +26,7 @@ from survng.app.config import CameraConfig, ImageStorageConfig, MotionQualificat
 from survng.app.detector import objects_to_json
 from survng.app.image_storage import DurableImageWriter
 from survng.app.motion import MotionQualificationResult
+from survng.app.ema_v2 import CameraNotice
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_events import MotionTrigger, MotionTriggerBatch
 from survng.app.motion_decisions import (
@@ -971,7 +972,7 @@ class CameraWorkerTest(unittest.TestCase):
         self.assertEqual(trigger.topic, "adaptive/visual_backup")
         self.assertTrue(trigger.prequalified.features["visual_backup"])
 
-    def test_visual_backup_counts_rate_limited_promotion_without_audit(self) -> None:
+    def test_visual_backup_merges_with_admitted_request_without_duplicate(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(
             mode="camera_rescue",
@@ -985,12 +986,22 @@ class CameraWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             prime_visual_backup_scene(worker, 90.0)
-            worker.motion_events.adaptive_trigger_pending = True
+            notice = worker.motion_events.episode_controller.observe_camera(
+                CameraNotice("gate", 99.5, time.monotonic(), "motion"),
+                generation=worker.runtime_state.generation,
+            )
+            self.assertIsNotNone(notice.intent)
+            worker.motion_events.episode_controller.acknowledge_admission(
+                notice.intent.intent_id,
+                admitted=True,
+                occurred_monotonic=time.monotonic(),
+            )
             worker.motion_analysis.consider_visual_backup(accepted, samples, 100.0)
             worker.motion_analysis.consider_visual_backup(accepted, samples, 100.5)
-        self.assertEqual(worker.motion_state._stats["visual_backup_not_promoted"], 1)
+        self.assertTrue(worker.motion_events.queue.empty())
+        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 1)
 
-    def test_visual_backup_yields_to_recent_onvif_notice(self) -> None:
+    def test_raw_onvif_observation_does_not_suppress_visual_backup(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(
             mode="camera_rescue",
@@ -1011,8 +1022,8 @@ class CameraWorkerTest(unittest.TestCase):
             for captured_at in (102.0, 102.5, 103.0):
                 worker.motion_analysis.consider_visual_backup(accepted, samples, captured_at)
 
-        self.assertTrue(worker.motion_events.queue.empty())
-        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 1)
+        self.assertFalse(worker.motion_events.queue.empty())
+        self.assertEqual(worker.motion_state._stats["visual_backup_onvif_matches"], 0)
         self.assertEqual(worker.motion_state._stats["visual_backup_candidates"], 6)
 
     def test_visual_backup_waits_for_background_learning_after_startup(self) -> None:
@@ -1042,7 +1053,7 @@ class CameraWorkerTest(unittest.TestCase):
 
         self.assertEqual(trigger.topic, "adaptive/visual_backup")
 
-    def test_visual_backup_readiness_resets_until_post_warmup_scene_is_quiet(self) -> None:
+    def test_visual_backup_readiness_uses_learning_health_not_quiet_scene(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
         config = MotionQualificationConfig(
             mode="camera_rescue",
@@ -1056,11 +1067,8 @@ class CameraWorkerTest(unittest.TestCase):
             worker = make_worker(camera, Path(tmpdir), motion_config=config)
             self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 100.0))
             self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 109.5))
-            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 110.0))
-            self.assertFalse(worker.motion_analysis.visual_backup_readiness(active, 110.75))
-            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 111.0))
-            self.assertFalse(worker.motion_analysis.visual_backup_readiness(stable, 111.75))
-            self.assertTrue(worker.motion_analysis.visual_backup_readiness(stable, 112.5))
+            self.assertTrue(worker.motion_analysis.visual_backup_readiness(stable, 110.0))
+            self.assertTrue(worker.motion_analysis.visual_backup_readiness(active, 110.75))
 
     def test_visual_trigger_modes_run_custom_non_adaptive_qualifiers_continuously(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
@@ -1974,11 +1982,11 @@ class CameraWorkerTest(unittest.TestCase):
                     time.sleep(0.01)
 
             self.assertTrue(thread.is_alive())
-            self.assertEqual(process_event.call_count, 3)
+            self.assertEqual(process_event.call_count, 2)
             self.assertEqual(worker.motion_state._stats["event_worker_errors"], 1)
             self.assertEqual(worker.motion_state._stats["event_retries"], 1)
-            self.assertEqual(worker.motion_state._stats["bursts"], 2)
-            self.assertEqual(worker.motion_state._stats["passed"], 2)
+            self.assertEqual(worker.motion_state._stats["bursts"], 1)
+            self.assertEqual(worker.motion_state._stats["passed"], 1)
             worker._stop.set()
             worker.motion_events.queue.put_nowait(None)
             thread.join(timeout=1)
@@ -2902,7 +2910,7 @@ class CameraWorkerTest(unittest.TestCase):
             self.assertEqual(process_event.call_count, 1)
             qualifications = [payload for event_type, payload in published if event_type == "motion_qualification"]
             self.assertEqual(len(qualifications), 1)
-            self.assertEqual(qualifications[0]["trigger_count"], 2)
+            self.assertEqual(qualifications[0]["trigger_count"], 1)
 
     def test_audit_records_detector_failure_as_not_run(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")

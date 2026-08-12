@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping, Protocol
 from .motion_decisions import priority_motion_topic
 from .motion_events import MotionEventCoordinator, MotionEventTiming, MotionTrigger
 from .domain_events import MotionObserved
+from .ema_v2 import CameraNotice, EpisodeDecisionReason
 
 
 class MotionIngressQualification(Protocol):
@@ -32,6 +33,7 @@ class MotionIngressState(Protocol):
     def publish_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
     def set_last_motion_at(self, value: str) -> None: ...
     def increment_stat(self, name: str, amount: int = 1) -> None: ...
+    def lifecycle_generation(self) -> int: ...
 
 
 class MotionEventClock:
@@ -184,13 +186,37 @@ class MotionEventIngressService:
                     source="manual" if manual else "onvif",
                 ).to_payload() | {"event_timing": event_timing.to_payload()},
             )
-            self.enqueue(MotionTrigger(
+            episode = self.events.episode_controller.observe_camera(
+                CameraNotice(
+                    camera_id=self.camera_id,
+                    event_at=normalized_event_at.timestamp(),
+                    observed_monotonic=time.monotonic(),
+                    topic=topic,
+                    message=message,
+                    manual=manual,
+                ),
+                generation=generation,
+            )
+            if episode.reason is not EpisodeDecisionReason.REQUEST_RESERVED:
+                return
+            intent = episode.intent
+            if intent is None:
+                return
+            queued = self.enqueue(MotionTrigger(
                 topic=topic,
                 message=message,
                 event_at=normalized_event_at,
                 received_at=received_at,
                 event_timing=event_timing,
-            ))
+                episode_id=intent.episode_id,
+                detection_intent_id=intent.intent_id,
+                lifecycle_generation=intent.generation,
+            ), evict_oldest=False)
+            self.events.episode_controller.acknowledge_admission(
+                intent.intent_id,
+                admitted=queued,
+                occurred_monotonic=time.monotonic(),
+            )
         finally:
             self.state.end_ingress(generation)
 

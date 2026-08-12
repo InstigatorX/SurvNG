@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Any, Callable, Iterable, Iterator
 
 from .motion import MotionQualificationResult
+from .ema_v2 import MotionEpisodeController
 
 StatCallback = Callable[[str], None]
 
@@ -65,6 +66,9 @@ class MotionTrigger:
     retry_diagnostics: dict[str, Any] | None = None
     audit_snapshot_path: str | None = None
     event_timing: MotionEventTiming | None = None
+    episode_id: str = ""
+    detection_intent_id: str = ""
+    lifecycle_generation: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
@@ -96,6 +100,14 @@ class MotionTrigger:
             raise TypeError("motion trigger prequalified result has an invalid type")
         if not isinstance(self.decision_id, str):
             raise TypeError("motion trigger decision ID must be a string")
+        if not isinstance(self.episode_id, str):
+            raise TypeError("motion trigger episode ID must be a string")
+        if not isinstance(self.detection_intent_id, str):
+            raise TypeError("motion trigger detection intent ID must be a string")
+        if isinstance(self.lifecycle_generation, bool) or not isinstance(
+            self.lifecycle_generation, int
+        ):
+            raise TypeError("motion trigger lifecycle generation must be an integer")
         if self.retry_batch is not None and (
             not isinstance(self.retry_batch, tuple)
             or not all(isinstance(item, MotionTrigger) for item in self.retry_batch)
@@ -196,12 +208,19 @@ class MotionEventCoordinator:
     stable batch of triggers to that policy.
     """
 
-    def __init__(self, *, queue_size: int, retry_limit: int) -> None:
+    def __init__(
+        self,
+        *,
+        queue_size: int,
+        retry_limit: int,
+        camera_id: str = "camera",
+    ) -> None:
         self.queue: queue.Queue[MotionTrigger | None] = queue.Queue(
             maxsize=queue_size
         )
         self.retry_batches: deque[MotionTrigger] = deque()
         self._episode = MotionEpisodeState()
+        self.episode_controller = MotionEpisodeController(camera_id)
         self._retry_limit = retry_limit
         self._lock = threading.RLock()
         self._runtime_metrics = {
@@ -340,6 +359,20 @@ class MotionEventCoordinator:
             event_at=min(item.event_at for item in retry_triggers),
             received_at=min(item.received_at for item in retry_triggers),
             retry_batch=tuple(retry_triggers),
+            episode_id=next(
+                (item.episode_id for item in retry_triggers if item.episode_id), ""
+            ),
+            detection_intent_id=next(
+                (
+                    item.detection_intent_id
+                    for item in retry_triggers
+                    if item.detection_intent_id
+                ),
+                "",
+            ),
+            lifecycle_generation=max(
+                (item.lifecycle_generation for item in retry_triggers), default=0
+            ),
         )
         with self._lock:
             self.retry_batches.append(wrapper)
@@ -506,6 +539,7 @@ class MotionEventCoordinator:
         self.clear()
         with self._lock:
             self._episode = MotionEpisodeState(sequence=self._episode.sequence)
+            self.episode_controller.reset()
 
     def reset_timebase(self) -> None:
         """Discard wall-clock histories without disturbing queued work."""

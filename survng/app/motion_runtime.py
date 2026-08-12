@@ -108,6 +108,10 @@ class CameraMotionState:
         with self.camera_state.lock:
             return self.camera_state.detection_enabled
 
+    def lifecycle_generation(self) -> int:
+        with self.camera_state.lock:
+            return self.camera_state.generation
+
     def accepting_events(self) -> bool:
         with self.camera_state.lock:
             return self.camera_state.accepting_motion_events
@@ -281,6 +285,9 @@ class MotionRuntimeService:
                     f"workers remain: {', '.join(residual)}"
                 )
             self.events.clear()
+            self.events.episode_controller.start_generation(
+                self.state.lifecycle_generation()
+            )
             self._stop_event = stop_event
             try:
                 self.incidents.start(stop_event)

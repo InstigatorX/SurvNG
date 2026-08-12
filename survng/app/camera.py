@@ -171,6 +171,7 @@ class CameraWorker:
         self.motion_events = MotionEventCoordinator(
             queue_size=MOTION_QUEUE_SIZE,
             retry_limit=MOTION_EVENT_MAX_RETRIES,
+            camera_id=camera.id,
         )
         self.visual_backup = VisualBackupCoordinator()
         self.motion_qualification = MotionQualificationService(

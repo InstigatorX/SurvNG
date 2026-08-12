@@ -248,9 +248,12 @@ class MotionDecisionOrchestrator:
         stop_event: threading.Event,
     ) -> None:
         if stop_event.is_set():
+            if not any(item.retry_count > 0 for item in triggers):
+                self._abort_episode_intents(triggers)
             self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
             return
+        self._mark_episode_intents_running(triggers)
         priority_triggers = [
             item for item in triggers if priority_motion_topic(item.topic)
         ]
@@ -294,6 +297,7 @@ class MotionDecisionOrchestrator:
             adaptive_only=adaptive_only,
         )
         if stop_event.is_set():
+            self._abort_episode_intents(triggers)
             self._complete_adaptive_trigger(triggers)
             self._events.set_active(None)
             return
@@ -841,7 +845,45 @@ class MotionDecisionOrchestrator:
         )
 
     def _complete_adaptive_trigger(self, triggers: MotionTriggerBatch) -> None:
+        completed_monotonic = time.monotonic()
+        for intent_id in {
+            item.detection_intent_id for item in triggers if item.detection_intent_id
+        }:
+            try:
+                self._events.episode_controller.complete(
+                    intent_id,
+                    occurred_monotonic=completed_monotonic,
+                )
+            except ValueError:
+                # A stopped generation may already have aborted the reservation.
+                pass
         self._events.complete_adaptive(triggers, time.time())
+
+    def _mark_episode_intents_running(self, triggers: MotionTriggerBatch) -> None:
+        started_monotonic = time.monotonic()
+        for intent_id in {
+            item.detection_intent_id for item in triggers if item.detection_intent_id
+        }:
+            try:
+                self._events.episode_controller.mark_running(
+                    intent_id,
+                    occurred_monotonic=started_monotonic,
+                )
+            except ValueError:
+                pass
+
+    def _abort_episode_intents(self, triggers: MotionTriggerBatch) -> None:
+        aborted_monotonic = time.monotonic()
+        for intent_id in {
+            item.detection_intent_id for item in triggers if item.detection_intent_id
+        }:
+            try:
+                self._events.episode_controller.abort(
+                    intent_id,
+                    occurred_monotonic=aborted_monotonic,
+                )
+            except ValueError:
+                pass
 
     def _related_incident_event_id(
         self,
