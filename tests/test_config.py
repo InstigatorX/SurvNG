@@ -10,6 +10,8 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from survng.app.config import (
+    ApiAuthConfig,
+    ApiTokenConfig,
     AppConfig,
     CameraConfig,
     CameraTransitionRoute,
@@ -122,6 +124,17 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(AppConfig().database_dir, "")
         self.assertEqual(AppConfig().recording_index_dir, "")
         self.assertFalse(AppConfig().incident_thumbnail_annotations)
+        self.assertFalse(AppConfig().api_auth.enabled)
+
+    def test_api_auth_requires_tokens_and_unique_ids(self) -> None:
+        digest = "a" * 64
+        with self.assertRaises(ValidationError):
+            ApiAuthConfig(enabled=True)
+        with self.assertRaises(ValidationError):
+            ApiAuthConfig(tokens=[
+                ApiTokenConfig(id="ha", name="HA", token_hash=digest),
+                ApiTokenConfig(id="ha", name="Other", token_hash="b" * 64),
+            ])
 
     def test_base_path_is_normalized(self) -> None:
         self.assertEqual(AppConfig(base_path=" cameras/ ").base_path, "/cameras")

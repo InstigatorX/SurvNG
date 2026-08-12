@@ -13,6 +13,44 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 
 CONFIG_PATH_ENV = "SURVNG_CONFIG_PATH"
 
+ApiScope = Literal["read", "camera:control", "admin"]
+
+
+class ApiTokenConfig(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    name: str = Field(min_length=1, max_length=128)
+    token_hash: str = Field(
+        min_length=20,
+        max_length=64,
+        pattern=r"^(?:[0-9a-f]{64}|__SURVNG_SECRET_SET__)$",
+    )
+    scopes: list[ApiScope] = Field(default_factory=lambda: ["read"])
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, value: list[ApiScope]) -> list[ApiScope]:
+        normalized = list(dict.fromkeys(value))
+        if not normalized:
+            raise ValueError("API tokens require at least one scope")
+        return normalized
+
+
+class ApiAuthConfig(BaseModel):
+    enabled: bool = False
+    tokens: list[ApiTokenConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_tokens(self) -> "ApiAuthConfig":
+        token_ids = [token.id for token in self.tokens]
+        token_hashes = [token.token_hash for token in self.tokens]
+        if len(token_ids) != len(set(token_ids)):
+            raise ValueError("API token ids must be unique")
+        if len(token_hashes) != len(set(token_hashes)):
+            raise ValueError("API token hashes must be unique")
+        if self.enabled and not self.tokens:
+            raise ValueError("API authentication cannot be enabled without a token")
+        return self
+
 
 class OnvifConfig(BaseModel):
     enabled: bool = False
@@ -583,6 +621,7 @@ class AppConfig(BaseModel):
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
     image_storage: ImageStorageConfig = Field(default_factory=ImageStorageConfig)
+    api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
     audit_ai: AuditAiConfig = Field(default_factory=AuditAiConfig)
@@ -717,6 +756,11 @@ def _config_path(path: str | Path | None = None) -> Path:
         return Path(path)
     configured_path = os.environ.get(CONFIG_PATH_ENV, "").strip()
     return Path(configured_path or "config.json")
+
+
+def config_path(path: str | Path | None = None) -> Path:
+    """Return the effective configuration path for administrative tooling."""
+    return _config_path(path)
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

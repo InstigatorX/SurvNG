@@ -170,6 +170,28 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
 
         return with_manager_lease(info)
 
+    @router.get("/api/cameras/{camera_id}/stream-source")
+    def stream_source(
+        camera_id: str,
+        response: Response,
+        source: str = "live",
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+
+        def descriptor(active_manager: AppManager) -> dict[str, Any]:
+            camera = active_manager.camera(camera_id)
+            worker = active_manager.workers.get(camera_id)
+            if camera is None or worker is None:
+                raise HTTPException(status_code=404, detail="camera not found")
+            if not worker.status().get("running"):
+                raise HTTPException(status_code=503, detail="camera is powered off")
+            try:
+                return active_manager.go2rtc.stream_source(camera, source)
+            except Go2RtcError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)[:160]) from exc
+
+        return with_manager_lease(descriptor)
+
     @router.get("/api/cameras/{camera_id}/stream.mjpg")
     async def stream(
         camera_id: str,

@@ -166,6 +166,14 @@ def restore_config_secrets(incoming: AppConfig, current: AppConfig) -> AppConfig
         current.audit_ai.api_key,
         "audit_ai.api_key",
     )
+    current_api_tokens = {token.id: token for token in current.api_auth.tokens}
+    for token in restored.api_auth.tokens:
+        if token.token_hash != SECRET_PLACEHOLDER:
+            continue
+        existing = current_api_tokens.get(token.id)
+        if existing is None:
+            raise ValueError("new API tokens must provide their own token hash")
+        token.token_hash = existing.token_hash
     current_by_id = {camera.id: camera for camera in current.cameras}
     same_shape = len(restored.cameras) == len(current.cameras)
     restored.cameras = [
@@ -197,6 +205,8 @@ def redacted_config_payload(config: AppConfig) -> dict:
     payload = config.model_dump(mode="json")
     payload["mqtt"]["password"] = SECRET_PLACEHOLDER if config.mqtt.password else ""
     payload["audit_ai"]["api_key"] = SECRET_PLACEHOLDER if config.audit_ai.api_key else ""
+    for token in payload["api_auth"]["tokens"]:
+        token["token_hash"] = SECRET_PLACEHOLDER
     payload["cameras"] = [redacted_camera_payload(camera) for camera in config.cameras]
     return payload
 

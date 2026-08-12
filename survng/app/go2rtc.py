@@ -19,6 +19,8 @@ class Go2RtcError(RuntimeError):
 class Go2RtcStream:
     host: str
     name: str
+    port: int = 8554
+    scheme: str = "rtsp"
 
 
 class Go2RtcAdapter:
@@ -35,7 +37,32 @@ class Go2RtcAdapter:
         stream_name = unquote(parsed.path.strip("/"))
         if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname or not stream_name:
             raise Go2RtcError("camera source is not a go2rtc RTSP restream")
-        return Go2RtcStream(parsed.hostname, stream_name)
+        return Go2RtcStream(
+            parsed.hostname,
+            stream_name,
+            parsed.port or 8554,
+            parsed.scheme,
+        )
+
+    def stream_source(self, camera: CameraConfig, source: str = "live") -> dict[str, Any]:
+        stream = self.stream(camera, source)
+        info = self.stream_info(camera, source)
+        if not info.get("available"):
+            raise Go2RtcError("go2rtc stream is unavailable")
+        authority = self._host_authority(stream.host)
+        encoded_name = quote(stream.name, safe="")
+        normalized_source = camera.normalized_source(source)
+        return {
+            "schema_version": 1,
+            "camera_id": camera.id,
+            "source": normalized_source,
+            "transport": stream.scheme,
+            "url": f"{stream.scheme}://{authority}:{stream.port}/{encoded_name}",
+            "credentials_embedded": False,
+            "available": True,
+            "video_codec": info.get("video_codec", ""),
+            "video_codecs": list(info.get("video_codecs") or []),
+        }
 
     def snapshot(self, camera: CameraConfig, source: str = "live") -> bytes:
         stream = self.stream(camera, source)

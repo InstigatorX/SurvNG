@@ -464,6 +464,50 @@ The power command also accepts JSON such as `{"state":"OFF"}`. Replace `survng` 
 
 When Home Assistant Discovery is enabled, SurvNG publishes retained entity configuration under `homeassistant/` by default. Each camera appears as a Home Assistant device with a power switch, camera-wide motion and object binary sensors, and a last-object sensor. Every enabled detection zone appears as its own device with an any-object binary sensor and one binary sensor for each class configured on that zone. A zone with no class filter receives sensors for every class in the active detection model. Change the discovery prefix if the Home Assistant MQTT integration uses a non-default prefix.
 
+### API authentication
+
+SurvNG supports optional scoped long-lived bearer tokens for integrations and
+automation clients. Authentication is disabled by default for compatibility
+with trusted-LAN and existing reverse-proxy deployments. Create a Home
+Assistant token from the repository root:
+
+```bash
+.venv/bin/python scripts/create-api-token.py \
+  --id home-assistant \
+  --name "Home Assistant" \
+  --scope read \
+  --scope camera:control \
+  --enable
+```
+
+The command prints the bearer token once and stores only its SHA-256 digest in
+the active SurvNG configuration. Send it on API requests as:
+
+```text
+Authorization: Bearer <SURVNG_TOKEN>
+```
+
+Available scopes are `read`, `camera:control`, and `admin`. The `admin` scope
+includes the other scopes. Camera power, recording, and detection controls need
+`camera:control`; other mutations need `admin`. `GET /api/health` intentionally
+remains unauthenticated for service supervision.
+
+When authentication is enabled, the SurvNG browser UI also needs the bearer
+header for API and WebSocket requests. A reverse proxy can inject that header
+after completing its own user authentication. Keep the native SurvNG port on a
+trusted network so clients cannot bypass that proxy.
+
+### Integration stream sources
+
+`GET /api/cameras/CAMERA_ID/stream-source?source=live` returns a versioned,
+FFmpeg-readable go2rtc RTSP descriptor for integrations such as Home Assistant.
+Use `source=main` for the configured main stream. The descriptor preserves the
+configured go2rtc host, port, stream name and native codec while removing all
+embedded user information. It returns `404` for an unknown camera and `503`
+when the camera or go2rtc stream is unavailable. Stream URLs are operational
+secrets and should not be exposed as Home Assistant entity attributes or
+diagnostic fields even when they contain no credentials.
+
 SurvNG also publishes a separate `SurvNG Server` device. Its entities report system status (`starting`, `running`, `stopping`, or `restarting`), overall health, current maintenance activity, uptime, camera and recorder counts, CPU and memory load, cached storage capacity, and object-detector status. Server state and metrics are retained at `survng/server/state` and `survng/server/metrics`; state transitions are published without retention at `survng/server/event`. The existing `survng/status` topic remains the availability and Last Will topic for both server and camera entities. An unexpected process or network failure therefore becomes `offline`; graceful shutdown is reported as `stopping` before disconnect.
 
 Server status publishing can be disabled independently of camera messages. The metrics interval defaults to 30 seconds and can be adjusted from 10 to 3600 seconds under Admin > MQTT. Storage metrics reuse the most recent daily retention plan instead of scanning the recording filesystem on every MQTT update. MQTT reports daily projection work as `planning` and collapses bounded cleanup and its short inter-batch waits into the stable `cleaning` activity.

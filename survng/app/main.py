@@ -81,7 +81,7 @@ from .system_telemetry import (
 )
 from .system_routes import SystemRouteDependencies, create_system_router
 from .training_routes import TrainingRouteDependencies, create_training_router
-from .security import redact_secret_text
+from .security import authenticate_api_token, redact_secret_text, required_api_scope
 from .storage_maintenance import StorageMaintenanceRunner
 
 config = load_config()
@@ -208,11 +208,44 @@ class SecurityBoundaryMiddleware:
 
     async def __call__(self, scope, receive, send) -> None:
         scope_type = scope.get("type")
+        api_path = _api_scope_path(scope)
+        if (
+            scope_type in {"http", "websocket"}
+            and api_path.startswith("/api/")
+            and api_path != "/api/health"
+            and config.api_auth.enabled
+        ):
+            authorization = _scope_header(scope, b"authorization")
+            principal = authenticate_api_token(authorization, config.api_auth)
+            required_scope = required_api_scope(
+                str(scope.get("method") or "GET"), api_path
+            )
+            if principal is None or not principal.permits(required_scope):
+                if scope_type == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    status = 401 if principal is None else 403
+                    headers = {"Cache-Control": "no-store"}
+                    if status == 401:
+                        headers["WWW-Authenticate"] = 'Bearer realm="SurvNG"'
+                    response = JSONResponse(
+                        {
+                            "detail": (
+                                "valid bearer token required"
+                                if status == 401
+                                else f"API token requires {required_scope} scope"
+                            )
+                        },
+                        status_code=status,
+                        headers=headers,
+                    )
+                    await response(scope, receive, send)
+                return
         if (
             scope_type == "http"
             and APPLICATION_STOPPING.is_set()
             and str(scope.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}
-            and _api_scope_path(scope).startswith("/api/")
+            and api_path.startswith("/api/")
         ):
             response = JSONResponse(
                 {"detail": "SurvNG is shutting down; configuration changes are temporarily unavailable"},
@@ -226,7 +259,7 @@ class SecurityBoundaryMiddleware:
             return
         if (
             scope_type == "http"
-            and _api_scope_path(scope).startswith("/api/")
+            and api_path.startswith("/api/")
             and not _same_origin_request(scope)
         ):
             response = JSONResponse(
@@ -813,6 +846,7 @@ app.include_router(_camera_api_route_bundle.router)
 snapshot = _camera_api_route_bundle.handlers["snapshot"]
 zone_snapshot = _camera_api_route_bundle.handlers["zone_snapshot"]
 live_info = _camera_api_route_bundle.handlers["live_info"]
+stream_source = _camera_api_route_bundle.handlers["stream_source"]
 stream = _camera_api_route_bundle.handlers["stream"]
 relay_go2rtc_websocket = _camera_api_route_bundle.handlers[
     "relay_go2rtc_websocket"

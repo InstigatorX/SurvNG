@@ -51,6 +51,39 @@ class Go2RtcAdapterTest(unittest.TestCase):
             "ws://10.1.1.1:1984/api/ws?src=back_middle",
         )
 
+    def test_stream_source_is_stable_and_contains_no_camera_credentials(self) -> None:
+        adapter = Go2RtcAdapter()
+        payload = {
+            "back_middle_ext": {
+                "producers": [{"medias": ["video, recvonly, H264"]}],
+            },
+        }
+        with patch.object(adapter, "_streams", return_value=payload):
+            descriptor = adapter.stream_source(self.camera(), "live")
+
+        self.assertEqual(descriptor["schema_version"], 1)
+        self.assertEqual(descriptor["camera_id"], "back-middle")
+        self.assertEqual(descriptor["source"], "live")
+        self.assertEqual(descriptor["transport"], "rtsp")
+        self.assertEqual(descriptor["url"], "rtsp://10.1.1.1:8554/back_middle_ext")
+        self.assertFalse(descriptor["credentials_embedded"])
+
+    def test_stream_source_removes_credentials_and_quotes_stream_name(self) -> None:
+        adapter = Go2RtcAdapter()
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://viewer:secret@[fd00::10]:9554/front%20gate",
+        )
+        with patch.object(adapter, "_streams", return_value={
+            "front gate": {"producers": [{"medias": ["video, recvonly, H265"]}]},
+        }):
+            descriptor = adapter.stream_source(camera, "main")
+
+        self.assertEqual(descriptor["url"], "rtsp://[fd00::10]:9554/front%20gate")
+        self.assertNotIn("viewer", str(descriptor))
+        self.assertNotIn("secret", str(descriptor))
+
     def test_stream_info_keeps_native_mode_when_h264_is_available(self) -> None:
         adapter = Go2RtcAdapter()
         payload = {

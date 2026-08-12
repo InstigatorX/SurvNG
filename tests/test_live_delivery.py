@@ -10,7 +10,7 @@ from starlette.responses import Response
 
 from survng.app.camera_api_routes import CameraApiDependencies, create_camera_api_router
 from survng.app.manager_access import ManagerAccessCoordinator
-from survng.app.main import live_info, relay_go2rtc_websocket, stream
+from survng.app.main import live_info, relay_go2rtc_websocket, stream, stream_source
 from starlette.websockets import WebSocketDisconnect
 
 
@@ -105,6 +105,31 @@ class LiveDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(mjpeg.headers["cache-control"], "no-store")
         self.assertEqual(mjpeg.headers["x-accel-buffering"], "no")
+
+    async def test_stream_source_returns_credential_safe_descriptor(self) -> None:
+        response = Response()
+        camera = Mock()
+        worker = Mock()
+        worker.status.return_value = {"running": True}
+        descriptor = {
+            "schema_version": 1,
+            "camera_id": "gate",
+            "source": "live",
+            "transport": "rtsp",
+            "url": "rtsp://go2rtc.local:8554/gate_ext",
+            "credentials_embedded": False,
+            "available": True,
+            "video_codec": "H264",
+            "video_codecs": ["H264"],
+        }
+        with (
+            patch("survng.app.main.manager.camera", return_value=camera),
+            patch("survng.app.main.manager.workers", {"gate": worker}),
+            patch("survng.app.main.manager.go2rtc.stream_source", return_value=descriptor),
+        ):
+            self.assertEqual(stream_source("gate", response), descriptor)
+
+        self.assertEqual(response.headers["cache-control"], "no-store")
 
     async def test_relay_resolves_blocking_go2rtc_url_off_the_event_loop(self) -> None:
         websocket = SimpleNamespace(

@@ -13,6 +13,8 @@ from pydantic import ValidationError
 from survng.app import main
 from survng.app.config import (
     AppConfig,
+    ApiAuthConfig,
+    ApiTokenConfig,
     AuditAiConfig,
     BaichuanConfig,
     CameraConfig,
@@ -28,7 +30,7 @@ from survng.app.config_routes import (
 from survng.app.face_routes import _public_face_observation
 from survng.app.incident_presenter import _event_row
 from survng.app.recording_routes import _public_recording_row
-from survng.app.security import redact_secret_text
+from survng.app.security import hash_api_token, redact_secret_text
 
 
 def camera(camera_id: str = "gate", name: str = "Gate") -> CameraConfig:
@@ -61,6 +63,12 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             cameras=[camera()],
             mqtt=MqttConfig(password="mqtt-secret"),
             audit_ai=AuditAiConfig(api_key="ai-secret"),
+            api_auth=ApiAuthConfig(tokens=[ApiTokenConfig(
+                id="ha",
+                name="Home Assistant",
+                token_hash=hash_api_token("survng-api-secret"),
+                scopes=["read", "camera:control"],
+            )]),
         )
 
         payload = redacted_config_payload(current)
@@ -73,6 +81,7 @@ class ApiSecretBoundaryTest(unittest.TestCase):
             "baichuan-secret",
             "mqtt-secret",
             "ai-secret",
+            hash_api_token("survng-api-secret"),
         ):
             self.assertNotIn(secret, serialized)
         restored = restore_config_secrets(AppConfig.model_validate(payload), current)
@@ -193,6 +202,87 @@ class SameOriginMiddlewareTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(called)
         self.assertEqual(messages[0]["status"], 403)
+
+    async def test_enabled_api_auth_requires_a_bearer_token(self) -> None:
+        async def inner(_scope, _receive, _send) -> None:
+            self.fail("unauthenticated request reached the application")
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        messages: list[dict] = []
+        auth = ApiAuthConfig(enabled=True, tokens=[ApiTokenConfig(
+            id="ha",
+            name="Home Assistant",
+            token_hash=hash_api_token("secret-token"),
+            scopes=["read"],
+        )])
+        with patch.object(main.config, "api_auth", auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "GET",
+                "path": "/api/cameras", "headers": [(b"host", b"survng.local")],
+            }, self._receive, self._collector(messages))
+
+        self.assertEqual(messages[0]["status"], 401)
+        self.assertIn(b"www-authenticate", dict(messages[0]["headers"]))
+
+    async def test_health_check_remains_available_when_api_auth_is_enabled(self) -> None:
+        called = False
+
+        async def inner(_scope, _receive, _send) -> None:
+            nonlocal called
+            called = True
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        auth = ApiAuthConfig(enabled=True, tokens=[ApiTokenConfig(
+            id="ha", name="Home Assistant", token_hash=hash_api_token("secret-token"), scopes=["read"],
+        )])
+        with patch.object(main.config, "api_auth", auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "GET",
+                "path": "/api/health", "headers": [(b"host", b"survng.local")],
+            }, self._receive, self._collector([]))
+
+        self.assertTrue(called)
+
+    async def test_read_token_cannot_mutate_camera_state(self) -> None:
+        async def inner(_scope, _receive, _send) -> None:
+            self.fail("under-scoped request reached the application")
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        messages: list[dict] = []
+        auth = ApiAuthConfig(enabled=True, tokens=[ApiTokenConfig(
+            id="reader", name="Reader", token_hash=hash_api_token("read-token"), scopes=["read"],
+        )])
+        with patch.object(main.config, "api_auth", auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "PUT",
+                "path": "/api/cameras/gate/detection",
+                "headers": [(b"host", b"survng.local"), (b"authorization", b"Bearer read-token")],
+            }, self._receive, self._collector(messages))
+
+        self.assertEqual(messages[0]["status"], 403)
+
+    async def test_camera_control_token_reaches_camera_control_route(self) -> None:
+        called = False
+
+        async def inner(_scope, _receive, send) -> None:
+            nonlocal called
+            called = True
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        middleware = main.SecurityBoundaryMiddleware(inner)
+        auth = ApiAuthConfig(enabled=True, tokens=[ApiTokenConfig(
+            id="ha", name="Home Assistant", token_hash=hash_api_token("control-token"),
+            scopes=["read", "camera:control"],
+        )])
+        with patch.object(main.config, "api_auth", auth):
+            await middleware({
+                "type": "http", "scheme": "http", "method": "PUT",
+                "path": "/api/cameras/gate/detection",
+                "headers": [(b"host", b"survng.local"), (b"authorization", b"Bearer control-token")],
+            }, self._receive, self._collector([]))
+
+        self.assertTrue(called)
 
     async def test_cross_site_fetch_without_origin_is_rejected(self) -> None:
         async def inner(_scope, _receive, _send) -> None:
