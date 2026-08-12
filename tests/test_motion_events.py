@@ -159,8 +159,18 @@ def test_episode_controller_owns_incident_linkage() -> None:
 
 def test_stale_refinement_cannot_link_into_a_new_episode() -> None:
     coordinator = MotionEventCoordinator(queue_size=2, retry_limit=1)
-    coordinator.episode_controller.observe_camera(
+    first = coordinator.episode_controller.observe_camera(
         CameraNotice("camera", 100.0, 100.0, "onvif/motion"), generation=0
+    )
+    assert first.intent is not None
+    coordinator.episode_controller.acknowledge_admission(
+        first.intent.intent_id,
+        admitted=True,
+        occurred_monotonic=100.1,
+    )
+    coordinator.episode_controller.complete(
+        first.intent.intent_id,
+        occurred_monotonic=100.2,
     )
     sequence = coordinator.current_episode_sequence()
     coordinator.episode_controller.observe_camera(

@@ -170,7 +170,15 @@ class EmaSignalConditioner:
         ):
             self._samples.clear()
         self._samples.append(_SignalSample(captured_at, strong))
-        maximum_samples = max(policy.minimum_consecutive + 1, 3)
+        # Keep enough history to represent the configured elapsed grace period.
+        # A fixed ``minimum_consecutive + 1`` window made longer grace values
+        # impossible to satisfy regardless of how long motion persisted.
+        grace_samples = math.ceil(policy.grace_seconds / expected_interval) + 2
+        maximum_samples = max(
+            policy.minimum_consecutive + 1,
+            grace_samples,
+            3,
+        )
         while len(self._samples) > maximum_samples:
             self._samples.popleft()
 
@@ -274,6 +282,7 @@ class EpisodeDecisionReason(StrEnum):
     FOLLOWUP_DUPLICATE = "followup_duplicate"
     FOLLOWUP_RATE_LIMITED = "followup_rate_limited"
     FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
+    EMA_RATE_LIMITED = "ema_rate_limited"
     STALE_GENERATION = "stale_generation"
 
 
@@ -297,6 +306,7 @@ class DetectionIntent:
     created_monotonic: float
     primary_source: MotionSource
     sources: tuple[MotionSource, ...]
+    followup: bool = False
     ema: EmaQualified | None = None
     camera_notice: CameraNotice | None = None
 
@@ -318,7 +328,10 @@ class _Episode:
     generation: int
     started_monotonic: float
     updated_monotonic: float
+    # Observations explain the episode; only admitted sources are allowed to
+    # influence the authority of detector work downstream.
     sources: set[MotionSource] = field(default_factory=set)
+    admitted_sources: set[MotionSource] = field(default_factory=set)
     ema: EmaQualified | None = None
     camera_notice: CameraNotice | None = None
     intent: DetectionIntent | None = None
@@ -350,6 +363,7 @@ class MotionEpisodeController:
         *,
         episode_gap_seconds: float = 30.0,
         cooldown_seconds: float = 0.0,
+        maximum_ema_requests_5m: int = 3,
         transition_limit: int = 256,
         maximum_followups: int = 2,
         minimum_followup_interval_seconds: float = 1.5,
@@ -359,6 +373,7 @@ class MotionEpisodeController:
         self.camera_id = camera_id
         self.episode_gap_seconds = max(0.1, float(episode_gap_seconds))
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        self.maximum_ema_requests_5m = max(1, int(maximum_ema_requests_5m))
         self.maximum_followups = max(0, int(maximum_followups))
         self.minimum_followup_interval_seconds = max(
             0.0, float(minimum_followup_interval_seconds)
@@ -374,6 +389,7 @@ class MotionEpisodeController:
         self._sequence = 0
         self._episode: _Episode | None = None
         self._last_completed_monotonic: float | None = None
+        self._ema_admitted_times: deque[float] = deque()
         self._transitions: deque[EpisodeTransition] = deque(
             maxlen=max(16, transition_limit)
         )
@@ -387,6 +403,15 @@ class MotionEpisodeController:
                 self._generation = generation
                 self._episode = None
                 self._last_completed_monotonic = None
+                self._ema_admitted_times.clear()
+
+    def configure_rescue_policy(self, policy: EmaPolicy) -> None:
+        """Apply effective per-camera EMA limits at the admission boundary."""
+        with self._lock:
+            self.cooldown_seconds = max(0.0, float(policy.cooldown_seconds))
+            self.maximum_ema_requests_5m = max(
+                1, int(policy.maximum_triggers_5m)
+            )
 
     def observe_camera(
         self, notice: CameraNotice, *, generation: int
@@ -446,9 +471,12 @@ class MotionEpisodeController:
                 DetectionRequestStatus.ADMITTED,
                 DetectionRequestStatus.RUNNING,
             }:
-                # Refresh the immutable request so downstream diagnostics see
-                # every source associated with this same episode.
                 if episode.intent is not None:
+                    if episode.status is DetectionRequestStatus.RESERVED:
+                        request_sources = set(episode.intent.sources) | {source}
+                    else:
+                        episode.admitted_sources.add(source)
+                        request_sources = set(episode.admitted_sources)
                     episode.intent = DetectionIntent(
                         intent_id=episode.intent.intent_id,
                         episode_id=episode.intent.episode_id,
@@ -457,7 +485,8 @@ class MotionEpisodeController:
                         event_at=min(episode.intent.event_at, event_at),
                         created_monotonic=episode.intent.created_monotonic,
                         primary_source=episode.intent.primary_source,
-                        sources=tuple(sorted(episode.sources, key=str)),
+                        sources=tuple(sorted(request_sources, key=str)),
+                        followup=episode.intent.followup,
                         ema=episode.ema,
                         camera_notice=episode.camera_notice,
                     )
@@ -492,7 +521,8 @@ class MotionEpisodeController:
                         episode.intent,
                     )
             if (
-                self._last_completed_monotonic is not None
+                source is MotionSource.EMA
+                and self._last_completed_monotonic is not None
                 and observed_monotonic - self._last_completed_monotonic
                 < self.cooldown_seconds
             ):
@@ -502,8 +532,20 @@ class MotionEpisodeController:
                     observed_monotonic,
                     episode,
                 )
+            if source is MotionSource.EMA and self._ema_limit_reached(
+                observed_monotonic
+            ):
+                if ema is not None:
+                    self._remember_ema(episode, ema)
+                return self._decision(
+                    EpisodeDecisionReason.EMA_RATE_LIMITED,
+                    source,
+                    observed_monotonic,
+                    episode,
+                )
             episode.request_count += 1
             followup = episode.request_count > 1
+            request_sources = set(episode.admitted_sources) | {source}
             intent = DetectionIntent(
                 intent_id=f"{episode.episode_id}:request:{episode.request_count}",
                 episode_id=episode.episode_id,
@@ -512,7 +554,8 @@ class MotionEpisodeController:
                 event_at=event_at,
                 created_monotonic=observed_monotonic,
                 primary_source=source,
-                sources=tuple(sorted(episode.sources, key=str)),
+                sources=tuple(sorted(request_sources, key=str)),
+                followup=followup,
                 ema=episode.ema,
                 camera_notice=episode.camera_notice,
             )
@@ -521,8 +564,6 @@ class MotionEpisodeController:
             episode.last_request_monotonic = observed_monotonic
             if followup:
                 episode.followup_count += 1
-            if ema is not None:
-                self._remember_ema(episode, ema)
             return self._decision(
                 (
                     EpisodeDecisionReason.FOLLOWUP_RESERVED
@@ -544,19 +585,27 @@ class MotionEpisodeController:
     ) -> EpisodeDecision:
         with self._lock:
             episode = self._require_intent(intent_id)
+            intent = episode.intent
+            source = intent.primary_source
             if admitted:
+                episode.admitted_sources.update(intent.sources)
                 episode.status = DetectionRequestStatus.ADMITTED
+                episode.intent = self._refresh_intent_sources(
+                    intent, episode.admitted_sources
+                )
+                if source is MotionSource.EMA:
+                    self._record_ema_admission(occurred_monotonic)
+                if intent.ema is not None:
+                    self._remember_ema(episode, intent.ema)
                 reason = EpisodeDecisionReason.REQUEST_ADMITTED
             else:
                 episode.status = DetectionRequestStatus.ABORTED
                 episode.intent = None
-                episode.request_count = max(0, episode.request_count - 1)
+                self._refund_reservation(episode, intent)
                 reason = EpisodeDecisionReason.REQUEST_ABORTED
             return self._decision(
                 reason,
-                MotionSource.EMA
-                if episode.ema is not None
-                else MotionSource.CAMERA,
+                source,
                 occurred_monotonic,
                 episode,
                 episode.intent,
@@ -567,10 +616,11 @@ class MotionEpisodeController:
     ) -> EpisodeDecision:
         with self._lock:
             episode = self._require_intent(intent_id)
-            source = episode.intent.primary_source
+            intent = episode.intent
+            source = intent.primary_source
             episode.status = DetectionRequestStatus.ABORTED
             episode.intent = None
-            episode.request_count = max(0, episode.request_count - 1)
+            self._refund_reservation(episode, intent)
             return self._decision(
                 EpisodeDecisionReason.REQUEST_ABORTED,
                 source,
@@ -652,6 +702,15 @@ class MotionEpisodeController:
                     if episode
                     else ()
                 ),
+                "admitted_sources": (
+                    tuple(
+                        sorted(
+                            source.value for source in episode.admitted_sources
+                        )
+                    )
+                    if episode
+                    else ()
+                ),
                 "request_status": (
                     episode.status.value if episode and episode.status else None
                 ),
@@ -693,16 +752,26 @@ class MotionEpisodeController:
         with self._lock:
             self._episode = None
             self._last_completed_monotonic = None
+            self._ema_admitted_times.clear()
             self._sequence += 1
 
     def reset(self) -> None:
         with self._lock:
             self._episode = None
             self._last_completed_monotonic = None
+            self._ema_admitted_times.clear()
             self._transitions.clear()
 
     def _episode_for(self, observed_monotonic: float) -> _Episode:
         episode = self._episode
+        if episode is not None and episode.status in {
+            DetectionRequestStatus.RESERVED,
+            DetectionRequestStatus.ADMITTED,
+            DetectionRequestStatus.RUNNING,
+        }:
+            # An in-flight request remains addressable until its explicit
+            # terminal transition. Ordinary episode rollover cannot orphan it.
+            return episode
         if (
             episode is None
             or observed_monotonic < episode.started_monotonic
@@ -719,6 +788,60 @@ class MotionEpisodeController:
             )
             self._episode = episode
         return episode
+
+    @staticmethod
+    def _refresh_intent_sources(
+        intent: DetectionIntent,
+        sources: Iterable[MotionSource],
+    ) -> DetectionIntent:
+        return DetectionIntent(
+            intent_id=intent.intent_id,
+            episode_id=intent.episode_id,
+            camera_id=intent.camera_id,
+            generation=intent.generation,
+            event_at=intent.event_at,
+            created_monotonic=intent.created_monotonic,
+            primary_source=intent.primary_source,
+            sources=tuple(sorted(set(sources), key=str)),
+            followup=intent.followup,
+            ema=intent.ema,
+            camera_notice=intent.camera_notice,
+        )
+
+    @staticmethod
+    def _refund_reservation(
+        episode: _Episode,
+        intent: DetectionIntent,
+    ) -> None:
+        episode.request_count = max(0, episode.request_count - 1)
+        if intent.followup:
+            episode.followup_count = max(0, episode.followup_count - 1)
+
+    def _ema_limit_reached(self, observed_monotonic: float) -> bool:
+        self._prune_ema_admissions(observed_monotonic)
+        return len(self._ema_admitted_times) >= self.maximum_ema_requests_5m
+
+    def _record_ema_admission(self, occurred_monotonic: float) -> None:
+        self._prune_ema_admissions(occurred_monotonic)
+        admission_time = (
+            max(occurred_monotonic, self._ema_admitted_times[-1])
+            if self._ema_admitted_times
+            else occurred_monotonic
+        )
+        self._ema_admitted_times.append(admission_time)
+
+    def _prune_ema_admissions(self, observed_monotonic: float) -> None:
+        effective_now = (
+            max(observed_monotonic, self._ema_admitted_times[-1])
+            if self._ema_admitted_times
+            else observed_monotonic
+        )
+        cutoff = effective_now - 300.0
+        while (
+            self._ema_admitted_times
+            and self._ema_admitted_times[0] <= cutoff
+        ):
+            self._ema_admitted_times.popleft()
 
     def _require_intent(self, intent_id: str) -> _Episode:
         episode = self._episode

@@ -14,6 +14,7 @@ from survng.app.camera_lifecycle import (
     CameraRuntimeState,
 )
 from survng.app.config import MotionQualificationConfig
+from survng.app.ema_v2 import EmaPolicy
 from survng.app.motion_analysis import FairMotionAnalysisLimiter
 from survng.app.motion_analysis_service import MotionAnalysisService
 from survng.app.motion_decisions import MotionDecisionOrchestrator
@@ -112,6 +113,17 @@ def _stress_runtime() -> tuple[CameraLifecycleService, SimpleNamespace]:
     qualification.illumination_filter_enabled.return_value = False
     qualification.trigger_mode.return_value = "adaptive"
     qualification.visual_backup_settings.return_value = {}
+    qualification.visual_backup_policy.return_value = EmaPolicy(
+        warmup_seconds=0.0,
+        grace_seconds=1.0,
+        minimum_score=0.65,
+        score_margin=0.1,
+        minimum_consecutive=3,
+        cooldown_seconds=20.0,
+        maximum_triggers_5m=3,
+        sample_fps=10.0,
+        background_fps=2.0,
+    )
     qualification.suppression_verification_rate.return_value = 0.0
     evidence = Mock()
     analysis = MotionAnalysisService(

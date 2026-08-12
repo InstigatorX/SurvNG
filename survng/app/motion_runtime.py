@@ -285,6 +285,9 @@ class MotionRuntimeService:
                     f"workers remain: {', '.join(residual)}"
                 )
             self.events.clear()
+            self.events.episode_controller.configure_rescue_policy(
+                self.qualification.visual_backup_policy()
+            )
             self.events.episode_controller.start_generation(
                 self.state.lifecycle_generation()
             )

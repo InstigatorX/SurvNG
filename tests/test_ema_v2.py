@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from survng.app.ema_v2 import (
     CameraNotice,
     EmaSignalAction,
@@ -129,6 +131,31 @@ def test_one_borderline_dropout_does_not_erase_persistent_motion() -> None:
     assert decisions[-1].window_samples == 4
 
 
+def test_long_grace_period_retains_enough_samples_to_qualify() -> None:
+    conditioner = EmaSignalConditioner("gate")
+    policy = _policy(
+        warmup_seconds=0.0,
+        grace_seconds=5.0,
+        minimum_consecutive=3,
+    )
+    for at in (1.0, 1.5, 2.0):
+        conditioner.evaluate(
+            _result(0.0, accepted=False, reason="no_motion_blobs"),
+            at,
+            at,
+            policy,
+            detection_enabled=True,
+        )
+
+    decisions = [
+        conditioner.evaluate(_result(0.8), at, at, policy, detection_enabled=True)
+        for at in (10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0)
+    ]
+
+    assert decisions[-1].action is EmaSignalAction.QUALIFIED
+    assert decisions[-1].qualifying_samples == 11
+
+
 def test_known_nuisance_cannot_accumulate() -> None:
     conditioner = EmaSignalConditioner("gate")
     policy = _policy(warmup_seconds=0.0)
@@ -165,7 +192,10 @@ def test_raw_camera_notice_does_not_hide_ema_after_enqueue_failure() -> None:
 
     assert ema.reason is EpisodeDecisionReason.REQUEST_RESERVED
     assert ema.intent is not None
-    assert set(ema.intent.sources) == {"camera", "ema"}
+    assert set(ema.intent.sources) == {"ema"}
+    snapshot = controller.snapshot()
+    assert set(snapshot["sources"]) == {"camera", "ema"}
+    assert snapshot["admitted_sources"] == ()
 
 
 def test_camera_and_ema_merge_only_after_request_is_admitted() -> None:
@@ -188,6 +218,26 @@ def test_camera_and_ema_merge_only_after_request_is_admitted() -> None:
     assert camera.intent is not None
     assert set(camera.intent.sources) == {"camera", "ema"}
     assert controller.intent(ema.intent.intent_id) == camera.intent
+
+
+def test_in_flight_intent_cannot_be_orphaned_by_episode_rollover() -> None:
+    controller = MotionEpisodeController("gate", episode_gap_seconds=30.0)
+    controller.start_generation(8)
+    first = controller.observe_ema(_qualified("gate"), generation=8)
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.mark_running(first.intent.intent_id, occurred_monotonic=1011.2)
+
+    later = controller.observe_camera(
+        CameraNotice("gate", 60.0, 1060.0, "motion"), generation=8
+    )
+
+    assert later.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
+    assert later.intent is not None
+    assert later.intent.intent_id == first.intent.intent_id
+    controller.complete(first.intent.intent_id, occurred_monotonic=1061.0)
 
 
 def test_stale_generation_cannot_reserve_work() -> None:
@@ -220,6 +270,31 @@ def test_cooldown_starts_only_after_completed_detection() -> None:
     # It remains the same completed request, so the observation merges rather
     # than manufacturing another request or treating raw notice as completion.
     assert during.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
+
+
+def test_completed_camera_request_cools_down_only_ema_rescue() -> None:
+    controller = MotionEpisodeController(
+        "gate", episode_gap_seconds=0.5, cooldown_seconds=10.0
+    )
+    controller.start_generation(1)
+    first = controller.observe_camera(
+        CameraNotice("gate", 10.0, 1010.0, "motion"), generation=1
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1010.1
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1010.2)
+
+    ema = controller.observe_ema(
+        replace(_qualified("gate"), observed_monotonic=1011.0), generation=1
+    )
+    camera = controller.observe_camera(
+        CameraNotice("gate", 11.1, 1011.1, "motion"), generation=1
+    )
+
+    assert ema.reason is EpisodeDecisionReason.COOLDOWN_ACTIVE
+    assert camera.reason is EpisodeDecisionReason.REQUEST_RESERVED
 
 
 def test_episode_transitions_explain_every_request_boundary() -> None:
@@ -293,6 +368,78 @@ def test_distinct_later_track_reserves_bounded_followup_in_same_episode() -> Non
     assert followup.intent is not None
     assert followup.intent.episode_id == first.intent.episode_id
     assert followup.intent.intent_id.endswith(":request:2")
+
+
+def test_aborted_followup_refunds_followup_budget() -> None:
+    controller = MotionEpisodeController(
+        "gate", maximum_followups=1, minimum_followup_interval_seconds=0.0
+    )
+    controller.start_generation(1)
+    first = controller.observe_ema(
+        _qualified_region(track_id=1, region=(0.05, 0.1, 0.2, 0.4), started_at=10.0),
+        generation=1,
+    )
+    assert first.intent is not None
+    controller.acknowledge_admission(
+        first.intent.intent_id, admitted=True, occurred_monotonic=1011.1
+    )
+    controller.complete(first.intent.intent_id, occurred_monotonic=1012.0)
+    rejected = controller.observe_ema(
+        _qualified_region(track_id=2, region=(0.70, 0.1, 0.9, 0.5), started_at=14.0),
+        generation=1,
+    )
+    assert rejected.intent is not None
+    controller.acknowledge_admission(
+        rejected.intent.intent_id, admitted=False, occurred_monotonic=1015.1
+    )
+
+    retry = controller.observe_ema(
+        _qualified_region(track_id=2, region=(0.70, 0.1, 0.9, 0.5), started_at=16.0),
+        generation=1,
+    )
+
+    assert retry.reason is EpisodeDecisionReason.FOLLOWUP_RESERVED
+    assert retry.intent is not None
+    assert controller.snapshot()["followup_count"] == 1
+
+
+def test_configured_five_minute_limit_applies_only_to_ema_admissions() -> None:
+    controller = MotionEpisodeController(
+        "gate", episode_gap_seconds=5.0, maximum_ema_requests_5m=2
+    )
+    controller.start_generation(1)
+    qualified = _qualified("gate")
+    for index, observed in enumerate((1011.0, 1051.0), start=1):
+        decision = controller.observe_ema(
+            replace(
+                qualified,
+                captured_at=observed - 1000.0,
+                observed_monotonic=observed,
+            ),
+            generation=1,
+        )
+        assert decision.intent is not None
+        controller.acknowledge_admission(
+            decision.intent.intent_id,
+            admitted=True,
+            occurred_monotonic=observed + 0.1,
+        )
+        controller.complete(
+            decision.intent.intent_id, occurred_monotonic=observed + 0.2
+        )
+
+    limited = controller.observe_ema(
+        replace(qualified, captured_at=91.0, observed_monotonic=1091.0),
+        generation=1,
+    )
+    camera = controller.observe_camera(
+        CameraNotice("gate", 92.0, 1092.0, "motion"), generation=1
+    )
+
+    assert limited.reason is EpisodeDecisionReason.EMA_RATE_LIMITED
+    assert camera.reason is EpisodeDecisionReason.REQUEST_RESERVED
+    assert camera.intent is not None
+    assert camera.intent.primary_source.value == "camera"
 
 
 def test_same_track_cannot_create_followup_request() -> None:

@@ -8,6 +8,7 @@ import pytest
 
 from survng.app.camera_lifecycle import CameraRuntimeState
 from survng.app.motion import MotionQualificationResult
+from survng.app.ema_v2 import EmaPolicy
 from survng.app.motion_runtime import CameraMotionState, MotionRuntimeService
 
 
@@ -35,6 +36,17 @@ def _runtime() -> tuple[MotionRuntimeService, SimpleNamespace]:
     ingress.wait_idle.return_value = True
     ingress.in_flight.return_value = 0
     qualification = Mock()
+    qualification.visual_backup_policy.return_value = EmaPolicy(
+        warmup_seconds=10.0,
+        grace_seconds=1.0,
+        minimum_score=0.65,
+        score_margin=0.1,
+        minimum_consecutive=3,
+        cooldown_seconds=20.0,
+        maximum_triggers_5m=2,
+        sample_fps=2.0,
+        background_fps=2.0,
+    )
     evidence = Mock()
     pipelines = (("qualification", Mock()), ("fusion", Mock()))
     runtime = MotionRuntimeService(
@@ -70,6 +82,9 @@ def test_runtime_starts_both_workers_as_one_generation() -> None:
     runtime.start(stop_event)
 
     owned.events.clear.assert_called_once_with()
+    owned.events.episode_controller.configure_rescue_policy.assert_called_once_with(
+        owned.qualification.visual_backup_policy.return_value
+    )
     owned.analysis.start.assert_called_once_with(stop_event)
     owned.decisions.start.assert_called_once_with(stop_event)
 

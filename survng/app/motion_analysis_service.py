@@ -1040,6 +1040,9 @@ class MotionAnalysisService:
             }[episode.reason]
             self.state.increment_stat(stat, 1)
             return
+        if episode.reason is EpisodeDecisionReason.EMA_RATE_LIMITED:
+            self.state.increment_stat("visual_backup_rate_limited", 1)
+            return
         if episode.reason not in {
             EpisodeDecisionReason.REQUEST_RESERVED,
             EpisodeDecisionReason.FOLLOWUP_RESERVED,
