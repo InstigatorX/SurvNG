@@ -197,21 +197,24 @@ class MotionEventIngressService:
             intent = episode.intent
             if intent is None:
                 return
-            queued = self.enqueue(MotionTrigger(
-                topic=topic,
-                message=message,
-                event_at=normalized_event_at,
-                received_at=received_at,
-                event_timing=event_timing,
-                episode_id=intent.episode_id,
-                detection_intent_id=intent.intent_id,
-                lifecycle_generation=intent.generation,
-            ), evict_oldest=False)
-            self.events.episode_controller.acknowledge_admission(
-                intent.intent_id,
-                admitted=queued,
-                occurred_monotonic=time.monotonic(),
-            )
+            queued = False
+            try:
+                queued = self.enqueue(MotionTrigger(
+                    topic=topic,
+                    message=message,
+                    event_at=normalized_event_at,
+                    received_at=received_at,
+                    event_timing=event_timing,
+                    episode_id=intent.episode_id,
+                    detection_intent_id=intent.intent_id,
+                    lifecycle_generation=intent.generation,
+                ), evict_oldest=False)
+            finally:
+                self.events.episode_controller.acknowledge_admission(
+                    intent.intent_id,
+                    admitted=queued,
+                    occurred_monotonic=time.monotonic(),
+                )
         finally:
             self.state.end_ingress(generation)
 

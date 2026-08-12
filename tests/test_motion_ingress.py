@@ -77,6 +77,20 @@ def test_camera_notice_is_normalized_observed_published_and_enqueued() -> None:
     owned.state.end_ingress.assert_called_once_with(1)
 
 
+def test_camera_enqueue_exception_aborts_episode_reservation() -> None:
+    service, owned = _service()
+    owned.events.enqueue.side_effect = RuntimeError("queue unavailable")
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        service.handle("onvif/motion", "motion")
+
+    episode = owned.events.episode_controller.snapshot()
+    assert episode["request_status"] == "aborted"
+    assert episode["intent_id"] is None
+    assert episode["decision_counts"]["request_aborted"] == 1
+    owned.state.end_ingress.assert_called_once_with(1)
+
+
 def test_event_clock_separates_stable_offset_from_delivery_delay() -> None:
     clock = MotionEventClock()
     base = 1_800_000_000.0
