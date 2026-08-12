@@ -468,7 +468,10 @@ class MotionEpisodeController:
                     episode,
                     episode.intent,
                 )
-            if episode.status is DetectionRequestStatus.COMPLETED:
+            if episode.status in {
+                DetectionRequestStatus.COMPLETED,
+                DetectionRequestStatus.FAILED,
+            }:
                 if ema is None:
                     return self._decision(
                         EpisodeDecisionReason.MERGED_WITH_REQUEST,
@@ -624,6 +627,18 @@ class MotionEpisodeController:
     def transitions(self) -> tuple[EpisodeTransition, ...]:
         with self._lock:
             return tuple(self._transitions)
+
+    def intent(self, intent_id: str) -> DetectionIntent | None:
+        """Return the latest immutable view of an admitted episode request."""
+        with self._lock:
+            episode = self._episode
+            if (
+                episode is None
+                or episode.intent is None
+                or episode.intent.intent_id != intent_id
+            ):
+                return None
+            return episode.intent
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:

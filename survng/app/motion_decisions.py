@@ -248,6 +248,14 @@ class MotionDecisionOrchestrator:
             self._events.set_active(None)
             return
         self._mark_episode_intents_running(triggers)
+        authoritative_sources = {
+            source.value
+            for item in triggers
+            if item.detection_intent_id
+            for intent in (self._events.episode_controller.intent(item.detection_intent_id),)
+            if intent is not None
+            for source in intent.sources
+        }
         priority_triggers = [
             item for item in triggers if priority_motion_topic(item.topic)
         ]
@@ -267,7 +275,10 @@ class MotionDecisionOrchestrator:
         mode, sensitivity, frame_width = self._qualification.settings()
         rescue_enabled, rescue_margin = self._qualification.rescue_settings()
         priority = bool(priority_triggers)
-        adaptive_only = all(item.topic.startswith("adaptive/") for item in triggers)
+        adaptive_only = bool(
+            all(item.topic.startswith("adaptive/") for item in triggers)
+            and not authoritative_sources.intersection({"camera", "manual"})
+        )
         visual_backup_queued = any(
             item.topic == "adaptive/visual_backup" for item in triggers
         )

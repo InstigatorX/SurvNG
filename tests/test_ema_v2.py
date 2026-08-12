@@ -187,6 +187,7 @@ def test_camera_and_ema_merge_only_after_request_is_admitted() -> None:
     assert camera.reason is EpisodeDecisionReason.MERGED_WITH_REQUEST
     assert camera.intent is not None
     assert set(camera.intent.sources) == {"camera", "ema"}
+    assert controller.intent(ema.intent.intent_id) == camera.intent
 
 
 def test_stale_generation_cannot_reserve_work() -> None:
