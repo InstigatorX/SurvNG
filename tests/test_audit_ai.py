@@ -138,6 +138,23 @@ class AuditAiTest(unittest.TestCase):
         self.assertEqual(interpretation["category"], "visual_backup_scene_learning")
         self.assertFalse(interpretation["object_detection_miss"])
 
+    def test_visual_backup_nonpromotion_explains_why_detection_did_not_run(self) -> None:
+        interpretation = motion_audit_interpretation(
+            reason="visual_backup_below_threshold",
+            event_id=None,
+            object_detected=None,
+        )
+
+        self.assertEqual(
+            interpretation["category"],
+            "visual_backup_below_threshold",
+        )
+        self.assertEqual(
+            interpretation["label"],
+            "Credible EMA motion · below backup threshold",
+        )
+        self.assertFalse(interpretation["object_detection_miss"])
+
     def test_prompt_describes_current_trigger_validator_paradigm(self) -> None:
         self.assertIn("camera_triggered", SYSTEM_PROMPT)
         self.assertIn("visual_triggered", SYSTEM_PROMPT)

@@ -2243,6 +2243,7 @@ class EventStore:
                 "visual_backup_no_object": 0,
                 "visual_backup_incomplete": 0,
                 "visual_backup_not_ready": 0,
+                "visual_backup_below_threshold": 0,
                 "active_followup_attempts": 0,
                 "active_followup_objects": 0,
                 "active_followup_no_object": 0,
@@ -2290,8 +2291,12 @@ class EventStore:
             summary = summary_for(str(row["camera_id"]), str(row["mode"] or "unknown"))
             category = str(row["category"] or "qualification")
             if category == "visual_backup":
-                if str(row["reason"] or "") == "startup_not_ready":
+                visual_reason = str(row["reason"] or "")
+                if visual_reason == "startup_not_ready":
                     summary["visual_backup_not_ready"] += 1
+                    continue
+                if visual_reason == "visual_backup_below_threshold":
+                    summary["visual_backup_below_threshold"] += 1
                     continue
                 summary["visual_backup_attempts"] += 1
                 if row["object_detected"] is None:

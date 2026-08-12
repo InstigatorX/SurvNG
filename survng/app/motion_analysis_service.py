@@ -71,6 +71,13 @@ class MotionAnalysisMedia(Protocol):
         self, event_at: datetime, result: MotionQualificationResult
     ) -> str: ...
 
+    def sample_rejected_motion_frame(
+        self,
+        event_at: datetime,
+        result: MotionQualificationResult,
+        frame: np.ndarray,
+    ) -> str: ...
+
 
 @dataclass(frozen=True, slots=True)
 class MotionFrameSubmission:
@@ -88,6 +95,19 @@ class _AnalysisSlotWakeup:
 
 
 ANALYSIS_SLOT_WAKEUP = _AnalysisSlotWakeup()
+
+
+@dataclass(slots=True)
+class _VisualBackupNonpromotionEpisode:
+    """One bounded episode of credible EMA motion below its rescue gate."""
+
+    started_at: float
+    last_seen_at: float
+    observation_count: int
+    peak_at: float
+    peak_result: MotionQualificationResult
+    peak_required_score: float
+    peak_frame: np.ndarray
 
 
 class MotionAnalysisService:
@@ -149,6 +169,7 @@ class MotionAnalysisService:
         self.last_continuous_result: MotionQualificationResult | None = None
         self.debug_last_run_clock = 0.0
         self._visual_lock = threading.Lock()
+        self._visual_nonpromotion_episode: _VisualBackupNonpromotionEpisode | None = None
         self._stop_event: threading.Event | None = None
         self._stop_requested = threading.Event()
         self._admission_lock = threading.Lock()
@@ -270,6 +291,7 @@ class MotionAnalysisService:
         self.clear_queue()
         with self._visual_lock:
             self.visual_backup.reset()
+            self._visual_nonpromotion_episode = None
         self.active_motion_followup.reset()
 
     def schedule(self, captured_at: float, stop_event: threading.Event) -> None:
@@ -1053,7 +1075,20 @@ class MotionAnalysisService:
         if decision.action in {VisualBackupAction.DISABLED, VisualBackupAction.IGNORED}:
             if decision.count_nonpromotion:
                 self.state.increment_stat("visual_backup_not_promoted", 1)
+                self._observe_visual_backup_nonpromotion(
+                    result,
+                    decision.required_score,
+                    samples,
+                    captured_at,
+                    settings,
+                )
+            else:
+                self._flush_visual_backup_nonpromotion(settings)
             return
+        # A stronger candidate, a matching camera notification, or startup
+        # learning means the preceding low-score observations were not a
+        # completed missed-rescue episode.
+        self._discard_visual_backup_nonpromotion()
         if decision.action == VisualBackupAction.NOT_READY:
             self.state.increment_stat("visual_backup_not_ready", 1)
             if decision.readiness_audit_needed:
@@ -1251,6 +1286,111 @@ class MotionAnalysisService:
         except Exception:
             LOGGER.exception(
                 "failed to record visual backup readiness audit for %s",
+                self.camera_id,
+            )
+
+    def _observe_visual_backup_nonpromotion(
+        self,
+        result: MotionQualificationResult,
+        required_score: float,
+        samples: list[tuple[float, np.ndarray]],
+        captured_at: float,
+        settings: dict[str, float | int],
+    ) -> None:
+        """Accumulate only credible motion that specifically missed the score gate."""
+        if result.score >= required_score or not samples:
+            self._flush_visual_backup_nonpromotion(settings)
+            return
+        frame = samples[-1][1]
+        expected_interval = 1.0 / max(
+            0.5,
+            min(self.config.sample_fps, self.config.camera_mode_background_fps),
+        )
+        episode = self._visual_nonpromotion_episode
+        if (
+            episode is not None
+            and captured_at - episode.last_seen_at > expected_interval * 2.5
+        ):
+            self._flush_visual_backup_nonpromotion(settings)
+            episode = None
+        if episode is None:
+            self._visual_nonpromotion_episode = _VisualBackupNonpromotionEpisode(
+                started_at=captured_at,
+                last_seen_at=captured_at,
+                observation_count=1,
+                peak_at=captured_at,
+                peak_result=result,
+                peak_required_score=required_score,
+                peak_frame=frame,
+            )
+            return
+        episode.last_seen_at = captured_at
+        episode.observation_count += 1
+        if result.score > episode.peak_result.score:
+            episode.peak_at = captured_at
+            episode.peak_result = result
+            episode.peak_required_score = required_score
+            episode.peak_frame = frame
+
+    def _discard_visual_backup_nonpromotion(self) -> None:
+        self._visual_nonpromotion_episode = None
+
+    def _flush_visual_backup_nonpromotion(
+        self,
+        settings: dict[str, float | int],
+    ) -> None:
+        episode = self._visual_nonpromotion_episode
+        self._visual_nonpromotion_episode = None
+        if episode is None:
+            return
+        minimum_observations = max(2, int(settings["minimum_consecutive"]))
+        if episode.observation_count < minimum_observations:
+            return
+        event_at = datetime.fromtimestamp(episode.peak_at, timezone.utc)
+        try:
+            snapshot_path = self.media.sample_rejected_motion_frame(
+                event_at,
+                episode.peak_result,
+                episode.peak_frame,
+            )
+            self.audit_recorder.record_audit(
+                snapshot_path=snapshot_path,
+                event_at=event_at,
+                mode="camera_rescue",
+                sensitivity=self.qualification.settings()[1],
+                score=episode.peak_result.score,
+                threshold=episode.peak_result.threshold,
+                reason="visual_backup_below_threshold",
+                object_detected=None,
+                trigger_count=0,
+                features={
+                    **audit_features(episode.peak_result),
+                    "visual_backup_scene_ready": True,
+                    "visual_backup_required_score": round(
+                        episode.peak_required_score,
+                        4,
+                    ),
+                    "visual_backup_episode_started_at": datetime.fromtimestamp(
+                        episode.started_at,
+                        timezone.utc,
+                    ).isoformat(),
+                    "visual_backup_episode_ended_at": datetime.fromtimestamp(
+                        episode.last_seen_at,
+                        timezone.utc,
+                    ).isoformat(),
+                    "visual_backup_episode_duration_seconds": round(
+                        max(0.0, episode.last_seen_at - episode.started_at),
+                        3,
+                    ),
+                    "visual_backup_credible_frames": episode.observation_count,
+                    "visual_backup_peak_at": event_at.isoformat(),
+                    "visual_backup_camera_notice_received": False,
+                },
+                category="visual_backup",
+            )
+        except Exception:
+            LOGGER.exception(
+                "failed to record visual backup non-promotion audit for %s",
                 self.camera_id,
             )
 

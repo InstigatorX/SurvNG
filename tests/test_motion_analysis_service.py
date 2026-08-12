@@ -76,6 +76,7 @@ def _hooks(
     state.increment_stat = increment_stat or Mock()
     media = Mock()
     media.sample_rejected_motion.return_value = ""
+    media.sample_rejected_motion_frame.return_value = ""
     return SimpleNamespace(
         config=MotionQualificationConfig(
             sample_fps=5.0,
@@ -860,3 +861,83 @@ def test_visual_fusion_failure_releases_reservation_and_candidate() -> None:
 
     assert not service.events.adaptive_trigger_pending
     assert service.visual_backup.consecutive == 0
+
+
+def test_visual_backup_audits_one_summary_for_sustained_below_gate_episode() -> None:
+    dependencies = _hooks()
+    service = _service(dependencies)
+    below_gate = [
+        MotionQualificationResult(True, score, 0.48, "qualified", 3, {})
+        for score in (0.61, 0.69, 0.65)
+    ]
+    quiet = MotionQualificationResult(False, 0.1, 0.48, "low_score", 3, {})
+    service.visual_backup.evaluate = Mock(side_effect=[
+        *[
+            VisualBackupDecision(
+                VisualBackupAction.IGNORED,
+                result,
+                required_score=0.73,
+                scene_ready=True,
+                count_nonpromotion=True,
+            )
+            for result in below_gate
+        ],
+        VisualBackupDecision(
+            VisualBackupAction.IGNORED,
+            quiet,
+            required_score=0.73,
+            scene_ready=True,
+        ),
+    ])
+    frames = [
+        np.full((90, 160, 3), value, dtype=np.uint8)
+        for value in (10, 20, 30, 40)
+    ]
+
+    for index, result in enumerate([*below_gate, quiet]):
+        service.consider_visual_backup(
+            result,
+            [(100.0 + index * 0.5, frames[index])],
+            100.0 + index * 0.5,
+        )
+
+    service.audit_recorder.record_audit.assert_called_once()
+    audit = service.audit_recorder.record_audit.call_args.kwargs
+    assert audit["category"] == "visual_backup"
+    assert audit["reason"] == "visual_backup_below_threshold"
+    assert audit["score"] == 0.69
+    assert audit["features"]["visual_backup_required_score"] == 0.73
+    assert audit["features"]["visual_backup_credible_frames"] == 3
+    assert audit["features"]["visual_backup_episode_duration_seconds"] == 1.0
+    dependencies.media.sample_rejected_motion_frame.assert_called_once()
+    stored_frame = dependencies.media.sample_rejected_motion_frame.call_args.args[2]
+    assert stored_frame is frames[1]
+
+
+def test_visual_backup_does_not_audit_one_frame_below_gate_noise() -> None:
+    dependencies = _hooks()
+    service = _service(dependencies)
+    accepted = MotionQualificationResult(True, 0.69, 0.48, "qualified", 3, {})
+    quiet = MotionQualificationResult(False, 0.1, 0.48, "low_score", 3, {})
+    service.visual_backup.evaluate = Mock(side_effect=[
+        VisualBackupDecision(
+            VisualBackupAction.IGNORED,
+            accepted,
+            required_score=0.73,
+            scene_ready=True,
+            count_nonpromotion=True,
+        ),
+        VisualBackupDecision(
+            VisualBackupAction.IGNORED,
+            quiet,
+            required_score=0.73,
+            scene_ready=True,
+        ),
+    ])
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+
+    service.consider_visual_backup(accepted, [(100.0, frame)], 100.0)
+    service.consider_visual_backup(quiet, [(100.5, frame)], 100.5)
+
+    service.audit_recorder.record_audit.assert_not_called()
+    dependencies.media.sample_rejected_motion_frame.assert_not_called()

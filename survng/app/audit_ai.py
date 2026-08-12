@@ -276,6 +276,13 @@ def motion_audit_interpretation(
             "object_detection_miss": False,
             "explanation": "A strong EMA candidate was held until a quiet post-startup scene baseline could be established; camera notices remained active.",
         }
+    if normalized_reason == "visual_backup_below_threshold":
+        return {
+            "category": "visual_backup_below_threshold",
+            "label": "Credible EMA motion · below backup threshold",
+            "object_detection_miss": False,
+            "explanation": "EMA observed sustained credible motion, but its peak score did not reach the stronger threshold required to replace a missing camera notice, so object detection did not run.",
+        }
     if normalized_reason == "object_not_motion_correlated":
         return {
             "category": "object_not_motion_correlated",

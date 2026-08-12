@@ -9876,6 +9876,7 @@ function motionAuditOutcome(item) {
   if (item.reason === "illumination_change") return { label: "Filtered · light or shadow change", className: "not-run" };
   if (item.features?.illumination_verification_probe) return { label: item.object_detected ? "Light filter check · object rescued" : "Light filter check · no object", className: item.object_detected ? "object" : "clear" };
   if (item.interpretation?.category === "visual_backup_scene_learning") return { label: "Visual backup · scene learning", className: "not-run" };
+  if (item.interpretation?.category === "visual_backup_below_threshold") return { label: "Credible EMA motion · below backup threshold", className: "not-run" };
   if (item.interpretation?.category === "object_not_motion_correlated") return { label: "Motion confirmed · detected object outside motion area", className: "clear" };
   if (item.interpretation?.category === "duplicate_active_event") return { label: "Duplicate · event active", className: "not-run" };
   if (item.interpretation?.category === "duplicate_event_cooldown") return { label: "Duplicate · cooldown", className: "not-run" };

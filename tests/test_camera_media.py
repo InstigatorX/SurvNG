@@ -113,6 +113,24 @@ def test_rejected_samples_are_bounded_to_newest_hundred() -> None:
         assert not (directory / "old-000.webp").exists()
 
 
+def test_rejected_motion_frame_persists_supplied_observation_not_live_frame() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        live = np.zeros((8, 8, 3), dtype=np.uint8)
+        observed = np.full((8, 8, 3), 200, dtype=np.uint8)
+        service = _service(Path(tmpdir), frame=live)
+        result = MotionQualificationResult(True, 0.69, 0.48, "qualified", 3, {})
+
+        stored = service.sample_rejected_motion_frame(
+            datetime(2026, 8, 12, tzinfo=timezone.utc),
+            result,
+            observed,
+        )
+
+        decoded = cv2.imread(stored)
+        assert decoded is not None
+        assert float(decoded.mean()) > 190
+
+
 def test_snapshot_filename_uses_normalized_event_time_and_injected_suffix() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         service = _service(Path(tmpdir))

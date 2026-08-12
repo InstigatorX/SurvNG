@@ -94,12 +94,34 @@ class CameraMediaService:
         event_at: datetime,
         result: MotionQualificationResult,
     ) -> str:
-        sample_rate = self.rejected_sample_rate()
-        if sample_rate <= 0 or self.random_value() > sample_rate:
+        if not self._sample_rejected_motion_enabled():
             return ""
         frame = self.frame_provider("live")
         if frame is None:
             return ""
+        return self._store_rejected_motion_frame(event_at, result, frame)
+
+    def sample_rejected_motion_frame(
+        self,
+        event_at: datetime,
+        result: MotionQualificationResult,
+        frame: Any,
+    ) -> str:
+        """Persist the supplied evidence frame, preserving its observation time."""
+        if not self._sample_rejected_motion_enabled():
+            return ""
+        return self._store_rejected_motion_frame(event_at, result, frame)
+
+    def _sample_rejected_motion_enabled(self) -> bool:
+        sample_rate = self.rejected_sample_rate()
+        return bool(sample_rate > 0 and self.random_value() <= sample_rate)
+
+    def _store_rejected_motion_frame(
+        self,
+        event_at: datetime,
+        result: MotionQualificationResult,
+        frame: Any,
+    ) -> str:
         directory = self.storage_dir / "motion_samples" / self.camera.id
         try:
             directory.mkdir(parents=True, exist_ok=True)

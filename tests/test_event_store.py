@@ -1297,6 +1297,30 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(summary["visual_backup_attempts"], 0)
             self.assertEqual(summary["visual_backup_incomplete"], 0)
 
+    def test_visual_backup_below_threshold_is_not_counted_as_detector_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.add_motion_audit(
+                camera_id="back-left",
+                snapshot_path="motion.webp",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                mode="camera_rescue",
+                sensitivity="balanced",
+                score=0.697,
+                threshold=0.48,
+                reason="visual_backup_below_threshold",
+                object_detected=None,
+                trigger_count=0,
+                features={"visual_backup_required_score": 0.73},
+                category="visual_backup",
+            )
+
+            summary = store.motion_effectiveness(days=1)["by_camera"]["back-left"]["camera_rescue"]
+
+            self.assertEqual(summary["visual_backup_below_threshold"], 1)
+            self.assertEqual(summary["visual_backup_attempts"], 0)
+            self.assertEqual(summary["visual_backup_incomplete"], 0)
+
     def test_suppressed_motion_audit_retry_is_idempotent_after_read_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))
