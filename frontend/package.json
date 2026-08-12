@@ -4,6 +4,7 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "test:motion-analysis": "node tests/motion-analysis-config.mjs",
     "test:motion-decision": "node tests/motion-decision-config.mjs",
+    "test:motion-audit": "node tests/motion-audit.mjs",
     "test:live-transport": "node tests/live-transport.mjs",
     "test:live-aspect": "node tests/live-aspect.mjs",
     "test:live-grid-layout": "node tests/live-grid-layout.mjs",

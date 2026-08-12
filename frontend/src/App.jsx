@@ -100,6 +100,7 @@ import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackErro
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
 import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
@@ -2184,7 +2185,7 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   const displayPixelWidth = (frameSize?.width || 0) * devicePixelRatio;
   const progressiveWidth = incidentProgressiveImageWidth(frameSize?.width, devicePixelRatio);
   const progressiveQuality = progressiveWidth > 1280 ? 90 : 86;
-  const shouldLoadFullResolution = fullResolution || displayPixelWidth > 2560;
+  const shouldLoadFullResolution = fullResolution || highQualityZoom || displayPixelWidth > 2560;
   const renderedImage = useMemo(() => {
     if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
     const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
@@ -2236,15 +2237,8 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     recordImageLoad(loadEvent.currentTarget, imageKey);
   }
 
-  async function markProgressiveReady(stage, loadEvent) {
+  function markProgressiveReady(stage, loadEvent) {
     const image = loadEvent.currentTarget;
-    if (stage === "full" && typeof image.decode === "function") {
-      try {
-        await image.decode();
-      } catch {
-        // A completed load is still usable when a browser rejects decode().
-      }
-    }
     if (!image.isConnected) return;
     recordImageLoad(image, progressiveImageKey);
     setProgressiveState((current) => ({
@@ -2342,14 +2336,15 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
                   onLoad={(loadEvent) => markProgressiveReady("intermediate", loadEvent)}
                 />
               ) : null}
-              {shouldLoadFullResolution && progressiveReady.intermediate ? (
+              {shouldLoadFullResolution ? (
                 <img
                   key={`${progressiveImageKey}-full`}
                   className={`snapshot-progressive-image snapshot-full-resolution-image ${progressiveReady.full ? "ready" : ""}`}
                   src={eventSnapshotUrl(event)}
                   alt=""
                   aria-hidden="true"
-                  decoding="async"
+                  decoding="sync"
+                  fetchPriority="high"
                   onLoad={(loadEvent) => markProgressiveReady("full", loadEvent)}
                 />
               ) : null}
@@ -9857,6 +9852,57 @@ function motionAuditOutcome(item) {
   return { label: visualBackup ? "Visual backup · incomplete" : activeFollowup ? "Active follow-up · incomplete" : "Not run", className: "not-run" };
 }
 
+function MotionAuditAnnotatedImage({ item, alt, loading, onImageSize }) {
+  const frameRef = useRef(null);
+  const [frameSize, setFrameSize] = useState(null);
+  const [imageSize, setImageSize] = useState(null);
+  const regions = motionAuditRegions(item.features);
+  const renderedImage = useMemo(() => {
+    if (!frameSize?.width || !frameSize?.height || !imageSize?.width || !imageSize?.height) return null;
+    const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
+    const width = imageSize.width * scale;
+    const height = imageSize.height * scale;
+    return { left: (frameSize.width - width) / 2, top: (frameSize.height - height) / 2, width, height };
+  }, [frameSize, imageSize]);
+
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return undefined;
+    function updateFrameSize() {
+      const rect = frame.getBoundingClientRect();
+      if (rect.width && rect.height) setFrameSize({ width: rect.width, height: rect.height });
+    }
+    updateFrameSize();
+    const observer = new ResizeObserver(updateFrameSize);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, []);
+
+  function imageLoaded(event) {
+    const size = { width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight };
+    setImageSize(size);
+    onImageSize?.(size);
+  }
+
+  return (
+    <div className="motion-audit-annotated-image" ref={frameRef}>
+      <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={alt} loading={loading} onLoad={imageLoaded} />
+      {renderedImage && regions.length ? <div className="motion-audit-region-layer" aria-hidden="true">
+        {regions.map(([x1, y1, x2, y2], index) => <span
+          className="motion-audit-region"
+          key={`${x1}-${y1}-${x2}-${y2}-${index}`}
+          style={{
+            left: `${renderedImage.left + x1 * renderedImage.width}px`,
+            top: `${renderedImage.top + y1 * renderedImage.height}px`,
+            width: `${(x2 - x1) * renderedImage.width}px`,
+            height: `${(y2 - y1) * renderedImage.height}px`,
+          }}
+        >{index === regions.length - 1 ? <strong>motion</strong> : null}</span>)}
+      </div> : null}
+    </div>
+  );
+}
+
 function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, error, timeZone, onOpen }) {
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   return (
@@ -9873,7 +9919,7 @@ function MotionAuditViewer({ items, total, page, pageSize, setPage, loading, err
             <article className="motion-audit-card" key={item.id}>
               <button type="button" className="motion-audit-media" onClick={() => onOpen(item)} aria-label={`Open ${item.camera_id} motion audit image`}>
                 {item.has_snapshot
-                  ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} motion decision`} loading="lazy" />
+                  ? <MotionAuditAnnotatedImage item={item} alt={`${item.camera_id} motion decision`} loading="lazy" />
                   : <div className="empty-thumb"><Camera size={28} /><span>Audit image unavailable</span></div>}
                 <span className={`motion-audit-outcome ${outcome.className}`}>{outcome.label}</span>
               </button>
@@ -10045,7 +10091,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
         <div className="motion-audit-overlay-content">
           <div className="motion-audit-overlay-media">
             {item.has_snapshot
-              ? <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={`${item.camera_id} rejected motion`} onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+              ? <MotionAuditAnnotatedImage item={item} alt={`${item.camera_id} rejected motion`} onImageSize={setImageSize} />
               : <div className="empty-thumb"><Camera size={42} /><span>Audit image unavailable</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
@@ -10697,7 +10743,6 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           <header className="detection-settings-card-head">
             <div className="detection-settings-card-icon"><Activity size={18} /></div>
             <div><h3>Continuous tracking</h3><p>Keep one numbered identity while an object moves through an active incident.</p></div>
-            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /><span>Tracking enabled</span></label>
           </header>
           <div className="detection-field-grid">
           <label>Tracking detail<select value={String(config.detector?.tracking?.sample_fps ?? 2)} onChange={(event) => updateConfig(["detector", "tracking", "sample_fps"], Number(event.target.value))}><option value="1">Lower CPU (1 frame/sec)</option><option value="2">Balanced (2 frames/sec)</option><option value="3">Smoother (3 frames/sec)</option><option value="5">Maximum detail (5 frames/sec)</option></select><small>OpenVINO runs once for every analyzed tracking frame.</small></label>
@@ -10725,6 +10770,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
         <details className="detection-compact-details">
           <summary>Association tuning</summary>
           <div className="detection-field-grid advanced-tracking-grid">
+            <label className="compact-toggle"><input type="checkbox" checked={config.detector?.tracking?.enabled ?? true} onChange={(event) => updateConfig(["detector", "tracking", "enabled"], event.target.checked)} /><span>Enable core tracking</span><small>Troubleshooting escape hatch. Leave enabled unless this camera or hardware cannot sustain tracking.</small></label>
             <div className="detection-settings-subhead"><strong>SurvNG Hybrid tracking</strong><small>Production tracking uses SurvNG’s timestamp-aware geometry and selective appearance recovery. FastTrack is available only through the incident Compare tool.</small></div>
             <label>Confirm after detections<input type="number" min="1" max="10" step="1" value={config.detector?.tracking?.min_confirmations ?? 2} onChange={(event) => updateConfig(["detector", "tracking", "min_confirmations"], Number(event.target.value))} /><small>New objects found during an active session need this many matching observations. Incident-starting objects have already passed the event-frame confirmation above.</small></label>
             <label>Tracking confidence floor<input type="number" min="0.01" max="0.95" step="0.01" value={config.detector?.tracking?.low_confidence_threshold ?? 0.25} onChange={(event) => updateConfig(["detector", "tracking", "low_confidence_threshold"], Number(event.target.value))} /><small>Allows an existing track to survive weaker detections without creating a new incident object.</small></label>
