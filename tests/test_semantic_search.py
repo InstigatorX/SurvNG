@@ -226,21 +226,23 @@ class SemanticIndexTest(unittest.TestCase):
         encoder = FakeEncoder()
         service.encoder = encoder
         service._storage_dir = Path(self.temporary.name)
-        service._index_event({
+        written = service.index_event({
             "id": 1, "camera_id": "gate", "created_at": "now",
             "snapshot_path": "snapshot.jpg",
             "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
         })
 
+        self.assertEqual(written, 2)
         self.assertEqual(encoder.calls, [[(100, 200, 3), (60, 100, 3)]])
         self.assertEqual(self.index.coverage(self.identity), {"evidence_count": 2, "event_count": 1})
 
         # A second pass for the same model generation performs no inference.
-        service._index_event({
+        written = service.index_event({
             "id": 1, "camera_id": "gate", "created_at": "now",
             "snapshot_path": "snapshot.jpg",
             "objects_json": '[{"label":"car","box":{"x1":10,"y1":20,"x2":110,"y2":80}}]',
         })
+        self.assertEqual(written, 0)
         self.assertEqual(len(encoder.calls), 1)
 
         # If only crops are missing, repair them without re-encoding the frame.

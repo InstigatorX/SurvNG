@@ -1464,7 +1464,7 @@ class SemanticSearchService(DisabledSemanticSearch):
             if event is None:
                 break
             try:
-                self._index_event(event)
+                self.index_event(event)
                 self._error = ""
                 if priority > 0:
                     self._stop.wait(self.config.backfill_pause_seconds)
@@ -1472,16 +1472,21 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self._error = str(exc)
                 LOGGER.warning("semantic indexing failed for event %s: %s", event.get("id"), exc)
 
-    def _index_event(self, event: dict[str, Any]) -> None:
+    def index_event(self, event: dict[str, Any]) -> int:
+        """Synchronously index one event for tooling and the worker loop.
+
+        New evidence is generation-isolated and idempotent. Encoder use is
+        serialized by the service.
+        """
         if self.encoder is None:
-            return
+            return 0
         event_id = int(event.get("id") or 0)
         if event_id <= 0:
-            return
+            return 0
         objects = semantic_event_objects(event)
         if not objects:
             self.index.delete_event(event_id)
-            return
+            return 0
         identity = self.encoder.identity
         full_frame_needed = self.config.index_full_frame and not self.index.event_source_indexed(
             event_id, identity, "full_frame"
@@ -1505,16 +1510,16 @@ class SemanticSearchService(DisabledSemanticSearch):
                 self.index.reconcile_event_source_keys(
                     event_id, identity, "object_crop", desired_crop_keys
                 )
-            return
+            return 0
         try:
             path = event_snapshot_path(self._storage_dir, event)
         except FileNotFoundError:
             self._skipped_missing += 1
-            return
+            return 0
         frame = cv2.imread(str(path))
         if frame is None:
             self._skipped_missing += 1
-            return
+            return 0
         evidence: list[SemanticEvidence] = []
         images: list[np.ndarray] = []
         if full_frame_needed:
@@ -1543,15 +1548,22 @@ class SemanticSearchService(DisabledSemanticSearch):
         if images:
             with self._encoder_lock:
                 if self.encoder is None:
-                    return
+                    return 0
                 embeddings = self.encoder.encode_images(images)
-            self._indexed += self.index.upsert(evidence, embeddings, self.encoder.identity)
+            written = self.index.upsert(evidence, embeddings, self.encoder.identity)
+            self._indexed += written
             if self.config.index_object_crops and existing_crop_keys != desired_crop_keys:
                 # Preserve prior searchable evidence until replacements have
                 # encoded successfully, then remove only stale source keys.
                 self.index.reconcile_event_source_keys(
                     event_id, identity, "object_crop", desired_crop_keys
                 )
+            return written
+        return 0
+
+    def _index_event(self, event: dict[str, Any]) -> int:
+        """Backward-compatible internal alias for existing integrations."""
+        return self.index_event(event)
 
     def search_text(self, query: str, **filters: Any) -> list[SemanticSearchHit]:
         if self.encoder is None:

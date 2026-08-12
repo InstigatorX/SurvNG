@@ -94,6 +94,44 @@ at five and ten, and reciprocal rank. Queries marked `judged: false` still
 produce candidates for review but are excluded from quality claims. Re-run the
 identical benchmark after a candidate generation is indexed.
 
+## Build and evaluate a comparison generation
+
+The offline builder writes only the candidate package's fingerprinted
+generation. It does not change `config.json`, restart SurvNG, or alter which
+generation serves live searches. The command is safe to interrupt and resume;
+already-complete full-frame and crop evidence is skipped.
+
+```bash
+.venv/bin/python scripts/build-semantic-index.py \
+  --database runtime/database/survng.sqlite3 \
+  --storage-dir /path/to/survng/storage \
+  --model-dir models/siglip2-base-patch16-224-openvino-fp16 \
+  --device GPU \
+  --pause-seconds 0.03 \
+  --report siglip2-index-report.json
+```
+
+Only one offline comparison build may use a database at a time. Progress and
+the final report distinguish events scanned from events actually encoded and
+record parent, inference-worker, and combined memory high-water marks. Live
+events continue to be indexed by the active model generation independently.
+
+Evaluate the candidate directly from its local generation, without activating
+it in the application:
+
+```bash
+.venv/bin/python scripts/evaluate-semantic-search.py benchmark.json \
+  --model-dir models/siglip2-base-patch16-224-openvino-fp16 \
+  --database runtime/database/survng.sqlite3 \
+  --device GPU \
+  --output siglip2-comparison.json
+```
+
+The evaluator de-duplicates crop and whole-frame matches to the best result per
+incident. Quality metrics are emitted only for queries whose relevant incident
+IDs have been reviewed; unjudged queries remain useful candidate lists but are
+not treated as accuracy evidence.
+
 ## Package layout
 
 ```text
