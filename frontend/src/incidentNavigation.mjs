@@ -109,6 +109,12 @@ export function incidentDetailQuery(incident) {
   }).toString();
 }
 
+export function linkedIncidentEventFilter(incident) {
+  return Number(incident?.object_event_count || 0) > 0 || incident?.has_objects || incident?.kind === "object"
+    ? "object"
+    : "motion";
+}
+
 export function incidentMosaicEvents(incident) {
   if (!Array.isArray(incident?.events)) return [];
   return incident.events

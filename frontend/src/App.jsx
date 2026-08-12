@@ -99,7 +99,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -4093,6 +4093,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     closeIncidentOverlay,
   } = useIncidentDetails();
   const [focusedFaceEventId, setFocusedFaceEventId] = useState(null);
+  const [linkedIncidentDetail, setLinkedIncidentDetail] = useState(null);
+  const [linkedIncidentEventId, setLinkedIncidentEventId] = useState(null);
   const [selectedFace, setSelectedFace] = useState(null);
   const [facePeople, setFacePeople] = useState([]);
   const [expandedIncidentId, setExpandedIncidentId] = useState(null);
@@ -4123,7 +4125,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const visibleIncidents = semanticIncidentActive
     ? incidentResultSource.slice(incidentPage * incidentsPerPage, (incidentPage + 1) * incidentsPerPage)
     : incidentResultSource;
-  const explicitlyFocusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId) || null;
+  const explicitlyFocusedSummary = visibleIncidents.find((incident) => incident.id === expandedIncidentId)
+    || (linkedIncidentDetail?.id === expandedIncidentId ? linkedIncidentDetail : null);
   const focusedSummary = mobileView ? explicitlyFocusedSummary : explicitlyFocusedSummary || visibleIncidents[0] || null;
   const focusedDetailQuery = incidentDetailQuery(focusedSummary);
   const focusedIncident = focusedSummary ? incidentDetails[focusedDetailQuery] || focusedSummary : null;
@@ -4166,11 +4169,21 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     fetch(`/api/incidents/detail?${query}`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("Linked incident unavailable")))
       .then((detail) => {
-        setSelectedEvent(detail);
+        const requestedEventId = Number(String(eventIds).split(",")[0]);
+        if (mobileView) {
+          setSelectedEvent(detail);
+          return;
+        }
+        setLinkedIncidentDetail(detail);
+        setLinkedIncidentEventId(Number.isInteger(requestedEventId) ? requestedEventId : Number(detail.representative_event_id) || null);
         setExpandedIncidentId(detail.id);
+        setFocusedFaceEventId(Number.isInteger(requestedEventId) ? requestedEventId : Number(detail.representative_event_id) || null);
+        const linkedEpoch = new Date(detail.start_at || detail.created_at || 0).getTime();
+        if (Number.isFinite(linkedEpoch) && linkedEpoch > 0) setIncidentDay(dateKeyForTimeZone(linkedEpoch, timeZone));
+        setEventFilter(linkedIncidentEventFilter(detail));
       })
       .catch(() => {});
-  }, []);
+  }, [mobileView, timeZone]);
 
   useEffect(() => {
     clearLegacyIncidentFilterStorage();
@@ -4397,13 +4410,15 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   }, [incidentPage, incidentPageCount]);
 
   useEffect(() => {
-    setFocusedFaceEventId(null);
+    setFocusedFaceEventId(
+      linkedIncidentDetail?.id === focusedIncident?.id ? linkedIncidentEventId : null,
+    );
     setDesktopAnalysisStats(null);
     relatedPreviewRequestRef.current += 1;
     setRelatedPreviewIncident(null);
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
-  }, [focusedIncident?.id]);
+  }, [focusedIncident?.id, linkedIncidentDetail?.id, linkedIncidentEventId]);
 
   useEffect(() => {
     if (!focusedSummary || !focusedDetailQuery || incidentDetails[focusedDetailQuery]) return;
@@ -4428,10 +4443,12 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   }, [selectedEvent?.id, focusedEvent?.id, focusedEvent?.created_at, focusedEvent?.camera_id, onRecordingContextChange]);
 
   useEffect(() => {
-    if (expandedIncidentId && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
+    if (expandedIncidentId
+      && linkedIncidentDetail?.id !== expandedIncidentId
+      && !visibleIncidents.some((incident) => incident.id === expandedIncidentId)) {
       setExpandedIncidentId(null);
     }
-  }, [expandedIncidentId, visibleIncidents]);
+  }, [expandedIncidentId, linkedIncidentDetail?.id, visibleIncidents]);
 
   useEffect(() => {
     function onKey(keyEvent) {
@@ -4449,6 +4466,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
       const incident = visibleIncidents.find((candidate) => candidate.id === incidentId);
       if (incident) openIncidentOverlay(incident);
       return;
+    }
+    if (incidentId !== linkedIncidentDetail?.id) {
+      setLinkedIncidentDetail(null);
+      setLinkedIncidentEventId(null);
     }
     setExpandedIncidentId(incidentId);
   }

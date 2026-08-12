@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -18,6 +18,9 @@ assert.equal(adjacentIncident([incidents[0]], incidents[0], 1), null);
 assert.equal(incidentDetailQuery(incidents[0]), "event_ids=101%2C102&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [{ id: 101 }, { id: 101 }, { id: "bad" }] }), "event_ids=101&gap_seconds=45");
 assert.equal(incidentDetailQuery({ events: [] }), "");
+assert.equal(linkedIncidentEventFilter({ kind: "motion", object_event_count: 0 }), "motion");
+assert.equal(linkedIncidentEventFilter({ kind: "motion", object_event_count: 1 }), "object");
+assert.equal(linkedIncidentEventFilter({ kind: "object" }), "object");
 
 const mosaicEvents = incidentMosaicEvents({ events: [
   { id: 3, created_at: "2026-08-08T12:00:03Z" },
