@@ -6,10 +6,6 @@ const DEFAULT_SETTINGS = Object.freeze({
   sourceThresholds: { onvif: 0.5 },
   sourceWeights: { primary: 1, onvif: 1 },
   weightedThreshold: 0.5,
-  activationFrames: 1,
-  releaseFrames: 3,
-  cooldownSeconds: 5,
-  stateTimeoutSeconds: 10,
 });
 
 export const MOTION_MODE_OPTIONS = Object.freeze([
@@ -122,14 +118,7 @@ export function motionModeInfo(mode) {
     || MOTION_MODE_OPTIONS.find((option) => option.value === "camera_rescue");
 }
 
-const GUIDED_IMPLEMENTATIONS = [
-  "buffered_evidence_fusion",
-  "score_event_state",
-  "score_trigger",
-];
-const GUIDED_STAGE_IDS = ["evidence_fusion", "event_state", "trigger"];
-const GUIDED_OPTION_KEYS = [
-  new Set([
+const FUSION_OPTION_KEYS = new Set([
     "sources",
     "policy",
     "source_thresholds",
@@ -139,22 +128,14 @@ const GUIDED_OPTION_KEYS = [
     "require_warmed",
     "include_primary",
     "fail_open",
-  ]),
-  new Set([
-    "activation_frames",
-    "release_frames",
-    "cooldown_seconds",
-    "state_timeout_seconds",
-  ]),
-  new Set(),
-];
+  ]);
 
-function isGuidedStage(stage, index) {
+function isGuidedFusionStage(stage) {
   const options = stage?.options || {};
-  return stage?.implementation === GUIDED_IMPLEMENTATIONS[index]
-    && stage?.stage_id === GUIDED_STAGE_IDS[index]
+  return stage?.implementation === "buffered_evidence_fusion"
+    && stage?.stage_id === "evidence_fusion"
     && !stage?.parallel_group
-    && Object.keys(options).every((key) => GUIDED_OPTION_KEYS[index].has(key));
+    && Object.keys(options).every((key) => FUSION_OPTION_KEYS.has(key));
 }
 
 function finiteNumber(value, fallback) {
@@ -198,18 +179,20 @@ export function readMotionDecisionFusion(fusion) {
   if (fusion == null || (Array.isArray(fusion) && fusion.length === 0)) {
     return { custom: false, usesDefaults: true, settings: defaultMotionDecisionSettings() };
   }
+  const migrated = Array.isArray(fusion)
+    ? fusion.filter((stage) => !["score_event_state", "score_trigger"].includes(stage?.implementation))
+    : fusion;
   if (
-    !Array.isArray(fusion)
-    || fusion.length !== GUIDED_IMPLEMENTATIONS.length
-    || fusion.some((stage, index) => !isGuidedStage(stage, index))
-    || (fusion[0]?.options?.minimum_sources ?? 1) !== 1
-    || (fusion[0]?.options?.require_warmed ?? true) !== true
+    !Array.isArray(migrated)
+    || migrated.length !== 1
+    || !isGuidedFusionStage(migrated[0])
+    || (migrated[0]?.options?.minimum_sources ?? 1) !== 1
+    || (migrated[0]?.options?.require_warmed ?? true) !== true
   ) {
     return { custom: true, usesDefaults: false, settings: defaultMotionDecisionSettings() };
   }
 
-  const fusionOptions = fusion[0]?.options || {};
-  const stateOptions = fusion[1]?.options || {};
+  const fusionOptions = migrated[0]?.options || {};
   const defaults = defaultMotionDecisionSettings();
   return {
     custom: false,
@@ -235,30 +218,6 @@ export function readMotionDecisionFusion(fusion) {
         0,
         1,
         defaults.weightedThreshold,
-      ),
-      activationFrames: Math.round(clamp(
-        stateOptions.activation_frames,
-        1,
-        20,
-        defaults.activationFrames,
-      )),
-      releaseFrames: Math.round(clamp(
-        stateOptions.release_frames,
-        1,
-        20,
-        defaults.releaseFrames,
-      )),
-      cooldownSeconds: clamp(
-        stateOptions.cooldown_seconds,
-        0,
-        300,
-        defaults.cooldownSeconds,
-      ),
-      stateTimeoutSeconds: clamp(
-        stateOptions.state_timeout_seconds,
-        0,
-        300,
-        defaults.stateTimeoutSeconds,
       ),
     },
   };
@@ -288,16 +247,5 @@ export function buildMotionDecisionFusion(settings) {
         fail_open: normalized.failOpen !== false,
       },
     },
-    {
-      stage_id: "event_state",
-      implementation: "score_event_state",
-      options: {
-        activation_frames: Math.round(clamp(normalized.activationFrames, 1, 20, 1)),
-        release_frames: Math.round(clamp(normalized.releaseFrames, 1, 20, 3)),
-        cooldown_seconds: clamp(normalized.cooldownSeconds, 0, 300, 5),
-        state_timeout_seconds: clamp(normalized.stateTimeoutSeconds, 0, 300, 10),
-      },
-    },
-    { stage_id: "trigger", implementation: "score_trigger", options: {} },
   ];
 }

@@ -7757,36 +7757,6 @@ function MotionDecisionEditor({
         </div>
       </div>
 
-      {!fullyInherited && !custom && !legacyMode ? <div className="motion-decision-options-body">
-      <details className="motion-decision-options">
-        <summary>Advanced timing options</summary>
-      <div className="motion-decision-stability">
-        <label>Start after<select value={settings.activationFrames} onChange={(event) => updateSettings({ activationFrames: Number(event.target.value) })}>
-          {![1, 2, 3, 5].includes(settings.activationFrames) ? <option value={settings.activationFrames}>{settings.activationFrames} matching signals</option> : null}
-          <option value={1}>1 matching signal (immediate)</option>
-          <option value={2}>2 matching signals</option>
-          <option value={3}>3 matching signals</option>
-          <option value={5}>5 matching signals</option>
-        </select></label>
-        <label>End after<select value={settings.releaseFrames} onChange={(event) => updateSettings({ releaseFrames: Number(event.target.value) })}>
-          {![1, 2, 3, 5].includes(settings.releaseFrames) ? <option value={settings.releaseFrames}>{settings.releaseFrames} quiet signals</option> : null}
-          <option value={1}>1 quiet signal (immediate)</option>
-          <option value={2}>2 quiet signals</option>
-          <option value={3}>3 quiet signals</option>
-          <option value={5}>5 quiet signals</option>
-        </select></label>
-        <label>Pause after an event<select value={settings.cooldownSeconds} onChange={(event) => updateSettings({ cooldownSeconds: Number(event.target.value) })}>
-          {![0, 1, 2, 5, 10].includes(settings.cooldownSeconds) ? <option value={settings.cooldownSeconds}>{settings.cooldownSeconds} seconds</option> : null}
-          <option value={0}>No pause</option>
-          <option value={1}>1 second</option>
-          <option value={2}>2 seconds</option>
-          <option value={5}>5 seconds</option>
-          <option value={10}>10 seconds</option>
-        </select></label>
-        <label>Forget unfinished event after (seconds)<input type="number" min="0" max="300" step="1" value={settings.stateTimeoutSeconds} onChange={(event) => updateSettings({ stateTimeoutSeconds: Number(event.target.value) })} /></label>
-      </div>
-      </details>
-      </div> : null}
     </div>
   );
 }

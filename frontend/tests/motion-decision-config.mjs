@@ -31,17 +31,14 @@ assert.equal(defaults.settings.failOpen, true);
 const graph = buildMotionDecisionFusion({
   ...defaults.settings,
   policy: "all",
-  activationFrames: 2,
 });
 assert.equal(graph[0].implementation, "buffered_evidence_fusion");
 assert.equal(graph[0].options.policy, "all");
-assert.equal(graph[1].options.activation_frames, 2);
-assert.equal(graph[2].implementation, "score_trigger");
+assert.equal(graph.length, 1);
 
 const roundTrip = readMotionDecisionFusion(graph);
 assert.equal(roundTrip.custom, false);
 assert.equal(roundTrip.settings.policy, "all");
-assert.equal(roundTrip.settings.activationFrames, 2);
 assert.equal(roundTrip.settings.includePrimary, true);
 assert.equal(roundTrip.settings.failOpen, true);
 
@@ -103,5 +100,12 @@ assert.equal(readMotionDecisionFusion(extended).custom, true);
 const alternateMinimum = structuredClone(graph);
 alternateMinimum[0].options.minimum_sources = 2;
 assert.equal(readMotionDecisionFusion(alternateMinimum).custom, true);
+
+const legacyThreeStage = [
+  graph[0],
+  { stage_id: "event_state", implementation: "score_event_state", options: {} },
+  { stage_id: "trigger", implementation: "score_trigger", options: {} },
+];
+assert.equal(readMotionDecisionFusion(legacyThreeStage).custom, false);
 
 console.log("motion decision configuration tests passed");

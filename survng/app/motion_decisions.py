@@ -43,8 +43,6 @@ class MotionDecisionQualification(Protocol):
     def with_pipeline_telemetry(
         self, result: MotionQualificationResult
     ) -> MotionQualificationResult: ...
-    def reset_event_state_runtime(self) -> None: ...
-
 
 class MotionDecisionIncidents(Protocol):
     def process(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -798,8 +796,6 @@ class MotionDecisionOrchestrator:
                 "visual_backup_uncorrelated_objects",
                 int(correlation.get("eligible_object_count") or 0),
             )
-        if not found_object:
-            self._qualification.reset_event_state_runtime()
         self._audit_recorder.record_audit(
             event_id=int(event_id) if event_id is not None else None,
             decision_id=decision_id,

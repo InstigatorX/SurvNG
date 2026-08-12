@@ -51,11 +51,6 @@ from .decision_handler import (
     MotionDecisionOutcome,
 )
 from .debug import MotionDebugSnapshot, MotionDebugSnapshotStore
-from .decision_stages import (
-    MotionEventStateStage,
-    ObjectDetectionTriggerStage,
-    register_decision_stages,
-)
 from .evidence import MotionEvidenceRepository, MotionEvidenceSample
 from .evidence_stages import (
     EVIDENCE_REPOSITORY_SERVICE,
@@ -97,7 +92,6 @@ def build_builtin_motion_registry() -> MotionStageRegistry:
     register_image_motion_stages(registry)
     register_adaptive_motion_stages(registry)
     register_evidence_stages(registry)
-    register_decision_stages(registry)
     return registry
 
 
@@ -136,7 +130,6 @@ __all__ = [
     "MotionEvidenceSample",
     "MotionFramePreprocessorStage",
     "MotionFrameBlobs",
-    "MotionEventStateStage",
     "MotionPipeline",
     "MotionPipelinePreset",
     "MotionPipelineFactory",
@@ -156,7 +149,6 @@ __all__ = [
     "MotionTrack",
     "OnvifEventEvidenceStage",
     "OpenCloseMorphologyStage",
-    "ObjectDetectionTriggerStage",
     "PersistentCentroidTrackerStage",
     "RecordedMotionObjectDetector",
     "RecordedMotionObjectDetectorFactory",
@@ -179,7 +171,6 @@ __all__ = [
     "register_image_motion_stages",
     "register_adaptive_motion_stages",
     "register_evidence_stages",
-    "register_decision_stages",
     "resolve_motion_pipeline_graphs",
     "resolved_trigger_mode",
     "update_guided_fusion",

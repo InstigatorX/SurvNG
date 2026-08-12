@@ -138,7 +138,7 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
                 camera_id,
                 graphs.fusion,
                 initial_artifacts={"scoring"},
-                required_artifacts={"scoring", "decision"},
+                required_artifacts={"scoring"},
             ))
         except ValueError as error:
             raise ValueError(
@@ -380,7 +380,7 @@ class AppManager:
                 camera.id,
                 graphs.fusion,
                 initial_artifacts={"scoring"},
-                required_artifacts={"scoring", "decision"},
+                required_artifacts={"scoring"},
             )
             pipelines.append(fusion_pipeline)
             return CameraWorker(

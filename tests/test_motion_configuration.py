@@ -379,7 +379,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
 
         pipeline.close.assert_called_once_with()
 
-    def test_application_preflight_requires_final_trigger_decision(self) -> None:
+    def test_application_preflight_accepts_evidence_only_fusion(self) -> None:
         config = AppConfig.model_validate({
             "motion_qualification": {
                 "pipeline": {
@@ -391,8 +391,7 @@ class MotionPipelineConfigurationTest(unittest.TestCase):
             },
         })
 
-        with self.assertRaisesRegex(ValueError, "required artifacts: decision"):
-            validate_motion_pipeline_configuration(config)
+        validate_motion_pipeline_configuration(config)
 
     def test_application_preflight_reports_invalid_stage_options_with_context(self) -> None:
         config = AppConfig.model_validate({

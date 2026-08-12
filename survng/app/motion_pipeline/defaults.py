@@ -145,15 +145,4 @@ def default_motion_fusion_stage_configs() -> list[MotionStageConfig]:
                 "fail_open": True,
             },
         ),
-        MotionStageConfig(
-            stage_id="event_state",
-            implementation="score_event_state",
-            options={
-                "activation_frames": 1,
-                "release_frames": 3,
-                "cooldown_seconds": 5.0,
-                "state_timeout_seconds": 10.0,
-            },
-        ),
-        MotionStageConfig(stage_id="trigger", implementation="score_trigger"),
     ]

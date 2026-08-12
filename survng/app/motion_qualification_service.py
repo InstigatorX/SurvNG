@@ -354,20 +354,7 @@ class MotionQualificationService:
                 )
             self._fusion_last_at = end_epoch
         scoring = processed.scoring
-        decision = processed.decision
         features = dict(scoring.features)
-        features.update({
-            "event_state_phase": processed.event_state.phase.value,
-            "event_state_key": processed.event_state.event_key,
-            "event_state_started_at": processed.event_state.started_at,
-            "event_state_transition": processed.event_state.transition_reason,
-            "event_state_consecutive_accepts": processed.event_state.consecutive_accepts,
-            "event_state_consecutive_rejects": processed.event_state.consecutive_rejects,
-        })
-        if processed.event_state.cooldown_until is not None:
-            features["event_state_cooldown_remaining"] = round(
-                max(0.0, processed.event_state.cooldown_until - end_epoch), 3
-            )
         telemetry = dict(result.telemetry)
         if include_telemetry:
             graphs = dict(telemetry.get("graphs") or {})
@@ -382,25 +369,14 @@ class MotionQualificationService:
                 "graphs": graphs,
             })
         return MotionQualificationResult(
-            accepted=(
-                decision.run_object_detection if decision is not None else scoring.accepted
-            ),
-            score=decision.score if decision is not None else scoring.score,
+            accepted=scoring.accepted,
+            score=scoring.score,
             threshold=scoring.threshold,
-            reason=decision.reason if decision is not None else scoring.reason,
+            reason=scoring.reason,
             frame_count=scoring.frame_count,
             features=features,
             telemetry=telemetry,
         )
-
-    def reset_event_state_runtime(self) -> None:
-        stage_ids = frozenset(
-            str(stage.get("stage_id") or "")
-            for stage in self.fusion_pipeline.stage_configuration
-            if stage.get("implementation") == "score_event_state"
-        )
-        with self._fusion_lock:
-            self.fusion_pipeline.runtime.reset_stages(stage_ids)
 
     def reset_runtime(
         self,

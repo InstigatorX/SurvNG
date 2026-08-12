@@ -50,6 +50,17 @@ def _resolve_graph(
             and stages[0].implementation in {"legacy_qualifier", "legacy_motion_scorer"}
         ):
             return tuple(defaults), f"{origin}_legacy_migrated"
+        if graph_name == "fusion":
+            migrated = [
+                stage
+                for stage in stages
+                if stage.implementation not in {"score_event_state", "score_trigger"}
+            ]
+            if len(migrated) != len(stages):
+                return (
+                    _stage_configs(migrated) if migrated else tuple(defaults),
+                    f"{origin}_episode_v2_migrated",
+                )
         return _stage_configs(stages), origin
 
     if camera_stages is not None:
