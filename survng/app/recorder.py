@@ -24,6 +24,7 @@ from .baichuan_native import (
 )
 from .config import CameraConfig, RecordingRetentionConfig
 from .go2rtc import Go2RtcAdapter, Go2RtcError
+from .media_storage import MediaStorageRegistry
 from .recording_media import mp4_stream_fingerprint
 from .recording_retention import RecordingRetentionService
 
@@ -58,13 +59,22 @@ class Recorder:
         go2rtc: Go2RtcAdapter | None = None,
         retention_config: RecordingRetentionConfig | None = None,
         protected_recording_paths: Callable[[], set[str]] | None = None,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.ffmpeg_path = ffmpeg_path
         self.hardware_acceleration = hardware_acceleration
         self.go2rtc = go2rtc or Go2RtcAdapter(timeout=1.5, cache_seconds=120.0)
         self.segment_seconds = max(2.0, min(300.0, float(segment_seconds or 10.0)))
         self.storage_dir = storage_dir
-        self.recordings_dir = storage_dir / "recordings"
+        self.media_storage = media_storage
+        self.recording_roots = (
+            media_storage.roots_for("recordings")
+            if media_storage is not None
+            else [storage_dir / "recordings"]
+        )
+        if not self.recording_roots:
+            raise ValueError("at least one media location must support recordings")
+        self.recordings_dir = self.recording_roots[0]
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
         resolved_index_dir = index_dir or storage_dir
         resolved_index_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +116,7 @@ class Recorder:
             self._index_connection,
             retention_config or RecordingRetentionConfig(),
             self._protected_recording_paths,
+            media_storage=self.media_storage,
         )
 
     def _index_connection(self) -> sqlite3.Connection:
@@ -132,7 +143,8 @@ class Recorder:
                     health_error TEXT NOT NULL DEFAULT '',
                     validated INTEGER NOT NULL DEFAULT 0,
                     stream_fingerprint TEXT NOT NULL DEFAULT '',
-                    fingerprint_checked INTEGER NOT NULL DEFAULT 0
+                    fingerprint_checked INTEGER NOT NULL DEFAULT 0,
+                    location_id TEXT NOT NULL DEFAULT 'default'
                 )
                 """
             )
@@ -165,6 +177,10 @@ class Recorder:
                     WHERE stream_fingerprint != ''
                     """
                 )
+            if "location_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE recordings ADD COLUMN location_id TEXT NOT NULL DEFAULT 'default'"
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS recordings_fingerprint_pending
@@ -175,6 +191,12 @@ class Recorder:
 
     def _rebase_recording_index_paths(self) -> None:
         """Rebase absolute media paths when the same index is used under a new mount."""
+        if len(self.recording_roots) > 1:
+            # In a storage pool, absolute legacy paths remain valid and a root
+            # change must be handled by an explicit drain/migration operation.
+            # Rebasing every row onto the first root would corrupt placement.
+            self._backfill_recording_location_ids()
+            return
         recordings_root = self.recordings_dir.resolve()
         root_value = str(recordings_root)
         root_prefix = f"{root_value}{os.sep}"
@@ -267,6 +289,25 @@ class Recorder:
                 changed,
                 self.storage_dir,
             )
+
+    def _backfill_recording_location_ids(self) -> None:
+        if self.media_storage is None:
+            return
+        with self._index_connection() as connection:
+            rows = connection.execute(
+                "SELECT path FROM recordings WHERE location_id = 'default'"
+            ).fetchall()
+            updates = []
+            for row in rows:
+                path = Path(str(row["path"]))
+                location_id = self.media_storage.location_id_for(path, "recordings")
+                if location_id is not None:
+                    updates.append((location_id, str(path)))
+            if updates:
+                connection.executemany(
+                    "UPDATE recordings SET location_id = ? WHERE path = ?",
+                    updates,
+                )
 
     @staticmethod
     def _rebased_recording_path(
@@ -586,13 +627,20 @@ class Recorder:
 
     def _camera_dir(self, camera_id: str, source: str = "main") -> Path:
         source = "main" if source == "main" else "live"
-        return self.recordings_dir / camera_id / source
+        if self.media_storage is None:
+            root = self.recordings_dir
+        else:
+            assignment = f"{camera_id}:{source}"
+            root = self.media_storage.directory("recordings", assignment)
+        return root / camera_id / source
 
     def _recording_search_dirs(self, camera_id: str, source: str) -> list[Path]:
         normalized = "main" if source == "main" else "live"
-        directories = [self._camera_dir(camera_id, normalized)]
-        if normalized == "main":
-            directories.append(self.recordings_dir / camera_id)
+        directories: list[Path] = []
+        for root in self.recording_roots:
+            directories.append(root / camera_id / normalized)
+            if normalized == "main":
+                directories.append(root / camera_id)
         return directories
 
     def _keep_recording_dirs(self, camera_dir: Path, stop_event: threading.Event) -> None:
@@ -962,7 +1010,7 @@ class Recorder:
                 """
                 SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds,
                        end_epoch, source, playable, health_error, validated,
-                       stream_fingerprint, fingerprint_checked
+                       stream_fingerprint, fingerprint_checked, location_id
                 FROM recordings
                 WHERE camera_id = ? AND source = ? AND playable = 1
                 ORDER BY start_epoch DESC LIMIT ?
@@ -991,7 +1039,8 @@ class Recorder:
                 indexed = connection.execute(
                     """
                     SELECT path, name, size_bytes, modified_at, start_epoch, duration_seconds, end_epoch, source,
-                           playable, health_error, stream_fingerprint, fingerprint_checked
+                           playable, health_error, stream_fingerprint, fingerprint_checked,
+                           location_id
                     FROM recordings
                     WHERE camera_id = ? AND source = ? AND playable = 1 AND end_epoch > ? AND start_epoch < ?
                     ORDER BY start_epoch
@@ -1071,17 +1120,20 @@ class Recorder:
     ) -> None:
         """Keep manifest segments out of retention while clients fetch them."""
         expires_at = time.monotonic() + max(10.0, float(ttl_seconds))
-        recordings_root = self.recordings_dir.resolve()
         leased: list[str] = []
         for row in rows:
             raw_path = str(row.get("path") or "")
             if not raw_path:
                 continue
             resolved = Path(raw_path).resolve(strict=False)
-            try:
-                resolved.relative_to(recordings_root)
-            except ValueError:
-                continue
+            if self.media_storage is not None:
+                if not self.media_storage.contains(resolved, "recordings"):
+                    continue
+            else:
+                try:
+                    resolved.relative_to(self.recordings_dir.resolve())
+                except ValueError:
+                    continue
             leased.append(str(resolved))
         if not leased:
             return
@@ -1303,6 +1355,11 @@ class Recorder:
                     "duration_seconds": duration_seconds,
                     "end_epoch": start_epoch + duration_seconds,
                     "source": source,
+                    "location_id": (
+                        self.media_storage.location_id_for(file_path, "recordings")
+                        if self.media_storage is not None
+                        else "default"
+                    ) or "default",
                 }
             )
         return rows
@@ -1370,6 +1427,7 @@ class Recorder:
                 1 if row.get("validated", False) else 0,
                 str(row.get("stream_fingerprint") or ""),
                 1 if row.get("fingerprint_checked", False) else 0,
+                str(row.get("location_id") or "default"),
             )
             for row in rows
         ]
@@ -1378,8 +1436,8 @@ class Recorder:
                 """
                 INSERT INTO recordings(path, camera_id, source, name, size_bytes, modified_at, start_epoch,
                                        duration_seconds, end_epoch, playable, health_error, validated,
-                                       stream_fingerprint, fingerprint_checked)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       stream_fingerprint, fingerprint_checked, location_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size_bytes=excluded.size_bytes,
                     modified_at=excluded.modified_at,
@@ -1389,7 +1447,8 @@ class Recorder:
                         WHEN excluded.fingerprint_checked = 1 THEN excluded.stream_fingerprint
                         ELSE recordings.stream_fingerprint
                     END,
-                    fingerprint_checked=MAX(recordings.fingerprint_checked, excluded.fingerprint_checked)
+                    fingerprint_checked=MAX(recordings.fingerprint_checked, excluded.fingerprint_checked),
+                    location_id=excluded.location_id
                 """,
                 values,
             )
@@ -1611,23 +1670,26 @@ class Recorder:
     ) -> dict[RecorderKey, list[Path]]:
         """Discover current and legacy recording layouts without relying on config state."""
         grouped: dict[RecorderKey, list[Path]] = {}
-        if not self.recordings_dir.exists():
-            return grouped
-        for index, path in enumerate(self.recordings_dir.glob("*/**/*.mp4"), start=1):
-            self._raise_if_cancelled(cancel_event)
-            try:
-                parts = path.relative_to(self.recordings_dir).parts
-            except ValueError:
+        index = 0
+        for recording_root in self.recording_roots:
+            if not recording_root.exists():
                 continue
-            if len(parts) == 5 and parts[1] in {"main", "live"}:
-                camera_id, source = parts[0], parts[1]
-            elif len(parts) == 4:
-                camera_id, source = parts[0], "main"
-            else:
-                continue
-            grouped.setdefault((camera_id, source), []).append(path)
-            if progress and index % 1000 == 0:
-                progress("Scanning all recording files", index, None)
+            for path in recording_root.glob("*/**/*.mp4"):
+                index += 1
+                self._raise_if_cancelled(cancel_event)
+                try:
+                    parts = path.relative_to(recording_root).parts
+                except ValueError:
+                    continue
+                if len(parts) == 5 and parts[1] in {"main", "live"}:
+                    camera_id, source = parts[0], parts[1]
+                elif len(parts) == 4:
+                    camera_id, source = parts[0], "main"
+                else:
+                    continue
+                grouped.setdefault((camera_id, source), []).append(path)
+                if progress and index % 1000 == 0:
+                    progress("Scanning all recording files", index, None)
         return grouped
 
     def _recent_recording_files_by_source(
@@ -1638,9 +1700,11 @@ class Recorder:
         progress: Callable[[str, int, int | None], None] | None = None,
     ) -> dict[RecorderKey, list[Path]]:
         grouped: dict[RecorderKey, list[Path]] = {}
-        if not self.recordings_dir.exists():
-            return grouped
-        camera_dirs = [path for path in self.recordings_dir.iterdir() if path.is_dir()]
+        camera_dirs = [
+            path
+            for root in self.recording_roots if root.exists()
+            for path in root.iterdir() if path.is_dir()
+        ]
         targets = [datetime.now() - timedelta(hours=offset) for offset in range(max(1, hours) + 1)]
         total = max(1, len(camera_dirs) * len(targets) * 2)
         checked = 0

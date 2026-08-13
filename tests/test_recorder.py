@@ -11,8 +11,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from survng.app.baichuan_native import ffmpeg_input_args, ffmpeg_timestamp_repair_args
-from survng.app.config import CameraConfig
+from survng.app.config import CameraConfig, MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.go2rtc import Go2RtcError
+from survng.app.media_storage import MediaStorageRegistry
 from survng.app.recorder import AudioStreamInfo, Recorder
 
 
@@ -34,6 +35,31 @@ class RecorderTest(unittest.TestCase):
             "end_epoch": start_epoch + 10.0,
             "source": "main",
         }
+
+    def test_multiple_recording_locations_are_indexed_and_searched_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
+                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
+            paths = []
+            for location, hour in ((first, "00"), (second, "01")):
+                path = location / "recordings" / "gate" / "main" / "2026-08-13" / hour / f"20260813-{hour}0000+0000.mp4"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"recording")
+                paths.append(path)
+
+            recorder.refresh_recording_index({"gate": CameraConfig(id="gate", name="Gate", stream_url="rtsp://gate")}, full=True)
+            rows = recorder.recording_rows("gate", limit=10)
+
+            self.assertEqual({row["path"] for row in rows}, {str(path) for path in paths})
+            self.assertEqual({row["location_id"] for row in rows}, {"one", "two"})
 
     def test_rtsp_recording_generates_missing_pts_and_discards_large_regressions(self) -> None:
         camera = CameraConfig(

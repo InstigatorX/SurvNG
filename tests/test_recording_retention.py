@@ -8,7 +8,13 @@ from collections import namedtuple
 from pathlib import Path
 from unittest.mock import patch
 
-from survng.app.config import CameraConfig, RecordingRetentionConfig
+from survng.app.config import (
+    CameraConfig,
+    MediaStorageConfig,
+    MediaStorageLocationConfig,
+    RecordingRetentionConfig,
+)
+from survng.app.media_storage import MediaLocationStatus, MediaStorageRegistry
 from survng.app.recording_retention import (
     GIB,
     RETENTION_CLEANUP_INTERVAL_SECONDS,
@@ -127,6 +133,31 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         with self.connection() as connection:
             paths = {str(row[0]) for row in connection.execute("SELECT path FROM recordings")}
         self.assertEqual(paths, {str(recent)})
+
+    def test_capacity_pressure_is_reported_per_recording_location(self) -> None:
+        second = self.storage / "second"
+        second.mkdir()
+        registry = MediaStorageRegistry(self.storage / "metadata", MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(id="one", path=str(self.storage), roles=["recordings"]),
+            MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+        ]))
+        service = RecordingRetentionService(
+            self.storage,
+            self.recordings,
+            self.connection,
+            RecordingRetentionConfig(storage_limit_tb=1),
+            media_storage=registry,
+        )
+        statuses = [
+            MediaLocationStatus(id="one", name="One", path=self.storage, roles=("recordings",), state="online", total_bytes=1000, free_bytes=500, usable_bytes=500),
+            MediaLocationStatus(id="two", name="Two", path=second, roles=("recordings",), state="online", total_bytes=1000, free_bytes=50, usable_bytes=50),
+        ]
+        with patch.object(registry, "statuses", return_value=statuses):
+            plan = service.plan()
+
+        self.assertEqual(plan["reclaim"]["pressured_location_ids"], ["two"])
+        self.assertEqual(plan["reclaim"]["free_space_bytes"], 150)
+        self.assertEqual(len(plan["storage"]["locations"]), 2)
 
     @patch(
         "survng.app.recording_retention.shutil.disk_usage",

@@ -164,6 +164,17 @@ class MediaStorageRegistry:
             return True
         return False
 
+    def location_id_for(self, path: Path, role: MediaStorageRole | None = None) -> str | None:
+        resolved = path.expanduser().resolve(strict=False)
+        for status in self.statuses():
+            root = status.path / self.ROLE_DIRECTORIES[role] if role is not None else status.path
+            try:
+                resolved.relative_to(root.resolve(strict=False))
+            except ValueError:
+                continue
+            return status.id
+        return None
+
     def payload(self) -> dict[str, object]:
         return {
             "placement": self.config.placement,

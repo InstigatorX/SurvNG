@@ -13,6 +13,7 @@ from typing import Any
 from threading import Thread
 
 from .config import CameraConfig, RecordingRetentionConfig
+from .media_storage import MediaStorageRegistry
 
 
 LOGGER = logging.getLogger(__name__)
@@ -36,12 +37,14 @@ class RecordingRetentionService:
         connection_factory: Callable[[], sqlite3.Connection],
         config: RecordingRetentionConfig,
         protected_paths_provider: Callable[[], set[str]] | None = None,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.recordings_dir = recordings_dir.resolve()
         self.connection_factory = connection_factory
         self.config = config
         self.protected_paths_provider = protected_paths_provider or set
+        self.media_storage = media_storage
         self._cameras: dict[str, CameraConfig] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -130,7 +133,10 @@ class RecordingRetentionService:
 
     def plan(self, *, now_epoch: float | None = None) -> dict[str, Any]:
         now = time.time() if now_epoch is None else float(now_epoch)
-        usage = shutil.disk_usage(self.storage_dir)
+        location_usage = self._location_usage()
+        total_bytes = sum(item["total_bytes"] for item in location_usage)
+        free_bytes = sum(item["free_bytes"] for item in location_usage)
+        used_bytes = max(0, total_bytes - free_bytes)
         protected_paths = self.protected_paths_provider()
         with self.connection_factory() as connection:
             self._register_protection_function(connection, protected_paths)
@@ -212,11 +218,15 @@ class RecordingRetentionService:
         indexed_bytes = int(totals["bytes"] or 0)
         storage_limit_bytes = round(self.config.storage_limit_tb * TIB)
         quota_reclaim = max(0, indexed_bytes - storage_limit_bytes)
-        free_percent = usage.free / usage.total * 100 if usage.total else 0.0
+        free_percent = free_bytes / total_bytes * 100 if total_bytes else 0.0
+        pressured_locations: list[str] = []
         free_reclaim = 0
-        if free_percent < self.config.minimum_free_percent:
-            target_free = round(usage.total * self.config.target_free_percent / 100)
-            free_reclaim = max(0, target_free - usage.free)
+        for item in location_usage:
+            if item["free_percent"] < self.config.minimum_free_percent:
+                pressured_locations.append(str(item["id"]))
+                target_free = round(item["total_bytes"] * self.config.target_free_percent / 100)
+                item["reclaim_bytes"] = max(0, target_free - item["free_bytes"])
+                free_reclaim += int(item["reclaim_bytes"])
         capacity_reclaim = max(quota_reclaim, free_reclaim)
         planned_reclaim = max(expired_bytes, capacity_reclaim)
         total_span = max(
@@ -226,9 +236,9 @@ class RecordingRetentionService:
         )
         bytes_per_day = indexed_bytes / total_span * SECONDS_PER_DAY
         days_to_minimum = None
-        minimum_free_bytes = round(usage.total * self.config.minimum_free_percent / 100)
+        minimum_free_bytes = round(total_bytes * self.config.minimum_free_percent / 100)
         if bytes_per_day > 0:
-            days_to_minimum = max(0.0, (usage.free - minimum_free_bytes) / bytes_per_day)
+            days_to_minimum = max(0.0, (free_bytes - minimum_free_bytes) / bytes_per_day)
 
         reasons: list[str] = []
         if expired_bytes:
@@ -242,14 +252,15 @@ class RecordingRetentionService:
             "enabled": self.config.enabled,
             "automatic_cleanup": self.config.automatic_cleanup,
             "storage": {
-                "total_bytes": usage.total,
-                "used_bytes": usage.used,
-                "free_bytes": usage.free,
+                "total_bytes": total_bytes,
+                "used_bytes": used_bytes,
+                "free_bytes": free_bytes,
                 "free_percent": round(free_percent, 1),
                 "minimum_free_percent": self.config.minimum_free_percent,
                 "target_free_percent": self.config.target_free_percent,
                 "emergency_free_percent": self.config.emergency_free_percent,
                 "emergency": free_percent < self.config.emergency_free_percent,
+                "locations": location_usage,
             },
             "indexed": {
                 "file_count": int(totals["file_count"] or 0),
@@ -272,6 +283,7 @@ class RecordingRetentionService:
                 "protected_expired_bytes": protected_expired_bytes,
                 "quota_bytes": quota_reclaim,
                 "free_space_bytes": free_reclaim,
+                "pressured_location_ids": pressured_locations,
                 "planned_bytes": planned_reclaim,
                 "reasons": reasons,
             },
@@ -525,12 +537,42 @@ class RecordingRetentionService:
             self._run_lock.release()
 
     def _storage_below_minimum(self) -> bool:
-        try:
-            usage = shutil.disk_usage(self.storage_dir)
-        except OSError:
-            return False
-        free_percent = usage.free / usage.total * 100 if usage.total else 0.0
-        return free_percent < self.config.minimum_free_percent
+        return any(
+            item["free_percent"] < self.config.minimum_free_percent
+            for item in self._location_usage()
+        )
+
+    def _location_usage(self) -> list[dict[str, Any]]:
+        if self.media_storage is None:
+            try:
+                usage = shutil.disk_usage(self.storage_dir)
+            except OSError:
+                return []
+            return [{
+                "id": "default",
+                "name": "Primary media",
+                "path": str(self.storage_dir),
+                "state": "online",
+                "total_bytes": usage.total,
+                "free_bytes": usage.free,
+                "free_percent": round(usage.free / usage.total * 100, 1) if usage.total else 0.0,
+                "reclaim_bytes": 0,
+            }]
+        payload: list[dict[str, Any]] = []
+        for status in self.media_storage.statuses():
+            if "recordings" not in status.roles or status.total_bytes <= 0:
+                continue
+            payload.append({
+                "id": status.id,
+                "name": status.name,
+                "path": str(status.path),
+                "state": status.state,
+                "total_bytes": status.total_bytes,
+                "free_bytes": status.free_bytes,
+                "free_percent": round(status.free_bytes / status.total_bytes * 100, 1),
+                "reclaim_bytes": 0,
+            })
+        return payload
 
     @staticmethod
     def _path_is_protected(raw_path: str, protected_paths: set[str]) -> bool:
@@ -610,14 +652,27 @@ class RecordingRetentionService:
             )
             selected_bytes = sum(int(row["size_bytes"] or 0) for row in candidates.values())
             if capacity_reclaim > selected_bytes and len(candidates) < limit:
-                rows = connection.execute(
-                    """
-                    SELECT path, size_bytes, start_epoch FROM recordings
-                    WHERE end_epoch < ? AND survng_path_protected(path) = 0
-                    ORDER BY start_epoch ASC LIMIT ?
-                    """,
-                    (protected_cutoff, limit * 2),
-                ).fetchall()
+                pressured = list(plan.get("reclaim", {}).get("pressured_location_ids", []))
+                if pressured and self.media_storage is not None:
+                    placeholders = ",".join("?" for _ in pressured)
+                    rows = connection.execute(
+                        f"""
+                        SELECT path, size_bytes, start_epoch FROM recordings
+                        WHERE end_epoch < ? AND survng_path_protected(path) = 0
+                          AND location_id IN ({placeholders})
+                        ORDER BY start_epoch ASC LIMIT ?
+                        """,
+                        (protected_cutoff, *pressured, limit * 2),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT path, size_bytes, start_epoch FROM recordings
+                        WHERE end_epoch < ? AND survng_path_protected(path) = 0
+                        ORDER BY start_epoch ASC LIMIT ?
+                        """,
+                        (protected_cutoff, limit * 2),
+                    ).fetchall()
                 for row in rows:
                     if self._path_is_protected(str(row["path"]), protected_paths):
                         continue
@@ -631,7 +686,11 @@ class RecordingRetentionService:
 
     def _safe_recording_path(self, raw_path: str) -> Path:
         path = Path(raw_path).resolve(strict=False)
-        path.relative_to(self.recordings_dir)
+        if self.media_storage is not None:
+            if not self.media_storage.contains(path, "recordings"):
+                raise ValueError("recording is outside configured media storage")
+        else:
+            path.relative_to(self.recordings_dir)
         if path.suffix.lower() != ".mp4":
             raise ValueError("retention only removes MP4 recordings")
         return path
@@ -639,7 +698,12 @@ class RecordingRetentionService:
     def _remove_empty_directories(self, directories: set[Path]) -> None:
         for directory in directories:
             current = directory
-            while current != self.recordings_dir:
+            roots = (
+                {root.resolve(strict=False) for root in self.media_storage.roots_for("recordings")}
+                if self.media_storage is not None
+                else {self.recordings_dir}
+            )
+            while current not in roots:
                 try:
                     current.rmdir()
                 except OSError:

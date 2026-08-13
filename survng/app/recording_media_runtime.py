@@ -924,7 +924,12 @@ class RecordingMediaRuntime:
             raise HTTPException(status_code=404, detail='recording file not found')
         try:
             path = Path(str(value)).resolve(strict=True)
-            path.relative_to(selected_manager.recorder.recordings_dir.resolve())
+            media_storage = getattr(selected_manager, "media_storage", None)
+            if media_storage is not None:
+                if not media_storage.contains(path, "recordings"):
+                    raise ValueError("recording file is outside configured media storage")
+            else:
+                path.relative_to(selected_manager.recorder.recordings_dir.resolve())
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail='recording file not found') from None
         except (OSError, ValueError):

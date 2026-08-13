@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AppConfig, CameraConfig, RecordingRetentionConfig
+from .media_storage import MediaStorageRegistry
 from .recorder import Recorder
 
 
@@ -32,6 +33,7 @@ class RecordingLifecycle:
         config: AppConfig,
         storage_dir: Path,
         protected_recording_paths: Callable[[], set[str]],
+        media_storage: MediaStorageRegistry | None = None,
         recorder: Recorder | None = None,
     ) -> None:
         recording_index_dir = (
@@ -47,6 +49,7 @@ class RecordingLifecycle:
             index_dir=recording_index_dir,
             retention_config=config.retention,
             protected_recording_paths=protected_recording_paths,
+            media_storage=media_storage,
         )
         self._lock = threading.RLock()
         self._closed = False

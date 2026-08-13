@@ -35,6 +35,7 @@ from .go2rtc import Go2RtcAdapter
 from .inference_lifecycle import InferenceLifecycle
 from .image_cache import LocalImageCache
 from .image_storage import DurableImageWriter
+from .media_storage import MediaStorageRegistry
 from .mqtt import MqttService
 from .mqtt_lifecycle import MqttLifecycle
 from .runtime_monitor import (
@@ -159,6 +160,7 @@ class AppManager:
         self.database_dir.mkdir(parents=True, exist_ok=True)
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.image_writer = DurableImageWriter(config.image_storage)
+        self.media_storage = MediaStorageRegistry(self.storage_dir, config.media_storage)
         self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.semantic_index = SemanticIndex(self.events.db_path)
@@ -166,6 +168,7 @@ class AppManager:
             config=config,
             storage_dir=self.storage_dir,
             protected_recording_paths=self.events.protected_recording_paths,
+            media_storage=self.media_storage,
         )
         # Compatibility handle for media APIs and camera dependencies. Shared
         # lifecycle/reconfiguration ownership lives in ``self.recording``.
