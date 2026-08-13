@@ -55,6 +55,33 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
     def cameras() -> list[dict]:
         return deps.get_manager().statuses()
 
+    @router.get("/api/integrations/home-assistant")
+    def home_assistant_metadata() -> dict[str, Any]:
+        """Expose credential-safe, read-scoped entity metadata for HA."""
+        config = deps.get_config()
+        return {
+            "schema_version": 1,
+            "base_path": config.base_path,
+            "mqtt": {
+                "enabled": config.mqtt.enabled,
+                "topic_prefix": config.mqtt.topic_prefix,
+                "discovery_enabled": config.mqtt.discovery_enabled,
+                "incident_events_enabled": config.mqtt.incident_events_enabled,
+            },
+            "cameras": [{
+                "id": camera.id,
+                "name": camera.name,
+                "zones": [
+                    {
+                        "name": zone.name,
+                        "object_classes": list(zone.object_classes),
+                    }
+                    for zone in camera.zones
+                    if zone.enabled
+                ],
+            } for camera in config.cameras],
+        }
+
     @router.get("/api/events/stream")
     async def application_event_stream(request: Request) -> StreamingResponse:
         active_manager = deps.get_manager()
@@ -258,7 +285,7 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
         name: value
         for name, value in locals().items()
         if callable(value) and name in {
-            "cameras", "application_event_stream", "get_motion_pipeline_catalog",
+            "cameras", "home_assistant_metadata", "application_event_stream", "get_motion_pipeline_catalog",
             "accelerator", "detector_status", "object_tracking_catalog",
             "detector_models", "event_clip_settings", "recording_cache_status",
         }
