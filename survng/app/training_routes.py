@@ -53,13 +53,17 @@ class TrainingImage(BaseModel):
 class TrainingSample(BaseModel):
     sample_id: str
     revision: str
-    event_id: int = Field(gt=0)
+    event_id: int | None = Field(default=None, gt=0)
+    source_id: int = Field(gt=0)
+    source: Literal["event", "motion_audit"]
+    sample_kind: Literal["annotated", "negative_candidate"]
+    assumed_negative: bool
     camera_id: str
     event_at: str
     captured_at: str
     image: TrainingImage
     annotations: list[TrainingAnnotation]
-    annotation_state: Literal["model_generated"]
+    annotation_state: Literal["model_generated", "unreviewed"]
 
 
 class TrainingSamplesResponse(BaseModel):
@@ -289,6 +293,8 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
         eligibility: Literal["eligible", "ineligible", "all"] = "eligible",
         minimum_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
         include_empty: bool = False,
+        sample_kinds: str = "",
+        sources: str = "",
         limit: int = Query(default=100, ge=1, le=500),
         cursor: str = Query(default="", max_length=2048),
     ) -> dict[str, Any]:
@@ -303,6 +309,27 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
             )
         selected_cameras = _csv_values(camera_ids, maximum=128)
         selected_labels = frozenset(_csv_values(object_labels, maximum=256, lower=True))
+        selected_kinds = _csv_values(sample_kinds, maximum=2, lower=True)
+        selected_sources = _csv_values(sources, maximum=2, lower=True)
+        invalid_kinds = set(selected_kinds) - {"annotated", "negative_candidate"}
+        invalid_sources = set(selected_sources) - {"event", "events", "motion_audit"}
+        if invalid_kinds:
+            raise HTTPException(status_code=422, detail="unsupported training sample kind")
+        if invalid_sources:
+            raise HTTPException(status_code=422, detail="unsupported training sample source")
+        negative_candidates = "negative_candidate" in selected_kinds
+        motion_audit_source = "motion_audit" in selected_sources
+        if motion_audit_source and selected_kinds and not negative_candidates:
+            raise HTTPException(
+                status_code=422,
+                detail="motion_audit source supports negative_candidate samples",
+            )
+        if negative_candidates and selected_sources and not motion_audit_source:
+            raise HTTPException(
+                status_code=422,
+                detail="negative_candidate samples require source motion_audit",
+            )
+        use_motion_audits = motion_audit_source or negative_candidates
         decoded_cursor = _decode_cursor(cursor)
         before_created_at = decoded_cursor[0] if decoded_cursor else None
         before_id = decoded_cursor[1] if decoded_cursor else None
@@ -325,15 +352,27 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                     batch_limit,
                     MAX_SCANNED_EVENTS - scanned,
                 )
-                rows = active_manager.events.page_between(
-                    start_iso,
-                    end_iso,
-                    limit=requested_rows,
-                    before_created_at=before_created_at,
-                    before_id=before_id,
-                    camera_ids=selected_cameras,
-                    require_snapshot=True,
-                )
+                if use_motion_audits:
+                    rows = active_manager.events.motion_audits_page_between(
+                        start_iso,
+                        end_iso,
+                        limit=requested_rows,
+                        before_created_at=before_created_at,
+                        before_id=before_id,
+                        camera_ids=selected_cameras,
+                        require_snapshot=True,
+                        exclude_confirmed_objects=True,
+                    )
+                else:
+                    rows = active_manager.events.page_between(
+                        start_iso,
+                        end_iso,
+                        limit=requested_rows,
+                        before_created_at=before_created_at,
+                        before_id=before_id,
+                        camera_ids=selected_cameras,
+                        require_snapshot=True,
+                    )
                 if not rows:
                     exhausted = True
                     break
@@ -344,15 +383,19 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                     last_row = event
                     before_created_at = str(event.get("created_at") or "")
                     before_id = int(event.get("id") or 0)
-                    annotations, width, height, sample_offset = _sample_annotations(
-                        before_id,
-                        _parse_objects(event),
-                        labels=selected_labels,
-                        minimum_confidence=minimum_confidence,
-                        eligibility=eligibility,
-                    )
-                    if not annotations and not include_empty:
-                        continue
+                    is_negative_candidate = use_motion_audits
+                    if is_negative_candidate:
+                        annotations, width, height, sample_offset = [], None, None, 0.0
+                    else:
+                        annotations, width, height, sample_offset = _sample_annotations(
+                            before_id,
+                            _parse_objects(event),
+                            labels=selected_labels,
+                            minimum_confidence=minimum_confidence,
+                            eligibility=eligibility,
+                        )
+                        if not annotations and not include_empty:
+                            continue
                     try:
                         snapshot_path = event_snapshot_path(
                             active_manager.storage_dir,
@@ -362,27 +405,44 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                         continue
                     event_at = _utc_datetime(str(event.get("created_at") or ""), "event created_at")
                     captured_at = event_at + timedelta(seconds=sample_offset)
-                    revision = hashlib.sha256(
-                        (
-                            f"{before_id}\0{event.get('snapshot_path') or ''}\0"
-                            f"{event.get('objects_json') or ''}"
-                        ).encode("utf-8")
-                    ).hexdigest()[:20]
+                    source_name = "motion_audit" if is_negative_candidate else "event"
+                    revision_material = (
+                        f"{source_name}\0{before_id}\0{event.get('snapshot_path') or ''}\0"
+                        f"{event.get('objects_json') or ''}\0{event.get('features_json') or ''}"
+                    )
+                    revision = hashlib.sha256(revision_material.encode("utf-8")).hexdigest()[:20]
+                    image_url = (
+                        f"{base_path}/api/motion-audit/{before_id}/snapshot.jpg"
+                        if is_negative_candidate
+                        else f"{base_path}/api/events/{before_id}/snapshot.jpg"
+                    )
                     samples.append({
-                        "sample_id": f"event-{before_id}",
+                        "sample_id": f"{source_name}-{before_id}",
                         "revision": revision,
-                        "event_id": before_id,
+                        "event_id": (
+                            int(event["event_id"])
+                            if is_negative_candidate and event.get("event_id")
+                            else None if is_negative_candidate else before_id
+                        ),
+                        "source_id": before_id,
+                        "source": source_name,
+                        "sample_kind": (
+                            "negative_candidate" if is_negative_candidate else "annotated"
+                        ),
+                        "assumed_negative": is_negative_candidate,
                         "camera_id": str(event.get("camera_id") or ""),
                         "event_at": event_at.isoformat(),
                         "captured_at": captured_at.isoformat(),
                         "image": {
-                            "url": f"{base_path}/api/events/{before_id}/snapshot.jpg",
+                            "url": image_url,
                             "media_type": snapshot_media_type(snapshot_path),
                             "width": width,
                             "height": height,
                         },
                         "annotations": annotations,
-                        "annotation_state": "model_generated",
+                        "annotation_state": (
+                            "unreviewed" if is_negative_candidate else "model_generated"
+                        ),
                     })
                     if len(samples) >= limit:
                         break
@@ -415,6 +475,12 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                 "eligibility": eligibility,
                 "minimum_confidence": minimum_confidence,
                 "include_empty": include_empty,
+                "sample_kinds": list(selected_kinds) or [
+                    "negative_candidate" if use_motion_audits else "annotated"
+                ],
+                "sources": list(selected_sources) or [
+                    "motion_audit" if use_motion_audits else "event"
+                ],
             },
             "samples": samples,
             "count": len(samples),

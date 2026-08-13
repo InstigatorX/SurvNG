@@ -71,6 +71,8 @@ class TrainingRoutesTest(unittest.TestCase):
             "eligibility": "eligible",
             "minimum_confidence": 0.0,
             "include_empty": False,
+            "sample_kinds": "",
+            "sources": "",
             "limit": 100,
             "cursor": "",
         }
@@ -116,6 +118,10 @@ class TrainingRoutesTest(unittest.TestCase):
         self.assertEqual(payload["scanned_events"], 1)
         sample = payload["samples"][0]
         self.assertEqual(sample["event_id"], event["id"])
+        self.assertEqual(sample["source_id"], event["id"])
+        self.assertEqual(sample["source"], "event")
+        self.assertEqual(sample["sample_kind"], "annotated")
+        self.assertFalse(sample["assumed_negative"])
         self.assertEqual(len(sample["revision"]), 20)
         self.assertEqual(
             sample["image"]["url"],
@@ -185,6 +191,73 @@ class TrainingRoutesTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(HTTPException, "cursor is invalid"):
             self.request(cursor="not-base64!!")
+
+    def test_motion_audits_are_unreviewed_negative_candidates(self) -> None:
+        snapshot = Path(self.temporary.name) / "motion" / "gate.webp"
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_bytes(b"clean-motion-image")
+        audit = self.store.add_motion_audit(
+            camera_id="gate",
+            snapshot_path=str(snapshot),
+            created_at="2026-08-10T16:00:00+00:00",
+            mode="camera_rescue",
+            sensitivity="balanced",
+            score=0.77,
+            threshold=0.65,
+            reason="visual_backup_no_object",
+            object_detected=False,
+            trigger_count=1,
+            features={},
+            category="visual_backup",
+        )
+
+        payload = self.request(
+            sample_kinds="negative_candidate",
+            sources="motion_audit",
+        )
+
+        self.assertEqual(payload["count"], 1)
+        sample = payload["samples"][0]
+        self.assertEqual(sample["sample_id"], f"motion_audit-{audit['id']}")
+        self.assertEqual(sample["source_id"], audit["id"])
+        self.assertIsNone(sample["event_id"])
+        self.assertEqual(sample["source"], "motion_audit")
+        self.assertEqual(sample["sample_kind"], "negative_candidate")
+        self.assertTrue(sample["assumed_negative"])
+        self.assertEqual(sample["annotation_state"], "unreviewed")
+        self.assertEqual(sample["annotations"], [])
+        self.assertEqual(
+            sample["image"]["url"],
+            f"/survng/api/motion-audit/{audit['id']}/snapshot.jpg",
+        )
+
+    def test_motion_audit_negative_candidates_exclude_known_object_matches(self) -> None:
+        for index, detected in enumerate((False, True)):
+            snapshot = Path(self.temporary.name) / "motion" / f"gate-{index}.webp"
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.write_bytes(b"clean-motion-image")
+            self.store.add_motion_audit(
+                camera_id="gate",
+                snapshot_path=str(snapshot),
+                created_at=f"2026-08-10T16:0{index}:00+00:00",
+                mode="camera_rescue",
+                sensitivity="balanced",
+                score=0.77,
+                threshold=0.65,
+                reason="visual_backup_object" if detected else "visual_backup_no_object",
+                object_detected=detected,
+                trigger_count=1,
+                features={},
+                category="visual_backup",
+            )
+
+        payload = self.request(
+            sample_kinds="negative_candidate",
+            sources="motion_audit",
+        )
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["samples"][0]["event_at"], "2026-08-10T16:00:00+00:00")
 
 
 if __name__ == "__main__":

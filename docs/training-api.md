@@ -40,6 +40,8 @@ requests remain available to local clients.
 - `include_empty=true` also returns snapshots with no annotations matching the
   selected filters. Treat these as review candidates rather than guaranteed
   negatives because the detector may have missed an object.
+- `sample_kinds=negative_candidate` selects unreviewed negative candidates.
+- `sources=motion_audit` uses clean motion-audit snapshots as that source.
 - `limit` ranges from 1 to 500.
 - `cursor` accepts the opaque `next_cursor` returned by the previous response.
   Keep the time range and filters unchanged while paging.
@@ -64,6 +66,27 @@ the representative snapshot's other annotations.
 sample offset for the representative image. `sample_id` remains stable for an
 event, while `revision` changes if delayed refinement replaces its image or
 object evidence. Importers should use both fields when synchronizing updates.
+
+## Unreviewed negative candidates
+
+Motion-audit snapshots where SurvNG did not confirm an object can be imported
+as clean negative candidates:
+
+```bash
+curl --get 'http://survng.local:8088/api/training/samples' \
+  --data-urlencode 'start_at=2026-08-01T00:00:00-04:00' \
+  --data-urlencode 'end_at=2026-08-08T00:00:00-04:00' \
+  --data-urlencode 'sample_kinds=negative_candidate' \
+  --data-urlencode 'sources=motion_audit' \
+  --data-urlencode 'limit=100'
+```
+
+These samples have `source=motion_audit`, `sample_kind=negative_candidate`,
+`assumed_negative=true`, `annotation_state=unreviewed`, and an empty
+`annotations` array. The training application must validate them before
+treating them as ground truth. Audits where SurvNG already confirmed an object
+are excluded. `sample_id` is the stable `motion_audit-{id}` identifier and
+`revision` changes if its stored evidence changes.
 
 ## Trust and access
 
