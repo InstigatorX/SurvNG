@@ -5617,6 +5617,21 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   padding-top: 14px;
 }
 
+.media-storage-settings {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.media-location-list { display: grid; gap: 8px; }
+.media-location-card { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--control-muted); padding: 9px; }
+.media-location-card > header { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; }
+.media-location-card button.compact { min-width: 32px; padding-inline: 7px; }
+.media-location-roles, .media-location-flags { display: flex; flex-wrap: wrap; gap: 7px 14px; }
+.media-location-roles label, .media-location-flags label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 700; }
+
 .retention-heading,
 .retention-alert,
 .retention-last-run,

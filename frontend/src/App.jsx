@@ -10692,6 +10692,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   const [modelEvaluationDraft, setModelEvaluationDraft] = useState({ baseline_path: "", candidate_path: "", sample_count: 200, confidence: 0.25 });
   const [modelEvaluation, setModelEvaluation] = useState({ status: "idle" });
   const [modelEvaluationError, setModelEvaluationError] = useState("");
+  const mediaLocations = config.media_storage?.locations || [];
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
   const routeCameras = config.cameras || [];
@@ -10790,6 +10791,33 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   function resetLiveCameraOrder() {
     localStorage.removeItem("survng.liveCameraOrder.v1");
     setLiveOrderReset(true);
+  }
+
+  function updateMediaLocation(index, field, value) {
+    updateConfig(["media_storage", "locations"], mediaLocations.map((item, itemIndex) => (
+      itemIndex === index ? { ...item, [field]: value } : item
+    )));
+  }
+
+  function toggleMediaRole(index, role, enabled) {
+    const current = mediaLocations[index]?.roles || [];
+    const roles = enabled ? [...new Set([...current, role])] : current.filter((item) => item !== role);
+    if (!roles.length) return;
+    updateMediaLocation(index, "roles", roles);
+  }
+
+  function addMediaLocation() {
+    const index = mediaLocations.length + 1;
+    updateConfig(["media_storage", "locations"], [...mediaLocations, {
+      id: `media-${index}`,
+      name: `Media ${index}`,
+      path: "",
+      enabled: true,
+      roles: ["recordings", "snapshots", "motion_audits", "clips", "exports"],
+      reserve_percent: 15,
+      priority: 100,
+      require_mount: true,
+    }]);
   }
 
   useEffect(() => {
@@ -10965,6 +10993,35 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             <label>Metadata Database Directory<input value={config.database_dir || ""} onChange={(event) => updateConfig(["database_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
             <label>Recording Index Directory<input value={config.recording_index_dir || ""} onChange={(event) => updateConfig(["recording_index_dir"], event.target.value)} placeholder="Defaults to storage directory" /></label>
           </div>
+          <section className="media-storage-settings">
+            <div className="retention-heading">
+              <div><h4>Media locations</h4><p>Spread recordings and related media across independently managed filesystems.</p></div>
+              <button type="button" onClick={addMediaLocation}><Plus size={15} /> Add location</button>
+            </div>
+            <div className="admin-field-grid">
+              <label>Placement<select value={config.media_storage?.placement || "balanced"} onChange={(event) => updateConfig(["media_storage", "placement"], event.target.value)}><option value="balanced">Balanced free space</option><option value="priority">Location priority</option></select></label>
+            </div>
+            {!mediaLocations.length ? <div className="probe-result ok"><strong>Single media location</strong><span>All media continues to use Storage Directory. Add locations only when the additional filesystems are mounted and writable.</span></div> : null}
+            <div className="media-location-list">
+              {mediaLocations.map((location, index) => {
+                const status = retentionStatus?.plan?.storage?.locations?.find((item) => item.id === location.id);
+                return <article className="media-location-card" key={`${location.id}-${index}`}>
+                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state || "restart to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
+                  <div className="admin-field-grid">
+                    <label>ID<input value={location.id || ""} onChange={(event) => updateMediaLocation(index, "id", event.target.value)} /></label>
+                    <label>Name<input value={location.name || ""} onChange={(event) => updateMediaLocation(index, "name", event.target.value)} /></label>
+                    <label className="wide-field">Filesystem path<input value={location.path || ""} onChange={(event) => updateMediaLocation(index, "path", event.target.value)} placeholder="/mnt/survng-media-2" /></label>
+                    <label>Reserve free space<input type="number" min="0" max="95" step="1" value={location.reserve_percent ?? 15} onChange={(event) => updateMediaLocation(index, "reserve_percent", Number(event.target.value))} /></label>
+                    <label>Priority<input type="number" min="1" max="1000" step="1" value={location.priority ?? 100} onChange={(event) => updateMediaLocation(index, "priority", Number(event.target.value))} /></label>
+                  </div>
+                  <div className="media-location-roles">{[["recordings", "Recordings"], ["snapshots", "Snapshots"], ["motion_audits", "Motion audits"], ["clips", "Clips"], ["exports", "Exports"]].map(([role, label]) => <label key={role}><input type="checkbox" checked={(location.roles || []).includes(role)} onChange={(event) => toggleMediaRole(index, role, event.target.checked)} />{label}</label>)}</div>
+                  <div className="media-location-flags"><label><input type="checkbox" checked={location.enabled ?? true} onChange={(event) => updateMediaLocation(index, "enabled", event.target.checked)} />Accept new media</label><label><input type="checkbox" checked={location.require_mount ?? false} onChange={(event) => updateMediaLocation(index, "require_mount", event.target.checked)} />Require a real mount</label></div>
+                  {status ? <small>{formatBytes(status.free_bytes)} free of {formatBytes(status.total_bytes)} · {Number(status.free_percent || 0).toFixed(1)}% free</small> : null}
+                </article>;
+              })}
+            </div>
+            <p className="retention-protection"><ShieldCheck size={15} /> Databases, indexes, models, and playback cache remain on local SurvNG storage. A required mount is never replaced by its empty mountpoint.</p>
+          </section>
           <div className="prewarm-setting">
             <h4>Evidence image storage</h4>
             <div className="field-row">
