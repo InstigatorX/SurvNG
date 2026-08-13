@@ -3723,6 +3723,95 @@ button.status-pill.hud-toggle:disabled {
   gap: 10px;
 }
 
+.api-access-settings {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-muted);
+  padding: 10px;
+}
+
+.api-access-settings > .detection-settings-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.api-access-settings > .detection-settings-subhead > div,
+.api-token-list article > div,
+.api-token-secret {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.api-token-list {
+  display: grid;
+  gap: 6px;
+}
+
+.api-token-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  padding: 8px;
+}
+
+.api-token-list code,
+.api-token-secret code {
+  overflow-wrap: anywhere;
+  color: var(--accent);
+}
+
+.api-token-list small,
+.api-token-secret small {
+  color: var(--muted);
+}
+
+.api-token-create {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(260px, 1.2fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.api-token-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 34px;
+}
+
+.api-token-secret {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  padding: 9px;
+}
+
+.api-token-secret strong,
+.api-token-secret small {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .api-token-create {
+    grid-template-columns: 1fr;
+  }
+}
+
 .onvif-field-grid {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(90px, 1fr);

@@ -487,6 +487,17 @@ the active SurvNG configuration. Send it on API requests as:
 Authorization: Bearer <SURVNG_TOKEN>
 ```
 
+List configured credentials (metadata only; secrets and hashes are never
+shown), or delete one by its stable ID:
+
+```bash
+.venv/bin/python scripts/create-api-token.py list
+.venv/bin/python scripts/create-api-token.py delete --id home-assistant
+```
+
+Tokens can also be created and deleted from **Admin → General → API**.
+New secrets are shown once. Creating a token does not enable enforcement.
+
 Available scopes are `read`, `camera:control`, and `admin`. The `admin` scope
 includes the other scopes. Camera power, recording, and detection controls need
 `camera:control`; other mutations need `admin`. `GET /api/health` intentionally
@@ -496,6 +507,10 @@ When authentication is enabled, the SurvNG browser UI also needs the bearer
 header for API and WebSocket requests. A reverse proxy can inject that header
 after completing its own user authentication. Keep the native SurvNG port on a
 trusted network so clients cannot bypass that proxy.
+
+Do not use `--enable` until that header injection is in place. Enabling bearer
+authentication without it leaves the page shell reachable but causes its API
+requests to return HTTP 401, making the browser interface appear offline.
 
 ### Integration stream sources
 

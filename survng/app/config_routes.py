@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import socket
 import threading
 from collections.abc import Callable
@@ -13,8 +14,8 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .config import AppConfig, CameraConfig, DetectionZone, camera_by_id, slugify_camera_id
-from .security import redact_secret_text
+from .config import ApiScope, ApiTokenConfig, AppConfig, CameraConfig, DetectionZone, camera_by_id, slugify_camera_id
+from .security import hash_api_token, redact_secret_text
 
 SECRET_PLACEHOLDER = "__SURVNG_SECRET_SET__"
 LOGGER = logging.getLogger(__name__)
@@ -27,6 +28,12 @@ class ConfigProbeRequest(BaseModel):
     password: str = Field(default="", max_length=1024)
     onvif_port: int = Field(default=8000, ge=1, le=65535)
     baichuan_port: int = Field(default=9000, ge=1, le=65535)
+
+
+class ApiTokenCreateRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    name: str = Field(min_length=1, max_length=128)
+    scopes: list[ApiScope] = Field(default_factory=lambda: ["read"], min_length=1)
 
 
 class ConfigRuntime(Protocol):
@@ -238,6 +245,62 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             effective, result = deps.apply_config(next_config, assign_ids=True)
         return {"ok": True, "cameras": len(effective.cameras), **result}
+
+    @router.get("/api/config/api-tokens")
+    def list_api_tokens() -> dict[str, Any]:
+        auth = deps.get_config().api_auth
+        return {
+            "enabled": auth.enabled,
+            "tokens": [
+                {"id": token.id, "name": token.name, "scopes": token.scopes}
+                for token in auth.tokens
+            ],
+        }
+
+    @router.post("/api/config/api-tokens", status_code=201)
+    def create_api_token(request: ApiTokenCreateRequest) -> dict[str, Any]:
+        with deps.lock:
+            current = deps.get_config()
+            if any(token.id == request.id for token in current.api_auth.tokens):
+                raise HTTPException(status_code=409, detail="API token id already exists")
+            raw_token = f"survng_{secrets.token_urlsafe(32)}"
+            next_config = current.model_copy(deep=True)
+            next_config.api_auth.tokens.append(ApiTokenConfig(
+                id=request.id,
+                name=request.name,
+                token_hash=hash_api_token(raw_token),
+                scopes=request.scopes,
+            ))
+            effective, result = deps.apply_config(next_config, assign_ids=False)
+        return {
+            "token": raw_token,
+            "credential": {
+                "id": request.id,
+                "name": request.name,
+                "scopes": request.scopes,
+            },
+            "enabled": effective.api_auth.enabled,
+            **result,
+        }
+
+    @router.delete("/api/config/api-tokens/{token_id}")
+    def delete_api_token(token_id: str) -> dict[str, Any]:
+        with deps.lock:
+            current = deps.get_config()
+            retained = [token for token in current.api_auth.tokens if token.id != token_id]
+            if len(retained) == len(current.api_auth.tokens):
+                raise HTTPException(status_code=404, detail="API token not found")
+            next_config = current.model_copy(deep=True)
+            next_config.api_auth.tokens = retained
+            if not retained:
+                next_config.api_auth.enabled = False
+            effective, result = deps.apply_config(next_config, assign_ids=False)
+        return {
+            "ok": True,
+            "id": token_id,
+            "enabled": effective.api_auth.enabled,
+            **result,
+        }
 
     @router.put("/api/config/cameras/{camera_id}/zones")
     def put_camera_zones(camera_id: str, zones: list[DetectionZone]) -> dict:

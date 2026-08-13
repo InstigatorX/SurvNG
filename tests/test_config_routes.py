@@ -6,8 +6,9 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-from survng.app.config import AppConfig, CameraConfig, DetectionZone
+from survng.app.config import ApiTokenConfig, AppConfig, CameraConfig, DetectionZone
 from survng.app.config_routes import (
+    ApiTokenCreateRequest,
     ConfigProbeRequest,
     ConfigRouteDependencies,
     SECRET_PLACEHOLDER,
@@ -67,6 +68,46 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertIn(SECRET_PLACEHOLDER, payload["cameras"][0]["stream_url"])
         self.assertNotIn("camera-secret", str(payload))
         self.assertNotIn("broker-secret", str(payload))
+
+    def test_api_token_create_lists_metadata_and_returns_secret_once(self) -> None:
+        self.apply.side_effect = lambda next_config, **_kwargs: (next_config, {
+            "apply_mode": "hot", "camera_workers_restarted": False,
+            "subsystems_restarted": [], "hot_updated": ["api_auth"],
+        })
+        created = self.endpoint("/api/config/api-tokens", "POST")(
+            ApiTokenCreateRequest(id="ha", name="Home Assistant", scopes=["read", "camera:control"])
+        )
+        # FastAPI normally validates the request model before invoking the handler.
+        self.assertTrue(created["token"].startswith("survng_"))
+        self.assertNotIn("token_hash", created["credential"])
+
+    def test_api_token_list_never_exposes_hashes(self) -> None:
+        self.config.api_auth.tokens = [ApiTokenConfig(
+            id="ha", name="Home Assistant", token_hash="a" * 64, scopes=["read"],
+        )]
+
+        result = self.endpoint("/api/config/api-tokens", "GET")()
+
+        self.assertEqual(result["tokens"], [{
+            "id": "ha", "name": "Home Assistant", "scopes": ["read"],
+        }])
+        self.assertNotIn("token_hash", str(result))
+
+    def test_api_token_delete_disables_auth_when_last_token_is_removed(self) -> None:
+        self.config.api_auth.enabled = True
+        self.config.api_auth.tokens = [ApiTokenConfig(
+            id="ha", name="Home Assistant", token_hash="a" * 64, scopes=["read"],
+        )]
+        self.apply.side_effect = lambda next_config, **_kwargs: (next_config, {
+            "apply_mode": "hot", "camera_workers_restarted": False,
+            "subsystems_restarted": [], "hot_updated": ["api_auth"],
+        })
+        result = self.endpoint("/api/config/api-tokens/{token_id}", "DELETE")("ha")
+
+        applied = self.apply.call_args.args[0]
+        self.assertEqual(applied.api_auth.tokens, [])
+        self.assertFalse(applied.api_auth.enabled)
+        self.assertFalse(result["enabled"])
 
     def test_order_rejects_missing_runtime_worker_before_persistence(self) -> None:
         self.manager.workers = {}

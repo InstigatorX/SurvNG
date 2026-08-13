@@ -9159,7 +9159,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
           <div className="tree-list">
             <button type="button" className={generalSection === "general" ? "active" : ""} onClick={() => setGeneralSection("general")}><Cog size={16} /><span>General</span></button>
             <button type="button" className={generalSection === "storage" ? "active" : ""} onClick={() => setGeneralSection("storage")}><HardDrive size={16} /><span>Storage</span></button>
-            <button type="button" className={generalSection === "mqtt" ? "active" : ""} onClick={() => setGeneralSection("mqtt")}><Radio size={16} /><span>MQTT</span></button>
+            <button type="button" className={generalSection === "mqtt" ? "active" : ""} onClick={() => setGeneralSection("mqtt")}><Radio size={16} /><span>API</span></button>
             <button type="button" className={generalSection === "detection" ? "active" : ""} onClick={() => setGeneralSection("detection")}><Cpu size={16} /><span>Object Detection</span></button>
             <button type="button" className={generalSection === "motion-review" ? "active" : ""} onClick={() => setGeneralSection("motion-review")}><Sparkles size={16} /><span>Camera Intelligence</span></button>
           </div>
@@ -10493,6 +10493,10 @@ function RetentionSummary({ status }) {
 
 function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
+  const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
+  const [apiTokenSecret, setApiTokenSecret] = useState("");
+  const [apiTokenBusy, setApiTokenBusy] = useState(false);
+  const [apiTokenError, setApiTokenError] = useState("");
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
   const routeCameras = config.cameras || [];
@@ -10594,6 +10598,63 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     setLiveOrderReset(true);
   }
 
+  function toggleApiTokenScope(scope) {
+    setApiTokenDraft((current) => ({
+      ...current,
+      scopes: current.scopes.includes(scope)
+        ? current.scopes.filter((item) => item !== scope)
+        : [...current.scopes, scope],
+    }));
+  }
+
+  async function createApiToken() {
+    if (apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length) return;
+    setApiTokenBusy(true);
+    setApiTokenError("");
+    setApiTokenSecret("");
+    try {
+      const response = await fetch("/api/config/api-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: apiTokenDraft.id.trim(),
+          name: apiTokenDraft.name.trim(),
+          scopes: apiTokenDraft.scopes,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not create API token");
+      updateConfig(["api_auth", "tokens"], [
+        ...(config.api_auth?.tokens || []),
+        { ...payload.credential, token_hash: "__SURVNG_SECRET_SET__" },
+      ]);
+      setApiTokenSecret(payload.token || "");
+      setApiTokenDraft({ id: "", name: "", scopes: ["read"] });
+    } catch (error) {
+      setApiTokenError(error.message || "Could not create API token");
+    } finally {
+      setApiTokenBusy(false);
+    }
+  }
+
+  async function deleteApiToken(tokenId) {
+    if (apiTokenBusy || !window.confirm(`Delete API token “${tokenId}”? Clients using it will stop working immediately.`)) return;
+    setApiTokenBusy(true);
+    setApiTokenError("");
+    try {
+      const response = await fetch(`/api/config/api-tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Could not delete API token");
+      updateConfig(["api_auth", "tokens"], (config.api_auth?.tokens || []).filter((token) => token.id !== tokenId));
+      if (!payload.enabled) updateConfig(["api_auth", "enabled"], false);
+      setApiTokenSecret("");
+    } catch (error) {
+      setApiTokenError(error.message || "Could not delete API token");
+    } finally {
+      setApiTokenBusy(false);
+    }
+  }
+
   return (
     <div className="general-settings-content config-form">
         {section === "general" ? (
@@ -10677,7 +10738,33 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
 
         {section === "mqtt" ? (
         <div className="sub-panel">
-          <h3>MQTT</h3>
+          <h3>API</h3>
+          <section className="api-access-settings">
+            <div className="detection-settings-subhead">
+              <div><strong>API access tokens</strong><small>Long-lived credentials for Home Assistant and other integrations. Secrets are displayed only once and are never stored in readable form.</small></div>
+              <span className={`retention-state ${config.api_auth?.enabled ? "running" : "idle"}`}>{config.api_auth?.enabled ? "Enforced" : "Not enforced"}</span>
+            </div>
+            <div className="api-token-list">
+              {(config.api_auth?.tokens || []).map((token) => (
+                <article key={token.id}>
+                  <div><strong>{token.name}</strong><code>{token.id}</code><small>{(token.scopes || []).join(" · ")}</small></div>
+                  <button type="button" className="danger" onClick={() => deleteApiToken(token.id)} disabled={apiTokenBusy}><Trash2 size={14} /> Delete</button>
+                </article>
+              ))}
+              {!(config.api_auth?.tokens || []).length ? <p className="settings-help">No integration tokens configured.</p> : null}
+            </div>
+            <div className="api-token-create">
+              <label>Token ID<input value={apiTokenDraft.id} onChange={(event) => setApiTokenDraft((current) => ({ ...current, id: event.target.value }))} placeholder="home-assistant" /></label>
+              <label>Name<input value={apiTokenDraft.name} onChange={(event) => setApiTokenDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Home Assistant" /></label>
+              <div className="api-token-scopes" role="group" aria-label="API token scopes">
+                {[["read", "Read"], ["camera:control", "Camera control"], ["admin", "Admin"]].map(([value, label]) => <label className="check-field" key={value}><input type="checkbox" checked={apiTokenDraft.scopes.includes(value)} onChange={() => toggleApiTokenScope(value)} /> {label}</label>)}
+              </div>
+              <button type="button" className="primary" onClick={createApiToken} disabled={apiTokenBusy || !apiTokenDraft.id.trim() || !apiTokenDraft.name.trim() || !apiTokenDraft.scopes.length}>{apiTokenBusy ? <RefreshCcw className="spin" size={15} /> : <Plus size={15} />} Create token</button>
+            </div>
+            {apiTokenSecret ? <div className="api-token-secret" role="status"><strong>Copy this token now</strong><code>{apiTokenSecret}</code><button type="button" onClick={() => navigator.clipboard?.writeText(apiTokenSecret)}><Copy size={14} /> Copy</button><small>It cannot be displayed again after you leave this page.</small></div> : null}
+            {apiTokenError ? <div className="error-banner">{apiTokenError}</div> : null}
+          </section>
+          <div className="detection-settings-subhead"><div><strong>MQTT</strong><small>Broker connection, Home Assistant discovery, incident publishing, and server telemetry.</small></div></div>
           <div className="admin-field-grid">
             <label className="check-field"><input type="checkbox" checked={config.mqtt?.enabled || false} onChange={(event) => updateConfig(["mqtt", "enabled"], event.target.checked)} /> Enabled</label>
             <label>Broker Host<input value={config.mqtt?.host || ""} onChange={(event) => updateConfig(["mqtt", "host"], event.target.value)} placeholder="mqtt.local" /></label>
