@@ -14,6 +14,8 @@ from survng.app.incident_utils import (
     stable_incident_key,
     stored_media_path,
 )
+from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
+from survng.app.media_storage import MediaStorageRegistry
 
 
 class IncidentIdentityTest(unittest.TestCase):
@@ -140,6 +142,24 @@ class EventSnapshotPathTest(unittest.TestCase):
 
             with self.assertRaises(PermissionError):
                 event_snapshot_path(Path(storage_dir), {"snapshot_path": str(outside)})
+
+    def test_allows_snapshot_inside_configured_external_media_location(self) -> None:
+        with tempfile.TemporaryDirectory() as storage_dir, tempfile.TemporaryDirectory() as media_dir:
+            snapshot = Path(media_dir) / "snapshots" / "gate" / "event.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"webp")
+            registry = MediaStorageRegistry(Path(storage_dir), MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="media", path=media_dir, roles=["snapshots"]),
+            ]))
+
+            self.assertEqual(
+                event_snapshot_path(
+                    Path(storage_dir),
+                    {"snapshot_path": str(snapshot)},
+                    registry,
+                ),
+                snapshot.resolve(),
+            )
 
     def test_rejects_non_image_file_inside_storage_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

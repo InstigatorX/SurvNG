@@ -99,7 +99,11 @@ def portable_media_path(storage_dir: Path, path_value: object) -> str:
     return raw_path
 
 
-def stored_media_path(storage_dir: Path, path_value: object) -> Path:
+def stored_media_path(
+    storage_dir: Path,
+    path_value: object,
+    media_storage: MediaStorageRegistry | None = None,
+) -> Path:
     """Resolve a stored media reference without allowing escape from storage."""
     raw_path = str(path_value or "").strip()
     if not raw_path:
@@ -111,19 +115,24 @@ def stored_media_path(storage_dir: Path, path_value: object) -> Path:
     try:
         resolved.relative_to(storage_root)
     except ValueError as exc:
-        raise PermissionError("stored media is outside storage directory") from exc
+        if media_storage is None or not media_storage.contains(resolved):
+            raise PermissionError("stored media is outside configured media storage") from exc
     if not resolved.is_file():
         raise FileNotFoundError("stored media is unavailable")
     return resolved
 
 
-def event_snapshot_path(storage_dir: Path, event: dict[str, Any]) -> Path:
+def event_snapshot_path(
+    storage_dir: Path,
+    event: dict[str, Any],
+    media_storage: MediaStorageRegistry | None = None,
+) -> Path:
     raw_path = str(event.get("snapshot_path") or "")
     if not raw_path:
         raise FileNotFoundError("event snapshot is unavailable")
 
     try:
-        snapshot = stored_media_path(storage_dir, raw_path)
+        snapshot = stored_media_path(storage_dir, raw_path, media_storage)
     except FileNotFoundError as exc:
         raise FileNotFoundError("event snapshot is unavailable") from exc
     except PermissionError as exc:
@@ -132,3 +141,4 @@ def event_snapshot_path(storage_dir: Path, event: dict[str, Any]) -> Path:
     if snapshot.suffix.lower() not in SNAPSHOT_SUFFIXES:
         raise PermissionError("event snapshot is not an image")
     return snapshot
+from .media_storage import MediaStorageRegistry

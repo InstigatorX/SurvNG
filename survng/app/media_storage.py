@@ -53,6 +53,7 @@ class MediaStorageRegistry:
     def __init__(self, storage_dir: Path, config: MediaStorageConfig) -> None:
         self.storage_dir = storage_dir.expanduser().resolve(strict=False)
         self.config = config
+        self._implicit_legacy = not config.locations
         self._lock = threading.RLock()
         self._assignments: dict[tuple[str, str], str] = {}
         configured = list(config.locations)
@@ -143,8 +144,11 @@ class MediaStorageRegistry:
         *relative: str,
         create: bool = True,
     ) -> Path:
-        selected = self.choose(role, assignment_key)
-        directory = selected.path / self.ROLE_DIRECTORIES[role]
+        if self._implicit_legacy:
+            directory = self.storage_dir / self.ROLE_DIRECTORIES[role]
+        else:
+            selected = self.choose(role, assignment_key)
+            directory = selected.path / self.ROLE_DIRECTORIES[role]
         if relative:
             directory = directory.joinpath(*relative)
         if create:
@@ -167,6 +171,8 @@ class MediaStorageRegistry:
     def location_id_for(self, path: Path, role: MediaStorageRole | None = None) -> str | None:
         resolved = path.expanduser().resolve(strict=False)
         for status in self.statuses():
+            if role is not None and role not in status.roles:
+                continue
             root = status.path / self.ROLE_DIRECTORIES[role] if role is not None else status.path
             try:
                 resolved.relative_to(root.resolve(strict=False))

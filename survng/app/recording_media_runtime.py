@@ -301,6 +301,7 @@ class RecordingMediaRuntime:
             ffmpeg_path=lambda: self.config.ffmpeg_path,
             hardware_backend=self._media_export_hardware_backend,
             hardware_device=self._media_export_hardware_device,
+            media_storage=self.manager.media_storage,
         )
 
     def rebind_media_exports(self) -> bool:
@@ -952,7 +953,14 @@ class RecordingMediaRuntime:
         safe_before = int(max(0.0, min(float(before), 3600.0)) * 1000)
         safe_after = int(max(0.0, min(float(after), 3600.0)) * 1000)
         clip_source = recording_source(source)
-        clip_dir = selected_manager.storage_dir / 'event_clips' / camera_id / clip_source
+        media_storage = getattr(selected_manager, "media_storage", None)
+        clip_dir = (
+            media_storage.directory(
+                'clips', f'{camera_id}:{clip_source}', camera_id, clip_source
+            )
+            if media_storage is not None
+            else selected_manager.storage_dir / 'event_clips' / camera_id / clip_source
+        )
         clip_dir.mkdir(parents=True, exist_ok=True)
         accel_mode = self._hardware_acceleration_mode()
         return clip_dir / f'{event_id}-{safe_before}-{safe_after}-a3-{accel_mode}.mp4'

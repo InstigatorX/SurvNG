@@ -15,6 +15,7 @@ import numpy as np
 from .appearance_index import AppearanceIndex
 from .config import ObjectTrackingConfig
 from .incident_utils import event_snapshot_path
+from .media_storage import MediaStorageRegistry
 
 
 LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class DeferredAppearanceBackfill:
         event_store: Any,
         index: AppearanceIndex,
         encoder: AppearanceEncoder,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self.storage_dir = Path(storage_dir)
@@ -44,6 +46,7 @@ class DeferredAppearanceBackfill:
         self.event_store = event_store
         self.index = index
         self.encoder = encoder
+        self.media_storage = media_storage
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -206,7 +209,7 @@ class DeferredAppearanceBackfill:
         if event is None:
             return ("failed", 0, "event no longer exists")
         try:
-            snapshot_path = event_snapshot_path(self.storage_dir, event)
+            snapshot_path = event_snapshot_path(self.storage_dir, event, self.media_storage)
         except (FileNotFoundError, PermissionError) as exc:
             return ("failed", 0, str(exc))
         frame = cv2.imread(str(snapshot_path), cv2.IMREAD_COLOR)

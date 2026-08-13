@@ -24,6 +24,7 @@ from .object_tracking import (
     ObjectTrackingSessionFactory,
 )
 from .semantic_search import DisabledSemanticSearch, SemanticIndex, build_semantic_search
+from .media_storage import MediaStorageRegistry
 from .security import redact_secret_text
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -61,6 +62,7 @@ class InferenceLifecycle:
         event_publisher: Callable[[str, dict], None],
         tracking_burst_guard: Callable[[], bool],
         database_dir: Path,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.events = events
@@ -69,6 +71,7 @@ class InferenceLifecycle:
         self.event_publisher = event_publisher
         self.tracking_burst_guard = tracking_burst_guard
         self.database_dir = database_dir
+        self.media_storage = media_storage
         self.detector = InferenceSupervisor(config)
         faces: FaceStore | None = None
         semantic_search: DisabledSemanticSearch | None = None
@@ -82,6 +85,7 @@ class InferenceLifecycle:
                 self.face_recognizer,
                 start_recognition=False,
                 database_dir=database_dir,
+                media_storage=media_storage,
             )
             semantic_search = build_semantic_search(
                 semantic_config,
@@ -170,7 +174,11 @@ class InferenceLifecycle:
                 return
             self.appearance_backfill.start()
             try:
-                self.semantic_search.start(self.events, self.storage_dir)
+                self.semantic_search.start(
+                    self.events,
+                    self.storage_dir,
+                    getattr(self, "media_storage", None),
+                )
             except BaseException:
                 for label, operation in (
                     ("semantic search", self.semantic_search.close),
@@ -451,6 +459,7 @@ class InferenceLifecycle:
             self.events,
             self.appearance_index,
             self.person_reidentifier,
+            media_storage=self.media_storage,
         )
 
     def _pause_tracking(self, *, best_effort: bool = False) -> None:

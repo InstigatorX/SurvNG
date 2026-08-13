@@ -10,8 +10,9 @@ import cv2
 import numpy as np
 
 from survng.app.camera_media import CameraMediaService, REJECTED_SAMPLE_LIMIT
-from survng.app.config import CameraConfig, ImageStorageConfig
+from survng.app.config import CameraConfig, ImageStorageConfig, MediaStorageConfig, MediaStorageLocationConfig
 from survng.app.image_storage import DurableImageWriter
+from survng.app.media_storage import MediaStorageRegistry
 from survng.app.motion import MotionQualificationResult
 
 
@@ -59,6 +60,28 @@ def test_snapshot_returns_decodable_jpeg_without_persisting_it() -> None:
         assert decoded is not None
         assert decoded.shape == (24, 32, 3)
         assert list(service.snapshots_dir.iterdir()) == []
+
+
+def test_durable_images_follow_role_specific_media_locations() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        media = root / "media"
+        media.mkdir()
+        registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(id="images", path=str(media), roles=["snapshots", "motion_audits"]),
+        ]))
+        service = _service(root / "metadata", frame=np.zeros((8, 8, 3), dtype=np.uint8))
+        service.media_storage = registry
+        service.snapshots_dir = registry.directory("snapshots", "gate", "gate")
+
+        snapshot = service.write_snapshot(np.zeros((8, 8, 3), dtype=np.uint8))
+        audit = service.sample_rejected_motion(
+            datetime(2026, 8, 6, tzinfo=timezone.utc),
+            MotionQualificationResult(False, 0.4, 0.5, "low_score", 2, {}),
+        )
+
+        assert Path(snapshot).is_relative_to(media / "snapshots")
+        assert Path(audit).is_relative_to(media / "motion_samples")
 
 
 def test_mjpeg_normalizes_source_and_stops_without_an_extra_frame() -> None:

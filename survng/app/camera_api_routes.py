@@ -130,7 +130,11 @@ def create_camera_api_router(deps: CameraApiDependencies) -> CameraApiRouteBundl
                 if event.get("camera_id") != camera_id:
                     continue
                 try:
-                    path = event_snapshot_path(active_manager.storage_dir, event)
+                    path = event_snapshot_path(
+                        active_manager.storage_dir,
+                        event,
+                        getattr(active_manager, "media_storage", None),
+                    )
                 except (FileNotFoundError, PermissionError, OSError):
                     continue
                 return FileResponse(

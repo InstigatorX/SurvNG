@@ -121,7 +121,11 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
         try:
-            snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
+            snapshot_path = event_snapshot_path(
+                active_manager.storage_dir,
+                event,
+                getattr(active_manager, "media_storage", None),
+            )
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="snapshot not found") from None
         except PermissionError:

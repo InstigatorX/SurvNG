@@ -400,6 +400,7 @@ def create_training_router(deps: TrainingRouteDependencies) -> APIRouter:
                         snapshot_path = event_snapshot_path(
                             active_manager.storage_dir,
                             event,
+                            getattr(active_manager, "media_storage", None),
                         )
                     except (FileNotFoundError, PermissionError):
                         continue

@@ -19,6 +19,7 @@ import cv2
 
 from .config import SemanticSearchConfig
 from .incident_utils import event_snapshot_path
+from .media_storage import MediaStorageRegistry
 from .openclip_tokenizer import OpenClipBpeTokenizer
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -745,7 +746,7 @@ class DisabledSemanticSearch:
     def close(self) -> None:
         return
 
-    def start(self, event_store: Any, storage_dir: Path) -> None:
+    def start(self, event_store: Any, storage_dir: Path, media_storage: MediaStorageRegistry | None = None) -> None:
         return
 
     def queue_event(self, event: dict[str, Any]) -> bool:
@@ -1247,6 +1248,7 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._bootstrap_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._storage_dir = Path()
+        self._media_storage: MediaStorageRegistry | None = None
         self._error = ""
         self._indexed = 0
         self._skipped_missing = 0
@@ -1258,11 +1260,12 @@ class SemanticSearchService(DisabledSemanticSearch):
         self._encoder_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
 
-    def start(self, event_store: Any, storage_dir: Path) -> None:
+    def start(self, event_store: Any, storage_dir: Path, media_storage: MediaStorageRegistry | None = None) -> None:
         with self._lifecycle_lock:
             if self._state in {"initializing", "recovering", "ready", "stopping"}:
                 return
             self._storage_dir = Path(storage_dir)
+            self._media_storage = media_storage
             self._stop.clear()
             self._state = "initializing"
             self._bootstrap_thread = threading.Thread(
@@ -1530,7 +1533,7 @@ class SemanticSearchService(DisabledSemanticSearch):
                 )
             return 0
         try:
-            path = event_snapshot_path(self._storage_dir, event)
+            path = event_snapshot_path(self._storage_dir, event, self._media_storage)
         except FileNotFoundError:
             self._skipped_missing += 1
             return 0

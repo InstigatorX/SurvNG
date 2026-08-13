@@ -278,7 +278,7 @@ class IntelligenceService:
         if audit is None:
             raise HTTPException(status_code=404, detail='motion audit entry not found')
         try:
-            snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+            snapshot_path = event_snapshot_path(active_manager.storage_dir, audit, active_manager.media_storage)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -298,7 +298,7 @@ class IntelligenceService:
                 raise HTTPException(status_code=429, detail='an AI audit request is already running', headers={'Retry-After': '5'})
             self.deps.begin_ai_operation('motion_audit')
         try:
-            snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+            snapshot_path = event_snapshot_path(active_manager.storage_dir, audit, active_manager.media_storage)
             analysis_context = self._audit_ai_context(audit, active_config, active_manager)
             advice = await asyncio.to_thread(AuditAiAdvisor(audit_config).analyze, snapshot_path, analysis_context)
             camera = camera_by_id(active_config, str(audit.get('camera_id') or ''))
@@ -368,7 +368,7 @@ class IntelligenceService:
             candidates: list[tuple[dict[str, Any], Path]] = []
             for audit in audits:
                 try:
-                    snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+                    snapshot_path = event_snapshot_path(active_manager.storage_dir, audit, active_manager.media_storage)
                 except (FileNotFoundError, PermissionError):
                     continue
                 candidates.append((audit, snapshot_path))
@@ -476,7 +476,7 @@ class IntelligenceService:
                         consecutive_failures = 0
                     else:
                         audit = sample['audit']
-                        snapshot_path = event_snapshot_path(active_manager.storage_dir, audit)
+                        snapshot_path = event_snapshot_path(active_manager.storage_dir, audit, active_manager.media_storage)
                         context = self._audit_ai_context(audit, active_config, active_manager)
                         context['camera_intelligence_review'] = {'purpose': 'balanced cross-incident camera review', 'instruction': 'Recommend only bounded camera-scoped changes this image supports; SurvNG will require repeated support across images.'}
                         advice = audit_advisor.analyze(snapshot_path, context)
@@ -1200,7 +1200,11 @@ class IntelligenceService:
             if raw_event is None:
                 continue
             try:
-                snapshot_path = event_snapshot_path(active_manager.storage_dir, raw_event)
+                snapshot_path = event_snapshot_path(
+                    active_manager.storage_dir,
+                    raw_event,
+                    getattr(active_manager, "media_storage", None),
+                )
                 source_event_id = candidate_id
                 break
             except (FileNotFoundError, PermissionError):

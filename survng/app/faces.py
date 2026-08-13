@@ -17,6 +17,7 @@ import numpy as np
 from .face_recognition import OpenVinoFaceRecognizer
 from .inference import INFERENCE_REQUEST_TIMEOUT_SECONDS, InferenceUnavailable
 from .incident_utils import event_snapshot_path, portable_media_path
+from .media_storage import MediaStorageRegistry
 from .visual_quality import image_quality
 
 
@@ -117,8 +118,10 @@ class FaceStore:
         recognizer: OpenVinoFaceRecognizer | None = None,
         start_recognition: bool = True,
         database_dir: Path | None = None,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
+        self.media_storage = media_storage
         resolved_database_dir = (database_dir or self.storage_dir).resolve()
         resolved_database_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = resolved_database_dir / "survng.sqlite3"
@@ -388,6 +391,7 @@ class FaceStore:
                     resolved_snapshot = event_snapshot_path(
                         self.storage_dir,
                         {"snapshot_path": str(candidate.get("snapshot_path") or "")},
+                        self.media_storage,
                     )
                     snapshot_path = portable_media_path(self.storage_dir, resolved_snapshot)
                 except (FileNotFoundError, PermissionError, OSError, RuntimeError, TypeError, ValueError):
@@ -455,6 +459,7 @@ class FaceStore:
                             discarded_paths.append(event_snapshot_path(
                                 self.storage_dir,
                                 {"snapshot_path": str(row["snapshot_path"] or "")},
+                                self.media_storage,
                             ))
                         except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                             continue
@@ -503,7 +508,7 @@ class FaceStore:
                 try:
                     snapshot_path = portable_media_path(
                         self.storage_dir,
-                        event_snapshot_path(self.storage_dir, event),
+                        event_snapshot_path(self.storage_dir, event, self.media_storage),
                     )
                 except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                     continue
@@ -839,6 +844,7 @@ class FaceStore:
             snapshot_path = event_snapshot_path(
                 self.storage_dir,
                 {"snapshot_path": str(row["snapshot_path"] or "")},
+                self.media_storage,
             )
             frame = cv2.imread(str(snapshot_path))
             if frame is None:
@@ -1371,6 +1377,7 @@ class FaceStore:
                     event_snapshot_path(
                         self.storage_dir,
                         {"snapshot_path": raw_path},
+                        self.media_storage,
                     ).unlink(missing_ok=True)
                 except (FileNotFoundError, PermissionError, OSError, RuntimeError):
                     LOGGER.debug("could not remove pruned face candidate %s", raw_path)
@@ -1895,7 +1902,7 @@ class FaceStore:
         if not observation:
             return None
         try:
-            path = event_snapshot_path(self.storage_dir, observation)
+            path = event_snapshot_path(self.storage_dir, observation, self.media_storage)
         except (FileNotFoundError, PermissionError, OSError, RuntimeError):
             return None
         box = parse_face_box(observation["box"])

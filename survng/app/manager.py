@@ -161,7 +161,11 @@ class AppManager:
         self.image_cache = LocalImageCache(self.database_dir / "image-cache")
         self.image_writer = DurableImageWriter(config.image_storage)
         self.media_storage = MediaStorageRegistry(self.storage_dir, config.media_storage)
-        self.events = EventStore(self.storage_dir, database_dir=self.database_dir)
+        self.events = EventStore(
+            self.storage_dir,
+            database_dir=self.database_dir,
+            media_storage=self.media_storage,
+        )
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.semantic_index = SemanticIndex(self.events.db_path)
         self.recording = RecordingLifecycle(
@@ -194,6 +198,7 @@ class AppManager:
                 event_publisher=self.publish_event,
                 tracking_burst_guard=self._tracking_burst_available,
                 database_dir=self.database_dir,
+                media_storage=self.media_storage,
             )
         except BaseException:
             for label, operation in (
@@ -403,6 +408,7 @@ class AppManager:
                 image_writer=self.image_writer,
                 onvif_cache_dir=self.database_dir / "onvif",
                 capture_backend=self.capture_backend,
+                media_storage=self.media_storage,
             )
         except BaseException:
             for pipeline in reversed(pipelines):

@@ -85,12 +85,14 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
             storage_dir = active_manager.storage_dir
             db_path = active_manager.events.db_path
             recorder = active_manager.recorder
+            media_storage = active_manager.media_storage
         try:
             return deps.storage_maintenance.start(
                 lambda cancel_event, progress: StorageReconciler(
                     storage_dir,
                     db_path,
                     recorder,
+                    media_storage=media_storage,
                     cancel_event=cancel_event,
                     progress=progress,
                 ),

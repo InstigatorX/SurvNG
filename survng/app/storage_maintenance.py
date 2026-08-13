@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .config import MediaStorageRole
+from .media_storage import MediaStorageRegistry
 from .recorder import Recorder
 
 
@@ -31,12 +33,14 @@ class StorageReconciler:
         database_path: Path,
         recorder: Recorder,
         *,
+        media_storage: MediaStorageRegistry | None = None,
         cancel_event: threading.Event | None = None,
         progress: Callable[[str, int, int | None], None] | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.database_path = database_path
         self.recorder = recorder
+        self.media_storage = media_storage
         self.cancel_event = cancel_event
         self.progress = progress
 
@@ -143,7 +147,17 @@ class StorageReconciler:
         try:
             return str(path.resolve().relative_to(self.storage_dir))
         except ValueError:
-            return path.name
+            if self.media_storage is not None:
+                location_id = self.media_storage.location_id_for(path)
+                if location_id is not None:
+                    location_root = self.media_storage.status(location_id).path
+                    return f"{location_id}:{path.resolve().relative_to(location_root)}"
+            return str(path)
+
+    def _role_roots(self, role: MediaStorageRole, fallback: str) -> list[Path]:
+        if self.media_storage is None:
+            return [self.storage_dir / fallback]
+        return list(dict.fromkeys(self.media_storage.roots_for(role)))
 
     def _path_key(self, path_value: object) -> str:
         return str(self._media_path(path_value).absolute())
@@ -225,8 +239,11 @@ class StorageReconciler:
         unindexed_files = list(recording_health.pop("unindexed_files", []))
         media_files: list[Path] = []
         if full:
-            for directory_name in ("snapshots", "motion_samples"):
-                directory = self.storage_dir / directory_name
+            media_roots = [
+                *self._role_roots("snapshots", "snapshots"),
+                *self._role_roots("motion_audits", "motion_samples"),
+            ]
+            for directory in dict.fromkeys(media_roots):
                 if not directory.exists():
                     continue
                 for index, path in enumerate(directory.rglob("*"), start=1):
@@ -280,18 +297,28 @@ class StorageReconciler:
                 continue
             orphan_files.append(path)
         orphan_bytes = sum(self._file_size(path) for path in orphan_files)
-        cache_bytes = (
-            sum(self._directory_size(self.storage_dir / name) for name in ("event_clips", "playback-cache", "hls"))
-            if full else None
-        )
+        cache_bytes = None
+        if full:
+            clip_roots = self._role_roots("clips", "event_clips")
+            cache_bytes = sum(self._directory_size(path) for path in clip_roots)
+            cache_bytes += sum(
+                self._directory_size(self.storage_dir / name)
+                for name in ("playback-cache", "hls")
+            )
         self._report("Reading storage capacity", 1, 1)
         usage = shutil.disk_usage(self.storage_dir)
+        locations = (
+            self.media_storage.payload()["locations"]
+            if self.media_storage is not None
+            else []
+        )
         return {
             "scan_complete": full,
             "reference_rows_scanned": len(all_references),
             "storage_total_bytes": usage.total,
             "storage_used_bytes": usage.used,
             "storage_free_bytes": usage.free,
+            "media_locations": locations,
             **recording_health,
             "missing_index_rows": len(missing_index_files),
             "unindexed_recording_files": len(unindexed_files),

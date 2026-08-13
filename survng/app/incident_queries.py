@@ -26,7 +26,7 @@ from .manager import AppManager
 from .manager_access import ManagerAccessCoordinator, manager_generation_lease
 
 
-def _motion_audit_row(row: dict[str, Any], storage_dir: Path) -> dict[str, Any]:
+def _motion_audit_row(row: dict[str, Any], storage_dir: Path, media_storage=None) -> dict[str, Any]:
     audit = dict(row)
     try:
         features = json.loads(str(audit.pop("features_json", "{}") or "{}"))
@@ -35,7 +35,7 @@ def _motion_audit_row(row: dict[str, Any], storage_dir: Path) -> dict[str, Any]:
     audit["features"] = features if isinstance(features, dict) else {}
     snapshot_path = str(audit.pop("snapshot_path", "") or "")
     try:
-        event_snapshot_path(storage_dir, {"snapshot_path": snapshot_path})
+        event_snapshot_path(storage_dir, {"snapshot_path": snapshot_path}, media_storage)
         audit["has_snapshot"] = True
     except (FileNotFoundError, PermissionError):
         audit["has_snapshot"] = False
@@ -165,7 +165,7 @@ class IncidentQueryService:
         for audit in manager.events.motion_audits_for_related_events(event_ids):
             related_event_id = int(audit.get("related_event_id") or 0)
             observations_by_event.setdefault(related_event_id, []).append(
-                _motion_audit_row(audit, manager.storage_dir)
+                _motion_audit_row(audit, manager.storage_dir, manager.media_storage)
             )
         for event_id, event in full_events.items():
             event["motion_observations"] = observations_by_event.get(event_id, [])

@@ -82,7 +82,11 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
             try:
-                snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
+                snapshot_path = event_snapshot_path(
+                    active_manager.storage_dir,
+                    event,
+                    getattr(active_manager, "media_storage", None),
+                )
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except PermissionError as exc:
@@ -108,7 +112,11 @@ def create_appearance_router(deps: AppearanceRouteDependencies) -> AppearanceRou
             if event is None:
                 raise HTTPException(status_code=404, detail="event not found")
             try:
-                snapshot_path = event_snapshot_path(active_manager.storage_dir, event)
+                snapshot_path = event_snapshot_path(
+                    active_manager.storage_dir,
+                    event,
+                    getattr(active_manager, "media_storage", None),
+                )
                 stat = snapshot_path.stat()
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc

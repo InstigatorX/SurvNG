@@ -14,6 +14,7 @@ import cv2
 from .config import CameraConfig
 from .image_storage import DurableImageWriter
 from .motion import MotionQualificationResult
+from .media_storage import MediaStorageRegistry
 
 LOGGER = logging.getLogger(__name__)
 REJECTED_SAMPLE_LIMIT = 100
@@ -47,6 +48,7 @@ class CameraMediaService:
         utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         time_ns: Callable[[], int] = time.time_ns,
         sleeper: Callable[[float], None] = time.sleep,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -59,7 +61,12 @@ class CameraMediaService:
         self.utc_now = utc_now
         self.time_ns = time_ns
         self.sleeper = sleeper
-        self.snapshots_dir = storage_dir / "snapshots" / camera.id
+        self.media_storage = media_storage
+        self.snapshots_dir = (
+            media_storage.directory("snapshots", camera.id, camera.id)
+            if media_storage is not None
+            else storage_dir / "snapshots" / camera.id
+        )
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     def snapshot(self, source: str = "live") -> bytes | None:
@@ -122,7 +129,11 @@ class CameraMediaService:
         result: MotionQualificationResult,
         frame: Any,
     ) -> str:
-        directory = self.storage_dir / "motion_samples" / self.camera.id
+        directory = (
+            self.media_storage.directory("motion_audits", self.camera.id, self.camera.id)
+            if self.media_storage is not None
+            else self.storage_dir / "motion_samples" / self.camera.id
+        )
         try:
             directory.mkdir(parents=True, exist_ok=True)
             stamp = event_at.strftime("%Y%m%d-%H%M%S-%f")

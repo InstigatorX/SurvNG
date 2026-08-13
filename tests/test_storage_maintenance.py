@@ -13,9 +13,57 @@ from survng.app.events import EventStore
 from survng.app.faces import FaceStore
 from survng.app.recorder import Recorder
 from survng.app.storage_maintenance import StorageMaintenanceRunner, StorageReconciler
+from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
+from survng.app.media_storage import MediaStorageRegistry
 
 
 class StorageReconcilerTest(unittest.TestCase):
+    def test_full_scan_includes_external_snapshot_and_motion_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            storage = root / "media"
+            external = root / "external"
+            storage.mkdir()
+            external.mkdir()
+            registry = MediaStorageRegistry(
+                storage,
+                MediaStorageConfig(locations=[MediaStorageLocationConfig(
+                    id="archive",
+                    path=str(external),
+                    roles=["snapshots", "motion_audits"],
+                )]),
+            )
+            events = EventStore(storage, database_dir=root / "database", media_storage=registry)
+            recorder = Recorder(
+                "ffmpeg",
+                storage,
+                segment_seconds=10,
+                index_dir=root / "recording-index",
+            )
+            referenced = external / "snapshots" / "gate" / "known.webp"
+            referenced.parent.mkdir(parents=True)
+            referenced.write_bytes(b"image")
+            events.add_event("gate", "object", snapshot_path=str(referenced))
+            orphan = external / "motion_samples" / "gate" / "orphan.webp"
+            orphan.parent.mkdir(parents=True)
+            orphan.write_bytes(b"orphan")
+            old = time.time() - 120
+            os.utime(orphan, (old, old))
+
+            summary = StorageReconciler(
+                storage,
+                events.db_path,
+                recorder,
+                media_storage=registry,
+            ).run(full=True)["summary"]
+
+            self.assertEqual(summary["missing_event_snapshots"], 0)
+            self.assertEqual(summary["orphan_media_files"], 1)
+            self.assertEqual(summary["orphan_media_samples"], [
+                "archive:motion_samples/gate/orphan.webp"
+            ])
+            self.assertEqual(summary["media_locations"][0]["id"], "archive")
+
     def test_scan_and_repair_preserve_history_and_reconcile_recording_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

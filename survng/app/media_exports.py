@@ -19,6 +19,7 @@ from typing import Callable
 
 from .recording_media import concatenated_clip_timing
 from .recorder import Recorder
+from .media_storage import MediaStorageRegistry
 
 
 LOGGER = logging.getLogger(__name__)
@@ -311,10 +312,16 @@ class MediaExportManager:
         hardware_device: Callable[[str], str] | None = None,
         retention_hours: int = 24,
         max_storage_bytes: int = 20 * 1024 * 1024 * 1024,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.database_dir = database_dir.resolve()
-        self.exports_dir = self.storage_dir / "exports"
+        self.media_storage = media_storage
+        self.exports_dir = (
+            media_storage.directory("exports", "exports")
+            if media_storage is not None
+            else self.storage_dir / "exports"
+        )
         self.recording_dir = self.exports_dir / "recording"
         self.timelapse_dir = self.exports_dir / "timelapse"
         self.manifest_dir = self.exports_dir / "manifests"

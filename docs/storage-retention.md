@@ -1,8 +1,26 @@
 # Storage retention
 
 SurvNG separates continuous recordings from protected incident media and
-regenerable playback data. The retention worker only removes indexed MP4 files
-inside `storage_dir/recordings`.
+regenerable playback data. By default all media remains beneath `storage_dir`,
+preserving the historical single-filesystem layout. Admin can additionally
+configure two or more role-aware media locations for recordings, snapshots,
+motion-audit evidence, event clips, and exports. Databases, indexes, model
+packages, and transient playback work remain on local application storage.
+
+Each location has an immutable ID, filesystem path, accepted media roles,
+reserve percentage, priority, enabled state, and optional mount requirement.
+`balanced` placement chooses the eligible location with the greatest weighted
+usable space; `priority` placement prefers the highest-priority eligible
+location. Placement is sticky for a camera/source or media role while that
+location remains writable, so SurvNG does not bounce an active stream between
+filesystems. New writes fail over when a location becomes unavailable or
+reaches its reserve. Existing indexed media remains readable from every
+configured location.
+
+The retention worker only removes indexed MP4 files inside configured
+recording-role directories. Capacity and watermarks are evaluated separately
+for each filesystem so one full location can be cleaned without treating free
+space on another disk as interchangeable.
 
 It never removes:
 
@@ -30,7 +48,7 @@ deleting anything. **Clean Up Now** requires confirmation and starts bounded,
 oldest-first cleanup. Enabling automatic cleanup applies the same guarded plan
 in the background.
 
-The worker uses the local SQLite recording index and does not walk NFS during
+The worker uses the local SQLite recording index and does not walk media mounts during
 normal operation. It performs the complete storage projection once per day,
 when retention settings change, when an operator requests recalculation, or
 when the free-space watermark is crossed. Lightweight index-driven expiration
@@ -44,3 +62,21 @@ updates for files already handled. Admin reports the states as `planning`,
 `cleaning`, `waiting`, and `idle`. Storage or database
 errors stop the cycle and are reported in Admin rather than causing an unbounded
 retry loop.
+
+## Operational guidance for multiple locations
+
+- Mount every filesystem on the host before starting SurvNG. Enable **Require
+  mount** for network or removable paths so a missing mount cannot silently
+  write into its empty local mountpoint.
+- Give each location a stable path. Existing database rows store verified
+  absolute paths for media outside the legacy root, so changing a mount path
+  requires moving or reconciling that media first.
+- A location may accept one role or several. Keeping recordings on large disks
+  while snapshots and clips use faster storage is supported, as is allowing
+  every role on every location.
+- Removing or disabling a location prevents new placement there. It does not
+  migrate or delete existing media. Keep the path configured until its indexed
+  media has expired or been moved deliberately.
+- Full Maintenance scans inspect snapshot and motion-audit roots across all
+  configured locations. Export cleanup remains governed by export retention;
+  recording cleanup remains governed by recording retention.

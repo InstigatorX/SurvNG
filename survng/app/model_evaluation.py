@@ -117,7 +117,11 @@ class ModelEvaluationRunner:
             if not event.get("snapshot_path"):
                 continue
             try:
-                path = event_snapshot_path(manager.storage_dir, event)
+                path = event_snapshot_path(
+                    manager.storage_dir,
+                    event,
+                    getattr(manager, "media_storage", None),
+                )
             except (FileNotFoundError, PermissionError):
                 continue
             sample = dict(event)
@@ -138,7 +142,11 @@ class ModelEvaluationRunner:
                 if not audit.get("snapshot_path"):
                     continue
                 try:
-                    path = event_snapshot_path(manager.storage_dir, audit)
+                    path = event_snapshot_path(
+                        manager.storage_dir,
+                        audit,
+                        getattr(manager, "media_storage", None),
+                    )
                 except (FileNotFoundError, PermissionError):
                     continue
                 sample = dict(audit)

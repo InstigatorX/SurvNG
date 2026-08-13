@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from survng.app.media_exports import MediaExportManager, MediaExportStore
+from survng.app.config import MediaStorageConfig, MediaStorageLocationConfig
+from survng.app.media_storage import MediaStorageRegistry
 
 
 class FakeRecorder:
@@ -33,6 +35,33 @@ class FakeRecorder:
 
 
 class MediaExportTest(unittest.TestCase):
+    def test_exports_follow_role_specific_media_location(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            external = root / "external"
+            external.mkdir()
+            registry = MediaStorageRegistry(
+                root / "storage",
+                MediaStorageConfig(locations=[MediaStorageLocationConfig(
+                    id="archive",
+                    path=str(external),
+                    roles=["exports"],
+                )]),
+            )
+
+            manager = MediaExportManager(
+                root / "storage",
+                root / "database",
+                recorder=lambda: FakeRecorder([]),
+                ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu",
+                media_storage=registry,
+            )
+
+            self.assertEqual(manager.exports_dir, external / "exports")
+            self.assertTrue(manager.recording_dir.is_dir())
+            self.assertTrue(manager.timelapse_dir.is_dir())
+
     def test_worker_can_restart_without_consuming_stale_shutdown_sentinel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

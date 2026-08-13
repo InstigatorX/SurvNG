@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .incident_utils import event_snapshot_path, portable_media_path
+from .media_storage import MediaStorageRegistry
 
 
 class EventStore:
@@ -26,8 +27,14 @@ class EventStore:
         "inconclusive",
     }
 
-    def __init__(self, storage_dir: Path, database_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        storage_dir: Path,
+        database_dir: Path | None = None,
+        media_storage: MediaStorageRegistry | None = None,
+    ) -> None:
         self.storage_dir = storage_dir
+        self.media_storage = media_storage
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -2708,8 +2715,12 @@ class EventStore:
             path = event_snapshot_path(
                 self.storage_dir,
                 {"snapshot_path": portable},
+                self.media_storage,
             )
-            path.relative_to((self.storage_dir / "snapshots").resolve())
+            if self.media_storage is None:
+                path.relative_to((self.storage_dir / "snapshots").resolve())
+            elif self.media_storage.location_id_for(path, role="snapshots") is None:
+                return
             path.unlink(missing_ok=True)
         except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
             return

@@ -24,6 +24,7 @@ from .camera_lifecycle import (
 )
 from .config import CameraConfig, DetectionZone, MotionQualificationConfig
 from .image_storage import DurableImageWriter
+from .media_storage import MediaStorageRegistry
 from .onvif_events import OnvifEventListener, OnvifStopTicket
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_analysis_service import MotionAnalysisService
@@ -70,6 +71,7 @@ class CameraWorker:
         image_writer: DurableImageWriter,
         onvif_cache_dir: Path | None = None,
         capture_backend: CaptureBackend | None = None,
+        media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.camera = camera
         self.storage_dir = storage_dir
@@ -110,6 +112,7 @@ class CameraWorker:
             frame_provider=lambda source: self._get_latest_frame(source),
             rejected_sample_rate=lambda: self.motion_config.rejected_sample_rate,
             stop_requested=self._stop.is_set,
+            media_storage=media_storage,
         )
         self.tracking_lifecycle = ObjectTrackingLifecycle(
             camera=camera,
