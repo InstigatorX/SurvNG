@@ -9896,10 +9896,14 @@ function motionAuditOutcome(item) {
   return { label: visualBackup ? "Visual backup · incomplete" : activeFollowup ? "Active follow-up · incomplete" : "Not run", className: "not-run" };
 }
 
-function MotionAuditAnnotatedImage({ item, alt, loading, onImageSize }) {
+function MotionAuditAnnotatedImage({ item, alt, loading, onImageSize, interactive = false }) {
   const frameRef = useRef(null);
   const [frameSize, setFrameSize] = useState(null);
   const [imageSize, setImageSize] = useState(null);
+  const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
+  const zoomRef = useRef(zoom);
+  const pointersRef = useRef(new Map());
+  const gestureRef = useRef(null);
   const regions = motionAuditRegions(item.features);
   const renderedImage = useMemo(() => {
     if (!frameSize?.width || !frameSize?.height || !imageSize?.width || !imageSize?.height) return null;
@@ -9908,6 +9912,14 @@ function MotionAuditAnnotatedImage({ item, alt, loading, onImageSize }) {
     const height = imageSize.height * scale;
     return { left: (frameSize.width - width) / 2, top: (frameSize.height - height) / 2, width, height };
   }, [frameSize, imageSize]);
+
+  useEffect(() => {
+    const reset = { scale: 1, x: 0, y: 0 };
+    zoomRef.current = reset;
+    setZoom(reset);
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [item.id]);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -9928,21 +9940,120 @@ function MotionAuditAnnotatedImage({ item, alt, loading, onImageSize }) {
     onImageSize?.(size);
   }
 
+  function updateZoom(next) {
+    const scale = Math.max(1, Math.min(8, Number(next.scale) || 1));
+    const xLimit = renderedImage ? renderedImage.width * (scale - 1) / 2 : 0;
+    const yLimit = renderedImage ? renderedImage.height * (scale - 1) / 2 : 0;
+    const value = {
+      scale,
+      x: scale === 1 ? 0 : Math.max(-xLimit, Math.min(xLimit, Number(next.x) || 0)),
+      y: scale === 1 ? 0 : Math.max(-yLimit, Math.min(yLimit, Number(next.y) || 0)),
+    };
+    zoomRef.current = value;
+    setZoom(value);
+  }
+
+  function zoomAt(clientX, clientY, scale) {
+    if (!interactive || !renderedImage || !frameRef.current) return;
+    const current = zoomRef.current;
+    const rect = frameRef.current.getBoundingClientRect();
+    const nextScale = Math.max(1, Math.min(8, scale));
+    const localX = clientX - rect.left - frameSize.width / 2;
+    const localY = clientY - rect.top - frameSize.height / 2;
+    const ratio = nextScale / current.scale;
+    updateZoom({
+      scale: nextScale,
+      x: localX - (localX - current.x) * ratio,
+      y: localY - (localY - current.y) * ratio,
+    });
+  }
+
+  function onWheel(event) {
+    if (!interactive) return;
+    event.preventDefault();
+    zoomAt(event.clientX, event.clientY, zoomRef.current.scale * Math.exp(-event.deltaY * 0.0017));
+  }
+
+  function onPointerDown(event) {
+    if (!interactive) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const pointers = [...pointersRef.current.values()];
+    if (pointers.length === 2) {
+      gestureRef.current = {
+        mode: "pinch",
+        distance: Math.hypot(pointers[1].x - pointers[0].x, pointers[1].y - pointers[0].y),
+        scale: zoomRef.current.scale,
+        centerX: (pointers[0].x + pointers[1].x) / 2,
+        centerY: (pointers[0].y + pointers[1].y) / 2,
+      };
+    } else {
+      gestureRef.current = { mode: "pan", pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: zoomRef.current.x, panY: zoomRef.current.y };
+    }
+  }
+
+  function onPointerMove(event) {
+    if (!interactive || !pointersRef.current.has(event.pointerId)) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const pointers = [...pointersRef.current.values()];
+    const gesture = gestureRef.current;
+    if (pointers.length === 2) {
+      const distance = Math.hypot(pointers[1].x - pointers[0].x, pointers[1].y - pointers[0].y);
+      const centerX = (pointers[0].x + pointers[1].x) / 2;
+      const centerY = (pointers[0].y + pointers[1].y) / 2;
+      if (!gesture || gesture.mode !== "pinch") {
+        gestureRef.current = { mode: "pinch", distance, scale: zoomRef.current.scale, centerX, centerY };
+        return;
+      }
+      zoomAt(centerX, centerY, gesture.scale * distance / Math.max(1, gesture.distance));
+      return;
+    }
+    if (gesture?.mode === "pan" && gesture.pointerId === event.pointerId && zoomRef.current.scale > 1) {
+      updateZoom({ scale: zoomRef.current.scale, x: gesture.panX + event.clientX - gesture.x, y: gesture.panY + event.clientY - gesture.y });
+    }
+  }
+
+  function onPointerEnd(event) {
+    pointersRef.current.delete(event.pointerId);
+    const remaining = [...pointersRef.current.entries()];
+    if (remaining.length === 1) {
+      const [pointerId, point] = remaining[0];
+      gestureRef.current = { mode: "pan", pointerId, x: point.x, y: point.y, panX: zoomRef.current.x, panY: zoomRef.current.y };
+    } else if (!remaining.length) {
+      gestureRef.current = null;
+    }
+  }
+
+  const canvasStyle = renderedImage ? {
+    left: `${renderedImage.left}px`,
+    top: `${renderedImage.top}px`,
+    width: `${renderedImage.width}px`,
+    height: `${renderedImage.height}px`,
+    transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})`,
+  } : undefined;
+
   return (
-    <div className="motion-audit-annotated-image" ref={frameRef}>
-      <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={alt} loading={loading} onLoad={imageLoaded} />
-      {renderedImage && regions.length ? <div className="motion-audit-region-layer" aria-hidden="true">
-        {regions.map(([x1, y1, x2, y2], index) => <span
-          className="motion-audit-region"
-          key={`${x1}-${y1}-${x2}-${y2}-${index}`}
-          style={{
-            left: `${renderedImage.left + x1 * renderedImage.width}px`,
-            top: `${renderedImage.top + y1 * renderedImage.height}px`,
-            width: `${(x2 - x1) * renderedImage.width}px`,
-            height: `${(y2 - y1) * renderedImage.height}px`,
-          }}
-        >{index === regions.length - 1 ? <strong>motion</strong> : null}</span>)}
-      </div> : null}
+    <div
+      className={`motion-audit-annotated-image ${interactive ? "interactive" : ""} ${zoom.scale > 1 ? "zoomed" : ""}`}
+      ref={frameRef}
+      onWheel={onWheel}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onDoubleClick={(event) => interactive && (zoom.scale > 1 ? updateZoom({ scale: 1, x: 0, y: 0 }) : zoomAt(event.clientX, event.clientY, 2))}
+    >
+      <div className="motion-audit-image-canvas" style={canvasStyle}>
+        <img src={appUrl(`/api/motion-audit/${item.id}/snapshot.jpg`)} alt={alt} loading={loading} onLoad={imageLoaded} draggable="false" />
+        {renderedImage && regions.length ? <div className="motion-audit-region-layer" aria-hidden="true">
+          {regions.map(([x1, y1, x2, y2], index) => <span
+            className="motion-audit-region"
+            key={`${x1}-${y1}-${x2}-${y2}-${index}`}
+            style={{ left: `${x1 * 100}%`, top: `${y1 * 100}%`, width: `${(x2 - x1) * 100}%`, height: `${(y2 - y1) * 100}%` }}
+          >{index === regions.length - 1 ? <strong>motion</strong> : null}</span>)}
+        </div> : null}
+      </div>
+      {interactive && zoom.scale > 1 ? <button type="button" className="motion-audit-zoom-reset" onClick={(event) => { event.stopPropagation(); updateZoom({ scale: 1, x: 0, y: 0 }); }}>Reset {zoom.scale.toFixed(1)}×</button> : null}
     </div>
   );
 }
@@ -10127,7 +10238,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
         <div className="motion-audit-overlay-content">
           <div className="motion-audit-overlay-media">
             {item.has_snapshot
-              ? <MotionAuditAnnotatedImage item={item} alt={`${item.camera_id} rejected motion`} />
+              ? <MotionAuditAnnotatedImage item={item} alt={`${item.camera_id} rejected motion`} interactive />
               : <div className="empty-thumb"><Camera size={42} /><span>Audit image unavailable</span></div>}
           </div>
           <aside className="motion-audit-overlay-details">
