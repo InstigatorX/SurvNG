@@ -332,6 +332,45 @@ class ImageStorageConfig(BaseModel):
     quality: int = Field(default=95, ge=1, le=100)
 
 
+MediaStorageRole = Literal["recordings", "snapshots", "motion_audits", "clips", "exports"]
+
+
+class MediaStorageLocationConfig(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    name: str = Field(default="", max_length=128)
+    path: str = Field(min_length=1, max_length=4096)
+    enabled: bool = True
+    roles: list[MediaStorageRole] = Field(
+        default_factory=lambda: ["recordings", "snapshots", "motion_audits", "clips", "exports"]
+    )
+    reserve_percent: float = Field(default=15.0, ge=0.0, le=95.0)
+    priority: int = Field(default=100, ge=1, le=1000)
+    require_mount: bool = False
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[MediaStorageRole]) -> list[MediaStorageRole]:
+        roles = list(dict.fromkeys(value))
+        if not roles:
+            raise ValueError("media storage location requires at least one role")
+        return roles
+
+
+class MediaStorageConfig(BaseModel):
+    placement: Literal["balanced", "priority"] = "balanced"
+    locations: list[MediaStorageLocationConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_locations(self) -> "MediaStorageConfig":
+        ids = [location.id for location in self.locations]
+        if len(ids) != len(set(ids)):
+            raise ValueError("media storage location ids must be unique")
+        paths = [str(Path(location.path).expanduser().resolve(strict=False)) for location in self.locations]
+        if len(paths) != len(set(paths)):
+            raise ValueError("media storage location paths must be unique")
+        return self
+
+
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
@@ -621,6 +660,7 @@ class AppConfig(BaseModel):
     recording_cache_max_days: int = Field(default=7, ge=1, le=90)
     recording_cache_prewarm: bool = True
     image_storage: ImageStorageConfig = Field(default_factory=ImageStorageConfig)
+    media_storage: MediaStorageConfig = Field(default_factory=MediaStorageConfig)
     api_auth: ApiAuthConfig = Field(default_factory=ApiAuthConfig)
     retention: RecordingRetentionConfig = Field(default_factory=RecordingRetentionConfig)
     motion_qualification: MotionQualificationConfig = Field(default_factory=MotionQualificationConfig)
