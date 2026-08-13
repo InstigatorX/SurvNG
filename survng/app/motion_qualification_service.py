@@ -75,6 +75,22 @@ class MotionQualificationService:
             ],
         }
 
+    def reconfigure_policy(
+        self,
+        config: MotionQualificationConfig,
+        camera: CameraConfig,
+    ) -> None:
+        """Atomically refresh scalar policy and the stage context snapshot."""
+        self.config = config
+        self.camera.motion_qualification = camera.motion_qualification
+        self._pipeline_configuration = {
+            **config.model_dump(mode="python"),
+            "camera_id": self.camera.id,
+            "motion_zones": [
+                zone.model_dump(mode="python") for zone in self.camera.zones
+            ],
+        }
+
     def settings(self) -> tuple[str, str, int]:
         override = self.camera.motion_qualification
         mode = self.config.mode if override.mode == "inherit" else override.mode

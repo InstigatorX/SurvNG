@@ -298,6 +298,17 @@ class CameraControlService:
             self._runtime_monitor.publish_camera_status(camera_id)
             return True
 
+    def replace_worker(
+        self,
+        camera: CameraConfig,
+        worker: DetectionControlWorker,
+    ) -> None:
+        with self._lock:
+            if camera.id not in self._workers:
+                raise RuntimeError(f"camera {camera.id} cannot be replaced")
+            self._cameras[camera.id] = camera
+            self._workers[camera.id] = worker
+
     def reconfigure_recorders(
         self,
         config: AppConfig,

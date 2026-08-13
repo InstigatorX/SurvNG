@@ -1021,6 +1021,7 @@ function defaultCamera(cameras, seed = {}) {
     require_incident_zone: seed.require_incident_zone ?? null,
     object_activity_attribution: seed.object_activity_attribution || "inherit",
     motion_qualification: {
+      ...defaultCameraMotionQualification(),
       mode: seed.motion_qualification?.mode || "inherit",
       sensitivity: seed.motion_qualification?.sensitivity || "inherit",
       stationary_object_tolerance: seed.motion_qualification?.stationary_object_tolerance || "inherit",
@@ -1054,6 +1055,60 @@ function defaultCamera(cameras, seed = {}) {
       channel: seed.baichuan?.channel || 0,
     },
   };
+}
+
+function defaultCameraMotionQualification() {
+  return {
+    mode: "inherit",
+    sensitivity: "inherit",
+    stationary_object_tolerance: "inherit",
+    illumination_filter_enabled: null,
+    frame_width: null,
+    visual_backup_grace_seconds: null,
+    visual_backup_min_score: null,
+    visual_backup_min_consecutive: null,
+    visual_backup_cooldown_seconds: null,
+    visual_backup_max_triggers_5m: null,
+    borderline_rescue_enabled: null,
+    borderline_margin: null,
+    suppression_verification_rate: null,
+    spatial_alignment: {},
+    pipeline: {
+      qualification: null,
+      observation: null,
+      fusion: null,
+    },
+  };
+}
+
+function cameraMotionQualificationInherited(qualification) {
+  const value = qualification || {};
+  const alignment = value.spatial_alignment || {};
+  const pipeline = value.pipeline || {};
+  return (
+    (value.mode == null || value.mode === "inherit")
+    && (value.sensitivity == null || value.sensitivity === "inherit")
+    && (value.stationary_object_tolerance == null || value.stationary_object_tolerance === "inherit")
+    && value.illumination_filter_enabled == null
+    && value.frame_width == null
+    && value.visual_backup_grace_seconds == null
+    && value.visual_backup_min_score == null
+    && value.visual_backup_min_consecutive == null
+    && value.visual_backup_cooldown_seconds == null
+    && value.visual_backup_max_triggers_5m == null
+    && value.borderline_rescue_enabled == null
+    && value.borderline_margin == null
+    && value.suppression_verification_rate == null
+    && (alignment.mode == null || alignment.mode === "auto")
+    && Number(alignment.confidence ?? 0) === 0
+    && Number(alignment.scale_x ?? 1) === 1
+    && Number(alignment.scale_y ?? 1) === 1
+    && Number(alignment.offset_x ?? 0) === 0
+    && Number(alignment.offset_y ?? 0) === 0
+    && pipeline.qualification == null
+    && pipeline.observation == null
+    && pipeline.fusion == null
+  );
 }
 
 const ASSISTANT_STORAGE_KEY = "survng.assistantConversation.v1";
@@ -7729,6 +7784,8 @@ function MotionDecisionEditor({
   onSetInherited,
   onModeChange,
   onChange,
+  onRestoreDefaults,
+  configurationInherited,
   cameraName,
 }) {
   const parsed = readMotionDecisionFusion(fusion);
@@ -7755,6 +7812,9 @@ function MotionDecisionEditor({
     : legacyMode
       ? motionModeInfo(effectiveMode)
       : motionBehaviorOption(effectiveBehavior);
+  const statusLabel = onRestoreDefaults
+    ? configurationInherited ? "Inherited" : "Custom"
+    : fullyInherited ? "Inherited" : custom ? "Advanced" : legacyMode ? "Legacy" : parsed.usesDefaults ? "Recommended default" : "Customized";
 
   function updateSettings(patch) {
     onChange(buildMotionDecisionFusion({ ...settings, ...patch }));
@@ -7780,7 +7840,10 @@ function MotionDecisionEditor({
           <strong>Motion behavior</strong>
           <span>{cameraName ? `Choose what can start object detection for ${cameraName}.` : "Choose what can start object detection."}</span>
         </div>
-        <span className="motion-decision-status">{fullyInherited ? "Inherited" : custom ? "Advanced" : legacyMode ? "Legacy" : parsed.usesDefaults ? "Recommended default" : "Customized"}</span>
+        <div className="motion-decision-status-actions">
+          <span className="motion-decision-status">{statusLabel}</span>
+          {onRestoreDefaults ? <button type="button" className="motion-decision-status motion-defaults-action" onClick={onRestoreDefaults} title="Restore all motion settings for this camera to global inheritance">Defaults</button> : null}
+        </div>
       </div>
 
       <div className="motion-behavior-row">
@@ -8997,7 +9060,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         ? {
           state: "saved",
           text: payload.camera_workers_restarted
-            ? "Saved. Camera workers reloaded."
+            ? payload.camera_ids_restarted?.length === 1
+              ? `Saved. ${payload.camera_ids_restarted[0]} motion runtime reloaded; other cameras kept running.`
+              : `Saved. ${payload.camera_ids_restarted?.length || "Affected"} camera motion runtimes reloaded.`
             : payload.subsystems_restarted?.includes("recorders") && payload.subsystems_restarted?.includes("mqtt")
               ? "Saved. Recorders restarted and MQTT reconnected; cameras kept running."
               : payload.subsystems_restarted?.includes("recorders")
@@ -9064,8 +9129,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       setSaveNotice({
         state: "saved",
         text: payload.camera_workers_restarted
-          ? "Camera settings saved. Camera workers reloaded."
-          : "Camera retention saved without interrupting cameras.",
+          ? `${savedCamera.name || savedCamera.id} motion runtime reloaded; other cameras kept running.`
+          : "Camera settings saved without interrupting camera streams.",
       });
       const statusResponse = await fetch("/api/cameras");
       if (statusResponse.ok) setRuntimeStatus(await statusResponse.json());
@@ -9369,7 +9434,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       </section>
       <section className="bento-card config-editor">
         <div className="section-head">
-          <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json and reload camera workers</p></div>
+          <div><h2>{selectedCamera ? selectedCamera.name : "Camera Config"}</h2><p>Changes save to config.json; only structural motion or camera changes interrupt the affected camera</p></div>
           {selectedCamera ? (
             <div className="camera-command-area">
               <div className="camera-command-bar">
@@ -9481,6 +9546,12 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                       ["motion_qualification", "pipeline"],
                       { ...(selectedCamera.motion_qualification?.pipeline || {}), fusion },
                     )}
+                    onRestoreDefaults={() => updateCamera(
+                      selectedCamera.id,
+                      ["motion_qualification"],
+                      defaultCameraMotionQualification(),
+                    )}
+                    configurationInherited={cameraMotionQualificationInherited(selectedCamera.motion_qualification)}
                   />
                   <MotionAnalysisPresetEditor
                     qualification={selectedCamera.motion_qualification?.pipeline?.qualification}
@@ -9920,6 +9991,7 @@ function MotionAuditAnnotatedImage({ item, alt, loading, onImageSize, interactiv
     const reset = { scale: 1, x: 0, y: 0 };
     zoomRef.current = reset;
     setZoom(reset);
+    setImageSize(null);
     pointersRef.current.clear();
     gestureRef.current = null;
   }, [item.id]);

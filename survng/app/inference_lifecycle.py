@@ -131,6 +131,12 @@ class InferenceLifecycle:
             self._workers = dict(workers)
             self._workers_bound = True
 
+    def replace_worker(self, camera_id: str, worker: TrackingWorker) -> None:
+        with self._lock:
+            if not self._workers_bound or camera_id not in self._workers:
+                raise RuntimeError(f"camera {camera_id} is not bound")
+            self._workers[camera_id] = worker
+
     def start_core(self) -> None:
         with self._lock:
             if self._closed:

@@ -865,6 +865,107 @@ class AppManager:
                 mode
             )
 
+    def reconfigure_motion(
+        self,
+        config: AppConfig,
+        *,
+        restart_camera_ids: set[str],
+        hot_camera_ids: set[str],
+    ) -> None:
+        """Apply EMA policy live and replace only structurally affected cameras."""
+        cameras = {camera.id: camera for camera in config.cameras}
+        with self._lifecycle_lock:
+            if self._stopping or self._closed:
+                raise RuntimeError("application manager is stopping")
+            for camera_id in sorted(hot_camera_ids):
+                worker = self.workers.get(camera_id)
+                camera = cameras.get(camera_id)
+                if worker is not None and camera is not None:
+                    worker.reconfigure_motion_policy(
+                        config.motion_qualification,
+                        camera,
+                    )
+            if not restart_camera_ids:
+                return
+
+            replacements: dict[str, CameraWorker] = {}
+            previous: dict[str, CameraWorker] = {}
+            previous_evidence: dict[str, MotionEvidenceRepository] = {}
+            enabled: dict[str, bool] = {}
+            detection: dict[str, bool] = {}
+            published: set[str] = set()
+            try:
+                for camera_id in sorted(restart_camera_ids):
+                    camera = cameras.get(camera_id)
+                    old_worker = self.workers.get(camera_id)
+                    if camera is None or old_worker is None:
+                        raise RuntimeError(f"camera {camera_id} cannot be reconfigured")
+                    previous[camera_id] = old_worker
+                    previous_evidence[camera_id] = self.motion_evidence[camera_id]
+                    enabled[camera_id] = self.camera_controls.camera_enabled(camera_id)
+                    detection[camera_id] = self.camera_controls.detection_enabled(camera_id)
+                    replacements[camera_id] = self._create_camera_worker(camera)
+
+                for camera_id, old_worker in previous.items():
+                    old_worker.stop()
+                    replacement = replacements[camera_id]
+                    replacement.set_detection_enabled(detection[camera_id])
+                    if enabled[camera_id]:
+                        replacement.start()
+                    camera = cameras[camera_id]
+                    self.workers[camera_id] = replacement
+                    self.camera_fleet.replace_worker(camera, replacement)
+                    self.camera_controls.replace_worker(camera, replacement)
+                    self.inference.replace_worker(camera_id, replacement)
+                    published.add(camera_id)
+            except BaseException:
+                for camera_id, replacement in replacements.items():
+                    try:
+                        replacement.close()
+                    except Exception:
+                        LOGGER.exception(
+                            "failed to close replacement camera %s during rollback",
+                            camera_id,
+                        )
+                for camera_id in published:
+                    old_worker = previous[camera_id]
+                    old_camera = old_worker.camera
+                    self.workers[camera_id] = old_worker
+                    self.camera_fleet.replace_worker(old_camera, old_worker)
+                    self.camera_controls.replace_worker(old_camera, old_worker)
+                    self.inference.replace_worker(camera_id, old_worker)
+                    self.motion_evidence[camera_id] = previous_evidence[camera_id]
+                for camera_id in previous.keys() - published:
+                    self.motion_evidence[camera_id] = previous_evidence[camera_id]
+                for camera_id, old_worker in previous.items():
+                    if enabled.get(camera_id):
+                        try:
+                            old_worker.start()
+                        except Exception:
+                            LOGGER.exception(
+                                "failed to restart camera %s after motion rollback",
+                                camera_id,
+                            )
+                raise
+
+            for camera_id, old_worker in previous.items():
+                try:
+                    old_worker.close()
+                except Exception:
+                    LOGGER.exception(
+                        "retired camera %s did not close after motion reconfiguration",
+                        camera_id,
+                    )
+            try:
+                self._mqtt_connected()
+            except Exception:
+                # Camera replacement is already committed. Discovery refresh
+                # is observational and must not turn a healthy cutover into a
+                # second camera-generation rollback.
+                LOGGER.exception(
+                    "MQTT discovery refresh failed after motion reconfiguration"
+                )
+
     def reconfigure_object_tracking(self, config: DetectorConfig) -> None:
         """Replace tracking sessions without restarting camera-owned services."""
         with self._lifecycle_lock:

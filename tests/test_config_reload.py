@@ -467,6 +467,85 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_camera_motion_scalar_tuning_hot_applies_without_worker_restart(self) -> None:
+        active = Mock()
+        current = AppConfig(cameras=[
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+        ])
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].motion_qualification.visual_backup_min_score = 0.76
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_motion.assert_called_once_with(
+            effective,
+            restart_camera_ids=set(),
+            hot_camera_ids={"gate"},
+        )
+        self.assertEqual(result["apply_mode"], "hot")
+        self.assertIn("motion_policy", result["hot_updated"])
+        self.assertFalse(result["camera_workers_restarted"])
+
+    def test_camera_motion_structural_change_restarts_only_affected_camera(self) -> None:
+        active = Mock()
+        current = AppConfig(cameras=[
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main"),
+            CameraConfig(id="yard", name="Yard", stream_url="rtsp://camera/yard"),
+        ])
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].motion_qualification.frame_width = 640
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_motion.assert_called_once_with(
+            effective,
+            restart_camera_ids={"gate"},
+            hot_camera_ids=set(),
+        )
+        self.assertEqual(result["subsystems_restarted"], ["camera:gate"])
+        self.assertTrue(result["camera_workers_restarted"])
+
+    def test_global_motion_tuning_hot_applies_only_to_inheriting_camera(self) -> None:
+        gate = CameraConfig(id="gate", name="Gate", stream_url="rtsp://camera/main")
+        yard = CameraConfig(id="yard", name="Yard", stream_url="rtsp://camera/yard")
+        yard.motion_qualification.visual_backup_min_score = 0.82
+        active = Mock()
+        current = AppConfig(cameras=[gate, yard])
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.motion_qualification.visual_backup_min_score = 0.78
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config"),
+        ):
+            effective, _result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        active.reconfigure_motion.assert_called_once_with(
+            effective,
+            restart_camera_ids=set(),
+            hot_camera_ids={"gate"},
+        )
+
     def test_detector_engine_change_restarts_only_object_inference(self) -> None:
         active = Mock()
         current = AppConfig()

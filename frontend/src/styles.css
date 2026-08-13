@@ -4535,8 +4535,34 @@ section.detection-settings-card {
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 9%, transparent);
   color: var(--ink) !important;
+  font-family: inherit;
+  font-size: 12px;
   font-weight: 760;
+  line-height: 1.45;
   padding: 4px 8px;
+}
+
+.motion-decision-heading > .motion-decision-status-actions {
+  align-self: start;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+button.motion-defaults-action {
+  min-height: 0;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+button.motion-defaults-action:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .motion-decision-mode {
@@ -7080,6 +7106,18 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   place-items: center;
 }
 
+.motion-audit-image-canvas {
+  position: absolute;
+  overflow: visible;
+  transform-origin: center;
+}
+
+.motion-audit-image-canvas > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .motion-audit-region-layer {
   position: absolute;
   inset: 0;
@@ -7338,6 +7376,8 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 .motion-audit-overlay-media .motion-audit-annotated-image img {
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: 100%;
 }

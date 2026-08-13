@@ -257,6 +257,10 @@ class ObjectActivityAttributor:
             if mode == "off":
                 self._context_memory.clear()
 
+    def reconfigure_stationary_tolerance(self, tolerance: str) -> None:
+        with self._lock:
+            self.stationary_policy = stationary_object_policy(tolerance)
+
     def _attribute_one(
         self,
         observation: dict[str, Any],

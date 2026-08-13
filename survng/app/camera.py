@@ -350,6 +350,28 @@ class CameraWorker:
     def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None:
         self.motion_decision_handler.reconfigure_activity_attribution(mode)
 
+    def reconfigure_motion_policy(
+        self,
+        config: MotionQualificationConfig,
+        camera: CameraConfig,
+    ) -> None:
+        """Hot-apply non-structural EMA policy without interrupting capture."""
+        next_global = config.model_copy(deep=True)
+        next_override = camera.motion_qualification.model_copy(deep=True)
+        with self._lifecycle_lock, self.motion_qualification.analysis_lock:
+            self.motion_config = next_global
+            next_camera = camera.model_copy(deep=True)
+            next_camera.motion_qualification = next_override
+            self.motion_qualification.reconfigure_policy(next_global, next_camera)
+            self.motion_analysis.config = next_global
+            self.motion_decisions.config = next_global
+            # Do not carry scene-readiness or persistence accumulated under a
+            # different threshold/warmup policy into the new policy.
+            self.motion_analysis.reset_ema_policy_state()
+            self.motion_decision_handler.reconfigure_stationary_tolerance(
+                self.motion_qualification.stationary_object_tolerance()
+            )
+
     def live_capture_ready(self) -> bool:
         """Expose capture readiness to lifecycle orchestration without a frame copy."""
         return self.capture.frame_ready("live")

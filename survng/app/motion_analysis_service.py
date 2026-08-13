@@ -240,6 +240,10 @@ class MotionAnalysisService:
             self._stop_event = None
             raise
 
+    def reset_ema_policy_state(self) -> None:
+        with self._visual_lock:
+            self.ema_v2.reset()
+
     def request_stop(self) -> None:
         with self._admission_lock:
             self._accepting_frames = False

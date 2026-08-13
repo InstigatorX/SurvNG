@@ -400,6 +400,10 @@ class MotionDecisionHandler:
         if self.activity_attributor is not None:
             self.activity_attributor.reconfigure(mode)
 
+    def reconfigure_stationary_tolerance(self, tolerance: str) -> None:
+        if self.activity_attributor is not None:
+            self.activity_attributor.reconfigure_stationary_tolerance(tolerance)
+
     def handle(
         self,
         topic: str,

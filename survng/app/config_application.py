@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from .config import AppConfig, normalize_config
+from .motion_pipeline.configuration import resolve_motion_pipeline_graphs
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,13 @@ class ConfigurableRuntime(Protocol):
     def reconfigure_inference(self, config: Any, roles: set[str], *, refresh_tracking: bool) -> None: ...
     def reconfigure_object_tracking(self, config: Any) -> None: ...
     def reconfigure_detector_policy(self, config: AppConfig) -> None: ...
+    def reconfigure_motion(
+        self,
+        config: AppConfig,
+        *,
+        restart_camera_ids: set[str],
+        hot_camera_ids: set[str],
+    ) -> None: ...
 
 
 class StorageTasksActiveError(RuntimeError):
@@ -51,11 +59,100 @@ def manager_owned_config(config: AppConfig) -> dict:
     for camera in payload.get("cameras", []):
         camera.pop("retention", None)
         camera.pop("object_activity_attribution", None)
+        camera.pop("motion_qualification", None)
+    payload.pop("motion_qualification", None)
     payload["detector"] = _without_fields(payload.get("detector", {}), DETECTOR_HOT_POLICY_FIELDS | DETECTOR_OBJECT_ENGINE_FIELDS | DETECTOR_FACE_ENGINE_FIELDS | DETECTOR_SHARED_ENGINE_FIELDS)
     tracking = payload["detector"].get("tracking")
     if isinstance(tracking, dict):
         payload["detector"]["tracking"] = _without_fields(tracking, TRACKING_SESSION_FIELDS | TRACKING_REID_ENGINE_FIELDS)
     return payload
+
+
+def _motion_structural_signature(config: AppConfig, camera_id: str) -> tuple[Any, ...]:
+    camera = next(camera for camera in config.cameras if camera.id == camera_id)
+    graphs = resolve_motion_pipeline_graphs(
+        config.motion_qualification,
+        camera.motion_qualification,
+    )
+    override = camera.motion_qualification
+    alignment = override.spatial_alignment
+    def graph_signature(stages: tuple[Any, ...]) -> tuple[Any, ...]:
+        return tuple(
+            (
+                stage.stage_id,
+                stage.implementation,
+                repr(sorted(dict(stage.options).items())),
+                stage.parallel_group,
+            )
+            for stage in stages
+        )
+
+    return (
+        graph_signature(graphs.qualification),
+        graph_signature(graphs.observation),
+        graph_signature(graphs.fusion),
+        (
+            config.motion_qualification.mode
+            if override.mode == "inherit"
+            else override.mode
+        ),
+        int(override.frame_width or config.motion_qualification.frame_width),
+        float(config.motion_qualification.sample_fps),
+        float(config.motion_qualification.camera_mode_background_fps),
+        float(config.motion_qualification.window_seconds),
+        float(config.motion_qualification.post_trigger_seconds),
+        float(config.motion_qualification.burst_quiet_seconds),
+        alignment.model_dump_json(),
+    )
+
+
+def _motion_policy_signature(config: AppConfig, camera_id: str) -> tuple[Any, ...]:
+    camera = next(camera for camera in config.cameras if camera.id == camera_id)
+    override = camera.motion_qualification
+
+    def inherited(name: str) -> Any:
+        value = getattr(override, name)
+        return getattr(config.motion_qualification, name) if value in (None, "inherit") else value
+
+    return (
+        inherited("sensitivity"),
+        inherited("stationary_object_tolerance"),
+        inherited("illumination_filter_enabled"),
+        inherited("visual_backup_grace_seconds"),
+        inherited("visual_backup_min_score"),
+        inherited("visual_backup_min_consecutive"),
+        inherited("visual_backup_cooldown_seconds"),
+        inherited("visual_backup_max_triggers_5m"),
+        inherited("borderline_rescue_enabled"),
+        inherited("borderline_margin"),
+        inherited("suppression_verification_rate"),
+        config.motion_qualification.visual_backup_warmup_seconds,
+        config.motion_qualification.visual_backup_score_margin,
+        config.motion_qualification.rejected_sample_rate,
+    )
+
+
+def motion_config_changes(
+    current: AppConfig,
+    incoming: AppConfig,
+) -> tuple[set[str], set[str]]:
+    """Return camera IDs requiring structural restart and live policy refresh."""
+    current_by_id = {camera.id: camera for camera in current.cameras}
+    incoming_by_id = {camera.id: camera for camera in incoming.cameras}
+    common = current_by_id.keys() & incoming_by_id.keys()
+    restart = {
+        camera_id
+        for camera_id in common
+        if _motion_structural_signature(current, camera_id)
+        != _motion_structural_signature(incoming, camera_id)
+    }
+    hot = {
+        camera_id
+        for camera_id in common - restart
+        if _motion_policy_signature(current, camera_id)
+        != _motion_policy_signature(incoming, camera_id)
+    }
+    return restart, hot
 
 
 def hot_config_changes(current: AppConfig, incoming: AppConfig) -> list[str]:
@@ -94,6 +191,7 @@ class TargetedConfigApplication:
                 for camera in incoming.cameras
             }
             tracking_changed = any(getattr(current.detector.tracking, f) != getattr(incoming.detector.tracking, f) for f in TRACKING_SESSION_FIELDS)
+            motion_restart_ids, motion_hot_ids = motion_config_changes(current, incoming)
             roles: set[str] = set()
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_OBJECT_ENGINE_FIELDS): roles.add("object")
             if any(getattr(current.detector, f) != getattr(incoming.detector, f) for f in DETECTOR_FACE_ENGINE_FIELDS): roles.add("face")
@@ -116,6 +214,20 @@ class TargetedConfigApplication:
                     (bool(roles), "inference", lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh), lambda c: runtime.reconfigure_inference(c.detector, roles, refresh_tracking=refresh)),
                     (tracking_changed and not refresh, "tracking", lambda c: runtime.reconfigure_object_tracking(c.detector), lambda c: runtime.reconfigure_object_tracking(c.detector)),
                     (policy_changed, "policy", runtime.reconfigure_detector_policy, runtime.reconfigure_detector_policy),
+                    (
+                        bool(motion_restart_ids or motion_hot_ids),
+                        "motion",
+                        lambda c: runtime.reconfigure_motion(
+                            c,
+                            restart_camera_ids=motion_restart_ids,
+                            hot_camera_ids=motion_hot_ids,
+                        ),
+                        lambda c: runtime.reconfigure_motion(
+                            c,
+                            restart_camera_ids=motion_restart_ids,
+                            hot_camera_ids=motion_hot_ids,
+                        ),
+                    ),
                 ]
                 for changed, name, forward, _rollback in steps:
                     if changed:
@@ -136,4 +248,13 @@ class TargetedConfigApplication:
             restarted = [name for name, changed in (("recorders", bool(recorder_changes)), ("mqtt", mqtt_changed), ("semantic_search", semantic_changed), ("tracking_sessions", tracking_changed or refresh)) if changed]
             restarted.extend(f"{role}_inference" for role in ("object", "face", "reid") if role in roles)
             hot = changes + recorder_changes + (["detector_policy"] if policy_changed else [])
-            return incoming, {"apply_mode": "targeted" if restarted else "hot" if hot else "unchanged", "camera_workers_restarted": False, "subsystems_restarted": restarted, "hot_updated": hot}
+            if motion_hot_ids:
+                hot.append("motion_policy")
+            restarted.extend(f"camera:{camera_id}" for camera_id in sorted(motion_restart_ids))
+            return incoming, {
+                "apply_mode": "targeted" if restarted else "hot" if hot else "unchanged",
+                "camera_workers_restarted": bool(motion_restart_ids),
+                "camera_ids_restarted": sorted(motion_restart_ids),
+                "subsystems_restarted": restarted,
+                "hot_updated": hot,
+            }

@@ -35,6 +35,8 @@ class CameraFleetWorker(Protocol):
     def set_detection_enabled(self, enabled: bool) -> None: ...
     def reconfigure_object_activity_attribution(self, mode: AttributionMode) -> None: ...
 
+    def reconfigure_motion_policy(self, config: Any, camera: CameraConfig) -> None: ...
+
 
 class CameraFleetRecorder(Protocol):
     def set_camera_enabled(self, camera_id: str, enabled: bool) -> None: ...
@@ -151,6 +153,23 @@ class CameraFleetLifecycle:
                 return False
             worker.stop()
             return True
+
+    def replace_worker(
+        self,
+        camera: CameraConfig,
+        worker: CameraFleetWorker,
+    ) -> None:
+        """Publish one already-started replacement camera generation."""
+        with self._operation_lock:
+            camera_id = camera.id
+            if camera_id not in self.workers or self._stopping.is_set():
+                raise RuntimeError(f"camera {camera_id} cannot be replaced")
+            self.workers[camera_id] = worker
+            self._cameras_by_id[camera_id] = camera
+            self.cameras = tuple(
+                camera if item.id == camera_id else item for item in self.cameras
+            )
+            self._closed_workers.discard(camera_id)
 
     def prepare_startup(
         self,
