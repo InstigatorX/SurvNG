@@ -136,7 +136,7 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     ) -> list[dict[str, Any]]:
         deps.start_observation_sync()
         resolved_status = (
-            status if status in {"all", "known", "unknown", "suggested", "unusable"} else "all"
+            status if status in {"all", "known", "unknown", "suggested", "unusable", "pending"} else "all"
         )
         return with_manager(
             lambda active: [
@@ -159,7 +159,7 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     ) -> dict[str, int]:
         deps.start_observation_sync()
         resolved_status = (
-            status if status in {"all", "known", "unknown", "suggested", "unusable"} else "all"
+            status if status in {"all", "known", "unknown", "suggested", "unusable", "pending"} else "all"
         )
         return with_manager(
             lambda active: {

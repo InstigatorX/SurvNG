@@ -11758,7 +11758,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
       <section className="faces-review-panel">
         <div className="faces-toolbar">
           <div className="faces-filter-group" role="group" aria-label="Face status">
-            {["unknown", "suggested", "known", "unusable", "all"].map((value) => (
+            {["unknown", "suggested", "known", "pending", "unusable", "all"].map((value) => (
               <button type="button" className={filter === value && !personId ? "active" : ""} key={value} onClick={() => { setPersonId(""); setFilter(value); setPage(0); }}>{value}</button>
             ))}
           </div>

@@ -240,33 +240,43 @@ class FaceStoreTest(unittest.TestCase):
             failed_id = self.insert_observation(
                 store, 4, observed_at="2026-08-13T12:03:00+00:00", recognition_pending=0
             )
+            pending_id = self.insert_observation(
+                store, 5, observed_at="2026-08-13T12:04:00+00:00"
+            )
             with store._connect() as connection:
                 connection.execute(
-                    "update face_observations set recognition_error = 'Face is smaller than 48px.' where id = ?",
+                    "update face_observations set recognition_error = 'Face is smaller than 48px.', recognition_outcome = 'too_small' where id = ?",
                     (too_small_id,),
                 )
                 connection.execute(
-                    "update face_observations set recognition_error = 'Snapshot is unavailable.' where id = ?",
+                    "update face_observations set recognition_error = 'Snapshot is unavailable.', recognition_outcome = 'failed' where id = ?",
                     (failed_id,),
                 )
 
             stats = store.stats()
 
-            self.assertEqual(stats["observations"], 4)
+            self.assertEqual(stats["observations"], 5)
             self.assertEqual(stats["actionable_observations"], 2)
             self.assertEqual(stats["known"], 1)
             self.assertEqual(stats["unknown"], 1)
             self.assertEqual(stats["embedded_unknown"], 1)
             self.assertEqual(stats["too_small"], 1)
             self.assertEqual(stats["processing_failed"], 1)
+            self.assertEqual(stats["pending"], 1)
             self.assertEqual(stats["identified_percent"], 50.0)
             self.assertEqual(stats["by_camera"][0]["camera_id"], "gate")
             self.assertEqual(store.observation_count(status="unknown"), 1)
+            self.assertEqual(store.observation_count(status="pending"), 1)
             self.assertEqual(store.observation_count(status="unusable"), 2)
             self.assertEqual([item["id"] for item in store.observations(status="unknown")], [unknown_id])
             self.assertEqual(
                 {item["id"] for item in store.observations(status="unusable")},
                 {too_small_id, failed_id},
+            )
+            self.assertNotIn(pending_id, {item["id"] for item in store.observations(status="unknown")})
+            self.assertEqual(
+                [item["id"] for item in store.observations(status="pending")],
+                [pending_id],
             )
             self.assertIsNotNone(store.observation(known_id))
 
@@ -284,11 +294,11 @@ class FaceStoreTest(unittest.TestCase):
             )
             with store._connect() as connection:
                 connection.execute(
-                    "update face_observations set recognition_error = 'Face is smaller than 48px.' where id = ?",
+                    "update face_observations set recognition_error = 'Face is smaller than 48px.', recognition_outcome = 'too_small' where id = ?",
                     (too_small_id,),
                 )
                 connection.execute(
-                    "update face_observations set recognition_error = 'Face crop is invalid.' where id = ?",
+                    "update face_observations set recognition_error = 'Face crop is invalid.', recognition_outcome = 'failed' where id = ?",
                     (failed_id,),
                 )
 
@@ -296,6 +306,101 @@ class FaceStoreTest(unittest.TestCase):
 
             self.assertEqual(status["too_small"], 1)
             self.assertEqual(status["failed"], 1)
+
+    def test_recognition_status_does_not_publish_stale_pending_suggestions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                status=lambda: {"enabled": True, "ready": True, "model_fingerprint": "model-v2"}
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            person = store.create_person("Alice")
+            stale_id = self.insert_observation(
+                store,
+                1,
+                observed_at="2026-08-13T12:00:00+00:00",
+                candidate_person_id=person["id"],
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v1",
+                recognition_pending=1,
+            )
+            current_id = self.insert_observation(
+                store,
+                2,
+                observed_at="2026-08-13T12:01:00+00:00",
+                candidate_person_id=person["id"],
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v2",
+                recognition_pending=0,
+            )
+
+            status = store.recognition_status()
+
+            self.assertEqual(status["suggested"], 1)
+            self.assertEqual(
+                [item["id"] for item in store.observations(status="suggested")],
+                [current_id],
+            )
+            self.assertNotEqual(stale_id, current_id)
+
+    def test_people_count_only_references_for_the_active_embedding_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                status=lambda: {"model_fingerprint": "current-model"}
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            person = store.create_person("Alice")
+            self.insert_observation(
+                store,
+                1,
+                observed_at="2026-08-13T12:00:00+00:00",
+                person_id=person["id"],
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="current-model",
+                recognition_pending=0,
+            )
+            self.insert_observation(
+                store,
+                2,
+                observed_at="2026-08-13T12:01:00+00:00",
+                person_id=person["id"],
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="old-model",
+                recognition_pending=0,
+            )
+
+            result = store.people()[0]
+
+            self.assertEqual(result["reference_count"], 2)
+            self.assertEqual(result["usable_reference_count"], 1)
+
+    def test_model_upgrade_marks_stale_embeddings_pending_before_queueing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                enabled=True,
+                status=lambda: {"model_fingerprint": "current-model"},
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            observation_id = self.insert_observation(
+                store,
+                1,
+                observed_at="2026-08-13T12:00:00+00:00",
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="old-model",
+                recognition_pending=0,
+            )
+
+            store._queue_pending_recognition()
+
+            with store._connect() as connection:
+                row = connection.execute(
+                    "select recognition_pending, recognition_outcome from face_observations where id = ?",
+                    (observation_id,),
+                ).fetchone()
+            self.assertEqual(row["recognition_pending"], 1)
+            self.assertEqual(row["recognition_outcome"], "pending")
+            self.assertEqual(store.stats()["unknown"], 0)
+            self.assertEqual(store.stats()["pending"], 1)
+            self.assertEqual(store._recognition_queue.get_nowait(), observation_id)
 
     @staticmethod
     def insert_observation(
@@ -316,8 +421,9 @@ class FaceStoreTest(unittest.TestCase):
                     event_id, object_index, person_id, camera_id, snapshot_path,
                     box_json, confidence, observed_at, match_confidence,
                     review_status, created_at, candidate_person_id,
-                    embedding_blob, embedding_model, recognition_pending
-                ) values (?, 0, ?, 'gate', ?, ?, 0.8, ?, null, ?, ?, ?, ?, ?, ?)
+                    embedding_blob, embedding_model, recognition_pending,
+                    recognition_outcome
+                ) values (?, 0, ?, 'gate', ?, ?, 0.8, ?, null, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -331,6 +437,7 @@ class FaceStoreTest(unittest.TestCase):
                     embedding.astype(np.float32).tobytes() if embedding is not None else None,
                     embedding_model,
                     recognition_pending,
+                    "pending" if recognition_pending else "embedded" if embedding is not None else "failed",
                 ),
             )
             return int(cursor.lastrowid)

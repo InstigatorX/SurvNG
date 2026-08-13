@@ -22,6 +22,10 @@ from .visual_quality import image_quality
 
 LOGGER = logging.getLogger(__name__)
 FACE_QUALITY_VERSION = 2
+FACE_OUTCOME_PENDING = "pending"
+FACE_OUTCOME_EMBEDDED = "embedded"
+FACE_OUTCOME_TOO_SMALL = "too_small"
+FACE_OUTCOME_FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +46,10 @@ class FaceMatch:
     margin: float | None
     reference_ids: tuple[int, ...]
     reference_scores: tuple[float, ...]
+
+
+class FaceTooSmallError(ValueError):
+    """The detected crop cannot produce a reliable face embedding."""
 
 
 def _face_crop(
@@ -226,6 +234,7 @@ class FaceStore:
                 "recognition_error": "alter table face_observations add column recognition_error text not null default ''",
                 "recognized_at": "alter table face_observations add column recognized_at text not null default ''",
                 "recognition_pending": "alter table face_observations add column recognition_pending integer not null default 1",
+                "recognition_outcome": "alter table face_observations add column recognition_outcome text not null default 'pending'",
                 "quality_score": "alter table face_observations add column quality_score real",
                 "quality_json": "alter table face_observations add column quality_json text not null default '{}'",
                 "quality_version": "alter table face_observations add column quality_version integer not null default 0",
@@ -243,6 +252,33 @@ class FaceStore:
                     connection.execute(statement)
             connection.execute(
                 """
+                update face_observations
+                set recognition_outcome = case
+                    when recognition_pending = 1 then ?
+                    when recognition_error like 'Face is smaller than %' then ?
+                    when recognition_error != '' then ?
+                    when embedding_blob is not null then ?
+                    else ?
+                end
+                where recognition_outcome = ''
+                    or recognition_outcome not in (?, ?, ?, ?)
+                    or (recognition_outcome = ? and recognition_pending = 0)
+                """,
+                (
+                    FACE_OUTCOME_PENDING,
+                    FACE_OUTCOME_TOO_SMALL,
+                    FACE_OUTCOME_FAILED,
+                    FACE_OUTCOME_EMBEDDED,
+                    FACE_OUTCOME_FAILED,
+                    FACE_OUTCOME_PENDING,
+                    FACE_OUTCOME_EMBEDDED,
+                    FACE_OUTCOME_TOO_SMALL,
+                    FACE_OUTCOME_FAILED,
+                    FACE_OUTCOME_PENDING,
+                ),
+            )
+            connection.execute(
+                """
                 create unique index if not exists idx_face_candidate_identity
                 on face_observations(event_id, candidate_track_id, candidate_offset_seconds)
                 where candidate_track_id != ''
@@ -251,11 +287,11 @@ class FaceStore:
             connection.execute(
                 """
                 update face_observations
-                set recognition_pending = 1
+                set recognition_pending = 1, recognition_outcome = ?
                 where quality_version != ? and embedding_blob is not null
                     and recognition_error = ''
                 """,
-                (FACE_QUALITY_VERSION,),
+                (FACE_OUTCOME_PENDING, FACE_QUALITY_VERSION),
             )
             connection.execute(
                 """
@@ -562,13 +598,20 @@ class FaceStore:
             row = connection.execute(
                 """
                 select sum(case when embedding_model = ? and embedding_blob is not null then 1 else 0 end) as embedded_current,
-                    sum(case when canonical = 1 and candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested,
-                    sum(case when recognition_error like 'Face is smaller than %' then 1 else 0 end) as too_small,
-                    sum(case when recognition_error != '' and recognition_error not like 'Face is smaller than %' then 1 else 0 end) as failed,
+                    sum(case when canonical = 1 and candidate_person_id is not null
+                        and person_id is null and recognition_pending = 0
+                        and recognition_outcome = ? then 1 else 0 end) as suggested,
+                    sum(case when recognition_outcome = ? then 1 else 0 end) as too_small,
+                    sum(case when recognition_outcome = ? then 1 else 0 end) as failed,
                     sum(case when recognition_pending = 1 then 1 else 0 end) as pending
                 from face_observations
                 """,
-                (str(recognizer_status.get("model_fingerprint") or ""),),
+                (
+                    str(recognizer_status.get("model_fingerprint") or ""),
+                    FACE_OUTCOME_EMBEDDED,
+                    FACE_OUTCOME_TOO_SMALL,
+                    FACE_OUTCOME_FAILED,
+                ),
             ).fetchone()
         return {
             **recognizer_status,
@@ -601,6 +644,15 @@ class FaceStore:
         recognizer_status = self.recognizer.status()
         model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
         with self._connect() as connection:
+            if model_fingerprint:
+                connection.execute(
+                    """
+                    update face_observations
+                    set recognition_pending = 1, recognition_outcome = ?
+                    where embedding_blob is not null and embedding_model != ?
+                    """,
+                    (FACE_OUTCOME_PENDING, model_fingerprint),
+                )
             rows = connection.execute(
                 """
                 select id from face_observations
@@ -673,6 +725,15 @@ class FaceStore:
                         int(row["id"]),
                     ),
                 )
+            connection.execute(
+                """
+                update face_observations
+                set recognition_pending = 1, recognition_outcome = ?
+                where person_id is null and embedding_blob is not null
+                    and embedding_model != ?
+                """,
+                (FACE_OUTCOME_PENDING, model_fingerprint),
+            )
             pending_rows = connection.execute(
                 """
                 select id from face_observations
@@ -786,7 +847,9 @@ class FaceStore:
             x2, y2 = float(box.get("x2", 0)), float(box.get("y2", 0))
             face_width, face_height = x2 - x1, y2 - y1
             if min(face_width, face_height) < recognizer.config.face_min_size:
-                raise ValueError(f"Face is smaller than {recognizer.config.face_min_size}px.")
+                raise FaceTooSmallError(
+                    f"Face is smaller than {recognizer.config.face_min_size}px."
+                )
             face = _face_crop(frame, box)
             if face is None:
                 raise ValueError("Face crop is invalid.")
@@ -863,7 +926,8 @@ class FaceStore:
                         candidate_confidence = case when person_id is null and not ? then ? else null end,
                         quality_score = ?, quality_json = ?, quality_version = ?,
                         match_details_json = ?,
-                        recognition_error = '', recognized_at = ?, recognition_pending = 0
+                        recognition_error = '', recognized_at = ?, recognition_pending = 0,
+                        recognition_outcome = ?
                     where id = ?
                     """,
                     (
@@ -884,6 +948,7 @@ class FaceStore:
                         FACE_QUALITY_VERSION,
                         details,
                         now,
+                        FACE_OUTCOME_EMBEDDED,
                         observation_id,
                     ),
                 )
@@ -904,14 +969,25 @@ class FaceStore:
         except InferenceUnavailable:
             raise
         except Exception as exc:
+            outcome = (
+                FACE_OUTCOME_TOO_SMALL
+                if isinstance(exc, FaceTooSmallError)
+                else FACE_OUTCOME_FAILED
+            )
             with self._lock, self._connect() as connection:
                 connection.execute(
                     """
                     update face_observations
-                    set recognition_error = ?, recognized_at = ?, recognition_pending = 0
+                    set recognition_error = ?, recognized_at = ?, recognition_pending = 0,
+                        recognition_outcome = ?
                     where id = ?
                     """,
-                    (str(exc)[:500], datetime.now(timezone.utc).isoformat(), observation_id),
+                    (
+                        str(exc)[:500],
+                        datetime.now(timezone.utc).isoformat(),
+                        outcome,
+                        observation_id,
+                    ),
                 )
             return False
 
@@ -1301,12 +1377,16 @@ class FaceStore:
         return len(remove_ids)
 
     def people(self) -> list[dict[str, Any]]:
+        status_reader = getattr(self.recognizer, "status", None)
+        recognizer_status = status_reader() if callable(status_reader) else {}
+        model_fingerprint = str(recognizer_status.get("model_fingerprint") or "")
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 select p.*, count(o.id) as observation_count,
                     sum(case when o.review_status = 'confirmed' then 1 else 0 end) as reference_count,
-                    sum(case when o.review_status = 'confirmed' and o.embedding_blob is not null then 1 else 0 end) as usable_reference_count,
+                    sum(case when o.review_status = 'confirmed' and o.embedding_blob is not null
+                        and o.embedding_model = ? then 1 else 0 end) as usable_reference_count,
                     sum(case when o.review_status = 'confirmed' and o.reference_pinned = 1 then 1 else 0 end) as pinned_reference_count,
                     avg(case when o.review_status = 'confirmed' then o.quality_score end) as average_reference_quality,
                     max(o.observed_at) as last_seen_at,
@@ -1317,7 +1397,8 @@ class FaceStore:
                 left join face_observations o on o.person_id = p.id and o.canonical = 1
                 group by p.id
                 order by lower(p.name)
-                """
+                """,
+                (model_fingerprint,),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1326,40 +1407,39 @@ class FaceStore:
             row = connection.execute(
                 """
                 select count(*) as total_observations,
-                    sum(case when person_id is null and recognition_error = '' then 1 else 0 end) as unknown,
+                    sum(case when person_id is null and recognition_pending = 0 and recognition_outcome = ? then 1 else 0 end) as unknown,
                     sum(case when person_id is not null then 1 else 0 end) as known,
-                    sum(case when candidate_person_id is not null and person_id is null and recognition_error = '' then 1 else 0 end) as suggested,
-                    sum(case when person_id is null and recognition_error like 'Face is smaller than %' then 1 else 0 end) as too_small,
-                    sum(case when person_id is null and recognition_error != '' and recognition_error not like 'Face is smaller than %' then 1 else 0 end) as processing_failed,
-                    sum(case when person_id is null and recognition_error = '' and embedding_blob is not null then 1 else 0 end) as embedded_unknown
+                    sum(case when candidate_person_id is not null and person_id is null and recognition_pending = 0 and recognition_outcome = ? then 1 else 0 end) as suggested,
+                    sum(case when person_id is null and recognition_outcome = ? then 1 else 0 end) as too_small,
+                    sum(case when person_id is null and recognition_outcome = ? then 1 else 0 end) as processing_failed,
+                    sum(case when person_id is null and recognition_pending = 0 and recognition_outcome = ? and embedding_blob is not null then 1 else 0 end) as embedded_unknown,
+                    sum(case when person_id is null and recognition_pending = 1 then 1 else 0 end) as pending
                 from face_observations
                 where canonical = 1
-                """
+                """,
+                (
+                    FACE_OUTCOME_EMBEDDED,
+                    FACE_OUTCOME_EMBEDDED,
+                    FACE_OUTCOME_TOO_SMALL,
+                    FACE_OUTCOME_FAILED,
+                    FACE_OUTCOME_EMBEDDED,
+                ),
             ).fetchone()
             people = connection.execute("select count(*) from face_people").fetchone()[0]
             per_camera_rows = connection.execute(
                 """
                 select camera_id, count(*) as total,
                     sum(case when person_id is not null then 1 else 0 end) as known,
-                    sum(case when person_id is null and recognition_error = '' then 1 else 0 end) as unknown,
-                    sum(case when person_id is null and recognition_error like 'Face is smaller than %' then 1 else 0 end) as too_small,
-                    sum(case when person_id is null and recognition_error != '' and recognition_error not like 'Face is smaller than %' then 1 else 0 end) as processing_failed
+                    sum(case when person_id is null and recognition_pending = 0 and recognition_outcome = ? then 1 else 0 end) as unknown,
+                    sum(case when person_id is null and recognition_outcome = ? then 1 else 0 end) as too_small,
+                    sum(case when person_id is null and recognition_outcome = ? then 1 else 0 end) as processing_failed,
+                    sum(case when person_id is null and recognition_pending = 1 then 1 else 0 end) as pending
                 from face_observations
                 where canonical = 1
                 group by camera_id
                 order by camera_id
-                """
-            ).fetchall()
-            gallery_rows = connection.execute(
-                """
-                select p.id, p.name,
-                    sum(case when o.review_status = 'confirmed' then 1 else 0 end) as confirmed,
-                    sum(case when o.review_status = 'confirmed' and o.embedding_blob is not null then 1 else 0 end) as usable
-                from face_people p
-                left join face_observations o on o.person_id = p.id and o.canonical = 1
-                group by p.id, p.name
-                order by lower(p.name)
-                """
+                """,
+                (FACE_OUTCOME_EMBEDDED, FACE_OUTCOME_TOO_SMALL, FACE_OUTCOME_FAILED),
             ).fetchall()
             candidate_rows = connection.execute(
                 "select count(*) from face_observations where candidate_track_id != ''"
@@ -1396,9 +1476,9 @@ class FaceStore:
             "too_small": int(row["too_small"] or 0),
             "processing_failed": int(row["processing_failed"] or 0),
             "embedded_unknown": int(row["embedded_unknown"] or 0),
+            "pending": int(row["pending"] or 0),
             "identified_percent": round(100.0 * known / recognizable, 1) if recognizable else 0.0,
             "by_camera": [dict(camera_row) for camera_row in per_camera_rows],
-            "gallery": [dict(gallery_row) for gallery_row in gallery_rows],
             "candidate_frames": int(candidate_rows or 0),
             "temporal_tracks": len(track_rows),
             "multi_frame_tracks": multi_frame_tracks,
@@ -1556,13 +1636,18 @@ class FaceStore:
             clauses.append("o.person_id = ?")
             values.append(person_id)
         elif status == "unknown":
-            clauses.append("o.person_id is null and o.recognition_error = ''")
+            clauses.append("o.person_id is null and o.recognition_pending = 0 and o.recognition_outcome = ?")
+            values.append(FACE_OUTCOME_EMBEDDED)
         elif status == "known":
             clauses.append("o.person_id is not null")
         elif status == "suggested":
-            clauses.append("o.person_id is null and o.candidate_person_id is not null and o.recognition_error = ''")
+            clauses.append("o.person_id is null and o.candidate_person_id is not null and o.recognition_pending = 0 and o.recognition_outcome = ?")
+            values.append(FACE_OUTCOME_EMBEDDED)
         elif status == "unusable":
-            clauses.append("o.person_id is null and o.recognition_error != ''")
+            clauses.append("o.person_id is null and o.recognition_outcome in (?, ?)")
+            values.extend((FACE_OUTCOME_TOO_SMALL, FACE_OUTCOME_FAILED))
+        elif status == "pending":
+            clauses.append("o.person_id is null and o.recognition_pending = 1")
         if camera_id:
             clauses.append("o.camera_id = ?")
             values.append(camera_id)
@@ -1596,13 +1681,18 @@ class FaceStore:
             clauses.append("person_id = ?")
             values.append(person_id)
         elif status == "unknown":
-            clauses.append("person_id is null and recognition_error = ''")
+            clauses.append("person_id is null and recognition_pending = 0 and recognition_outcome = ?")
+            values.append(FACE_OUTCOME_EMBEDDED)
         elif status == "known":
             clauses.append("person_id is not null")
         elif status == "suggested":
-            clauses.append("person_id is null and candidate_person_id is not null and recognition_error = ''")
+            clauses.append("person_id is null and candidate_person_id is not null and recognition_pending = 0 and recognition_outcome = ?")
+            values.append(FACE_OUTCOME_EMBEDDED)
         elif status == "unusable":
-            clauses.append("person_id is null and recognition_error != ''")
+            clauses.append("person_id is null and recognition_outcome in (?, ?)")
+            values.extend((FACE_OUTCOME_TOO_SMALL, FACE_OUTCOME_FAILED))
+        elif status == "pending":
+            clauses.append("person_id is null and recognition_pending = 1")
         if camera_id:
             clauses.append("camera_id = ?")
             values.append(camera_id)
