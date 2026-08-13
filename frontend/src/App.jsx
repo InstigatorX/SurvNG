@@ -99,7 +99,7 @@ import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incid
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
 import { recordingCameraAspect, recordingGridBestEpoch, recordingGridLayout } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
 import { addSemanticSearchHistory, clearSemanticSearchSession, readSemanticSearchHistory, readSemanticSearchSession, semanticSearchResultsForCamera, writeSemanticSearchHistory, writeSemanticSearchSession } from "./semanticSearchState.mjs";
 import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentRequest } from "./incidentSemanticSearch.mjs";
@@ -2166,7 +2166,7 @@ function objectBoxes(event, incidentEligibleOnly = false) {
     .filter((box) => box.x2 > box.x1 && box.y2 > box.y1);
 }
 
-function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
+function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle = null, zoom = null, allowObjectFocus = true, showAnnotations = true, showTracking = false, incidentEligibleOnly = false, thumbnail = false, progressive = false, fullResolution = false, highQualityZoom = false, onRequestFullResolution, onImageSize, children }) {
   const boxes = objectBoxes(event, incidentEligibleOnly);
   const tracks = storedObjectTracks(event);
   const boxCoordinateSize = incidentDetectionFrameSize(event);
@@ -2186,19 +2186,23 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
   const progressiveWidth = incidentProgressiveImageWidth(frameSize?.width, devicePixelRatio);
   const progressiveQuality = progressiveWidth > 1280 ? 90 : 86;
   const shouldLoadFullResolution = fullResolution || highQualityZoom || displayPixelWidth > 2560;
+  const zoomLayout = useMemo(() => incidentZoomLayout(frameSize, zoom), [frameSize, zoom?.scale, zoom?.x, zoom?.y]);
+  const renderingFrameSize = zoomLayout
+    ? { width: zoomLayout.width, height: zoomLayout.height }
+    : frameSize;
   const renderedImage = useMemo(() => {
-    if (!imageSize?.width || !imageSize?.height || !frameSize?.width || !frameSize?.height) return null;
-    const scale = Math.min(frameSize.width / imageSize.width, frameSize.height / imageSize.height);
+    if (!imageSize?.width || !imageSize?.height || !renderingFrameSize?.width || !renderingFrameSize?.height) return null;
+    const scale = Math.min(renderingFrameSize.width / imageSize.width, renderingFrameSize.height / imageSize.height);
     const width = imageSize.width * scale;
     const height = imageSize.height * scale;
     return {
-      x: (frameSize.width - width) / 2,
-      y: (frameSize.height - height) / 2,
+      x: (renderingFrameSize.width - width) / 2,
+      y: (renderingFrameSize.height - height) / 2,
       width,
       height,
       scale,
     };
-  }, [frameSize, imageSize]);
+  }, [imageSize, renderingFrameSize?.height, renderingFrameSize?.width]);
   const canFocus = allowObjectFocus && showAnnotations && boxes.length > 0 && renderedImage;
 
   useLayoutEffect(() => {
@@ -2307,7 +2311,14 @@ function SnapshotImage({ event, alt, iconSize = 24, className = "", layerStyle =
     };
   }, [canFocus, frameSize, renderedBoxes]);
 
-  const activeLayerStyle = objectFocused && focusStyle ? focusStyle : layerStyle;
+  const zoomLayerStyle = zoomLayout ? {
+    inset: "auto",
+    left: `${zoomLayout.left}px`,
+    top: `${zoomLayout.top}px`,
+    width: `${zoomLayout.width}px`,
+    height: `${zoomLayout.height}px`,
+  } : null;
+  const activeLayerStyle = objectFocused && focusStyle ? focusStyle : zoomLayerStyle || layerStyle;
   const aspect = imageSize ? `${imageSize.width} / ${imageSize.height}` : undefined;
   const prefersHighQualityRaster = highQualityZoom || objectFocused;
 
@@ -2952,7 +2963,7 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
           <SnapshotImage
             event={preview}
             alt="incident snapshot"
-            layerStyle={desktopWorkspace && expanded ? { transform: `translate3d(${snapshotZoom.x}px, ${snapshotZoom.y}px, 0) scale(${snapshotZoom.scale})` } : null}
+            zoom={desktopWorkspace && expanded ? snapshotZoom : null}
             highQualityZoom={desktopWorkspace && expanded && snapshotZoom.scale > 1}
             showAnnotations={desktopWorkspace && expanded ? true : showIncidentCardAnnotations(expanded, thumbnailAnnotations)}
             showTracking={false}
@@ -3836,7 +3847,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
             alt="selected event snapshot"
             iconSize={42}
             className="event-snapshot-frame"
-            layerStyle={{ transform: `translate3d(${zoom.x}px, ${zoom.y}px, 0) scale(${zoom.scale})` }}
+            zoom={zoom}
             allowObjectFocus={zoom.scale === 1 && !videoActive}
             progressive
             fullResolution={fullSnapshotRequested}

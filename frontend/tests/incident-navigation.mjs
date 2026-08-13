@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
+import { adjacentIncident, createIncidentPageCache, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentIndexForEvent, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "../src/incidentNavigation.mjs";
 
 const incidents = [
   { id: 100, events: [{ id: 101 }, { id: 102 }] },
@@ -68,6 +68,11 @@ assert.equal(incidentProgressiveImageWidth(390, 3), 1280);
 assert.equal(incidentProgressiveImageWidth(1440, 1), 1920);
 assert.equal(incidentProgressiveImageWidth(1600, 1.5), 2560);
 assert.equal(incidentProgressiveImageWidth(1920, 2), 2560);
+assert.equal(incidentZoomLayout({ width: 1000, height: 600 }, { scale: 1, x: 0, y: 0 }), null);
+assert.deepEqual(
+  incidentZoomLayout({ width: 1000, height: 600 }, { scale: 2, x: 40, y: -20 }),
+  { left: -460, top: -320, width: 2000, height: 1200 },
+);
 assert.equal(incidentTriggerLabel({ trigger_source: "camera" }), "Camera");
 assert.equal(incidentTriggerLabel({ trigger_source: "ema" }), "EMA");
 assert.equal(incidentTriggerLabel({ trigger_source: "visual_backup" }), "EMA");

@@ -220,6 +220,21 @@ export function incidentProgressiveImageWidth(renderedWidth, devicePixelRatio = 
   return 2560;
 }
 
+export function incidentZoomLayout(frameSize, zoom) {
+  const width = Math.max(0, Number(frameSize?.width) || 0);
+  const height = Math.max(0, Number(frameSize?.height) || 0);
+  const scale = Math.max(1, Number(zoom?.scale) || 1);
+  if (!width || !height || scale === 1) return null;
+  const scaledWidth = width * scale;
+  const scaledHeight = height * scale;
+  return {
+    left: (width - scaledWidth) / 2 + (Number(zoom?.x) || 0),
+    top: (height - scaledHeight) / 2 + (Number(zoom?.y) || 0),
+    width: scaledWidth,
+    height: scaledHeight,
+  };
+}
+
 export function incidentTriggerLabel(incident) {
   const source = String(incident?.trigger_source || "camera").toLowerCase();
   return ["ema", "adaptive", "visual_backup", "adaptive/visual_backup"].includes(source)
