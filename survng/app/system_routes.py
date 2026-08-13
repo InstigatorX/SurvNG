@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from .motion_pipeline import motion_pipeline_catalog
 
@@ -31,6 +32,14 @@ class SystemRouteDependencies:
     hardware_acceleration_mode: Callable[[], str]
     event_clip_window: Callable[[float | None, float | None], tuple[float, float]]
     recording_cache_status: Callable[[], dict]
+    model_evaluation: Any
+
+
+class ModelEvaluationRequest(BaseModel):
+    baseline_path: str = Field(min_length=1, max_length=4096)
+    candidate_path: str = Field(min_length=1, max_length=4096)
+    sample_count: int = Field(default=200, ge=10, le=500)
+    confidence: float = Field(default=0.25, ge=0.01, le=0.99)
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +280,31 @@ def create_system_router(deps: SystemRouteDependencies) -> SystemRouteBundle:
                     item["valid"] = bin_path.exists()
                 models.append(item)
         return {"models": models, "active_path": active_config.detector.resolved_model_path()}
+
+    @router.get("/api/detector/model-evaluation")
+    def model_evaluation_status() -> dict:
+        return deps.model_evaluation.status()
+
+    @router.post("/api/detector/model-evaluation", status_code=202)
+    def start_model_evaluation(request: ModelEvaluationRequest) -> dict:
+        try:
+            return deps.model_evaluation.start(
+                baseline_path=request.baseline_path,
+                candidate_path=request.candidate_path,
+                sample_count=request.sample_count,
+                confidence=request.confidence,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @router.delete("/api/detector/model-evaluation", status_code=202)
+    def cancel_model_evaluation() -> dict:
+        try:
+            return deps.model_evaluation.cancel()
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @router.get("/api/event-clip/settings")
     def event_clip_settings() -> dict:

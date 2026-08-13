@@ -20,6 +20,7 @@ def test_home_assistant_metadata_is_bounded_and_credential_free() -> None:
         ffmpeg_vaapi_info=lambda: {}, hardware_acceleration_mode=lambda: "off",
         event_clip_window=lambda _before, _after: (5, 5),
         recording_cache_status=lambda: {},
+        model_evaluation=Mock(),
     )
     payload = create_system_router(dependencies).handlers["home_assistant_metadata"]()
 

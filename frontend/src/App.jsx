@@ -10684,6 +10684,14 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   const [apiTokenSecret, setApiTokenSecret] = useState("");
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
   const [apiTokenError, setApiTokenError] = useState("");
+  const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
+  const validEvaluationModels = detectorModels.filter((model) => model.valid).sort((left, right) => String(left.path).localeCompare(String(right.path)));
+  const defaultBaselinePath = validEvaluationModels.filter((model) => String(model.path) < activeModelPath).at(-1)?.path
+    || validEvaluationModels.filter((model) => model.path !== activeModelPath).at(-1)?.path
+    || "";
+  const [modelEvaluationDraft, setModelEvaluationDraft] = useState({ baseline_path: "", candidate_path: "", sample_count: 200, confidence: 0.25 });
+  const [modelEvaluation, setModelEvaluation] = useState({ status: "idle" });
+  const [modelEvaluationError, setModelEvaluationError] = useState("");
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
   const routeCameras = config.cameras || [];
@@ -10743,7 +10751,6 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     : qsv.listed
       ? "Intel QSV listed by FFmpeg but runtime init failed"
       : "Intel QSV not available to FFmpeg";
-  const activeModelPath = config.detector?.model_path || config.detector?.model_xml || "";
   const activeModel = detectorModels.find((model) => model.path === activeModelPath);
   const eventClassConfirmations = config.detector?.event_class_confirmation_frames || {};
   const eventClassConfidences = config.detector?.event_class_confidence_thresholds || {};
@@ -10783,6 +10790,57 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   function resetLiveCameraOrder() {
     localStorage.removeItem("survng.liveCameraOrder.v1");
     setLiveOrderReset(true);
+  }
+
+  useEffect(() => {
+    setModelEvaluationDraft((current) => ({
+      ...current,
+      candidate_path: current.candidate_path || activeModelPath,
+      baseline_path: current.baseline_path || defaultBaselinePath,
+    }));
+  }, [activeModelPath, defaultBaselinePath]);
+
+  useEffect(() => {
+    if (section !== "detection") return undefined;
+    let cancelled = false;
+    let timer;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/detector/model-evaluation", { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (cancelled) return;
+        setModelEvaluation(payload);
+        if (["queued", "running", "cancelling"].includes(payload.status)) timer = window.setTimeout(load, 1_000);
+      } catch {
+        // An evaluation result is optional configuration telemetry.
+      }
+    };
+    void load();
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
+  }, [section, modelEvaluation.status]);
+
+  async function startModelEvaluation() {
+    setModelEvaluationError("");
+    try {
+      const response = await fetch("/api/detector/model-evaluation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(modelEvaluationDraft),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to start model evaluation.");
+      setModelEvaluation(payload);
+    } catch (error) {
+      setModelEvaluationError(error.message || "Unable to start model evaluation.");
+    }
+  }
+
+  async function cancelModelEvaluation() {
+    const response = await fetch("/api/detector/model-evaluation", { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) setModelEvaluation(payload);
+    else setModelEvaluationError(payload.detail || "Unable to cancel model evaluation.");
   }
 
   async function restartServer() {
@@ -11073,6 +11131,50 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
               </div>)}
             </div> : <span className="settings-help">Select a model with class metadata to configure per-object overrides.</span>}
           </details>
+        </section>
+
+        <section className="detection-settings-card wide-card model-evaluation-card">
+          <header className="detection-settings-card-head">
+            <div className="detection-settings-card-icon"><Gauge size={18} /></div>
+            <div><h3>Model Evaluation</h3><p>Compare two models on the same recent clean incident images without changing production detection.</p></div>
+          </header>
+          <div className="detection-field-grid">
+            <label>Baseline model<select value={modelEvaluationDraft.baseline_path} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, baseline_path: event.target.value }))}>
+              <option value="">Select model</option>
+              {detectorModels.filter((model) => model.valid).map((model) => <option key={model.path} value={model.path}>{String(model.path).split("/").slice(-2, -1)[0] || model.name}</option>)}
+            </select></label>
+            <label>Candidate model<select value={modelEvaluationDraft.candidate_path} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, candidate_path: event.target.value }))}>
+              <option value="">Select model</option>
+              {detectorModels.filter((model) => model.valid).map((model) => <option key={model.path} value={model.path}>{String(model.path).split("/").slice(-2, -1)[0] || model.name}{model.path === activeModelPath ? " (active)" : ""}</option>)}
+            </select></label>
+            <label>Recent images<input type="number" min="10" max="500" step="10" value={modelEvaluationDraft.sample_count} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, sample_count: Number(event.target.value) }))} /><small>Round-robin sampled across cameras; 200 is a useful first pass.</small></label>
+            <label>Candidate threshold<input type="number" min="0.01" max="0.99" step="0.01" value={modelEvaluationDraft.confidence} onChange={(event) => setModelEvaluationDraft((current) => ({ ...current, confidence: Number(event.target.value) }))} /><small>Use the same low evidence threshold for both models.</small></label>
+          </div>
+          <div className="model-evaluation-actions">
+            <button type="button" className="primary" onClick={startModelEvaluation} disabled={!modelEvaluationDraft.baseline_path || !modelEvaluationDraft.candidate_path || ["queued", "running", "cancelling"].includes(modelEvaluation.status)}><Activity size={15} />Run comparison</button>
+            {["queued", "running", "cancelling"].includes(modelEvaluation.status) ? <button type="button" onClick={cancelModelEvaluation} disabled={modelEvaluation.status === "cancelling"}><X size={15} />Cancel</button> : null}
+            <span className={`model-evaluation-state ${modelEvaluation.status}`}>{String(modelEvaluation.status || "idle").replaceAll("_", " ")}{modelEvaluation.progress?.total ? ` · ${modelEvaluation.progress.completed}/${modelEvaluation.progress.total}` : ""}</span>
+          </div>
+          <p className="settings-help">Runs sequentially at low priority from the user’s perspective, but shares the configured accelerator with production detection. Start with 200 images and run during a quiet period.</p>
+          {modelEvaluationError || modelEvaluation.error ? <div className="error-banner">{modelEvaluationError || modelEvaluation.error}</div> : null}
+          {modelEvaluation.result ? <div className="model-evaluation-results">
+            <div className="model-evaluation-summary">
+              <span><strong>{modelEvaluation.result.sample_count}</strong> images</span>
+              <span><strong>{modelEvaluation.result.camera_count}</strong> cameras</span>
+              <span><strong>{modelEvaluation.result.source_counts?.incident || 0}</strong> incidents</span>
+              <span><strong>{modelEvaluation.result.source_counts?.motion_audit || 0}</strong> negatives</span>
+              <span><strong>{modelEvaluation.result.disagreement_frames}</strong> disagreements</span>
+              <span><strong>{modelEvaluation.result.candidate.average_ms} ms</strong> candidate average</span>
+              <span><strong>{modelEvaluation.result.candidate.p95_ms} ms</strong> candidate p95</span>
+            </div>
+            <div className="model-evaluation-models">
+              {[['Baseline', modelEvaluation.result.baseline], ['Candidate', modelEvaluation.result.candidate]].map(([label, result]) => <div key={label}><strong>{label}</strong><span>{String(result.path).split("/").slice(-2, -1)[0]}</span><span>{result.frames_with_objects} frames with objects</span><span>{result.average_ms} ms average · {result.p95_ms} ms p95</span><span>{Object.entries(result.label_counts || {}).map(([name, count]) => `${name} ${count}`).join(" · ") || "No detections"}</span></div>)}
+            </div>
+            <p className="settings-help">Stored-evidence recall is diagnostic, not verified accuracy: baseline {modelEvaluation.result.stored_evidence_recall?.baseline ?? "—"}, candidate {modelEvaluation.result.stored_evidence_recall?.candidate ?? "—"}. Review disagreements before promoting a model.</p>
+            {modelEvaluation.result.disagreements?.length ? <div className="model-evaluation-disagreements">
+              {modelEvaluation.result.disagreements.map((item) => <a key={`${item.source_kind}-${item.source_id}`} href={appUrl(item.source_kind === "motion_audit" ? `/config?section=audit&audit_id=${item.source_id}` : `/incidents?event_ids=${item.event_id}`)}><img src={appUrl(item.image_url)} alt="" loading="lazy" /><span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small><small>Old: {item.baseline_labels.join(", ") || "none"}</small><small>New: {item.candidate_labels.join(", ") || "none"}</small></span></a>)}
+            </div> : <div className="probe-result ok"><strong>No label disagreements</strong><span>Both models returned the same label sets on this corpus.</span></div>}
+          </div> : null}
         </section>
 
         <section className="detection-settings-card detection-feature-card wide-card">

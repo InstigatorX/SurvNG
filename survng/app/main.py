@@ -49,6 +49,7 @@ from .manager import AppManager, validate_motion_pipeline_configuration
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .media_exports import MediaExportManager
+from .model_evaluation import ModelEvaluationRunner
 from .incident_queries import (
     IncidentQueryDependencies,
     IncidentQueryService,
@@ -108,6 +109,7 @@ SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
+MODEL_EVALUATION = ModelEvaluationRunner(lambda: manager, lambda: config)
 SERVER_RESTART_LOCK = threading.Lock()
 SERVER_RESTART_SCHEDULED = False
 
@@ -829,6 +831,7 @@ _system_route_bundle = create_system_router(
             _recording_media_runtime._event_clip_window(before, after)
         ),
         recording_cache_status=_recording_media_runtime.cache_status,
+        model_evaluation=MODEL_EVALUATION,
     )
 )
 app.include_router(_system_route_bundle.router)
