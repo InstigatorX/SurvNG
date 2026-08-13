@@ -8250,10 +8250,13 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           {!selected ? <div className="telemetry-semantic-subsection">
             <header><strong>Face recognition</strong><small>Best-frame collection and identity consensus</small></header>
             <dl className="telemetry-details">
-              <div><dt>Canonical faces</dt><dd>{Number(faceRecognition.observations || 0).toLocaleString()} <small>one review item per face track</small></dd></div>
+              <div><dt>Recognizable faces</dt><dd>{Number(faceRecognition.actionable_observations || 0).toLocaleString()} <small>{Number(faceRecognition.known || 0).toLocaleString()} identified · {Number(faceRecognition.unknown || 0).toLocaleString()} unknown</small></dd></div>
+              <div><dt>Identification rate</dt><dd>{Number(faceRecognition.identified_percent || 0).toFixed(1)}% <small>of faces large enough to recognize</small></dd></div>
+              <div><dt>Unusable faces</dt><dd>{Number(faceRecognition.too_small || 0).toLocaleString()} <small>below minimum size · {Number(faceRecognition.processing_failed || 0).toLocaleString()} processing failures</small></dd></div>
               <div><dt>Candidate frames retained</dt><dd>{Number(faceRecognition.candidate_frames || 0).toLocaleString()} <small>{Number(faceRecognition.average_candidates_per_track || 0).toFixed(1)} per temporal track</small></dd></div>
               <div><dt>Multi-frame tracks</dt><dd>{Number(faceRecognition.multi_frame_tracks || 0).toLocaleString()} <small>{Number(faceRecognition.consensus_tracks || 0).toLocaleString()} with identity agreement</small></dd></div>
-              <div><dt>Recognition queue</dt><dd>{Number(faceRecognition.recognition?.queue_depth || 0).toLocaleString()} <small>{Number(faceRecognition.recognition?.pending || 0).toLocaleString()} pending · {Number(faceRecognition.recognition?.failed || 0).toLocaleString()} failed</small></dd></div>
+              <div><dt>Recognition queue</dt><dd>{Number(faceRecognition.recognition?.queue_depth || 0).toLocaleString()} <small>{Number(faceRecognition.recognition?.pending || 0).toLocaleString()} pending · {Number(faceRecognition.recognition?.failed || 0).toLocaleString()} genuine failures</small></dd></div>
+              <div><dt>Camera outcomes</dt><dd><small>{(faceRecognition.by_camera || []).map((camera) => `${camera.camera_id}: ${Number(camera.known || 0)} identified / ${Number(camera.unknown || 0)} unknown / ${Number(camera.too_small || 0)} too small`).join(" · ") || "No observations"}</small></dd></div>
             </dl>
           </div> : null}
         </section>
@@ -11744,7 +11747,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
                 {person.preview_observation_id
                   ? <img src={appUrl(`/api/faces/observations/${person.preview_observation_id}/crop.jpg`)} alt="" />
                   : <span className="face-avatar unknown"><ScanFace size={20} /></span>}
-                <span><strong>{person.name}</strong><small>{person.reference_count || 0} trusted · {person.observation_count} total{person.pinned_reference_count ? ` · ${person.pinned_reference_count} pinned` : ""}</small></span>
+                <span><strong>{person.name}</strong><small>{person.usable_reference_count || 0}/{person.reference_count || 0} usable references · {person.observation_count} total{person.pinned_reference_count ? ` · ${person.pinned_reference_count} pinned` : ""}</small></span>
               </button>
               <button type="button" className="icon-button subtle" onClick={() => deletePerson(person)} title="Delete person" aria-label={`Delete ${person.name}`}><Trash2 size={15} /></button>
             </div>
@@ -11755,7 +11758,7 @@ function FacesPage({ timeZone, onAssistantContextChange }) {
       <section className="faces-review-panel">
         <div className="faces-toolbar">
           <div className="faces-filter-group" role="group" aria-label="Face status">
-            {["unknown", "suggested", "known", "all"].map((value) => (
+            {["unknown", "suggested", "known", "unusable", "all"].map((value) => (
               <button type="button" className={filter === value && !personId ? "active" : ""} key={value} onClick={() => { setPersonId(""); setFilter(value); setPage(0); }}>{value}</button>
             ))}
           </div>

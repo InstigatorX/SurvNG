@@ -219,6 +219,84 @@ class FaceStoreTest(unittest.TestCase):
             self.assertEqual(store.storage_dir, Path(storage))
             self.assertEqual(store.db_path, Path(database) / "survng.sqlite3")
 
+    def test_face_stats_separate_too_small_from_processing_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FaceStore(Path(tmpdir), start_recognition=False)
+            person = store.create_person("Alice")
+            known_id = self.insert_observation(
+                store, 1, observed_at="2026-08-13T12:00:00+00:00", person_id=person["id"]
+            )
+            unknown_id = self.insert_observation(
+                store,
+                2,
+                observed_at="2026-08-13T12:01:00+00:00",
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                embedding_model="model-v1",
+                recognition_pending=0,
+            )
+            too_small_id = self.insert_observation(
+                store, 3, observed_at="2026-08-13T12:02:00+00:00", recognition_pending=0
+            )
+            failed_id = self.insert_observation(
+                store, 4, observed_at="2026-08-13T12:03:00+00:00", recognition_pending=0
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set recognition_error = 'Face is smaller than 48px.' where id = ?",
+                    (too_small_id,),
+                )
+                connection.execute(
+                    "update face_observations set recognition_error = 'Snapshot is unavailable.' where id = ?",
+                    (failed_id,),
+                )
+
+            stats = store.stats()
+
+            self.assertEqual(stats["observations"], 4)
+            self.assertEqual(stats["actionable_observations"], 2)
+            self.assertEqual(stats["known"], 1)
+            self.assertEqual(stats["unknown"], 1)
+            self.assertEqual(stats["embedded_unknown"], 1)
+            self.assertEqual(stats["too_small"], 1)
+            self.assertEqual(stats["processing_failed"], 1)
+            self.assertEqual(stats["identified_percent"], 50.0)
+            self.assertEqual(stats["by_camera"][0]["camera_id"], "gate")
+            self.assertEqual(store.observation_count(status="unknown"), 1)
+            self.assertEqual(store.observation_count(status="unusable"), 2)
+            self.assertEqual([item["id"] for item in store.observations(status="unknown")], [unknown_id])
+            self.assertEqual(
+                {item["id"] for item in store.observations(status="unusable")},
+                {too_small_id, failed_id},
+            )
+            self.assertIsNotNone(store.observation(known_id))
+
+    def test_recognition_status_classifies_small_faces_as_non_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recognizer = SimpleNamespace(
+                status=lambda: {"enabled": True, "ready": True, "model_fingerprint": "model-v1"}
+            )
+            store = FaceStore(Path(tmpdir), recognizer=recognizer, start_recognition=False)
+            too_small_id = self.insert_observation(
+                store, 1, observed_at="2026-08-13T12:00:00+00:00", recognition_pending=0
+            )
+            failed_id = self.insert_observation(
+                store, 2, observed_at="2026-08-13T12:01:00+00:00", recognition_pending=0
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    "update face_observations set recognition_error = 'Face is smaller than 48px.' where id = ?",
+                    (too_small_id,),
+                )
+                connection.execute(
+                    "update face_observations set recognition_error = 'Face crop is invalid.' where id = ?",
+                    (failed_id,),
+                )
+
+            status = store.recognition_status()
+
+            self.assertEqual(status["too_small"], 1)
+            self.assertEqual(status["failed"], 1)
+
     @staticmethod
     def insert_observation(
         store: FaceStore,

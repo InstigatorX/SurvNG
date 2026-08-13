@@ -563,7 +563,8 @@ class FaceStore:
                 """
                 select sum(case when embedding_model = ? and embedding_blob is not null then 1 else 0 end) as embedded_current,
                     sum(case when canonical = 1 and candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested,
-                    sum(case when recognition_error != '' then 1 else 0 end) as failed,
+                    sum(case when recognition_error like 'Face is smaller than %' then 1 else 0 end) as too_small,
+                    sum(case when recognition_error != '' and recognition_error not like 'Face is smaller than %' then 1 else 0 end) as failed,
                     sum(case when recognition_pending = 1 then 1 else 0 end) as pending
                 from face_observations
                 """,
@@ -574,6 +575,7 @@ class FaceStore:
             "queue_depth": self._recognition_queue.qsize(),
             "embedded": int(row["embedded_current"] or 0),
             "suggested": int(row["suggested"] or 0),
+            "too_small": int(row["too_small"] or 0),
             "failed": int(row["failed"] or 0),
             "pending": int(row["pending"] or 0),
         }
@@ -1304,6 +1306,7 @@ class FaceStore:
                 """
                 select p.*, count(o.id) as observation_count,
                     sum(case when o.review_status = 'confirmed' then 1 else 0 end) as reference_count,
+                    sum(case when o.review_status = 'confirmed' and o.embedding_blob is not null then 1 else 0 end) as usable_reference_count,
                     sum(case when o.review_status = 'confirmed' and o.reference_pinned = 1 then 1 else 0 end) as pinned_reference_count,
                     avg(case when o.review_status = 'confirmed' then o.quality_score end) as average_reference_quality,
                     max(o.observed_at) as last_seen_at,
@@ -1322,15 +1325,42 @@ class FaceStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                select count(*) as observations,
-                    sum(case when person_id is null then 1 else 0 end) as unknown,
+                select count(*) as total_observations,
+                    sum(case when person_id is null and recognition_error = '' then 1 else 0 end) as unknown,
                     sum(case when person_id is not null then 1 else 0 end) as known,
-                    sum(case when candidate_person_id is not null and person_id is null then 1 else 0 end) as suggested
+                    sum(case when candidate_person_id is not null and person_id is null and recognition_error = '' then 1 else 0 end) as suggested,
+                    sum(case when person_id is null and recognition_error like 'Face is smaller than %' then 1 else 0 end) as too_small,
+                    sum(case when person_id is null and recognition_error != '' and recognition_error not like 'Face is smaller than %' then 1 else 0 end) as processing_failed,
+                    sum(case when person_id is null and recognition_error = '' and embedding_blob is not null then 1 else 0 end) as embedded_unknown
                 from face_observations
                 where canonical = 1
                 """
             ).fetchone()
             people = connection.execute("select count(*) from face_people").fetchone()[0]
+            per_camera_rows = connection.execute(
+                """
+                select camera_id, count(*) as total,
+                    sum(case when person_id is not null then 1 else 0 end) as known,
+                    sum(case when person_id is null and recognition_error = '' then 1 else 0 end) as unknown,
+                    sum(case when person_id is null and recognition_error like 'Face is smaller than %' then 1 else 0 end) as too_small,
+                    sum(case when person_id is null and recognition_error != '' and recognition_error not like 'Face is smaller than %' then 1 else 0 end) as processing_failed
+                from face_observations
+                where canonical = 1
+                group by camera_id
+                order by camera_id
+                """
+            ).fetchall()
+            gallery_rows = connection.execute(
+                """
+                select p.id, p.name,
+                    sum(case when o.review_status = 'confirmed' then 1 else 0 end) as confirmed,
+                    sum(case when o.review_status = 'confirmed' and o.embedding_blob is not null then 1 else 0 end) as usable
+                from face_people p
+                left join face_observations o on o.person_id = p.id and o.canonical = 1
+                group by p.id, p.name
+                order by lower(p.name)
+                """
+            ).fetchall()
             candidate_rows = connection.execute(
                 "select count(*) from face_observations where candidate_track_id != ''"
             ).fetchone()[0]
@@ -1352,12 +1382,23 @@ class FaceStore:
             candidate_total += count
             multi_frame_tracks += int(count > 1)
             consensus_tracks += int(int(consensus.get("agreement_count") or 0) >= 2)
+        total_observations = int(row["total_observations"] or 0)
+        known = int(row["known"] or 0)
+        unknown = int(row["unknown"] or 0)
+        recognizable = known + unknown
         return {
             "people": int(people or 0),
-            "observations": int(row["observations"] or 0),
-            "unknown": int(row["unknown"] or 0),
-            "known": int(row["known"] or 0),
+            "observations": total_observations,
+            "actionable_observations": recognizable,
+            "unknown": unknown,
+            "known": known,
             "suggested": int(row["suggested"] or 0),
+            "too_small": int(row["too_small"] or 0),
+            "processing_failed": int(row["processing_failed"] or 0),
+            "embedded_unknown": int(row["embedded_unknown"] or 0),
+            "identified_percent": round(100.0 * known / recognizable, 1) if recognizable else 0.0,
+            "by_camera": [dict(camera_row) for camera_row in per_camera_rows],
+            "gallery": [dict(gallery_row) for gallery_row in gallery_rows],
             "candidate_frames": int(candidate_rows or 0),
             "temporal_tracks": len(track_rows),
             "multi_frame_tracks": multi_frame_tracks,
@@ -1515,11 +1556,13 @@ class FaceStore:
             clauses.append("o.person_id = ?")
             values.append(person_id)
         elif status == "unknown":
-            clauses.append("o.person_id is null")
+            clauses.append("o.person_id is null and o.recognition_error = ''")
         elif status == "known":
             clauses.append("o.person_id is not null")
         elif status == "suggested":
-            clauses.append("o.person_id is null and o.candidate_person_id is not null")
+            clauses.append("o.person_id is null and o.candidate_person_id is not null and o.recognition_error = ''")
+        elif status == "unusable":
+            clauses.append("o.person_id is null and o.recognition_error != ''")
         if camera_id:
             clauses.append("o.camera_id = ?")
             values.append(camera_id)
@@ -1553,11 +1596,13 @@ class FaceStore:
             clauses.append("person_id = ?")
             values.append(person_id)
         elif status == "unknown":
-            clauses.append("person_id is null")
+            clauses.append("person_id is null and recognition_error = ''")
         elif status == "known":
             clauses.append("person_id is not null")
         elif status == "suggested":
-            clauses.append("person_id is null and candidate_person_id is not null")
+            clauses.append("person_id is null and candidate_person_id is not null and recognition_error = ''")
+        elif status == "unusable":
+            clauses.append("person_id is null and recognition_error != ''")
         if camera_id:
             clauses.append("camera_id = ?")
             values.append(camera_id)

@@ -72,11 +72,13 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
             if recognition.get("ready"):
                 pending = int(recognition.get("pending") or 0)
                 failed = int(recognition.get("failed") or 0)
+                too_small = int(recognition.get("too_small") or 0)
                 message = (
                     f"Recognition ready on {recognition.get('device') or 'OpenVINO'}; "
                     f"{recognition.get('embedded', 0)} faces embedded and "
                     f"{recognition.get('suggested', 0)} suggestions awaiting review"
-                    f"; {pending} pending and {failed} unable to process."
+                    f"; {pending} pending, {too_small} below the recognition size, "
+                    f"and {failed} processing failures."
                 )
             else:
                 message = str(
@@ -134,7 +136,7 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     ) -> list[dict[str, Any]]:
         deps.start_observation_sync()
         resolved_status = (
-            status if status in {"all", "known", "unknown", "suggested"} else "all"
+            status if status in {"all", "known", "unknown", "suggested", "unusable"} else "all"
         )
         return with_manager(
             lambda active: [
@@ -157,7 +159,7 @@ def create_face_router(deps: FaceRouteDependencies) -> FaceRouteBundle:
     ) -> dict[str, int]:
         deps.start_observation_sync()
         resolved_status = (
-            status if status in {"all", "known", "unknown", "suggested"} else "all"
+            status if status in {"all", "known", "unknown", "suggested", "unusable"} else "all"
         )
         return with_manager(
             lambda active: {
