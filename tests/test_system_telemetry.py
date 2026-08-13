@@ -90,6 +90,16 @@ class SystemTelemetryRouterTest(unittest.TestCase):
     def test_system_status_includes_lightweight_cpu_and_application_memory(self) -> None:
         manager = SimpleNamespace(
             storage_dir=Path("/tmp"),
+            recorder=SimpleNamespace(
+                retention_status=Mock(return_value={
+                    "last_plan_at": "2026-08-12T22:00:00+00:00",
+                    "plan": {"storage": {
+                        "total_bytes": 100,
+                        "used_bytes": 60,
+                        "free_bytes": 40,
+                    }},
+                }),
+            ),
             statuses=Mock(return_value=[]),
             detector_status=Mock(return_value={}),
             mqtt_status=Mock(return_value={}),
@@ -106,11 +116,17 @@ class SystemTelemetryRouterTest(unittest.TestCase):
             ),
             patch("survng.app.system_telemetry.os.cpu_count", return_value=8),
             patch("survng.app.system_telemetry.os.getloadavg", return_value=(2.0, 1.0, 0.5)),
+            patch(
+                "survng.app.system_telemetry.shutil.disk_usage",
+                side_effect=AssertionError("system status must not touch storage"),
+            ),
         ):
             status = service.system_status(manager)
 
         self.assertEqual(status["resources"]["application_memory_bytes"], 3_221_225_472)
         self.assertEqual(status["resources"]["cpu_load_percent"], 25.0)
+        self.assertEqual(status["storage"]["free_bytes"], 40)
+        self.assertTrue(status["storage"]["available"])
 
 
 if __name__ == "__main__":

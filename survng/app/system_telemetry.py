@@ -52,9 +52,15 @@ class SystemTelemetryService:
     _persisted_cache: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
     def system_status(self, manager: AppManager) -> dict[str, Any]:
-        storage_path = manager.storage_dir
-        storage_path.mkdir(parents=True, exist_ok=True)
-        usage = shutil.disk_usage(storage_path)
+        # The recording store may be an NFS mount.  Never stat it from an API
+        # request: a stalled mount would otherwise block health consumers and
+        # integrations even though cameras and the application are healthy.
+        retention = manager.recorder.retention_status()
+        plan = retention.get("plan") if isinstance(retention, dict) else None
+        storage = dict(plan.get("storage") or {}) if isinstance(plan, dict) else {}
+        storage_total = int(storage.get("total_bytes") or 0)
+        storage_free = int(storage.get("free_bytes") or 0)
+        storage_used = max(0, int(storage.get("used_bytes") or storage_total - storage_free))
         cameras = manager.statuses()
         service_memory = self.cgroup_memory_status()
         application_memory_bytes = int(service_memory.get("application_bytes") or 0)
@@ -74,12 +80,16 @@ class SystemTelemetryService:
                 "application_memory_bytes": application_memory_bytes,
             },
             "storage": {
-                "total_bytes": usage.total,
-                "used_bytes": usage.used,
-                "free_bytes": usage.free,
-                "used_percent": round((usage.used / usage.total) * 100, 1)
-                if usage.total
+                "total_bytes": storage_total,
+                "used_bytes": storage_used,
+                "free_bytes": storage_free,
+                "used_percent": round((storage_used / storage_total) * 100, 1)
+                if storage_total
                 else 0,
+                "sampled_at": retention.get("last_plan_at")
+                if isinstance(retention, dict)
+                else None,
+                "available": bool(storage_total),
             },
             "detector": manager.detector_status(),
             "cameras": {
