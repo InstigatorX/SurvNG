@@ -29,6 +29,7 @@ class OperationsRouteDependencies:
     manager_lock: threading.RLock
     log_rows: Callable[[], Sequence[dict[str, Any]]]
     storage_maintenance: StorageMaintenanceRunner
+    request_server_restart: Callable[[], dict[str, Any]]
 
 
 def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
@@ -103,6 +104,13 @@ def create_operations_router(deps: OperationsRouteDependencies) -> APIRouter:
     def cancel_storage_maintenance() -> dict[str, Any]:
         try:
             return deps.storage_maintenance.cancel()
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @router.post("/api/system/restart", status_code=202)
+    def restart_server() -> dict[str, Any]:
+        try:
+            return deps.request_server_restart()
         except RuntimeError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 

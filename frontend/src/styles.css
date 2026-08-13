@@ -4645,10 +4645,26 @@ button.motion-defaults-action:hover {
   gap: 6px;
 }
 
+.preference-action-buttons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preference-action-buttons button.danger {
+  color: var(--danger);
+}
+
 .preference-status {
   color: var(--ok-ink);
   font-size: 11px;
   font-weight: 760;
+}
+
+.preference-status.error {
+  color: var(--danger);
 }
 
 .zone-settings {

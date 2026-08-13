@@ -10679,6 +10679,7 @@ function RetentionSummary({ status }) {
 
 function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, setTheme, accelerator, detectorModels, recordingCache, retentionStatus, retentionError, runRetention, mqttStatus, detectorStatus, motionCatalog, section }) {
   const [liveOrderReset, setLiveOrderReset] = useState(false);
+  const [serverRestart, setServerRestart] = useState({ state: "idle", text: "" });
   const [apiTokenDraft, setApiTokenDraft] = useState({ id: "", name: "", scopes: ["read"] });
   const [apiTokenSecret, setApiTokenSecret] = useState("");
   const [apiTokenBusy, setApiTokenBusy] = useState(false);
@@ -10784,6 +10785,36 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
     setLiveOrderReset(true);
   }
 
+  async function restartServer() {
+    if (serverRestart.state === "requesting" || serverRestart.state === "waiting") return;
+    if (!window.confirm("Restart SurvNG now? Live view, recording playback, and detection will be briefly unavailable.")) return;
+    setServerRestart({ state: "requesting", text: "Requesting restart..." });
+    try {
+      const response = await fetch("/api/system/restart", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Unable to restart SurvNG.");
+      const previousInstance = String(payload.instance_id || "");
+      setServerRestart({ state: "waiting", text: "Restarting SurvNG..." });
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        try {
+          const statusResponse = await fetch(`/api/system/status?restart_check=${Date.now()}`, { cache: "no-store" });
+          if (!statusResponse.ok) continue;
+          const status = await statusResponse.json();
+          if (previousInstance && String(status.instance_id || "") === previousInstance) continue;
+          window.location.reload();
+          return;
+        } catch {
+          // The expected unavailable window while the service restarts.
+        }
+      }
+      setServerRestart({ state: "error", text: "Restart is taking longer than expected. Refresh this page shortly." });
+    } catch (error) {
+      setServerRestart({ state: "error", text: error.message || "Unable to restart SurvNG." });
+    }
+  }
+
   function toggleApiTokenScope(scope) {
     setApiTokenDraft((current) => ({
       ...current,
@@ -10853,11 +10884,18 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {THEMES.map((value) => <option key={value} value={value}>{THEME_META[value].label}</option>)}
           </select></label>
           <label>Web Base Path<input value={config.base_path ?? "/survng"} onChange={(event) => updateConfig(["base_path"], event.target.value)} placeholder="/survng" /></label>
-          <div className="preference-action">
+          <div className="preference-action general-server-actions">
             <strong>Live Camera Order</strong>
-            <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
+            <div className="preference-action-buttons">
+              <button type="button" onClick={resetLiveCameraOrder}><RotateCcw size={15} /> Reset Order</button>
+              <button type="button" className="danger" onClick={restartServer} disabled={["requesting", "waiting"].includes(serverRestart.state)}>
+                {serverRestart.state === "requesting" || serverRestart.state === "waiting" ? <RefreshCcw className="spin" size={15} /> : <Power size={15} />}
+                Restart Server
+              </button>
+            </div>
           </div>
           {liveOrderReset ? <span className="preference-status"><CircleDot size={13} /> Reset for this browser</span> : null}
+          {serverRestart.text ? <span className={`preference-status ${serverRestart.state === "error" ? "error" : ""}`} role="status">{serverRestart.text}</span> : null}
         </div>
         ) : null}
 

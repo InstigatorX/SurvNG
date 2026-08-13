@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import signal
+import subprocess
 import threading
 import time
 from collections import deque
@@ -107,6 +108,8 @@ SYSTEM_TELEMETRY = SystemTelemetryService()
 PROCESS_INSTANCE_ID = SYSTEM_TELEMETRY.process_instance_id
 INCIDENT_QUERIES = IncidentQueryService()
 STORAGE_MAINTENANCE = StorageMaintenanceRunner()
+SERVER_RESTART_LOCK = threading.Lock()
+SERVER_RESTART_SCHEDULED = False
 
 
 def _begin_ai_operation(kind: str) -> None:
@@ -401,6 +404,55 @@ def _active_storage_tasks(active_manager: AppManager) -> list[str]:
     return tasks
 
 
+def _request_server_restart() -> dict[str, object]:
+    """Queue a supervisor-owned restart after the HTTP response can be sent."""
+    global SERVER_RESTART_SCHEDULED
+    with SERVER_RESTART_LOCK:
+        if SERVER_RESTART_SCHEDULED or APPLICATION_STOPPING.is_set():
+            raise RuntimeError("SurvNG is already restarting or shutting down")
+        active_tasks = _active_storage_tasks(manager)
+        if active_tasks:
+            raise RuntimeError(
+                "SurvNG cannot restart while storage work is active: "
+                f"{', '.join(active_tasks)}. Wait for it to finish or cancel it from Maintenance."
+            )
+        SERVER_RESTART_SCHEDULED = True
+        APPLICATION_STOPPING.set()
+
+    def restart_from_supervisor() -> None:
+        global SERVER_RESTART_SCHEDULED
+        # Give Uvicorn enough time to flush the accepted response before
+        # systemd begins SurvNG's normal graceful-stop sequence.
+        time.sleep(0.75)
+        try:
+            subprocess.run(
+                ["systemctl", "--no-block", "restart", "survng.service"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+        except Exception as error:
+            LOGGER.error(
+                "server restart request failed: %s",
+                redact_secret_text(error),
+            )
+            with SERVER_RESTART_LOCK:
+                SERVER_RESTART_SCHEDULED = False
+                APPLICATION_STOPPING.clear()
+
+    threading.Thread(
+        target=restart_from_supervisor,
+        name="server-restart-request",
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "status": "restart_scheduled",
+        "instance_id": PROCESS_INSTANCE_ID,
+    }
+
+
 def reload_manager(
     next_config: AppConfig,
     *,
@@ -644,6 +696,7 @@ app.include_router(
             manager_lock=MANAGER_RELOAD_LOCK,
             log_rows=lambda: tuple(LOG_LINES),
             storage_maintenance=STORAGE_MAINTENANCE,
+            request_server_restart=_request_server_restart,
         )
     )
 )
