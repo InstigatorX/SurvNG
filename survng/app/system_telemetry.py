@@ -62,6 +62,7 @@ class SystemTelemetryService:
         storage_free = int(storage.get("free_bytes") or 0)
         storage_used = max(0, int(storage.get("used_bytes") or storage_total - storage_free))
         cameras = manager.statuses()
+        mqtt = manager.mqtt_status()
         service_memory = self.cgroup_memory_status()
         application_memory_bytes = int(service_memory.get("application_bytes") or 0)
         if application_memory_bytes <= 0:
@@ -73,6 +74,10 @@ class SystemTelemetryService:
             load_1m = 0.0
         payload = {
             "instance_id": self.process_instance_id,
+            "lifecycle": str((mqtt or {}).get("server_lifecycle") or "running"),
+            "uptime_seconds": round(
+                max(0.0, time.monotonic() - self.process_started_monotonic), 1
+            ),
             "resources": {
                 "cpu_load_percent": round(
                     min(100.0, max(0.0, (load_1m / cpu_count) * 100.0)), 1
@@ -97,7 +102,7 @@ class SystemTelemetryService:
                 "online": sum(1 for camera in cameras if camera.get("running")),
                 "recording": sum(1 for camera in cameras if camera.get("recording")),
             },
-            "mqtt": manager.mqtt_status(),
+            "mqtt": mqtt,
             "go2rtc": manager.go2rtc_status(),
             "camera_startup": manager.camera_startup_status(),
         }

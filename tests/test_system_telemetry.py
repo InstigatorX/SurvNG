@@ -125,6 +125,8 @@ class SystemTelemetryRouterTest(unittest.TestCase):
 
         self.assertEqual(status["resources"]["application_memory_bytes"], 3_221_225_472)
         self.assertEqual(status["resources"]["cpu_load_percent"], 25.0)
+        self.assertEqual(status["lifecycle"], "running")
+        self.assertGreaterEqual(status["uptime_seconds"], 0.0)
         self.assertEqual(status["storage"]["free_bytes"], 40)
         self.assertTrue(status["storage"]["available"])
 
