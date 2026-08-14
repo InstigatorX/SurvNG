@@ -14,6 +14,98 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_snapshot_retention_reports_usage_and_clears_expired_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "old.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"snapshot-bytes")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+
+            plan = store.snapshot_retention_plan(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp()
+            )
+            result = store.apply_snapshot_retention(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp(),
+                100,
+            )
+
+            self.assertEqual(plan["bytes"], len(b"snapshot-bytes"))
+            self.assertEqual(plan["expired_files"], 1)
+            self.assertEqual(result["deleted_files"], 1)
+            self.assertFalse(snapshot.exists())
+            with store._connect() as connection:
+                row = connection.execute(
+                    "select snapshot_path from events where id = ?",
+                    (int(event["id"]),),
+                ).fetchone()
+            self.assertEqual(row["snapshot_path"], "")
+
+    def test_snapshot_retention_protects_pinned_face_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "reference.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"reference")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            with store._connect() as connection:
+                connection.execute(
+                    """
+                    create table face_observations (
+                        id integer primary key, snapshot_path text not null,
+                        reference_pinned integer not null default 0
+                    )
+                    """
+                )
+                connection.execute(
+                    "insert into face_observations(snapshot_path, reference_pinned) values (?, 1)",
+                    (event["snapshot_path"],),
+                )
+
+            plan = store.snapshot_retention_plan(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp()
+            )
+            result = store.apply_snapshot_retention(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp(),
+                100,
+            )
+
+            self.assertEqual(plan["expired_files"], 0)
+            self.assertEqual(result["selected_files"], 0)
+            self.assertTrue(snapshot.exists())
+    def test_protected_recording_paths_use_lexical_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            recording = root / "secondary" / "recordings" / "gate" / ".." / "gate" / "segment.mp4"
+            store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path="",
+                recording_path=str(recording),
+                objects_json="[]",
+            )
+
+            with patch(
+                "survng.app.events.Path.resolve",
+                side_effect=AssertionError("protection lookup must not resolve media paths"),
+            ):
+                protected = store.protected_recording_paths()
+
+            self.assertEqual(protected, {str(root / "secondary" / "recordings" / "gate" / "segment.mp4")})
+
     def test_refinement_removes_replaced_snapshot_when_unreferenced(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

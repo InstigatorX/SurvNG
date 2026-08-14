@@ -847,6 +847,14 @@ function formatDuration(seconds) {
   return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 }
 
+function formatCompactDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "calculating";
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+}
+
 function isMobileViewport() {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
 }
@@ -8361,6 +8369,8 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
                 <div><dt>Recording / detection</dt><dd>{camera.recording ? "On" : "Off"} / {camera.detection_enabled ? "On" : "Off"}</dd></div>
                 <div><dt>Stream reliability</dt><dd>{!expected ? "Paused" : !fresh ? `Unavailable${interruptions ? ` · ${interruptions.toLocaleString()} issues` : ""}` : interruptions ? `Healthy now · ${interruptions.toLocaleString()} recovered issue${interruptions === 1 ? "" : "s"}` : "Healthy · no interruptions"}</dd></div>
                 <div><dt>Recording timeline</dt><dd>{formatRecorderTimestampHealth(camera.recording_timestamps)}</dd></div>
+                <div><dt>Used-Recordings</dt><dd>{formatBytes(camera.storage?.recording_bytes)}</dd></div>
+                <div><dt>Used-Snapshots</dt><dd>{formatBytes(camera.storage?.snapshot_bytes)}</dd></div>
                 <div><dt>Events · 1h / 24h</dt><dd>{camera.activity?.last_hour?.events || 0} / {camera.activity?.last_24h?.events || 0}</dd></div>
                 <div><dt>Object incidents · 1h / 24h</dt><dd>{camera.activity?.last_hour?.object_incidents || 0} / {camera.activity?.last_24h?.object_incidents || 0}</dd></div>
                 <div><dt>Motion triggers · camera / EMA</dt><dd>{camera.onvif?.motion_events || 0} / {camera.motion?.visual_backup_triggers || 0}</dd></div>
@@ -8660,6 +8670,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState("");
   const [selectedAuditId, setSelectedAuditId] = useState(null);
+  const [linkedAudit, setLinkedAudit] = useState(null);
   const [telemetry, setTelemetry] = useState(null);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
@@ -8736,6 +8747,29 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     void load();
     return () => { configLoadSequence.current += 1; };
   }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("section") !== "audit") return;
+    setSettingsTab("audit");
+    const auditId = Number(params.get("audit_id"));
+    if (!Number.isInteger(auditId) || auditId <= 0) return;
+    let active = true;
+    fetch(`/api/motion-audit/${auditId}`)
+      .then((response) => {
+        if (!response.ok) throw new Error(`Motion audit failed to load (${response.status})`);
+        return response.json();
+      })
+      .then((item) => {
+        if (!active) return;
+        setLinkedAudit(item);
+        setSelectedAuditId(item.id);
+      })
+      .catch((error) => {
+        if (active) setAuditError(error.message || "Unable to open the selected motion audit.");
+      });
+    return () => { active = false; };
+  }, [setSettingsTab]);
 
   async function loadRetention() {
     try {
@@ -8919,7 +8953,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const cameras = config?.cameras || [];
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
-  const selectedAudit = auditItems.find((item) => item.id === selectedAuditId) || null;
+  const selectedAudit = auditItems.find((item) => item.id === selectedAuditId)
+    || (linkedAudit?.id === selectedAuditId ? linkedAudit : null);
+  const selectedAuditItems = selectedAudit && !auditItems.some((item) => item.id === selectedAudit.id)
+    ? [selectedAudit, ...auditItems]
+    : auditItems;
   const activeDetectorPath = config?.detector?.model_path || config?.detector?.model_xml || "";
   const activeDetectorModel = detectorModels.find((model) => model.path === activeDetectorPath);
   const zoneClassOptions = activeDetectorModel?.classes?.length
@@ -9633,7 +9671,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       {selectedAudit ? (
         <MotionAuditOverlay
           item={selectedAudit}
-          items={auditItems}
+          items={selectedAuditItems}
           timeZone={timeZone}
           onClose={() => setSelectedAuditId(null)}
           onSelect={(item) => setSelectedAuditId(item.id)}
@@ -10651,7 +10689,8 @@ function RetentionSummary({ status }) {
   const indexed = plan.indexed || {};
   const reclaim = plan.reclaim || {};
   const lastRun = status.last_run || null;
-  const cameraRows = plan.per_camera || [];
+  const cameraStorageRows = plan.per_camera_storage || [];
+  const snapshots = plan.snapshots || {};
   const headroom = indexed.days_to_minimum_free;
   return (
     <div className="retention-summary">
@@ -10664,14 +10703,15 @@ function RetentionSummary({ status }) {
       </div>
       <div className="retention-metrics">
         <article><span>Continuous recordings</span><strong>{formatBytes(indexed.bytes)}</strong><small>{Number(indexed.file_count || 0).toLocaleString()} indexed segments</small></article>
+        <article><span>Incident snapshots</span><strong>{formatBytes(snapshots.bytes)}</strong><small>{Number(snapshots.file_count || 0).toLocaleString()} indexed images</small></article>
         <article><span>Current growth</span><strong>{formatBytes(indexed.bytes_per_day)}/day</strong><small>Estimated from indexed history</small></article>
         <article><span>Age-expired</span><strong>{formatBytes(reclaim.expired_bytes)}</strong><small>{Number(reclaim.expired_files || 0).toLocaleString()} segments</small></article>
         <article><span>Capacity pressure</span><strong>{formatBytes(Math.max(Number(reclaim.quota_bytes || 0), Number(reclaim.free_space_bytes || 0)))}</strong><small>{(reclaim.reasons || []).length ? reclaim.reasons.join(" + ").replaceAll("_", " ") : "None"}</small></article>
       </div>
       {lastRun ? <div className="retention-last-run"><strong>Last cleanup</strong><span>{Number(lastRun.deleted_files || 0).toLocaleString()} files · {formatBytes(lastRun.deleted_bytes)} reclaimed{lastRun.failed_files ? ` · ${lastRun.failed_files} failed` : ""}</span></div> : null}
-      {cameraRows.length ? <details className="retention-camera-details"><summary>Per-camera storage and projected retention</summary><div className="retention-camera-table">
-        <div className="heading"><span>Camera / stream</span><span>Used</span><span>Daily</span><span>Keep</span><span>Projected</span></div>
-        {cameraRows.map((row) => <div key={`${row.camera_id}-${row.source}`}><strong>{row.camera_id} · {row.source === "main" ? "Main" : "Sub"}</strong><span>{formatBytes(row.bytes)}</span><span>{formatBytes(row.bytes_per_day)}</span><span>{row.retention_days}d</span><span>{formatBytes(row.projected_bytes)}</span></div>)}
+      {cameraStorageRows.length ? <details className="retention-camera-details"><summary>Per-camera storage</summary><div className="retention-camera-table retention-camera-storage-table">
+        <div className="heading"><span>Camera</span><span>Used-Recordings</span><span>Used-Snapshots</span><span>Recording files</span><span>Snapshot files</span></div>
+        {cameraStorageRows.map((row) => <div key={row.camera_id}><strong>{row.camera_id}</strong><span>{formatBytes(row.recording_bytes)}</span><span>{formatBytes(row.snapshot_bytes)}</span><span>{Number(row.recording_files || 0).toLocaleString()}</span><span>{Number(row.snapshot_files || 0).toLocaleString()}</span></div>)}
       </div></details> : null}
     </div>
   );
@@ -10692,6 +10732,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
   const [modelEvaluationDraft, setModelEvaluationDraft] = useState({ baseline_path: "", candidate_path: "", sample_count: 200, confidence: 0.25 });
   const [modelEvaluation, setModelEvaluation] = useState({ status: "idle" });
   const [modelEvaluationError, setModelEvaluationError] = useState("");
+  const [modelEvaluationPreview, setModelEvaluationPreview] = useState(null);
   const mediaLocations = config.media_storage?.locations || [];
   const reidStatus = detectorStatus?.reid || null;
   const cameraTransitionRoutes = config.detector?.tracking?.camera_transition_routes || [];
@@ -11051,15 +11092,21 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
           {recordingCache ? <div className="probe-result"><strong>Playback Cache</strong><span>{formatBytes(recordingCache.bytes)} used across {recordingCache.entries} fragments</span><span>{formatBytes(recordingCache.max_bytes)} limit, {recordingCache.max_days} day maximum age</span><span>{recordingCache.metrics?.playback_hits || 0} hits / {recordingCache.metrics?.playback_misses || 0} misses, {recordingCache.metrics?.playback_avg_remux_ms || 0} ms average remux</span></div> : null}
           <div className="retention-settings">
             <div className="retention-heading">
-              <div><h4>Recording retention</h4><p>Daily storage planning with lightweight cleanup checks every 15 minutes.</p></div>
-              <span className={`retention-state ${retentionStatus?.state || "starting"}`}>{String(retentionStatus?.state || "calculating").replaceAll("_", " ")}</span>
+              <div><h4>Media retention</h4><p>Daily recording and incident-snapshot planning with lightweight cleanup checks every 15 minutes.</p></div>
+              <span className={`retention-state ${retentionStatus?.state || "starting"}`}>
+                {String(retentionStatus?.state || "calculating").replaceAll("_", " ")}
+                {retentionStatus?.progress && Number(retentionStatus.progress.initial_bytes || 0) > 0
+                  ? ` · ${Number(retentionStatus.progress.percent || 0).toFixed(1)}% · ${retentionStatus.progress.eta_seconds == null ? "calculating" : `~${formatCompactDuration(retentionStatus.progress.eta_seconds)} left`}`
+                  : ""}
+              </span>
             </div>
             <div className="retention-fields">
               <label className="check-field"><input type="checkbox" checked={config.retention?.enabled ?? true} onChange={(event) => updateConfig(["retention", "enabled"], event.target.checked)} /> Monitor storage retention</label>
-              <label className="check-field"><input type="checkbox" checked={config.retention?.automatic_cleanup ?? false} onChange={(event) => updateConfig(["retention", "automatic_cleanup"], event.target.checked)} /> Automatically remove expired continuous recordings</label>
+              <label className="check-field"><input type="checkbox" checked={config.retention?.automatic_cleanup ?? false} onChange={(event) => updateConfig(["retention", "automatic_cleanup"], event.target.checked)} /> Automatically remove expired recordings and snapshots</label>
               <label>SurvNG storage limit<input type="number" min="0.1" max="1000" step="0.5" value={config.retention?.storage_limit_tb ?? 13} onChange={(event) => updateConfig(["retention", "storage_limit_tb"], Number(event.target.value))} /><small>TiB allocated to indexed continuous recordings.</small></label>
               <label>Main stream history<input type="number" min="1" max="3650" step="1" value={config.retention?.main_days ?? 7} onChange={(event) => updateConfig(["retention", "main_days"], Number(event.target.value))} /><small>Days of high-resolution continuous video.</small></label>
               <label>Substream history<input type="number" min="1" max="3650" step="1" value={config.retention?.live_days ?? 21} onChange={(event) => updateConfig(["retention", "live_days"], Number(event.target.value))} /><small>Days of lower-bandwidth continuous video.</small></label>
+              <label>Incident snapshot history<input type="number" min="1" max="3650" step="1" value={config.retention?.snapshot_days ?? 1095} onChange={(event) => updateConfig(["retention", "snapshot_days"], Number(event.target.value))} /><small>Days to keep clean incident evidence images. Default: 1,095 days.</small></label>
               <label>Start cleanup below<input type="number" min="1" max="95" step="1" value={config.retention?.minimum_free_percent ?? 15} onChange={(event) => updateConfig(["retention", "minimum_free_percent"], Number(event.target.value))} /><small>Percent free on the entire storage filesystem.</small></label>
               <label>Clean back to<input type="number" min="2" max="99" step="1" value={config.retention?.target_free_percent ?? 20} onChange={(event) => updateConfig(["retention", "target_free_percent"], Number(event.target.value))} /><small>Higher than the start threshold to prevent repeated cycling.</small></label>
               <label>Emergency threshold<input type="number" min="0.5" max="50" step="0.5" value={config.retention?.emergency_free_percent ?? 5} onChange={(event) => updateConfig(["retention", "emergency_free_percent"], Number(event.target.value))} /><small>Raises a critical storage state.</small></label>
@@ -11070,7 +11117,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
               <button type="button" onClick={() => runRetention(false)}><RefreshCcw size={15} /> Recalculate</button>
               <button type="button" className="danger" onClick={() => runRetention(true)} disabled={["queued", "planning", "cleaning", "waiting"].includes(retentionStatus?.state)}><Trash2 size={15} /> Clean Up Now</button>
             </div>
-            <p className="retention-protection"><ShieldCheck size={15} /> Incident clips, snapshots, metadata databases, and the newest five minutes of recording are never removed by this cleanup.</p>
+            <p className="retention-protection"><ShieldCheck size={15} /> Incident snapshots expire only after their configured history; face-reference images, incident clips, metadata databases, and the newest five minutes of recording remain protected.</p>
           </div>
         </div>
         ) : null}
@@ -11229,8 +11276,19 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             </div>
             <p className="settings-help">Stored-evidence recall is diagnostic, not verified accuracy: baseline {modelEvaluation.result.stored_evidence_recall?.baseline ?? "—"}, candidate {modelEvaluation.result.stored_evidence_recall?.candidate ?? "—"}. Review disagreements before promoting a model.</p>
             {modelEvaluation.result.disagreements?.length ? <div className="model-evaluation-disagreements">
-              {modelEvaluation.result.disagreements.map((item) => <a key={`${item.source_kind}-${item.source_id}`} href={appUrl(item.source_kind === "motion_audit" ? `/config?section=audit&audit_id=${item.source_id}` : `/incidents?event_ids=${item.event_id}`)}><img src={appUrl(item.image_url)} alt="" loading="lazy" /><span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small><small>Old: {item.baseline_labels.join(", ") || "none"}</small><small>New: {item.candidate_labels.join(", ") || "none"}</small></span></a>)}
+              {modelEvaluation.result.disagreements.map((item) => <article key={`${item.source_kind}-${item.source_id}`}>
+                <button type="button" className="model-evaluation-image-button" onClick={() => setModelEvaluationPreview(item)} aria-label={`Enlarge ${item.camera_id} comparison image`}><img src={appUrl(item.image_url)} alt="" loading="lazy" /></button>
+                <span><strong>{item.camera_id}</strong><small>{item.source_kind === "motion_audit" ? "Motion audit negative" : "Incident"} · {item.created_at}</small><small>Old: {item.baseline_labels.join(", ") || "none"}</small><small>New: {item.candidate_labels.join(", ") || "none"}</small><a href={appUrl(item.source_kind === "motion_audit" ? `/config?section=audit&audit_id=${item.source_id}` : `/incidents?event_ids=${item.event_id}`)}>Open {item.source_kind === "motion_audit" ? "audit" : "incident"}</a></span>
+              </article>)}
             </div> : <div className="probe-result ok"><strong>No label disagreements</strong><span>Both models returned the same label sets on this corpus.</span></div>}
+          </div> : null}
+          {modelEvaluationPreview ? <div className="model-evaluation-preview" role="dialog" aria-modal="true" aria-label="Model comparison image">
+            <button type="button" className="live-overlay-backdrop" onClick={() => setModelEvaluationPreview(null)} aria-label="Close comparison image" />
+            <section>
+              <header><div><strong>{modelEvaluationPreview.camera_id}</strong><small>{modelEvaluationPreview.created_at}</small></div><button type="button" className="icon-only" onClick={() => setModelEvaluationPreview(null)} aria-label="Close comparison image"><X size={19} /></button></header>
+              <img src={appUrl(modelEvaluationPreview.image_url)} alt={`${modelEvaluationPreview.camera_id} model comparison source`} />
+              <footer><span><strong>Old</strong> {modelEvaluationPreview.baseline_labels.join(", ") || "none"}</span><span><strong>New</strong> {modelEvaluationPreview.candidate_labels.join(", ") || "none"}</span><a className="primary" href={appUrl(modelEvaluationPreview.source_kind === "motion_audit" ? `/config?section=audit&audit_id=${modelEvaluationPreview.source_id}` : `/incidents?event_ids=${modelEvaluationPreview.event_id}`)}>Open {modelEvaluationPreview.source_kind === "motion_audit" ? "audit" : "incident"}</a></footer>
+            </section>
           </div> : null}
         </section>
 

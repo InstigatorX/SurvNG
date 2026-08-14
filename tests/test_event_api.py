@@ -230,7 +230,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
     def test_motion_audit_endpoint_filters_named_categories(self) -> None:
         events = SimpleNamespace(motion_audits=Mock(return_value=([], 0)))
-        active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"))
+        active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"), media_storage=None)
         with patch.object(main, "manager", active_manager):
             response = main._intelligence_route_bundle.service.motion_audit(category="visual_backup")
 
@@ -256,6 +256,36 @@ class EventApiSerializationTest(unittest.TestCase):
         )
         with self.assertRaises(HTTPException):
             main._intelligence_route_bundle.service.motion_audit(category="unexpected")
+
+    def test_motion_audit_detail_supports_direct_deep_links(self) -> None:
+        events = SimpleNamespace(get_motion_audit=Mock(return_value={
+            "id": 41,
+            "camera_id": "gate",
+            "features_json": "{}",
+            "snapshot_path": "",
+            "object_detected": None,
+        }))
+        active_manager = SimpleNamespace(events=events, storage_dir=Path("/tmp/survng-test"), media_storage=None)
+        with patch.object(main, "manager", active_manager):
+            response = main._intelligence_route_bundle.service.motion_audit_detail(41)
+
+        self.assertEqual(response["id"], 41)
+        self.assertEqual(response["camera_id"], "gate")
+        events.get_motion_audit.assert_called_once_with(41)
+
+    def test_motion_audit_detail_returns_not_found(self) -> None:
+        active_manager = SimpleNamespace(
+            events=SimpleNamespace(get_motion_audit=Mock(return_value=None)),
+            storage_dir=Path("/tmp/survng-test"),
+            media_storage=None,
+        )
+        with (
+            patch.object(main, "manager", active_manager),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            main._intelligence_route_bundle.service.motion_audit_detail(404)
+
+        self.assertEqual(raised.exception.status_code, 404)
 
     def test_cgroup_memory_separates_application_and_file_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

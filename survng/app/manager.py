@@ -172,6 +172,8 @@ class AppManager:
             config=config,
             storage_dir=self.storage_dir,
             protected_recording_paths=self.events.protected_recording_paths,
+            snapshot_retention_plan=self.events.snapshot_retention_plan,
+            apply_snapshot_retention=self.events.apply_snapshot_retention,
             media_storage=self.media_storage,
         )
         # Compatibility handle for media APIs and camera dependencies. Shared

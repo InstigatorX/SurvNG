@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from .baichuan_native import (
     BaichuanFfmpegPipe,
@@ -59,6 +59,8 @@ class Recorder:
         go2rtc: Go2RtcAdapter | None = None,
         retention_config: RecordingRetentionConfig | None = None,
         protected_recording_paths: Callable[[], set[str]] | None = None,
+        snapshot_retention_plan: Callable[[float], Mapping[str, Any]] | None = None,
+        apply_snapshot_retention: Callable[[float, int], Mapping[str, Any]] | None = None,
         media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.ffmpeg_path = ffmpeg_path
@@ -116,6 +118,8 @@ class Recorder:
             self._index_connection,
             retention_config or RecordingRetentionConfig(),
             self._protected_recording_paths,
+            snapshot_plan_provider=snapshot_retention_plan,
+            snapshot_cleanup_provider=apply_snapshot_retention,
             media_storage=self.media_storage,
         )
 
@@ -150,6 +154,9 @@ class Recorder:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS recordings_range ON recordings(camera_id, source, start_epoch, end_epoch)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS recordings_retention_expiry ON recordings(camera_id, source, end_epoch)"
             )
             connection.execute(
                 """

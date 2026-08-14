@@ -33,6 +33,7 @@
     "emergency_free_percent": 5.0,
     "main_days": 7,
     "live_days": 21,
+    "snapshot_days": 1095,
     "cleanup_batch_files": 2000
   },
   "motion_qualification": {

@@ -3,7 +3,8 @@
 Local-first surveillance app for RTSP/RTMP/ONVIF cameras with recording, camera motion-event ingestion, OpenVINO object detection, and a browser GUI.
 
 Continuous-recording quotas, age limits, free-space watermarks, and protected
-incident media are described in [Storage retention](docs/storage-retention.md).
+incident media are described in [Multi-disk media storage](docs/storage.md) and
+[Storage retention](docs/storage-retention.md).
 Configuration saves and their runtime restart boundaries are described in
 [Configuration application boundaries](docs/configuration-application.md).
 For the optional container installation, persistent-volume layout, migration,

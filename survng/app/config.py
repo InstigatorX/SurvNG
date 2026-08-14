@@ -316,6 +316,7 @@ class RecordingRetentionConfig(BaseModel):
     emergency_free_percent: float = Field(default=5.0, ge=0.5, le=50.0)
     main_days: int = Field(default=7, ge=1, le=3650)
     live_days: int = Field(default=21, ge=1, le=3650)
+    snapshot_days: int = Field(default=3 * 365, ge=1, le=3650)
     cleanup_batch_files: int = Field(default=2000, ge=100, le=10000)
 
     @model_validator(mode="after")

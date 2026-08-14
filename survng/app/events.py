@@ -4,6 +4,7 @@ import json
 import copy
 import hashlib
 import math
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -60,17 +61,30 @@ class EventStore:
                     topic text,
                     message text,
                     snapshot_path text,
+                    snapshot_size_bytes integer not null default 0,
                     recording_path text,
                     objects_json text not null default '[]',
                     created_at text not null
                 )
                 """
             )
+            event_columns = {
+                str(row["name"])
+                for row in conn.execute("pragma table_info(events)").fetchall()
+            }
+            if "snapshot_size_bytes" not in event_columns:
+                conn.execute(
+                    "alter table events add column snapshot_size_bytes integer not null default 0"
+                )
             conn.execute(
                 "create index if not exists idx_events_created_at on events(created_at desc)"
             )
             conn.execute(
                 "create index if not exists idx_events_camera_created_at on events(camera_id, created_at desc)"
+            )
+            conn.execute(
+                "create index if not exists idx_events_snapshot_retention "
+                "on events(snapshot_path, created_at desc, id desc) where snapshot_path != ''"
             )
             conn.execute(
                 "create table if not exists survng_metadata (key text primary key, value text not null)"
@@ -584,7 +598,6 @@ class EventStore:
 
     def protected_recording_paths(self) -> set[str]:
         """Return continuous segments still referenced by incident history."""
-        recordings_root = (self.storage_dir / "recordings").resolve()
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT recording_path FROM events WHERE recording_path != ''"
@@ -597,12 +610,11 @@ class EventStore:
             path = Path(raw_path)
             if not path.is_absolute():
                 path = self.storage_dir / path
-            resolved = path.resolve(strict=False)
-            try:
-                resolved.relative_to(recordings_root)
-            except ValueError:
-                continue
-            protected.add(str(resolved))
+            # Protection is a string-key lookup against the recording index.
+            # Lexical normalization avoids an NFS metadata round trip for every
+            # retained incident while remaining harmless for an out-of-pool
+            # value: protection can only prevent deletion, never authorize it.
+            protected.add(os.path.normpath(os.path.abspath(str(path))))
         return protected
 
     @staticmethod
@@ -916,15 +928,16 @@ class EventStore:
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
         snapshot_path = portable_media_path(self.storage_dir, snapshot_path)
+        snapshot_size_bytes = self._snapshot_file_size(snapshot_path)
         recording_path = portable_media_path(self.storage_dir, recording_path)
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
                 insert into events (
-                    camera_id, kind, topic, message, snapshot_path,
+                    camera_id, kind, topic, message, snapshot_path, snapshot_size_bytes,
                     recording_path, objects_json, created_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     camera_id,
@@ -932,6 +945,7 @@ class EventStore:
                     topic,
                     message,
                     snapshot_path,
+                    snapshot_size_bytes,
                     recording_path,
                     objects_json,
                     created_at,
@@ -945,6 +959,7 @@ class EventStore:
             "topic": topic,
             "message": message,
             "snapshot_path": snapshot_path,
+            "snapshot_size_bytes": snapshot_size_bytes,
             "recording_path": recording_path,
             "objects_json": objects_json,
             "created_at": created_at,
@@ -2644,11 +2659,12 @@ class EventStore:
             replacement = []
         replacement = [item for item in replacement if isinstance(item, dict)]
         portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
+        snapshot_size_bytes = self._snapshot_file_size(portable_snapshot)
         portable_recording = portable_media_path(self.storage_dir, recording_path)
         replaced_snapshot = ""
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "select objects_json, snapshot_path, recording_path from events where id = ?",
+                "select objects_json, snapshot_path, snapshot_size_bytes, recording_path from events where id = ?",
                 (event_id,),
             ).fetchone()
             if row is None:
@@ -2667,11 +2683,12 @@ class EventStore:
             conn.execute(
                 """
                 update events
-                set snapshot_path = ?, recording_path = ?, objects_json = ?
+                set snapshot_path = ?, snapshot_size_bytes = ?, recording_path = ?, objects_json = ?
                 where id = ?
                 """,
                 (
                     portable_snapshot or str(row["snapshot_path"] or ""),
+                    snapshot_size_bytes if portable_snapshot else int(row["snapshot_size_bytes"] or 0),
                     portable_recording or str(row["recording_path"] or ""),
                     merged_json,
                     event_id,
@@ -2684,6 +2701,204 @@ class EventStore:
         if replaced_snapshot and replaced_snapshot != portable_snapshot:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None
+
+    def _snapshot_file_size(self, raw_path: str) -> int:
+        """Return an incident snapshot's size without allowing arbitrary paths."""
+        if not raw_path:
+            return 0
+        try:
+            path = event_snapshot_path(
+                self.storage_dir,
+                {"snapshot_path": raw_path},
+                self.media_storage,
+            )
+            if self.media_storage is None:
+                path.relative_to((self.storage_dir / "snapshots").resolve())
+            elif self.media_storage.location_id_for(path, role="snapshots") is None:
+                return 0
+            return max(0, int(path.stat().st_size))
+        except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
+            return 0
+
+    def _backfill_snapshot_sizes(self, *, limit: int = 2000) -> int:
+        """Incrementally index legacy snapshot sizes off the API request path."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                select snapshot_path from events
+                where snapshot_path != '' and snapshot_size_bytes <= 0
+                group by snapshot_path order by min(id) asc limit ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        updates = [
+            (size, str(row["snapshot_path"]))
+            for row in rows
+            if (size := self._snapshot_file_size(str(row["snapshot_path"]))) > 0
+        ]
+        if updates:
+            with self._lock, self._connect() as conn:
+                conn.executemany(
+                    "update events set snapshot_size_bytes = ? where snapshot_path = ?",
+                    updates,
+                )
+        return len(updates)
+
+    def snapshot_retention_plan(self, cutoff_epoch: float) -> dict[str, Any]:
+        """Report database-indexed incident snapshot use and age expiry."""
+        self._backfill_snapshot_sizes()
+        cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
+        ranked = """
+            with ranked as (
+                select id, camera_id, snapshot_path, snapshot_size_bytes, created_at,
+                       row_number() over (
+                           partition by snapshot_path order by created_at desc, id desc
+                       ) as snapshot_rank
+                from events where snapshot_path != ''
+            )
+        """
+        with self._lock, self._connect() as conn:
+            total = conn.execute(
+                ranked
+                + """
+                select count(*) as file_count,
+                       coalesce(sum(snapshot_size_bytes), 0) as bytes,
+                       coalesce(sum(case when snapshot_size_bytes <= 0 then 1 else 0 end), 0)
+                           as unindexed_files
+                from ranked where snapshot_rank = 1
+                """
+            ).fetchone()
+            cameras = conn.execute(
+                ranked
+                + """
+                select camera_id, count(*) as file_count,
+                       coalesce(sum(snapshot_size_bytes), 0) as bytes
+                from ranked where snapshot_rank = 1
+                group by camera_id order by camera_id
+                """
+            ).fetchall()
+            has_faces = conn.execute(
+                "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
+            ).fetchone() is not None
+            face_clause = (
+                "and not exists (select 1 from face_observations "
+                "where face_observations.snapshot_path = ranked.snapshot_path "
+                "and face_observations.reference_pinned = 1)"
+                if has_faces
+                else ""
+            )
+            expired = conn.execute(
+                ranked
+                + f"""
+                select count(*) as file_count,
+                       coalesce(sum(snapshot_size_bytes), 0) as bytes
+                from ranked
+                where snapshot_rank = 1 and created_at < ? {face_clause}
+                """,
+                (cutoff,),
+            ).fetchone()
+        return {
+            "file_count": int(total["file_count"] or 0),
+            "bytes": int(total["bytes"] or 0),
+            "unindexed_files": int(total["unindexed_files"] or 0),
+            "expired_files": int(expired["file_count"] or 0),
+            "expired_bytes": int(expired["bytes"] or 0),
+            "per_camera": [
+                {
+                    "camera_id": str(row["camera_id"]),
+                    "file_count": int(row["file_count"] or 0),
+                    "bytes": int(row["bytes"] or 0),
+                }
+                for row in cameras
+            ],
+        }
+
+    def apply_snapshot_retention(self, cutoff_epoch: float, limit: int) -> dict[str, Any]:
+        """Delete age-expired incident images and clear every stale reference."""
+        cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
+        bounded_limit = max(1, min(2000, int(limit)))
+        ranked = """
+            with ranked as (
+                select id, snapshot_path, snapshot_size_bytes, created_at,
+                       row_number() over (
+                           partition by snapshot_path order by created_at desc, id desc
+                       ) as snapshot_rank
+                from events where snapshot_path != ''
+            )
+        """
+        with self._lock, self._connect() as conn:
+            has_faces = conn.execute(
+                "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
+            ).fetchone() is not None
+            face_clause = (
+                "and not exists (select 1 from face_observations "
+                "where face_observations.snapshot_path = ranked.snapshot_path "
+                "and face_observations.reference_pinned = 1)"
+                if has_faces
+                else ""
+            )
+            rows = conn.execute(
+                ranked
+                + f"""
+                select snapshot_path, snapshot_size_bytes from ranked
+                where snapshot_rank = 1 and created_at < ? {face_clause}
+                order by created_at asc limit ?
+                """,
+                (cutoff, bounded_limit),
+            ).fetchall()
+        removed: list[str] = []
+        deleted_files = 0
+        missing_files = 0
+        deleted_bytes = 0
+        failed_files = 0
+        for row in rows:
+            raw_path = str(row["snapshot_path"] or "")
+            try:
+                path = event_snapshot_path(
+                    self.storage_dir,
+                    {"snapshot_path": raw_path},
+                    self.media_storage,
+                )
+                if self.media_storage is None:
+                    path.relative_to((self.storage_dir / "snapshots").resolve())
+                elif self.media_storage.location_id_for(path, role="snapshots") is None:
+                    raise PermissionError("snapshot is outside configured snapshot storage")
+                path.unlink()
+                deleted_files += 1
+                deleted_bytes += int(row["snapshot_size_bytes"] or 0)
+                removed.append(raw_path)
+            except FileNotFoundError:
+                missing_files += 1
+                removed.append(raw_path)
+            except (PermissionError, OSError, RuntimeError, ValueError):
+                failed_files += 1
+        if removed:
+            with self._lock, self._connect() as conn:
+                conn.executemany(
+                    "update events set snapshot_path = '', snapshot_size_bytes = 0 where snapshot_path = ?",
+                    ((path,) for path in removed),
+                )
+                conn.executemany(
+                    "update motion_audits set snapshot_path = '' where snapshot_path = ?",
+                    ((path,) for path in removed),
+                )
+                has_faces = conn.execute(
+                    "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
+                ).fetchone() is not None
+                if has_faces:
+                    conn.executemany(
+                        "update face_observations set snapshot_path = '' "
+                        "where snapshot_path = ? and reference_pinned = 0",
+                        ((path,) for path in removed),
+                    )
+        return {
+            "selected_files": len(rows),
+            "deleted_files": deleted_files,
+            "missing_files": missing_files,
+            "deleted_bytes": deleted_bytes,
+            "failed_files": failed_files,
+            "batch_saturated": len(rows) >= bounded_limit,
+        }
 
     def _delete_snapshot_if_unreferenced(self, raw_path: str) -> None:
         """Remove a replaced snapshot only after every durable reference moved."""

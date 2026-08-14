@@ -55,7 +55,9 @@ class SystemTelemetryService:
         # The recording store may be an NFS mount.  Never stat it from an API
         # request: a stalled mount would otherwise block health consumers and
         # integrations even though cameras and the application are healthy.
-        retention = manager.recorder.retention_status()
+        recorder = getattr(manager, "recorder", None)
+        retention_reader = getattr(recorder, "retention_status", None)
+        retention = retention_reader() if callable(retention_reader) else {}
         plan = retention.get("plan") if isinstance(retention, dict) else None
         storage = dict(plan.get("storage") or {}) if isinstance(plan, dict) else {}
         storage_total = int(storage.get("total_bytes") or 0)
@@ -416,7 +418,8 @@ class SystemTelemetryService:
 
     @staticmethod
     def _camera_payload(
-        status: dict[str, Any], per_camera_activity: dict[str, Any]
+        status: dict[str, Any], per_camera_activity: dict[str, Any],
+        per_camera_storage: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         camera_id = str(status.get("id") or "")
         motion = status.get("motion_qualification") or {}
@@ -530,6 +533,15 @@ class SystemTelemetryService:
                     "hourly": [],
                 },
             ),
+            "storage": per_camera_storage.get(
+                camera_id,
+                {
+                    "recording_bytes": 0,
+                    "recording_files": 0,
+                    "snapshot_bytes": 0,
+                    "snapshot_files": 0,
+                },
+            ),
         }
         payload["performance"] = camera_performance_health(payload)
         return payload
@@ -559,6 +571,20 @@ class SystemTelemetryService:
         selected_camera_id = str(camera_id or "").strip()[:128]
         persisted = self.persisted_history(manager, selected_camera_id)
         per_camera_activity = activity.get("by_camera", {})
+        recorder = getattr(manager, "recorder", None)
+        retention_reader = getattr(recorder, "retention_status", None)
+        retention = retention_reader() if callable(retention_reader) else {}
+        retention_plan = retention.get("plan") if isinstance(retention, dict) else None
+        storage_rows = (
+            retention_plan.get("per_camera_storage", [])
+            if isinstance(retention_plan, dict)
+            else []
+        )
+        per_camera_storage = {
+            str(row.get("camera_id") or ""): dict(row)
+            for row in storage_rows
+            if isinstance(row, dict)
+        }
         load_1m, load_5m, load_15m = os.getloadavg()
         memory = self.linux_memory_status()
         process_memory = process_memory_status()
@@ -576,7 +602,8 @@ class SystemTelemetryService:
         cpu_count = os.cpu_count() or 1
         generated_at = datetime.now(timezone.utc).isoformat()
         cameras = [
-            self._camera_payload(status, per_camera_activity) for status in camera_statuses
+            self._camera_payload(status, per_camera_activity, per_camera_storage)
+            for status in camera_statuses
         ]
         detector_runtime = detector.get("runtime") or {}
         history = self.record_history(

@@ -17,14 +17,15 @@ filesystems. New writes fail over when a location becomes unavailable or
 reaches its reserve. Existing indexed media remains readable from every
 configured location.
 
-The retention worker only removes indexed MP4 files inside configured
-recording-role directories. Capacity and watermarks are evaluated separately
-for each filesystem so one full location can be cleaned without treating free
-space on another disk as interchangeable.
+The retention worker removes indexed MP4 files inside configured recording-role
+directories and clean incident images inside configured snapshot-role
+directories. Capacity and watermarks are evaluated separately for recording
+filesystems so one full location can be cleaned without treating free space on
+another disk as interchangeable. Snapshot deletion is age-only.
 
 It never removes:
 
-- event clips, snapshots, faces, motion-audit images, or databases;
+- event clips, pinned face-reference images, motion-audit images, or databases;
 - a continuous segment still referenced by an incident;
 - an active recording or any segment from the newest five minutes; or
 - files outside the configured recordings directory.
@@ -36,20 +37,23 @@ the complete storage filesystem falls below the minimum watermark. Free-space
 cleanup continues toward the higher target watermark to avoid repeatedly
 starting and stopping around one threshold.
 
-The global defaults are seven days for main streams, 21 days for substreams, a
-13 TiB continuous-recording quota, cleanup below 15% free, a 20% free-space
-target, and a 5% emergency warning. Cameras inherit the stream age limits and
-can override either value independently.
+The global defaults are seven days for main streams, 21 days for substreams,
+1,095 days for incident snapshots, a 13 TiB continuous-recording quota, cleanup
+below 15% free, a 20% free-space target, and a 5% emergency warning. Cameras
+inherit the stream age limits and can override either value independently.
+Snapshot age is currently one global evidence policy.
 
 Automatic deletion is disabled by default. Admin > General > Storage displays
 the index-only dry-run projection, current growth rate, estimated headroom,
-eligible bytes, and per-camera usage. **Recalculate** refreshes the plan without
+eligible bytes, and per-camera recording/snapshot usage. **Recalculate** refreshes the plan without
 deleting anything. **Clean Up Now** requires confirmation and starts bounded,
 oldest-first cleanup. Enabling automatic cleanup applies the same guarded plan
 in the background.
 
-The worker uses the local SQLite recording index and does not walk media mounts during
-normal operation. It performs the complete storage projection once per day,
+The worker uses local SQLite recording and event indexes and does not walk
+media directories during normal operation. Legacy event rows without a cached
+image size are reconciled from their known paths in bounded batches. It performs
+the complete storage projection once per day,
 when retention settings change, when an operator requests recalculation, or
 when the free-space watermark is crossed. Lightweight index-driven expiration
 runs every 15 minutes between those projections.

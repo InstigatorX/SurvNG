@@ -264,7 +264,18 @@ class IntelligenceService:
             active_manager = self.deps.get_manager()
             rows, total = active_manager.events.motion_audits(limit=limit, offset=offset, camera_id=camera_id, outcome=outcome, category=category)
             storage_dir = active_manager.storage_dir
-        return {'items': [_motion_audit_row(row, storage_dir) for row in rows], 'total': total, 'limit': max(1, min(int(limit), 100)), 'offset': max(0, int(offset))}
+            media_storage = active_manager.media_storage
+        return {'items': [_motion_audit_row(row, storage_dir, media_storage) for row in rows], 'total': total, 'limit': max(1, min(int(limit), 100)), 'offset': max(0, int(offset))}
+
+    def motion_audit_detail(self, audit_id: int) -> dict:
+        with self.deps.manager_lock:
+            active_manager = self.deps.get_manager()
+            audit = active_manager.events.get_motion_audit(audit_id)
+            storage_dir = active_manager.storage_dir
+            media_storage = active_manager.media_storage
+        if audit is None:
+            raise HTTPException(status_code=404, detail='motion audit entry not found')
+        return _motion_audit_row(audit, storage_dir, media_storage)
 
     def motion_effectiveness(self, days: float=7.0) -> dict:
         with self.deps.manager_lock:
@@ -1678,6 +1689,7 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
     router = APIRouter()
     service = IntelligenceService(deps)
     router.add_api_route('/api/motion-audit', service.motion_audit, methods=['GET'])
+    router.add_api_route('/api/motion-audit/{audit_id}', service.motion_audit_detail, methods=['GET'])
     router.add_api_route('/api/motion-effectiveness', service.motion_effectiveness, methods=['GET'])
     router.add_api_route('/api/motion-audit/{audit_id}/snapshot.jpg', service.motion_audit_snapshot, methods=['GET'])
     router.add_api_route('/api/motion-audit/{audit_id}/ai-analyze', service.motion_audit_ai_analyze, methods=['POST'])
