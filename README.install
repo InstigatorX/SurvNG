@@ -1,12 +1,14 @@
 # SurvNG Docker Installation
 
-This guide installs SurvNG on a prepared Linux Docker host. The recommended
-path below enables Intel OpenVINO GPU inference and QSV/VA-API access. A
-CPU-only alternative is also included.
+This guide installs the current SurvNG release on a prepared Linux Docker
+host. The recommended path below enables Intel OpenVINO GPU inference and
+QSV/VA-API access. A CPU-only alternative and the supported Proxmox LXC build
+path are also included.
 
-The host only needs Docker, the Docker Compose plugin, Git, and—for the Intel
-path—a working `/dev/dri`. Python, Node, OpenVINO, and FFmpeg are installed
-inside the image.
+The host only needs Docker Engine, the Docker Compose plugin, Git, and—for the
+Intel path—a working `/dev/dri`. Python, Node.js, OpenVINO, and FFmpeg are
+installed inside the image. The container uses Linux host networking so the
+host must be able to reach every camera, go2rtc, MQTT broker, and media mount.
 
 ## 1. Download SurvNG
 
@@ -21,7 +23,7 @@ cd /opt/survng
 ## 2. Create persistent storage
 
 Keep configuration and databases on local storage. Recordings can reside on a
-local disk or a network filesystem already mounted by the Docker host.
+local disk or a network filesystem mounted by the Docker host.
 
 ```bash
 mkdir -p docker-data/config
@@ -29,14 +31,36 @@ mkdir -p docker-data/data
 mkdir -p docker-data/models
 sudo mkdir -p /srv/survng/media
 
-sudo chown -R 1000:1000 docker-data/config docker-data/data
-sudo chown -R 1000:1000 /srv/survng/media
+sudo chown -R "$(id -u):$(id -g)" docker-data/config docker-data/data
+sudo chown -R "$(id -u):$(id -g)" /srv/survng/media
 chmod 700 docker-data/config docker-data/data
 ```
 
 If `/srv/survng/media` is an NFS mount, mount it on the host first and ensure
-UID/GID `1000:1000` can write to it. Do not place `/config` or `/data` on NFS;
-SQLite databases and frequently updated caches should remain on local storage.
+the selected `SURVNG_UID` and `SURVNG_GID` can write to it. Do not place
+`/config` or `/data` on NFS; SQLite databases and frequently updated caches
+should remain on local storage.
+
+SurvNG can place recordings, snapshots, motion-audit images, clips, and
+exports across multiple disks. Mount every filesystem on the Docker host and
+expose each one at a distinct container path. For example, add a local
+`compose.storage.yaml` file:
+
+```yaml
+services:
+  survng:
+    volumes:
+      - /srv/survng-a:/media-a
+      - /srv/survng-b:/media-b
+```
+
+Include that file in every `docker compose` command, then configure `/media-a`
+and `/media-b` under **Admin → General → Storage → Media locations**. Enable
+**Require mount** for NFS, SMB, removable disks, and dedicated filesystems so
+SurvNG will not write into an empty local mountpoint. If only one media root is
+needed, the standard `/media` mapping remains sufficient. See
+[docs/storage.md](docs/storage.md) for placement modes, roles, reserves,
+retention, and failure behavior.
 
 ## 3. Create the environment file
 
@@ -45,7 +69,15 @@ cp .env.example .env
 nano .env
 ```
 
-A typical Intel GPU installation uses:
+Determine the numeric identity that should own SurvNG's local files:
+
+```bash
+id -u
+id -g
+```
+
+Use those values for `SURVNG_UID` and `SURVNG_GID`. A typical Intel GPU
+installation where both values are `1000` uses:
 
 ```dotenv
 TZ=America/New_York
@@ -78,6 +110,10 @@ ls -l /dev/dri
 
 The `.env` file should contain host paths and numeric IDs only. Camera, MQTT,
 and AI credentials belong in the private SurvNG configuration, not `.env`.
+
+If you created a Compose override such as `compose.storage.yaml`, append
+`-f compose.storage.yaml` to the build, config, up, ps, logs, down, and update
+commands in the remainder of this guide.
 
 ## 4. Build the image
 
@@ -171,7 +207,8 @@ docker-data/config/config.json
 ```
 
 It contains no cameras or credentials, and object detection initially remains
-disabled.
+disabled. SurvNG fills omitted settings with current schema defaults; later
+Admin saves persist the expanded configuration.
 
 ## 6. Open the application
 
@@ -187,6 +224,21 @@ directly.
 
 Restrict port 8088 to the trusted LAN/VPN or place it behind an authenticated
 reverse proxy.
+
+### Optional API authentication
+
+SurvNG supports scoped long-lived bearer tokens for Home Assistant, training
+tools, and other integrations. Authentication is disabled by default. Create,
+list, and delete tokens under **Admin → General → API**.
+
+The raw token is displayed once; only its SHA-256 digest is retained. Clients
+send `Authorization: Bearer <SURVNG_TOKEN>`. Available scopes are `read`,
+`camera:control`, and `admin`; `admin` includes the other two. The health
+endpoint remains unauthenticated.
+
+Do not enable API authentication until the browser and WebSocket requests will
+receive the bearer header. When using a reverse proxy, inject it only after the
+proxy authenticates the user and prevent direct untrusted access to port 8088.
 
 ## 7. Verify Intel acceleration
 
@@ -209,66 +261,50 @@ The output should include options such as `qsv`, `vaapi`, and `opencl`. Select
 `GPU` or `AUTO` for object detection in SurvNG. Device passthrough makes
 hardware acceleration available but does not force every workload to use it.
 
-## 8. Install detection and ReID models
+## 8. Install detection, recognition, and search models
 
-Model binaries are deliberately excluded from the Git repository and Docker
-image. Copy the required models from an existing SurvNG server or install them
-under:
+Large model binaries are deliberately excluded from the Docker image. Download
+or export the model packages required by the features you intend to enable,
+and place them under:
 
 ```text
 /opt/survng/docker-data/models/
 ```
 
-For example, run this on the existing server:
-
-```bash
-rsync -a --progress \
-  /root/SurvNG/docker-data/models/ \
-  NEW-SERVER:/opt/survng/docker-data/models/
-```
-
 Configure model paths using container-visible `/models` paths, for example:
 
 ```text
-/models/072926_openvino_model/best.xml
-/models/072926_openvino_model/classes.txt
+/models/detector/best.xml
+/models/detector/metadata.yaml
 ```
 
 Do not configure host paths such as `/root/SurvNG/models/...`; those paths do
 not exist inside the container. Keep each OpenVINO `.xml` with its matching
 `.bin`, labels, and any associated metadata.
 
-## 9. Optional: transfer an existing configuration
+Depending on the enabled features, the model mount can contain:
 
-To reproduce an existing installation, securely copy its Docker-ready private
-configuration:
+- the primary OpenVINO object detector and its class metadata;
+- the face detector, landmarks model, and face-embedding model;
+- person and vehicle ReID models; and
+- the MobileCLIP2 OpenVINO package used by Smart Search.
 
-```bash
-scp \
-  /root/SurvNG/docker-data/config/config.json \
-  NEW-SERVER:/opt/survng/docker-data/config/config.json
-```
+Configure and validate these under **Admin → Object Detection**. Model
+evaluation, parallel detector count, device selection, face recognition, ReID,
+and Smart Search are independent settings. Each parallel detector worker loads
+its own model instance, so start with one and increase only if Telemetry shows
+meaningful inference queue delay.
 
-Protect the copied configuration on the new server:
+The container-visible runtime paths are:
 
-```bash
-chmod 600 /opt/survng/docker-data/config/config.json
-```
+- `/media` for recordings and generated media;
+- `/data/database` for SQLite databases;
+- `/data/recording-index` for the recording index;
+- `/data/openvino-cache` for compiled OpenVINO cache files;
+- `/models/...` for detection, face, semantic, and ReID models; and
+- `/usr/bin/ffmpeg` for the container FFmpeg executable.
 
-Review all container-visible filesystem paths. They should normally use:
-
-- `/media` for recordings and generated media
-- `/data/database` for SQLite databases
-- `/data/recording-index` for the recording index
-- `/data/openvino-cache` for compiled OpenVINO cache files
-- `/models/...` for detection, face, semantic, and ReID models
-- `/usr/bin/ffmpeg` for the container FFmpeg executable
-
-Never run native/systemd and Docker SurvNG instances against the same cameras
-simultaneously. Doing so duplicates RTSP streams, recorders, MQTT clients, and
-ONVIF subscriptions.
-
-## 10. Health and functional verification
+## 9. Health and functional verification
 
 Check the application health endpoint:
 
@@ -284,15 +320,50 @@ Then verify the following through the UI:
 4. Object detection produces an incident.
 5. ONVIF motion events are received.
 6. MQTT connects and publishes when enabled.
+7. Every configured media location is online, writable, and above reserve.
+8. Snapshot and recording retention show the expected per-camera usage.
 
-## 11. Future updates
+If API authentication is enabled, also verify a scoped request:
 
-Update the source and rebuild the Intel image:
+```bash
+curl -fsS \
+  -H 'Authorization: Bearer <SURVNG_TOKEN>' \
+  http://127.0.0.1:8088/api/cameras
+```
+
+## 10. Upgrade to newer commits
+
+SurvNG is installed from the checked-out Git repository. Pulling commits alone
+does not update a running container: rebuild the image and recreate the service
+after every source update.
+
+First inspect the checkout and review the available commits:
 
 ```bash
 cd /opt/survng
-git pull --ff-only
+git status --short
+git fetch --prune origin
+git log --oneline HEAD..origin/main
+```
 
+`git status --short` should show no tracked modifications. The normal `.env`
+and `docker-data/` paths are ignored and are not replaced by Git. A local
+`compose.storage.yaml` may appear as an untracked `??` file; keep it and include
+it in the Compose commands. If tracked files are modified, preserve or commit
+those changes before continuing; do not discard them merely to make the pull
+succeed.
+
+Pull the new commits with a fast-forward-only update:
+
+```bash
+git pull --ff-only origin main
+git rev-parse --short HEAD
+```
+
+For an Intel GPU installation, build the updated image while the currently
+running container remains online, then recreate it:
+
+```bash
 docker compose \
   -f compose.yaml \
   -f compose.intel-gpu.yaml \
@@ -301,22 +372,50 @@ docker compose \
 docker compose \
   -f compose.yaml \
   -f compose.intel-gpu.yaml \
-  up -d
+  up -d --remove-orphans
 ```
 
 For CPU-only installations:
 
 ```bash
-cd /opt/survng
-git pull --ff-only
 docker compose build --pull
-docker compose up -d
+docker compose up -d --remove-orphans
 ```
 
-Configuration, databases, models, and recordings are bind-mounted outside the
-image and survive rebuilds.
+For the Proxmox LXC helper path, use the dedicated builder and start the
+already-built image:
 
-## 12. Backup
+```bash
+scripts/docker-build-lxc.sh
+
+docker compose \
+  -f compose.yaml \
+  -f compose.intel-gpu.yaml \
+  -f compose.lxc.yaml \
+  up -d --no-build --remove-orphans
+```
+
+If a local `compose.storage.yaml` override is used, include it in both commands
+as explained in section 3. Never start the updated container without the same
+storage overrides used by the installed deployment.
+
+Verify the upgraded service:
+
+```bash
+docker ps --filter name=survng
+docker logs --tail=200 survng
+curl -fsS http://127.0.0.1:8088/api/health
+```
+
+Confirm the commit shown by `git rev-parse --short HEAD` is the one intended
+and perform the functional checks in section 9.
+
+Configuration, databases, indexes, models, and media are bind-mounted outside
+the image and survive rebuilds. Back them up before an upgrade that includes
+schema or storage changes. Source rollback does not guarantee that newer
+database or configuration state is compatible with an older SurvNG image.
+
+## 11. Backup
 
 Stop SurvNG before making a simple filesystem backup of its local state:
 
@@ -336,14 +435,16 @@ docker compose \
   up -d
 ```
 
-Back up model files separately if they cannot easily be reproduced. Recordings
-under `/media` normally follow SurvNG's configured retention policy.
+Back up model files separately if they cannot easily be reproduced. Recordings,
+snapshots, motion-audit evidence, clips, and exports under `/media` or any
+additional configured media roots follow SurvNG's storage and retention
+policies; include protected exports or irreplaceable incident evidence in a
+separate backup policy.
 
 Do not add `-v` to `docker compose down`; the deployment intentionally keeps
 all persistent bind-mounted state outside the image.
 
-## Current FFmpeg note
+## 12. FFmpeg version
 
-The Docker image currently installs Ubuntu 24.04's packaged FFmpeg 6.1.x. A
-native SurvNG installation that uses a custom FFmpeg 8.1.x executable therefore
-does not yet have exact FFmpeg version parity with this Docker image.
+The Docker image installs Ubuntu 24.04's packaged FFmpeg 6.1.x. Confirm the
+active version with `docker exec survng ffmpeg -version`.
