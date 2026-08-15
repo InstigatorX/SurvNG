@@ -7,8 +7,8 @@ SurvNG separates the signal that **starts** a motion event from the visual analy
 ```text
 ONVIF camera notice
   → optional adaptive validation
-  → high-resolution recorded-frame extraction
-  → object detection
+  → fresh live-frame object check
+  → durable high-resolution recorded-frame refinement
   → incident when an eligible object is found
 ```
 
@@ -30,7 +30,7 @@ strong persistent EMA motion                       │
 
 This default mode keeps ONVIF as the primary trigger but covers a camera that occasionally fails to send a notice. After a startup learning period lets the adaptive background stabilize, an EMA backup is considered only when motion is accepted, exceeds both an absolute confidence floor and a margin above the learned scene threshold, persists for multiple samples, and does not match known illumination, insect, persistent-scene, or stationary-foreground rejection reasons.
 
-Camera notices and qualified EMA evidence enter one per-camera motion episode. An ONVIF notice suppresses duplicate EMA work only after an object-detection request for that episode was actually admitted; an observed notice whose work could not be queued cannot hide a later EMA rescue. A backup invocation does not create an empty incident: high-resolution object detection must find an incident-eligible object. Every completed backup attempt is stored under **Admin > Motion Audit > EMA backup**, including attempts where no object was found.
+Camera notices and qualified EMA evidence enter one per-camera motion episode. An ONVIF notice suppresses duplicate EMA work only after an object-detection request for that episode was actually admitted; an observed notice whose work could not be queued cannot hide a later EMA rescue. A backup invocation does not create an empty incident: durable main-recording refinement must find an incident-eligible object that passes the required causal checks. Every completed backup attempt is stored under **Admin > Motion Audit > EMA backup**, including attempts where no object was found.
 
 This is the recommended general-purpose behavior when ONVIF is normally reliable but an occasional missing camera notice is unacceptable. It costs more CPU than Camera-triggered mode because EMA must continuously inspect the live/substream feed. It remains more conservative than EMA-only mode.
 
@@ -40,8 +40,8 @@ This is the recommended general-purpose behavior when ONVIF is normally reliable
 live/substream video
   → EMA visual trigger
   → event state and cooldown
-  → high-resolution recorded-frame extraction
-  → object detection
+  → fresh live-frame object check
+  → durable high-resolution recorded-frame refinement
 ```
 
 EMA visual motion is the only automatic trigger. Ordinary ONVIF notices are retained as diagnostic evidence but cannot start object detection. Manual tests remain available.
@@ -55,7 +55,15 @@ Adaptive analysis reads the camera's live capture source:
 1. `live_stream_url` when a live/substream is configured.
 2. `stream_url` when no separate live stream exists.
 
-The frame is downscaled to `motion_qualification.frame_width` and converted to grayscale. The default is 320 pixels wide at 5 samples per second. Continuous recording remains stream-copy based and object detection uses high-resolution frames from the main recording after a trigger.
+The frame is downscaled to `motion_qualification.frame_width` and converted to
+grayscale. The default is 320 pixels wide at 5 samples per second. Continuous
+recording remains stream-copy based. After a trigger, object detection performs
+a strictly fresh live-frame check for low latency and always schedules the
+high-resolution main-recording temporal pass. The fast frame is provisional;
+main evidence supplies temporal confirmation and normally supplies the durable
+representative cover. See [Incident evidence data
+path](incident-evidence-data-path.md) for the complete frame provenance,
+geometry, correlation, refinement, and cover-selection contract.
 
 ## EMA exclusion zones
 

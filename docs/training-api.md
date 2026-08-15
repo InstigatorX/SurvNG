@@ -66,6 +66,11 @@ the representative snapshot's other annotations.
 sample offset for the representative image. `sample_id` remains stable for an
 event, while `revision` changes if delayed refinement replaces its image or
 object evidence. Importers should use both fields when synchronizing updates.
+An event may begin with a provisional live/substream image and later promote a
+compatible main-recording or tracked cover. The image dimensions, annotations,
+`captured_at`, and `revision` move together so a consumer never needs to map an
+old coordinate plane onto the new image. See [Incident evidence data
+path](incident-evidence-data-path.md) for the source and promotion rules.
 
 ## Unreviewed negative candidates
 

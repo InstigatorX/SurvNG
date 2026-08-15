@@ -1,5 +1,10 @@
 # Recording frame API
 
+This endpoint is the public arbitrary-time extraction contract. It is separate
+from the incident pipeline's live provisional check and recorded temporal
+refinement. See [Incident evidence data path](incident-evidence-data-path.md)
+for how SurvNG selects and promotes incident evidence internally.
+
 SurvNG can return a clean recording frame near an arbitrary UTC epoch:
 
 ```text

@@ -367,7 +367,20 @@ For ONVIF, use the camera host, ONVIF port, username, and password. Many Reolink
 
 ### Stream Source Strategy
 
-Use `stream_url` for the main/high-resolution stream and `live_stream_url` for the optional low-latency live preview/substream. SurvNG records the main stream continuously. ONVIF motion events trigger object detection by sampling five high-resolution frames from the recorded main stream around the event timestamp. Spatially consistent detections are combined across those frames, confidence uses the median instead of the highest outlier, and only labels meeting the configured confirmation count become object incidents. The default is two matching frames; optional per-class overrides can require stronger or weaker evidence. The representative confirmed frame becomes the event snapshot.
+Use `stream_url` for the main/high-resolution stream and `live_stream_url` for
+the optional low-latency live preview/substream. SurvNG records the main stream
+continuously. After a detection request is admitted, SurvNG first checks a
+strictly fresh frame already held by live capture so it does not wait for the
+open main-recording segment to finalize. This is provisional evidence and is
+normally the substream when one is configured. A durable delayed pass then
+samples high-resolution main recordings at several timestamps, combines
+spatially consistent detections, uses median confidence rather than the highest
+outlier, and applies the configured confirmation count. Cover selection is
+independent from incident admission: a compatible, materially better main frame
+can replace the provisional cover without changing the security decision, and
+ambiguous scenes remain unchanged for later tracking-based verification. See
+[Incident evidence data path](docs/incident-evidence-data-path.md) for the full
+source, timing, geometry, refinement, and cover-promotion contract.
 
 Recorder timestamp handling is discontinuity-aware. Persistent regressing or rebased FFmpeg timestamps are coalesced into one diagnostic event and cause only the affected camera/source to begin a new recording epoch. The old recorder is finalized before its replacement starts, replacement health is verified, and recovery is rate-limited to prevent restart loops. Per-source discontinuity, rollover, failure, and rate-limit counters are exposed with camera status and under Admin > Telemetry.
 
@@ -408,7 +421,12 @@ notices:
 
 Camera only and Camera + EMA validation never allow EMA to create an event. Camera + EMA backup preserves the camera as primary but permits a tightly bounded EMA backup attempt. After the configured warmup, backup triggering waits for a quiet scene baseline; an eligible object must then overlap the credible EMA motion region or demonstrate movement across detector samples before an incident is created. This prevents a parked vehicle or other stationary object elsewhere in the frame from validating unrelated shadows, vegetation, or exposure changes. EMA only never allows ordinary ONVIF notices to create an event. If EMA validation is unavailable or still warming, camera-triggered events fail open so object detection still runs. Each camera can inherit or override the global mode, sensitivity, and configured qualification, observation, or fusion stage graph. Empty global graph lists retain the built-in pipeline.
 
-Adaptive analysis uses the camera's live feed: `live_stream_url` when a substream is configured, otherwise `stream_url`. Frames are downscaled to `frame_width` (320 px by default), converted to grayscale, and sampled at `sample_fps` (5 FPS by default). Object detection after a trigger uses high-resolution frames from the main recording.
+Adaptive analysis uses the camera's live feed: `live_stream_url` when a
+substream is configured, otherwise `stream_url`. Frames are downscaled to
+`frame_width` (320 px by default), converted to grayscale, and sampled at
+`sample_fps` (5 FPS by default). After a trigger, a fresh live frame supplies
+the provisional low-latency check; durable temporal refinement and normal cover
+selection use high-resolution frames from the main recording.
 
 All cameras remain eligible for analysis, but a shared application semaphore permits at most two cameras to execute the CPU-heavy visual pipeline simultaneously. Each camera has a bounded latest-frame queue, so stale pending analysis is replaced instead of accumulating. This limit does not restrict capture, continuous recording, live view, or the number of cameras with motion detection enabled.
 
