@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -66,6 +67,8 @@ def test_store_upgrades_pre_expected_camera_schema(tmp_path) -> None:
     with sqlite3.connect(path) as conn:
         columns = {row[1] for row in conn.execute("pragma table_info(camera_metric_buckets)")}
     assert "expected" in columns
+    assert "tracking_completed" not in columns
+    assert "incidents_created" not in columns
 
 
 def test_lifecycle_events_are_durable_bounded_and_validated(tmp_path) -> None:
@@ -164,6 +167,8 @@ def test_operational_history_combines_camera_and_system_metrics(tmp_path) -> Non
             sampled_at=sampled_at,
             cpu_load_percent=25.0,
             inference_ms=18.0,
+            detector_requests=4,
+            detector_failures=1,
         ),
         [
             CameraTelemetryBucket(
@@ -175,6 +180,8 @@ def test_operational_history_combines_camera_and_system_metrics(tmp_path) -> Non
                 ema_credible_episodes=2,
                 object_checks_admitted=1,
                 object_checks_completed=1,
+                tracking_requested=2,
+                tracking_delayed=1,
             )
         ],
     )
@@ -186,6 +193,10 @@ def test_operational_history_combines_camera_and_system_metrics(tmp_path) -> Non
     assert row["analysis_coverage_percent"] == 98.0
     assert row["cpu_load_percent"] == 25.0
     assert row["ema_credible_episodes"] == 2
+    assert row["detector_requests"] == 4
+    assert row["detector_failures"] == 1
+    assert row["tracking_requested"] == 2
+    assert row["tracking_delayed"] == 1
     assert store.sample_times(hours=2, now=sampled_at) == [sampled_at.isoformat()]
 
 
@@ -221,6 +232,43 @@ def test_disabled_camera_is_not_counted_as_available_or_expected(tmp_path) -> No
     assert disabled_row["camera_availability_percent"] is None
 
 
+def test_rollup_availability_excludes_disabled_intervals(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    start = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    store.write_buckets(
+        SystemTelemetryBucket(sampled_at=start),
+        [
+            CameraTelemetryBucket(
+                sampled_at=start,
+                camera_id="foyer",
+                expected=0.0,
+                available=0.0,
+            )
+        ],
+    )
+    store.write_buckets(
+        SystemTelemetryBucket(sampled_at=start + timedelta(minutes=1)),
+        [
+            CameraTelemetryBucket(
+                sampled_at=start + timedelta(minutes=1),
+                camera_id="foyer",
+                expected=1.0,
+                available=1.0,
+            )
+        ],
+    )
+    store.refresh_rollups(sampled_at=start + timedelta(minutes=1))
+
+    row = store.operational_history(
+        hours=1,
+        bucket_minutes=15,
+        camera_id="foyer",
+        now=start + timedelta(minutes=2),
+    )[0]
+    assert row["expected_cameras"] == 0.5
+    assert row["camera_availability_percent"] == 100.0
+
+
 def test_diagnostic_sessions_expire_and_export_bounded_samples(tmp_path) -> None:
     store = TelemetryStore(tmp_path)
     started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
@@ -238,6 +286,32 @@ def test_diagnostic_sessions_expire_and_export_bounded_samples(tmp_path) -> None
 
     store.enforce_retention(now=started + timedelta(days=8))
     assert store.diagnostic_export(session["id"]) is None
+
+
+def test_diagnostic_stream_is_valid_and_stopped_session_rejects_late_sample(
+    tmp_path,
+) -> None:
+    store = TelemetryStore(tmp_path)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    session = store.create_diagnostic_session(
+        scope="system", duration_seconds=900, started_at=started
+    )
+    assert store.write_diagnostic_samples(
+        [session["id"]], sampled_at=started, payload={"value": 1}
+    ) == 1
+    assert store.stop_diagnostic_session(
+        session["id"], stopped_at=started + timedelta(seconds=1)
+    )
+    assert store.write_diagnostic_samples(
+        [session["id"]],
+        sampled_at=started + timedelta(seconds=2),
+        payload={"value": 2},
+    ) == 0
+
+    chunks = store.diagnostic_export_chunks(session["id"])
+    assert chunks is not None
+    report = json.loads(b"".join(chunks))
+    assert [sample["payload"]["value"] for sample in report["samples"]] == [1]
 
 
 def test_diagnostic_payload_budget_removes_oldest_samples(tmp_path) -> None:

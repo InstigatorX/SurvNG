@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from fastapi.responses import StreamingResponse
+
 from survng.app.system_telemetry import (
     DiagnosticSessionRequest,
     SystemTelemetryDependencies,
@@ -102,6 +104,7 @@ class SystemTelemetryRouterTest(unittest.TestCase):
         runtime_monitor = Mock()
         runtime_monitor.start_diagnostics.return_value = {"id": "session-1"}
         runtime_monitor.stop_diagnostics.return_value = True
+        runtime_monitor.export_diagnostics_stream.return_value = iter([b"{}"])
         manager = SimpleNamespace(runtime_monitor=runtime_monitor)
         router = create_system_telemetry_router(
             SystemTelemetryDependencies(get_manager=lambda: manager, get_config=Mock()),
@@ -116,6 +119,13 @@ class SystemTelemetryRouterTest(unittest.TestCase):
         )
         assert created == {"id": "session-1"}
         assert routes[("/api/telemetry/diagnostics/{session_id}", ("DELETE",))]("session-1") == {"stopped": True}
+        response = routes[("/api/telemetry/diagnostics/{session_id}", ("GET",))](
+            "session-1"
+        )
+        assert isinstance(response, StreamingResponse)
+        assert response.headers["content-disposition"].endswith(
+            'survng-diagnostics-session-1.json"'
+        )
 
     def test_system_status_includes_lightweight_cpu_and_application_memory(self) -> None:
         manager = SimpleNamespace(

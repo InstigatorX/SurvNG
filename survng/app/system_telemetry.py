@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import AppConfig
@@ -749,11 +750,19 @@ def create_system_telemetry_router(
         return {"stopped": True}
 
     @router.get("/api/telemetry/diagnostics/{session_id}")
-    def export_diagnostics(session_id: str) -> dict[str, Any]:
+    def export_diagnostics(session_id: str) -> StreamingResponse:
         active_manager = dependencies.get_manager()
-        payload = active_manager.runtime_monitor.export_diagnostics(session_id)
-        if payload is None:
+        chunks = active_manager.runtime_monitor.export_diagnostics_stream(session_id)
+        if chunks is None:
             raise HTTPException(status_code=404, detail="diagnostic session not found")
-        return payload
+        return StreamingResponse(
+            chunks,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="survng-diagnostics-{session_id}.json"'
+                )
+            },
+        )
 
     return router

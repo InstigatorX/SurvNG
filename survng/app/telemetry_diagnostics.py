@@ -2,14 +2,35 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from .telemetry_contract import DIAGNOSTIC_DURATIONS_SECONDS, DIAGNOSTIC_SCOPES
+from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
+
+
+def _diagnostic_safe(value: Any) -> Any:
+    """Make diagnostic payloads finite, bounded, and credential-safe."""
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return redact_secret_text(value)[:2000]
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:128]: _diagnostic_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_diagnostic_safe(item) for item in value]
+    return redact_secret_text(str(value))[:2000]
 
 
 class DiagnosticTelemetryController:
@@ -29,7 +50,7 @@ class DiagnosticTelemetryController:
         self._camera_unavailable_samples: dict[str, int] = {}
         self._camera_anomaly_active: set[str] = set()
         self._detector_failure_count: int | None = None
-        self._detector_saturated_samples = 0
+        self._detector_backlog_samples = 0
         self._storage_anomaly_active = False
 
     @staticmethod
@@ -58,6 +79,7 @@ class DiagnosticTelemetryController:
         *,
         detector_runtime: dict[str, Any],
         storage_status: dict[str, Any] | None = None,
+        camera_startup_complete: bool = True,
         now_monotonic: float | None = None,
         sampled_at: datetime | None = None,
     ) -> None:
@@ -67,7 +89,7 @@ class DiagnosticTelemetryController:
                 return
             self._last_sample_monotonic = monotonic
         current = sampled_at or datetime.now(timezone.utc)
-        payload = {
+        payload = _diagnostic_safe({
             "detector_runtime": dict(detector_runtime),
             "storage": dict(storage_status or {}),
             "cameras": {
@@ -75,7 +97,7 @@ class DiagnosticTelemetryController:
                 for status in statuses
                 if status.get("id")
             },
-        }
+        })
         with self._lock:
             self._ring.append((current, payload))
         active = self._store.diagnostic_sessions(active_only=True, now=current)
@@ -92,7 +114,11 @@ class DiagnosticTelemetryController:
                     self._samples_since_budget_check = 0
             if check_budget:
                 self._store.enforce_diagnostic_budget()
-        self._detect_anomalies(payload, current)
+        self._detect_anomalies(
+            payload,
+            current,
+            camera_startup_complete=camera_startup_complete,
+        )
 
     @staticmethod
     def _scoped_payload(
@@ -167,13 +193,22 @@ class DiagnosticTelemetryController:
                 started_at=current,
             )
 
-    def _detect_anomalies(self, payload: dict[str, Any], current: datetime) -> None:
+    def _detect_anomalies(
+        self,
+        payload: dict[str, Any],
+        current: datetime,
+        *,
+        camera_startup_complete: bool,
+    ) -> None:
         cameras = dict(payload.get("cameras") or {})
         present: set[str] = set()
         for camera_id, camera in cameras.items():
             if not isinstance(camera, dict):
                 continue
             present.add(str(camera_id))
+            if not camera_startup_complete:
+                self._camera_unavailable_samples[str(camera_id)] = 0
+                continue
             unhealthy = bool(camera.get("expected_enabled", True)) and not bool(
                 camera.get("connected")
             )
@@ -217,15 +252,14 @@ class DiagnosticTelemetryController:
             )
         self._detector_failure_count = failures
         depth = int(detector.get("queue_depth") or 0)
-        capacity = int(detector.get("queue_capacity") or 0)
-        saturated = capacity > 0 and depth >= capacity
-        self._detector_saturated_samples = self._detector_saturated_samples + 1 if saturated else 0
-        if self._detector_saturated_samples == 3:
+        backlogged = depth > 0
+        self._detector_backlog_samples = self._detector_backlog_samples + 1 if backlogged else 0
+        if self._detector_backlog_samples == 3:
             self._start_automatic_session(
-                kind="detector_saturated",
+                kind="detector_backlog",
                 scope="detector",
                 camera_id="",
-                summary="Object detector queue remained at capacity",
+                summary="Object detector queue remained backlogged",
                 current=current,
             )
 
@@ -259,3 +293,6 @@ class DiagnosticTelemetryController:
 
     def export(self, session_id: str) -> dict[str, Any] | None:
         return self._store.diagnostic_export(session_id)
+
+    def export_stream(self, session_id: str) -> Iterator[bytes] | None:
+        return self._store.diagnostic_export_chunks(session_id)

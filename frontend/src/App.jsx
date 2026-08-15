@@ -8403,7 +8403,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           })}
         </div>
       </section>
-      <p className="telemetry-footnote">Availability, interruptions, EMA coverage, event delivery, and tracking capacity are the primary health signals. “Stale skipped” means a newer frame replaced an older pending sample so analysis stayed current; it matters only when coverage drops persistently. Camera-health samples are retained for eight days.</p>
+      <p className="telemetry-footnote">Availability, interruptions, EMA coverage, event delivery, and tracking capacity are the primary health signals. “Stale skipped” means a newer frame replaced an older pending sample so analysis stayed current; it matters only when coverage drops persistently. One-minute detail is retained for 48 hours, with compact summaries retained longer.</p>
     </div>
     </TelemetryInterruptionsContext.Provider>
   );

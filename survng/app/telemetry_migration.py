@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import sqlite3
 import zlib
@@ -28,6 +29,10 @@ def _decode(value: object) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _delta(current: int, previous: int | None) -> int:
     if previous is None:
         return 0
@@ -40,6 +45,13 @@ def _finite(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if result == result and abs(result) != float("inf") else None
+
+
+def _integer(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def migrate_legacy_runtime_telemetry(
@@ -84,58 +96,66 @@ def migrate_legacy_runtime_telemetry(
                     if sampled_at.tzinfo is None:
                         sampled_at = sampled_at.replace(tzinfo=timezone.utc)
                     payload = _decode(row["payload_json"])
-                except (TypeError, ValueError, json.JSONDecodeError, zlib.error):
+                except (
+                    TypeError,
+                    ValueError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    zlib.error,
+                    binascii.Error,
+                ):
                     continue
-                process = dict(payload.get("process_memory") or {})
-                workers = dict(payload.get("worker_memory") or {})
-                runtime = dict(payload.get("system_runtime") or {})
+                process = _mapping(payload.get("process_memory"))
+                workers = _mapping(payload.get("worker_memory"))
+                runtime = _mapping(payload.get("system_runtime"))
                 systems.append(
                     SystemTelemetryBucket(
                         sampled_at=sampled_at,
                         cpu_load_percent=_finite(runtime.get("cpu_load_percent")),
                         memory_used_percent=_finite(runtime.get("memory_used_percent")),
-                        application_rss_bytes=int(process.get("rss_bytes") or 0),
-                        worker_rss_bytes=int(workers.get("total_rss_bytes") or 0),
+                        application_rss_bytes=_integer(process.get("rss_bytes")),
+                        worker_rss_bytes=_integer(workers.get("total_rss_bytes")),
                         inference_ms=_finite(runtime.get("inference_ms")),
                     )
                 )
-                for camera_id, item in dict(payload.get("cameras") or {}).items():
+                for camera_id, item in _mapping(payload.get("cameras")).items():
                     if not isinstance(item, dict):
                         continue
-                    capture = dict(item.get("capture") or {})
-                    live = dict(capture.get("live") or {})
-                    main = dict(capture.get("main") or {})
-                    analysis = dict(item.get("analysis_runtime") or {})
-                    event_runtime = dict(item.get("event_runtime") or {})
-                    decisions = dict(
-                        (event_runtime.get("episode") or {}).get("decision_counts") or {}
-                    )
+                    capture = _mapping(item.get("capture"))
+                    live = _mapping(capture.get("live"))
+                    main = _mapping(capture.get("main"))
+                    analysis = _mapping(item.get("analysis_runtime"))
+                    event_runtime = _mapping(item.get("event_runtime"))
+                    decisions = _mapping(_mapping(event_runtime.get("episode")).get("decision_counts"))
                     current = {
-                        "capture_interruptions": int(live.get("read_failures") or 0)
-                        + int(live.get("open_failures") or 0)
-                        + int(main.get("read_failures") or 0)
-                        + int(main.get("open_failures") or 0),
-                        "ema_frames_sampled": int(analysis.get("frames_sampled") or 0),
-                        "ema_frames_superseded": int(item.get("analysis_frames_dropped") or 0),
-                        "ema_credible_episodes": int(decisions.get("request_reserved") or 0),
-                        "object_checks_admitted": int(decisions.get("request_admitted") or 0),
-                        "object_checks_completed": int(decisions.get("request_completed") or 0),
-                        "object_check_failures": int(decisions.get("detector_failed") or 0),
+                        "capture_interruptions": _integer(live.get("read_failures"))
+                        + _integer(live.get("open_failures"))
+                        + _integer(main.get("read_failures"))
+                        + _integer(main.get("open_failures")),
+                        "ema_frames_sampled": _integer(analysis.get("frames_sampled")),
+                        "ema_frames_superseded": _integer(item.get("analysis_frames_dropped")),
+                        "ema_credible_episodes": _integer(decisions.get("request_reserved")),
+                        "object_checks_admitted": _integer(decisions.get("request_admitted")),
+                        "object_checks_completed": _integer(decisions.get("request_completed")),
+                        "object_check_failures": _integer(decisions.get("detector_failed")),
                     }
                     old = previous.get(str(camera_id), {})
                     deltas = {key: _delta(value, old.get(key)) for key, value in current.items()}
                     previous[str(camera_id)] = current
-                    frame_age = item.get("frame_age_seconds")
-                    fresh = frame_age is None or float(frame_age) <= 5.0
+                    raw_frame_age = item.get("frame_age_seconds")
+                    frame_age = _finite(raw_frame_age)
+                    fresh = raw_frame_age is None or (
+                        frame_age is not None and frame_age <= 5.0
+                    )
                     enabled = bool(item.get("enabled", True))
                     cameras.append(
                         CameraTelemetryBucket(
                             sampled_at=sampled_at,
                             camera_id=str(camera_id),
                             expected=float(enabled),
-                            available=float(not enabled or (bool(item.get("connected")) and fresh)),
-                            live_fps=float(live.get("fps") or 0.0),
-                            main_fps=float(main.get("fps") or 0.0),
+                            available=float(enabled and bool(item.get("connected")) and fresh),
+                            live_fps=_finite(live.get("fps")) or 0.0,
+                            main_fps=_finite(main.get("fps")) or 0.0,
                             **deltas,
                         )
                     )

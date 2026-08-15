@@ -51,3 +51,74 @@ def test_sustained_camera_outage_creates_one_automatic_session(tmp_path) -> None
     assert sessions[0]["trigger_kind"] == "camera_unavailable"
     events = store.operational_event_history(hours=1, now=started)
     assert [event["kind"] for event in events] == ["camera_unavailable"]
+
+
+def test_camera_outages_are_not_reported_during_startup_admission(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    controller = DiagnosticTelemetryController(store)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    status = [{"id": "gate", "expected_enabled": True, "connected": False}]
+    for index in range(6):
+        controller.observe(
+            status,
+            detector_runtime={},
+            camera_startup_complete=False,
+            now_monotonic=10 + index * 5,
+            sampled_at=started,
+        )
+
+    assert not store.diagnostic_sessions(active_only=True, now=started)
+    assert not store.operational_event_history(hours=1, now=started)
+
+    for index in range(3):
+        controller.observe(
+            status,
+            detector_runtime={},
+            camera_startup_complete=True,
+            now_monotonic=40 + index * 5,
+            sampled_at=started,
+        )
+    assert len(store.diagnostic_sessions(active_only=True, now=started)) == 1
+
+
+def test_sustained_detector_backlog_uses_available_runtime_signal(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    controller = DiagnosticTelemetryController(store)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    for index in range(3):
+        controller.observe(
+            [],
+            detector_runtime={"queue_depth": 1},
+            now_monotonic=10 + index * 5,
+            sampled_at=started,
+        )
+
+    events = store.operational_event_history(hours=1, now=started)
+    assert [event["kind"] for event in events] == ["detector_backlog"]
+
+
+def test_diagnostic_payload_redacts_credentials_and_normalizes_nonfinite_values(
+    tmp_path,
+) -> None:
+    store = TelemetryStore(tmp_path)
+    controller = DiagnosticTelemetryController(store)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    controller.observe(
+        [],
+        detector_runtime={
+            "last_error": "rtsp://admin:secret@camera/live token=abc",
+            "average_inference_ms": float("nan"),
+        },
+        now_monotonic=10,
+        sampled_at=started,
+    )
+    session = controller.start(
+        scope="detector", duration_seconds=900, started_at=started
+    )
+
+    exported = controller.export(session["id"])
+    assert exported is not None
+    detector = exported["samples"][0]["payload"]["detector_runtime"]
+    assert "secret" not in detector["last_error"]
+    assert "token=abc" not in detector["last_error"]
+    assert detector["average_inference_ms"] is None

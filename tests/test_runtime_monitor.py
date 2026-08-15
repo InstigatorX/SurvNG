@@ -64,6 +64,11 @@ def test_operational_collector_persists_interval_deltas(tmp_path) -> None:
     status["capture_stats"]["live"]["read_failures"] = 6
     status["motion_qualification"]["analysis_runtime"]["frames_sampled"] = 125
     status["motion_qualification"]["event_runtime"]["episode"]["decision_counts"]["request_admitted"] = 4
+    status["object_tracking"] = {
+        "capacity_requests": 4,
+        "capacity_waits": 2,
+        "capacity_timeouts": 1,
+    }
     _, second = collector.collect(
         [status],
         sampled_at=sampled_at,
@@ -77,6 +82,75 @@ def test_operational_collector_persists_interval_deltas(tmp_path) -> None:
     assert second[0].capture_interruptions == 2
     assert second[0].ema_frames_sampled == 25
     assert second[0].object_checks_admitted == 1
+    assert second[0].tracking_requested == 4
+    assert second[0].tracking_delayed == 2
+    assert second[0].tracking_skipped == 1
+
+
+def test_operational_collector_uses_real_detector_runtime_counter_names() -> None:
+    from datetime import datetime, timezone
+
+    from survng.app.runtime_monitor import OperationalTelemetryCollector
+
+    collector = OperationalTelemetryCollector()
+    sampled_at = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    collector.collect(
+        [],
+        sampled_at=sampled_at,
+        process_memory={},
+        worker_memory={},
+        system_runtime={},
+        detector_runtime={"total_inferences": 10, "failed_inferences": 1},
+    )
+    system, _ = collector.collect(
+        [],
+        sampled_at=sampled_at,
+        process_memory={},
+        worker_memory={},
+        system_runtime={},
+        detector_runtime={"total_inferences": 14, "failed_inferences": 2},
+    )
+
+    assert system.detector_requests == 4
+    assert system.detector_failures == 1
+
+
+def test_operational_collector_handles_one_detector_worker_counter_reset() -> None:
+    from datetime import datetime, timezone
+
+    from survng.app.runtime_monitor import OperationalTelemetryCollector
+
+    collector = OperationalTelemetryCollector()
+    sampled_at = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    common = {
+        "sampled_at": sampled_at,
+        "process_memory": {},
+        "worker_memory": {},
+        "system_runtime": {},
+    }
+    collector.collect(
+        [],
+        detector_runtime={
+            "workers": [
+                {"index": 1, "total_inferences": 50, "failed_inferences": 1},
+                {"index": 2, "total_inferences": 50, "failed_inferences": 0},
+            ]
+        },
+        **common,
+    )
+    system, _ = collector.collect(
+        [],
+        detector_runtime={
+            "workers": [
+                {"index": 1, "total_inferences": 5, "failed_inferences": 0},
+                {"index": 2, "total_inferences": 54, "failed_inferences": 1},
+            ]
+        },
+        **common,
+    )
+
+    assert system.detector_requests == 9
+    assert system.detector_failures == 1
 
 
 class ApplicationRuntimeMonitorTest(unittest.TestCase):
@@ -187,6 +261,18 @@ class ApplicationRuntimeMonitorTest(unittest.TestCase):
         monitor.publish_camera_status("missing")
 
         state_events.publish.assert_called_once_with("camera_state", status)
+
+    def test_camera_diagnostics_reject_unknown_camera(self) -> None:
+        monitor, _inference, _events, _state_events = runtime_monitor(
+            statuses=[{"id": "gate"}]
+        )
+        monitor._diagnostics = Mock()
+
+        with self.assertRaisesRegex(ValueError, "unknown diagnostic camera"):
+            monitor.start_diagnostics(
+                scope="camera", camera_id="missing", duration_seconds=900
+            )
+        monitor._diagnostics.start.assert_not_called()
 
 
 if __name__ == "__main__":

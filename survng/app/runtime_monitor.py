@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .inference_lifecycle import InferenceLifecycle
 from .process_memory import (
@@ -32,6 +32,7 @@ class OperationalTelemetryCollector:
     def __init__(self) -> None:
         self._camera_counters: dict[str, dict[str, int]] = {}
         self._system_counters: dict[str, int] = {}
+        self._system_initialized = False
 
     @staticmethod
     def _delta(current: int, previous: int | None) -> int:
@@ -49,17 +50,46 @@ class OperationalTelemetryCollector:
         system_runtime: dict[str, Any],
         detector_runtime: dict[str, Any],
     ) -> tuple[SystemTelemetryBucket, list[CameraTelemetryBucket]]:
-        system_current = {
-            "detector_requests": int(detector_runtime.get("requests") or detector_runtime.get("frames_processed") or 0),
-            "detector_failures": int(detector_runtime.get("failures") or 0),
-            "detector_capacity_delays": int(detector_runtime.get("capacity_delays") or 0),
-            "database_write_contention": 0,
-        }
-        system_deltas = {
-            key: self._delta(value, self._system_counters.get(key))
+        detector_workers = detector_runtime.get("workers")
+        worker_rows = detector_workers if isinstance(detector_workers, list) else []
+        system_current: dict[str, int] = {}
+        for position, worker in enumerate(worker_rows):
+            if not isinstance(worker, dict):
+                continue
+            worker_id = str(worker.get("index") or position + 1)
+            system_current[f"requests:{worker_id}"] = int(
+                worker.get("total_inferences") or 0
+            )
+            system_current[f"failures:{worker_id}"] = int(
+                worker.get("failed_inferences") or 0
+            )
+        if not system_current:
+            system_current = {
+                "requests:aggregate": int(
+                    detector_runtime.get("total_inferences") or 0
+                ),
+                "failures:aggregate": int(
+                    detector_runtime.get("failed_inferences") or 0
+                ),
+            }
+        deltas = {
+            key: (
+                self._delta(value, self._system_counters.get(key))
+                if key in self._system_counters or not self._system_initialized
+                else max(0, value)
+            )
             for key, value in system_current.items()
         }
         self._system_counters = system_current
+        self._system_initialized = True
+        system_deltas = {
+            "detector_requests": sum(
+                value for key, value in deltas.items() if key.startswith("requests:")
+            ),
+            "detector_failures": sum(
+                value for key, value in deltas.items() if key.startswith("failures:")
+            ),
+        }
         system = SystemTelemetryBucket(
             sampled_at=sampled_at,
             cpu_load_percent=_finite_float(system_runtime.get("cpu_load_percent")),
@@ -67,7 +97,6 @@ class OperationalTelemetryCollector:
             application_rss_bytes=int(process_memory.get("rss_bytes") or 0),
             worker_rss_bytes=int(worker_memory.get("total_rss_bytes") or 0),
             inference_ms=_finite_float(system_runtime.get("inference_ms")),
-            gpu_utilization_percent=_finite_float(system_runtime.get("gpu_utilization_percent")),
             **system_deltas,
         )
         cameras: list[CameraTelemetryBucket] = []
@@ -98,11 +127,9 @@ class OperationalTelemetryCollector:
                 "object_checks_admitted": int(decisions.get("request_admitted") or 0),
                 "object_checks_completed": int(decisions.get("request_completed") or 0),
                 "object_check_failures": int(decisions.get("detector_failed") or 0),
-                "tracking_requested": int(tracking.get("attempts") or tracking.get("requested") or 0),
-                "tracking_completed": int(tracking.get("completed") or 0),
-                "tracking_delayed": int(tracking.get("waited") or tracking.get("delayed") or 0),
-                "tracking_skipped": int(tracking.get("skipped") or 0),
-                "incidents_created": int(status.get("incidents_created") or 0),
+                "tracking_requested": int(tracking.get("capacity_requests") or 0),
+                "tracking_delayed": int(tracking.get("capacity_waits") or 0),
+                "tracking_skipped": int(tracking.get("capacity_timeouts") or 0),
             }
             previous = self._camera_counters.get(camera_id, {})
             deltas = {
@@ -111,14 +138,15 @@ class OperationalTelemetryCollector:
             }
             self._camera_counters[camera_id] = counters
             expected = bool(status.get("expected_enabled", lifecycle.get("enabled", True)))
-            frame_age = status.get("last_frame_age_seconds")
-            fresh = frame_age is None or float(frame_age) <= 5.0
+            raw_frame_age = status.get("last_frame_age_seconds")
+            frame_age = _finite_float(raw_frame_age)
+            fresh = raw_frame_age is None or (frame_age is not None and frame_age <= 5.0)
             cameras.append(
                 CameraTelemetryBucket(
                     sampled_at=sampled_at,
                     camera_id=camera_id,
                     expected=float(expected),
-                    available=float(not expected or (bool(status.get("connected")) and fresh)),
+                    available=float(expected and bool(status.get("connected")) and fresh),
                     live_fps=float(live.get("fps") or 0.0),
                     main_fps=float(main.get("fps") or 0.0),
                     **deltas,
@@ -179,6 +207,7 @@ class ApplicationRuntimeMonitor:
         state_events: StateEventBroker,
         camera_statuses: Callable[[], list[dict[str, Any]]],
         storage_status: Callable[[], dict[str, Any]] | None = None,
+        camera_startup_status: Callable[[], dict[str, Any]] | None = None,
         sample_interval_seconds: float = 60.0,
         poll_interval_seconds: float = 1.0,
         memory_trimmer: AllocatorMemoryTrimmer | None = None,
@@ -194,6 +223,7 @@ class ApplicationRuntimeMonitor:
         self._state_events = state_events
         self._camera_statuses = camera_statuses
         self._storage_status = storage_status or (lambda: {})
+        self._camera_startup_status = camera_startup_status or (lambda: {"complete": True})
         self._sample_interval_seconds = max(0.01, float(sample_interval_seconds))
         self._poll_interval_seconds = max(0.01, float(poll_interval_seconds))
         self._memory_trimmer = memory_trimmer or AllocatorMemoryTrimmer()
@@ -315,6 +345,9 @@ class ApplicationRuntimeMonitor:
                             statuses,
                             detector_runtime=detector_runtime,
                             storage_status=self._storage_status(),
+                            camera_startup_complete=bool(
+                                self._camera_startup_status().get("complete", True)
+                            ),
                             now_monotonic=now,
                         )
                     except Exception:
@@ -377,6 +410,10 @@ class ApplicationRuntimeMonitor:
     ) -> dict[str, Any]:
         if self._diagnostics is None:
             raise RuntimeError("diagnostic telemetry is unavailable")
+        if scope == "camera" and camera_id not in {
+            str(status.get("id") or "") for status in self._camera_statuses()
+        }:
+            raise ValueError("unknown diagnostic camera id")
         return self._diagnostics.start(
             scope=scope, duration_seconds=duration_seconds, camera_id=camera_id
         )
@@ -386,6 +423,9 @@ class ApplicationRuntimeMonitor:
 
     def export_diagnostics(self, session_id: str) -> dict[str, Any] | None:
         return self._diagnostics.export(session_id) if self._diagnostics else None
+
+    def export_diagnostics_stream(self, session_id: str) -> Iterator[bytes] | None:
+        return self._diagnostics.export_stream(session_id) if self._diagnostics else None
 
     @staticmethod
     def allocator_trim_safe(

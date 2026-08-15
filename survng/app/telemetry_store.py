@@ -9,7 +9,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from .telemetry_contract import TelemetryRetentionPolicy
 
@@ -29,11 +29,8 @@ class SystemTelemetryBucket:
     application_rss_bytes: int = 0
     worker_rss_bytes: int = 0
     inference_ms: float | None = None
-    gpu_utilization_percent: float | None = None
     detector_requests: int = 0
     detector_failures: int = 0
-    detector_capacity_delays: int = 0
-    database_write_contention: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,10 +50,8 @@ class CameraTelemetryBucket:
     object_checks_completed: int = 0
     object_check_failures: int = 0
     tracking_requested: int = 0
-    tracking_completed: int = 0
     tracking_delayed: int = 0
     tracking_skipped: int = 0
-    incidents_created: int = 0
 
 
 SYSTEM_COLUMNS = tuple(
@@ -74,7 +69,7 @@ CAMERA_COLUMNS = tuple(
 class TelemetryStore:
     """Own the telemetry database; it never shares EventStore's writer lock."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(
         self,
@@ -94,6 +89,7 @@ class TelemetryStore:
         conn.execute("pragma journal_mode=wal")
         conn.execute("pragma synchronous=normal")
         conn.execute("pragma busy_timeout=2000")
+        conn.execute("pragma foreign_keys=on")
         return conn
 
     def _initialize(self) -> None:
@@ -102,7 +98,7 @@ class TelemetryStore:
             for name in SYSTEM_COLUMNS
         )
         camera_fields = ",\n".join(
-            f"{name} {'integer' if name not in {'available', 'live_fps', 'main_fps'} else 'real'} not null default 0"
+            f"{name} {'integer' if name not in {'expected', 'available', 'live_fps', 'main_fps'} else 'real'} not null default 0"
             for name in CAMERA_COLUMNS
         )
         with self._lock, self._connect() as conn:
@@ -125,6 +121,8 @@ class TelemetryStore:
                     {camera_fields},
                     primary key (resolution_minutes, camera_id, sampled_at)
                 ) without rowid;
+                create index if not exists camera_metric_buckets_time
+                    on camera_metric_buckets (resolution_minutes, sampled_at);
                 create table if not exists operational_events (
                     id integer primary key,
                     occurred_at text not null,
@@ -137,6 +135,8 @@ class TelemetryStore:
                 );
                 create index if not exists operational_events_time
                     on operational_events (occurred_at);
+                create index if not exists operational_events_identity_time
+                    on operational_events (kind,scope,camera_id,occurred_at);
                 create table if not exists system_lifecycle_events (
                     id integer primary key,
                     instance_id text not null,
@@ -163,6 +163,8 @@ class TelemetryStore:
                     payload_json text not null,
                     primary key (session_id, sampled_at)
                 ) without rowid;
+                create index if not exists diagnostic_samples_time
+                    on diagnostic_samples (sampled_at);
                 """
             )
             camera_columns = {
@@ -173,10 +175,68 @@ class TelemetryStore:
                 conn.execute(
                     "alter table camera_metric_buckets add column expected real not null default 1"
                 )
+            self._remove_obsolete_metric_columns(conn, system_fields, camera_fields)
             conn.execute(
                 "insert or replace into telemetry_metadata (key, value) values ('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
             )
+
+    @staticmethod
+    def _remove_obsolete_metric_columns(
+        conn: sqlite3.Connection,
+        system_fields: str,
+        camera_fields: str,
+    ) -> None:
+        """Rebuild pre-v3 bucket tables so dead metrics do not linger forever."""
+        expected = {
+            "system_metric_buckets": {
+                "sampled_at",
+                "resolution_minutes",
+                *SYSTEM_COLUMNS,
+            },
+            "camera_metric_buckets": {
+                "sampled_at",
+                "camera_id",
+                "resolution_minutes",
+                *CAMERA_COLUMNS,
+            },
+        }
+        definitions = {
+            "system_metric_buckets": (
+                f"sampled_at text not null,resolution_minutes integer not null,{system_fields},"
+                "primary key (resolution_minutes,sampled_at)"
+            ),
+            "camera_metric_buckets": (
+                f"sampled_at text not null,camera_id text not null,resolution_minutes integer not null,{camera_fields},"
+                "primary key (resolution_minutes,camera_id,sampled_at)"
+            ),
+        }
+        for table, desired in expected.items():
+            existing = {
+                str(row["name"]) for row in conn.execute(f"pragma table_info({table})")
+            }
+            if existing == desired:
+                continue
+            replacement = f"{table}_v3"
+            columns = [name for name in desired if name in existing]
+            # Stable ordering makes the copy deterministic and easy to inspect.
+            keys = ["sampled_at", "resolution_minutes"]
+            if table == "camera_metric_buckets":
+                keys = ["sampled_at", "camera_id", "resolution_minutes"]
+            metric_columns = (
+                SYSTEM_COLUMNS if table == "system_metric_buckets" else CAMERA_COLUMNS
+            )
+            columns = [*keys, *(name for name in metric_columns if name in columns)]
+            conn.execute(f"drop table if exists {replacement}")
+            conn.execute(f"create table {replacement} ({definitions[table]}) without rowid")
+            names = ",".join(columns)
+            conn.execute(f"insert into {replacement} ({names}) select {names} from {table}")
+            conn.execute(f"drop table {table}")
+            conn.execute(f"alter table {replacement} rename to {table}")
+        conn.execute(
+            "create index if not exists camera_metric_buckets_time "
+            "on camera_metric_buckets (resolution_minutes,sampled_at)"
+        )
 
     @staticmethod
     def _system_values(sample: SystemTelemetryBucket) -> tuple[Any, ...]:
@@ -249,9 +309,8 @@ class TelemetryStore:
             "application_rss_bytes",
             "worker_rss_bytes",
             "inference_ms",
-            "gpu_utilization_percent",
         }
-        camera_gauges = {"available", "live_fps", "main_fps"}
+        camera_gauges = {"expected", "available", "live_fps", "main_fps"}
         with self._lock, self._connect() as conn:
             conn.execute("delete from system_metric_buckets where resolution_minutes in (15,60)")
             conn.execute("delete from camera_metric_buckets where resolution_minutes in (15,60)")
@@ -321,7 +380,6 @@ class TelemetryStore:
             "application_rss_bytes",
             "worker_rss_bytes",
             "inference_ms",
-            "gpu_utilization_percent",
         )
         counter_columns = tuple(name for name in SYSTEM_COLUMNS if name not in gauge_columns)
         expressions = [f"avg({name}) as {name}" for name in gauge_columns]
@@ -459,10 +517,9 @@ class TelemetryStore:
             analysis_total = analyzed + superseded
             live = [float(row.get("live_fps") or 0.0) for row in selected if float(row.get("live_fps") or 0.0) > 0]
             main = [float(row.get("main_fps") or 0.0) for row in selected if float(row.get("main_fps") or 0.0) > 0]
-            expected_rows = [
-                row for row in selected if float(row.get("expected") or 0.0) >= 0.5
-            ]
-            availability = [float(row.get("available") or 0.0) for row in expected_rows]
+            expected_rows = [row for row in selected if float(row.get("expected") or 0.0) > 0]
+            expected_weight = sum(float(row.get("expected") or 0.0) for row in expected_rows)
+            available_weight = sum(float(row.get("available") or 0.0) for row in expected_rows)
             result.append(
                 {
                     "sampled_at": sampled_at,
@@ -472,16 +529,27 @@ class TelemetryStore:
                     "analysis_frames_sampled": analyzed,
                     "analysis_frames_dropped": superseded,
                     "analysis_coverage_percent": round((analyzed / analysis_total) * 100.0, 3) if analysis_total else None,
-                    "camera_availability_percent": round((sum(availability) / len(availability)) * 100.0, 2) if availability else None,
-                    "expected_cameras": len(expected_rows),
-                    "unavailable_cameras": sum(1 for value in availability if value < 0.5),
+                    "camera_availability_percent": round((available_weight / expected_weight) * 100.0, 2) if expected_weight else None,
+                    "expected_cameras": round(expected_weight, 2),
+                    "unavailable_cameras": sum(
+                        1
+                        for row in expected_rows
+                        if float(row.get("available") or 0.0)
+                        / max(float(row.get("expected") or 0.0), 1e-9)
+                        < 0.5
+                    ),
                     "ema_credible_episodes": sum(int(row.get("ema_credible_episodes") or 0) for row in selected),
                     "object_checks_admitted": sum(int(row.get("object_checks_admitted") or 0) for row in selected),
                     "object_checks_completed": sum(int(row.get("object_checks_completed") or 0) for row in selected),
                     "object_check_failures": sum(int(row.get("object_check_failures") or 0) for row in selected),
+                    "tracking_requested": sum(int(row.get("tracking_requested") or 0) for row in selected),
+                    "tracking_delayed": sum(int(row.get("tracking_delayed") or 0) for row in selected),
+                    "tracking_skipped": sum(int(row.get("tracking_skipped") or 0) for row in selected),
                     "cpu_load_percent": system.get("cpu_load_percent"),
                     "memory_used_percent": system.get("memory_used_percent"),
                     "inference_ms": system.get("inference_ms"),
+                    "detector_requests": int(system.get("detector_requests") or 0),
+                    "detector_failures": int(system.get("detector_failures") or 0),
                 }
             )
         return result
@@ -732,12 +800,20 @@ class TelemetryStore:
         encoded = json.dumps(dict(payload), separators=(",", ":"), allow_nan=False)
         timestamp = _utc(sampled_at).isoformat()
         with self._lock, self._connect() as conn:
+            before = conn.total_changes
             conn.executemany(
                 "insert or replace into diagnostic_samples "
-                "(session_id,sampled_at,payload_json) values (?,?,?)",
-                [(session_id, timestamp, encoded) for session_id in identifiers],
+                "(session_id,sampled_at,payload_json) "
+                "select ?,?,? where exists ("
+                "select 1 from diagnostic_sessions where id=? "
+                "and stopped_at is null and expires_at>?)",
+                [
+                    (session_id, timestamp, encoded, session_id, timestamp)
+                    for session_id in identifiers
+                ],
             )
-        return len(identifiers)
+            written = conn.total_changes - before
+        return written
 
     def diagnostic_export(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -758,6 +834,43 @@ class TelemetryStore:
                 for row in rows
             ],
         }
+
+    def diagnostic_export_chunks(self, session_id: str) -> Iterator[bytes] | None:
+        """Stream a diagnostic report without materializing its bounded budget."""
+        with self._connect() as conn:
+            session = conn.execute(
+                "select * from diagnostic_sessions where id=?", (session_id,)
+            ).fetchone()
+        if session is None:
+            return None
+        encoded_session = json.dumps(
+            dict(session), separators=(",", ":"), allow_nan=False
+        ).encode()
+
+        def generate() -> Iterator[bytes]:
+            yield b'{"session":' + encoded_session + b',"samples":['
+            first = True
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "select sampled_at,payload_json from diagnostic_samples "
+                    "where session_id=? order by sampled_at",
+                    (session_id,),
+                )
+                for row in cursor:
+                    try:
+                        payload = json.loads(str(row["payload_json"] or "{}"))
+                    except json.JSONDecodeError:
+                        payload = {}
+                    item = json.dumps(
+                        {"sampled_at": row["sampled_at"], "payload": payload},
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode()
+                    yield (b"" if first else b",") + item
+                    first = False
+            yield b"]}"
+
+        return generate()
 
     def enforce_diagnostic_budget(self) -> int:
         """Bound logical diagnostic payload storage, oldest samples first."""

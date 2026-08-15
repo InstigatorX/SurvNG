@@ -42,15 +42,13 @@ SYSTEM_METRICS: tuple[MetricDefinition, ...] = (
     MetricDefinition("application_rss_bytes", MetricKind.GAUGE, "bytes"),
     MetricDefinition("worker_rss_bytes", MetricKind.GAUGE, "bytes"),
     MetricDefinition("inference_ms", MetricKind.GAUGE, "milliseconds"),
-    MetricDefinition("gpu_utilization_percent", MetricKind.GAUGE, "percent"),
     MetricDefinition("detector_requests", MetricKind.COUNTER, "count"),
     MetricDefinition("detector_failures", MetricKind.COUNTER, "count"),
-    MetricDefinition("detector_capacity_delays", MetricKind.COUNTER, "count"),
-    MetricDefinition("database_write_contention", MetricKind.COUNTER, "count"),
 )
 
 
 CAMERA_METRICS: tuple[MetricDefinition, ...] = (
+    MetricDefinition("expected", MetricKind.GAUGE, "boolean"),
     MetricDefinition("available", MetricKind.GAUGE, "boolean"),
     MetricDefinition("live_fps", MetricKind.GAUGE, "frames_per_second"),
     MetricDefinition("main_fps", MetricKind.GAUGE, "frames_per_second"),
@@ -62,10 +60,8 @@ CAMERA_METRICS: tuple[MetricDefinition, ...] = (
     MetricDefinition("object_checks_completed", MetricKind.COUNTER, "count"),
     MetricDefinition("object_check_failures", MetricKind.COUNTER, "count"),
     MetricDefinition("tracking_requested", MetricKind.COUNTER, "count"),
-    MetricDefinition("tracking_completed", MetricKind.COUNTER, "count"),
     MetricDefinition("tracking_delayed", MetricKind.COUNTER, "count"),
     MetricDefinition("tracking_skipped", MetricKind.COUNTER, "count"),
-    MetricDefinition("incidents_created", MetricKind.COUNTER, "count"),
 )
 
 

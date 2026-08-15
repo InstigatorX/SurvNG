@@ -72,3 +72,36 @@ def test_legacy_migration_is_complete_idempotent_and_drops_source(tmp_path) -> N
             "select 1 from sqlite_master where name='system_lifecycle_events'"
         ).fetchone() is None
     assert migrate_legacy_runtime_telemetry(event_db, store) == {"migrated": 0, "complete": True}
+
+
+def test_legacy_migration_skips_corrupt_and_malformed_payloads(tmp_path) -> None:
+    event_db = tmp_path / "survng.sqlite3"
+    sampled_at = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    with sqlite3.connect(event_db) as conn:
+        conn.execute(
+            "create table runtime_telemetry_samples (sampled_at text primary key,payload_json text not null)"
+        )
+        conn.execute(
+            "insert into runtime_telemetry_samples values (?,?)",
+            (sampled_at.isoformat(), "zlib:not-base64"),
+        )
+        conn.execute(
+            "insert into runtime_telemetry_samples values (?,?)",
+            (
+                (sampled_at + timedelta(minutes=1)).isoformat(),
+                json.dumps(
+                    {
+                        "process_memory": {"rss_bytes": "invalid"},
+                        "cameras": ["not", "a", "mapping"],
+                    }
+                ),
+            ),
+        )
+
+    result = migrate_legacy_runtime_telemetry(event_db, TelemetryStore(tmp_path))
+
+    assert result == {"migrated": 1, "complete": True}
+    with sqlite3.connect(event_db) as conn:
+        assert conn.execute(
+            "select 1 from sqlite_master where name='runtime_telemetry_samples'"
+        ).fetchone() is None

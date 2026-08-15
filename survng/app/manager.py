@@ -318,6 +318,7 @@ class AppManager:
             state_events=self.state_events,
             camera_statuses=self.statuses,
             storage_status=self.recorder.retention_status,
+            camera_startup_status=self.camera_fleet.status,
         )
         self.camera_controls = CameraControlService(
             cameras=tuple(self._unique_cameras()),

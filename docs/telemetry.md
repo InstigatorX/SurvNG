@@ -24,14 +24,14 @@ object detection.
 ## Operational metric catalog
 
 System metrics cover CPU, application and worker memory, inference latency,
-GPU utilization, detector demand/failures/capacity delays, and database writer
-contention. Camera metrics cover availability, live/main FPS, capture
+and detector demand and failures. Current GPU health remains available in the
+live telemetry response without being duplicated into history. Camera metrics cover availability, live/main FPS, capture
 interruptions, EMA coverage and credible episodes, object-check outcomes,
-tracking outcomes, and incident creation.
+and tracking capacity outcomes.
 
 An operational event records important transitions such as a controlled
 restart, unexpected interruption, camera outage/recovery, detector failure,
-queue saturation, database contention, or retention failure. Repeated
+sustained detector backlog, or retention failure. Repeated
 equivalent events are coalesced.
 
 ## Legacy removal requirement
@@ -40,4 +40,3 @@ The migration may temporarily compare old and new results, but the final
 runtime has one writer, one reader, and no compatibility fallback. The old
 `runtime_telemetry_samples` table, compressed JSON codec, legacy readers, and
 shadow plumbing are removed after the one-time versioned migration succeeds.
-
