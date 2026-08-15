@@ -1,4 +1,7 @@
+import sqlite3
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from survng.app.telemetry_contract import TelemetryRetentionPolicy
 from survng.app.telemetry_store import (
@@ -39,6 +42,51 @@ def test_store_persists_typed_system_and_camera_buckets(tmp_path) -> None:
     )[0]
     assert camera["live_fps"] == 9.8
     assert camera["ema_frames_sampled"] == 120
+
+
+def test_store_upgrades_pre_expected_camera_schema(tmp_path) -> None:
+    path = tmp_path / "telemetry.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("create table telemetry_metadata(key text primary key,value text not null)")
+        conn.execute(
+            "create table camera_metric_buckets("
+            "sampled_at text not null,camera_id text not null,resolution_minutes integer not null,"
+            "available real not null default 0,live_fps real not null default 0,main_fps real not null default 0,"
+            "capture_interruptions integer not null default 0,ema_frames_sampled integer not null default 0,"
+            "ema_frames_superseded integer not null default 0,ema_credible_episodes integer not null default 0,"
+            "object_checks_admitted integer not null default 0,object_checks_completed integer not null default 0,"
+            "object_check_failures integer not null default 0,tracking_requested integer not null default 0,"
+            "tracking_completed integer not null default 0,tracking_delayed integer not null default 0,"
+            "tracking_skipped integer not null default 0,incidents_created integer not null default 0,"
+            "primary key(resolution_minutes,camera_id,sampled_at)) without rowid"
+        )
+
+    TelemetryStore(tmp_path)
+
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info(camera_metric_buckets)")}
+    assert "expected" in columns
+
+
+def test_lifecycle_events_are_durable_bounded_and_validated(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    store.record_lifecycle_event(
+        "stale", "startup_started", occurred_at=now - timedelta(days=31)
+    )
+    store.record_lifecycle_event(
+        "current", "startup_started", occurred_at=now - timedelta(minutes=1)
+    )
+    store.record_lifecycle_event(
+        "current", "startup_ready", occurred_at=now, details={"cameras": 13}
+    )
+
+    events = TelemetryStore(tmp_path).lifecycle_events(hours=1, now=now)
+    assert [event["kind"] for event in events] == ["startup_started", "startup_ready"]
+    assert events[-1]["details"] == {"cameras": 13}
+
+    with pytest.raises(ValueError, match="unsupported lifecycle event"):
+        store.record_lifecycle_event("current", "restarting")
 
 
 def test_store_is_independent_and_retention_is_resolution_aware(tmp_path) -> None:
@@ -141,6 +189,38 @@ def test_operational_history_combines_camera_and_system_metrics(tmp_path) -> Non
     assert store.sample_times(hours=2, now=sampled_at) == [sampled_at.isoformat()]
 
 
+def test_disabled_camera_is_not_counted_as_available_or_expected(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    sampled_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    store.write_buckets(
+        SystemTelemetryBucket(sampled_at=sampled_at),
+        [
+            CameraTelemetryBucket(
+                sampled_at=sampled_at,
+                camera_id="gate",
+                expected=1.0,
+                available=1.0,
+            ),
+            CameraTelemetryBucket(
+                sampled_at=sampled_at,
+                camera_id="foyer",
+                expected=0.0,
+                available=1.0,
+            ),
+        ],
+    )
+
+    global_row = store.operational_history(
+        hours=1, bucket_minutes=1, now=sampled_at
+    )[0]
+    disabled_row = store.operational_history(
+        hours=1, bucket_minutes=1, camera_id="foyer", now=sampled_at
+    )[0]
+    assert global_row["expected_cameras"] == 1
+    assert global_row["camera_availability_percent"] == 100.0
+    assert disabled_row["camera_availability_percent"] is None
+
+
 def test_diagnostic_sessions_expire_and_export_bounded_samples(tmp_path) -> None:
     store = TelemetryStore(tmp_path)
     started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
@@ -156,7 +236,7 @@ def test_diagnostic_sessions_expire_and_export_bounded_samples(tmp_path) -> None
     assert exported["samples"][0]["payload"]["cameras"]["gate"]["fps"] == 10
     assert store.diagnostic_sessions(active_only=True, now=started)
 
-    store.enforce_retention(now=started + timedelta(minutes=16))
+    store.enforce_retention(now=started + timedelta(days=8))
     assert store.diagnostic_export(session["id"]) is None
 
 
@@ -203,3 +283,23 @@ def test_operational_events_coalesce_within_window(tmp_path) -> None:
     assert first["id"] == second["id"]
     assert second == {"id": first["id"], "count": 2, "coalesced": True}
     assert store.operational_event_history(hours=2, now=now + timedelta(minutes=1))[0]["count"] == 2
+
+
+def test_operational_budget_prunes_fine_grained_history_first(tmp_path) -> None:
+    store = TelemetryStore(
+        tmp_path,
+        retention=TelemetryRetentionPolicy(operational_budget_bytes=3 * 256),
+    )
+    start = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    for minute in range(4):
+        sampled_at = start + timedelta(minutes=minute)
+        store.write_buckets(
+            SystemTelemetryBucket(sampled_at=sampled_at),
+            [CameraTelemetryBucket(sampled_at=sampled_at, camera_id="gate")],
+        )
+
+    assert store.enforce_operational_budget() > 0
+    remaining = len(store.system_history(since=start, resolution_minutes=1)) + len(
+        store.camera_history(since=start, resolution_minutes=1)
+    )
+    assert remaining <= 3

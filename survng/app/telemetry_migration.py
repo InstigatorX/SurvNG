@@ -17,7 +17,7 @@ from .telemetry_store import (
 )
 
 
-MIGRATION_KEY = "legacy_runtime_telemetry_migrated_v1"
+MIGRATION_KEY = "legacy_event_telemetry_migrated_v2"
 
 
 def _decode(value: object) -> dict[str, Any]:
@@ -54,16 +54,20 @@ def migrate_legacy_runtime_telemetry(
     source = sqlite3.connect(Path(event_database), timeout=10.0)
     source.row_factory = sqlite3.Row
     try:
-        exists = source.execute(
-            "select 1 from sqlite_master where type='table' and name='runtime_telemetry_samples'"
-        ).fetchone()
-        if exists is None:
+        tables = {
+            str(row[0])
+            for row in source.execute(
+                "select name from sqlite_master where type='table' and name in "
+                "('runtime_telemetry_samples','system_lifecycle_events')"
+            )
+        }
+        if not tables:
             store.set_metadata_value(MIGRATION_KEY, "1")
             return {"migrated": 0, "complete": True}
         previous: dict[str, dict[str, int]] = {}
         migrated = 0
         last_sampled_at = ""
-        while True:
+        while "runtime_telemetry_samples" in tables:
             rows = source.execute(
                 "select sampled_at,payload_json from runtime_telemetry_samples "
                 "where sampled_at>? order by sampled_at limit ?",
@@ -128,6 +132,7 @@ def migrate_legacy_runtime_telemetry(
                         CameraTelemetryBucket(
                             sampled_at=sampled_at,
                             camera_id=str(camera_id),
+                            expected=float(enabled),
                             available=float(not enabled or (bool(item.get("connected")) and fresh)),
                             live_fps=float(live.get("fps") or 0.0),
                             main_fps=float(main.get("fps") or 0.0),
@@ -136,8 +141,16 @@ def migrate_legacy_runtime_telemetry(
                     )
                 migrated += 1
             store.write_bucket_batch(systems, cameras)
-        store.rebuild_rollups()
-        source.execute("drop table runtime_telemetry_samples")
+        if "runtime_telemetry_samples" in tables:
+            store.rebuild_rollups()
+            source.execute("drop table runtime_telemetry_samples")
+        if "system_lifecycle_events" in tables:
+            lifecycle_rows = source.execute(
+                "select instance_id,kind,occurred_at,details_json "
+                "from system_lifecycle_events order by occurred_at,id"
+            ).fetchall()
+            store.import_lifecycle_events(dict(row) for row in lifecycle_rows)
+            source.execute("drop table system_lifecycle_events")
         source.commit()
         store.set_metadata_value(MIGRATION_KEY, "1")
         return {"migrated": migrated, "complete": True}

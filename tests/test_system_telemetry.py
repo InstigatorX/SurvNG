@@ -18,7 +18,6 @@ class SystemTelemetryRouterTest(unittest.TestCase):
     def _event_store(marker: str) -> SimpleNamespace:
         return SimpleNamespace(
             tracking_capacity_activity=Mock(return_value=[]),
-            lifecycle_events=Mock(return_value=[]),
         )
 
     @staticmethod
@@ -27,6 +26,7 @@ class SystemTelemetryRouterTest(unittest.TestCase):
             operational_history=Mock(return_value=[{"marker": marker}]),
             memory_history=Mock(return_value=[]),
             sample_times=Mock(return_value=[]),
+            lifecycle_events=Mock(return_value=[]),
         )
 
     def test_persisted_history_cache_is_invalidated_for_new_event_store(self) -> None:

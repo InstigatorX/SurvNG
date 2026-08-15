@@ -31,6 +31,7 @@ class TelemetryRetentionPolicy:
     quarter_hour_days: int = 30
     hourly_days: int = 365
     operational_events_days: int = 90
+    diagnostic_retention_days: int = 7
     operational_budget_bytes: int = 128 * 1024 * 1024
     diagnostic_budget_bytes: int = 256 * 1024 * 1024
 
@@ -71,5 +72,9 @@ CAMERA_METRICS: tuple[MetricDefinition, ...] = (
 DIAGNOSTIC_SCOPES: frozenset[str] = frozenset(
     {"system", "detector", "storage", "camera"}
 )
-DIAGNOSTIC_DURATIONS_SECONDS: tuple[int, ...] = (15 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60)
-
+DIAGNOSTIC_DURATIONS_SECONDS: tuple[int, ...] = (
+    15 * 60,
+    60 * 60,
+    6 * 60 * 60,
+    24 * 60 * 60,
+)

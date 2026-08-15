@@ -19,6 +19,10 @@ def test_legacy_migration_is_complete_idempotent_and_drops_source(tmp_path) -> N
         conn.execute(
             "create table runtime_telemetry_samples (sampled_at text primary key,payload_json text not null)"
         )
+        conn.execute(
+            "create table system_lifecycle_events ("
+            "id integer primary key,instance_id text,kind text,occurred_at text,details_json text)"
+        )
         start = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
         for minute, failures, sampled in ((0, 1, 100), (1, 3, 125)):
             payload = {
@@ -41,16 +45,30 @@ def test_legacy_migration_is_complete_idempotent_and_drops_source(tmp_path) -> N
                 "insert into runtime_telemetry_samples values (?,?)",
                 ((start + timedelta(minutes=minute)).isoformat(), _encoded(payload)),
             )
+        conn.execute(
+            "insert into system_lifecycle_events "
+            "(instance_id,kind,occurred_at,details_json) values (?,?,?,?)",
+            ("instance-a", "startup_ready", start.isoformat(), '{"cameras":13}'),
+        )
     store = TelemetryStore(tmp_path)
 
     result = migrate_legacy_runtime_telemetry(event_db, store, batch_size=1)
 
     assert result == {"migrated": 2, "complete": True}
-    history = store.operational_history(hours=2, bucket_minutes=1, camera_id="gate", now=start + timedelta(minutes=1))
+    history = store.operational_history(
+        hours=2,
+        bucket_minutes=1,
+        camera_id="gate",
+        now=start + timedelta(minutes=1),
+    )
     assert history[-1]["capture_interruptions"] == 2
     assert history[-1]["analysis_frames_sampled"] == 25
+    assert store.lifecycle_events(hours=1, now=start)[0]["details"] == {"cameras": 13}
     with sqlite3.connect(event_db) as conn:
         assert conn.execute(
             "select 1 from sqlite_master where name='runtime_telemetry_samples'"
+        ).fetchone() is None
+        assert conn.execute(
+            "select 1 from sqlite_master where name='system_lifecycle_events'"
         ).fetchone() is None
     assert migrate_legacy_runtime_telemetry(event_db, store) == {"migrated": 0, "complete": True}

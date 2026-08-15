@@ -249,6 +249,7 @@ class DiagnosticTelemetryController:
     def status(self) -> dict[str, Any]:
         return {
             "active": self._store.diagnostic_sessions(active_only=True),
+            "recent": self._store.diagnostic_sessions(active_only=False)[:20],
             "supported_scopes": sorted(DIAGNOSTIC_SCOPES),
             "supported_durations_seconds": list(DIAGNOSTIC_DURATIONS_SECONDS),
             "prebuffer_seconds": int(

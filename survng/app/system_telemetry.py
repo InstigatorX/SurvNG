@@ -375,11 +375,10 @@ class SystemTelemetryService:
                 return cached["value"]
         interruptions: list[dict[str, Any]] = []
         if not camera_id:
-            lifecycle_reader = getattr(event_store, "lifecycle_events", None)
             try:
                 interruptions = classify_telemetry_interruptions(
                     telemetry_store.sample_times(hours=168),
-                    lifecycle_reader(hours=168) if callable(lifecycle_reader) else [],
+                    telemetry_store.lifecycle_events(hours=168),
                     observed_at=datetime.now(timezone.utc),
                 )
             except Exception:

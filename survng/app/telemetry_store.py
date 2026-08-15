@@ -41,6 +41,7 @@ class CameraTelemetryBucket:
     sampled_at: datetime
     camera_id: str
     resolution_minutes: int = 1
+    expected: float = 1.0
     available: float = 0.0
     live_fps: float = 0.0
     main_fps: float = 0.0
@@ -73,7 +74,7 @@ CAMERA_COLUMNS = tuple(
 class TelemetryStore:
     """Own the telemetry database; it never shares EventStore's writer lock."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -136,6 +137,17 @@ class TelemetryStore:
                 );
                 create index if not exists operational_events_time
                     on operational_events (occurred_at);
+                create table if not exists system_lifecycle_events (
+                    id integer primary key,
+                    instance_id text not null,
+                    kind text not null,
+                    occurred_at text not null,
+                    details_json text not null default '{{}}'
+                );
+                create index if not exists system_lifecycle_events_time
+                    on system_lifecycle_events (occurred_at);
+                create unique index if not exists system_lifecycle_events_identity
+                    on system_lifecycle_events (instance_id,kind,occurred_at);
                 create table if not exists diagnostic_sessions (
                     id text primary key,
                     scope text not null,
@@ -153,6 +165,14 @@ class TelemetryStore:
                 ) without rowid;
                 """
             )
+            camera_columns = {
+                str(row["name"])
+                for row in conn.execute("pragma table_info(camera_metric_buckets)")
+            }
+            if "expected" not in camera_columns:
+                conn.execute(
+                    "alter table camera_metric_buckets add column expected real not null default 1"
+                )
             conn.execute(
                 "insert or replace into telemetry_metadata (key, value) values ('schema_version', ?)",
                 (str(self.SCHEMA_VERSION),),
@@ -330,7 +350,7 @@ class TelemetryStore:
     def _refresh_camera_rollup(
         self, *, start: datetime, end: datetime, resolution: int
     ) -> None:
-        gauge_columns = ("available", "live_fps", "main_fps")
+        gauge_columns = ("expected", "available", "live_fps", "main_fps")
         counter_columns = tuple(name for name in CAMERA_COLUMNS if name not in gauge_columns)
         expressions = [f"avg({name}) as {name}" for name in gauge_columns]
         expressions.extend(f"sum({name}) as {name}" for name in counter_columns)
@@ -439,7 +459,10 @@ class TelemetryStore:
             analysis_total = analyzed + superseded
             live = [float(row.get("live_fps") or 0.0) for row in selected if float(row.get("live_fps") or 0.0) > 0]
             main = [float(row.get("main_fps") or 0.0) for row in selected if float(row.get("main_fps") or 0.0) > 0]
-            availability = [float(row.get("available") or 0.0) for row in selected]
+            expected_rows = [
+                row for row in selected if float(row.get("expected") or 0.0) >= 0.5
+            ]
+            availability = [float(row.get("available") or 0.0) for row in expected_rows]
             result.append(
                 {
                     "sampled_at": sampled_at,
@@ -450,7 +473,7 @@ class TelemetryStore:
                     "analysis_frames_dropped": superseded,
                     "analysis_coverage_percent": round((analyzed / analysis_total) * 100.0, 3) if analysis_total else None,
                     "camera_availability_percent": round((sum(availability) / len(availability)) * 100.0, 2) if availability else None,
-                    "expected_cameras": len(availability),
+                    "expected_cameras": len(expected_rows),
                     "unavailable_cameras": sum(1 for value in availability if value < 0.5),
                     "ema_credible_episodes": sum(int(row.get("ema_credible_episodes") or 0) for row in selected),
                     "object_checks_admitted": sum(int(row.get("object_checks_admitted") or 0) for row in selected),
@@ -508,6 +531,86 @@ class TelemetryStore:
                     json.dumps(dict(details or {}), separators=(",", ":")),
                 ),
             )
+
+    def record_lifecycle_event(
+        self,
+        instance_id: str,
+        kind: str,
+        *,
+        occurred_at: datetime | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        current = _utc(occurred_at or datetime.now(timezone.utc))
+        allowed = {
+            "startup_started",
+            "startup_ready",
+            "shutdown_requested",
+            "shutdown_completed",
+            "restart_requested",
+        }
+        if kind not in allowed:
+            raise ValueError(f"unsupported lifecycle event: {kind}")
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "insert into system_lifecycle_events "
+                "(instance_id,kind,occurred_at,details_json) values (?,?,?,?)",
+                (
+                    instance_id,
+                    kind,
+                    current.isoformat(),
+                    json.dumps(dict(details or {}), separators=(",", ":")),
+                ),
+            )
+            conn.execute(
+                "delete from system_lifecycle_events where occurred_at < ?",
+                ((current - timedelta(days=30)).isoformat(),),
+            )
+
+    def lifecycle_events(
+        self, *, hours: int = 168, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        current = _utc(now or datetime.now(timezone.utc))
+        start = current - timedelta(hours=max(1, min(int(hours), 24 * 30)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select instance_id,kind,occurred_at,details_json "
+                "from system_lifecycle_events where occurred_at>=? order by occurred_at,id",
+                (start.isoformat(),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                details = json.loads(str(row["details_json"] or "{}"))
+            except json.JSONDecodeError:
+                details = {}
+            result.append(
+                {
+                    "instance_id": str(row["instance_id"]),
+                    "kind": str(row["kind"]),
+                    "occurred_at": str(row["occurred_at"]),
+                    "details": details if isinstance(details, dict) else {},
+                }
+            )
+        return result
+
+    def import_lifecycle_events(self, rows: Iterable[Mapping[str, Any]]) -> int:
+        values = [
+            (
+                str(row.get("instance_id") or ""),
+                str(row.get("kind") or ""),
+                str(row.get("occurred_at") or ""),
+                str(row.get("details_json") or "{}"),
+            )
+            for row in rows
+            if row.get("instance_id") and row.get("kind") and row.get("occurred_at")
+        ]
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "insert or ignore into system_lifecycle_events "
+                "(instance_id,kind,occurred_at,details_json) values (?,?,?,?)",
+                values,
+            )
+        return len(values)
 
     def record_or_coalesce_operational_event(
         self,
@@ -708,15 +811,63 @@ class TelemetryStore:
                     .isoformat(),
                 ),
             )
+            diagnostic_cutoff = current - timedelta(
+                days=self.retention.diagnostic_retention_days
+            )
             conn.execute(
                 "delete from diagnostic_samples where session_id in "
                 "(select id from diagnostic_sessions where expires_at < ?)",
-                (current.isoformat(),),
+                (diagnostic_cutoff.isoformat(),),
             )
             conn.execute(
                 "delete from diagnostic_sessions where expires_at < ?",
-                (current.isoformat(),),
+                (diagnostic_cutoff.isoformat(),),
             )
+
+    def enforce_operational_budget(self) -> int:
+        """Bound logical metric rows; SQLite may reuse rather than shrink pages."""
+        estimated_row_bytes = 256
+        maximum_rows = max(
+            1, int(self.retention.operational_budget_bytes) // estimated_row_bytes
+        )
+        removed = 0
+        with self._lock, self._connect() as conn:
+            total = sum(
+                int(conn.execute(f"select count(*) from {table}").fetchone()[0])
+                for table in ("system_metric_buckets", "camera_metric_buckets")
+            )
+            for resolution in (1, 15, 60):
+                while total > maximum_rows:
+                    rows = conn.execute(
+                        "select sampled_at from camera_metric_buckets "
+                        "where resolution_minutes=? order by sampled_at limit 1",
+                        (resolution,),
+                    ).fetchall()
+                    system_row = conn.execute(
+                        "select sampled_at from system_metric_buckets "
+                        "where resolution_minutes=? order by sampled_at limit 1",
+                        (resolution,),
+                    ).fetchone()
+                    candidates = [str(row["sampled_at"]) for row in rows]
+                    if system_row is not None:
+                        candidates.append(str(system_row["sampled_at"]))
+                    if not candidates:
+                        break
+                    oldest = min(candidates)
+                    camera_deleted = conn.execute(
+                        "delete from camera_metric_buckets where resolution_minutes=? and sampled_at=?",
+                        (resolution, oldest),
+                    ).rowcount
+                    system_deleted = conn.execute(
+                        "delete from system_metric_buckets where resolution_minutes=? and sampled_at=?",
+                        (resolution, oldest),
+                    ).rowcount
+                    deleted = int(camera_deleted or 0) + int(system_deleted or 0)
+                    if not deleted:
+                        break
+                    total -= deleted
+                    removed += deleted
+        return removed
 
     def database_bytes(self) -> int:
         total = 0

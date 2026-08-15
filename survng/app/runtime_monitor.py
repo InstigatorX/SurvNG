@@ -117,6 +117,7 @@ class OperationalTelemetryCollector:
                 CameraTelemetryBucket(
                     sampled_at=sampled_at,
                     camera_id=camera_id,
+                    expected=float(expected),
                     available=float(not expected or (bool(status.get("connected")) and fresh)),
                     live_fps=float(live.get("fps") or 0.0),
                     main_fps=float(main.get("fps") or 0.0),
@@ -199,6 +200,7 @@ class ApplicationRuntimeMonitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
+        self._last_diagnostic_error_log = 0.0
 
     @property
     def running(self) -> bool:
@@ -308,15 +310,23 @@ class ApplicationRuntimeMonitor:
                 detector_status = self._detector_status()
                 detector_runtime = dict(detector_status.get("runtime") or {})
                 if self._diagnostics is not None:
-                    self._diagnostics.observe(
-                        statuses,
-                        detector_runtime=detector_runtime,
-                        storage_status=self._storage_status(),
-                        now_monotonic=now,
-                    )
+                    try:
+                        self._diagnostics.observe(
+                            statuses,
+                            detector_runtime=detector_runtime,
+                            storage_status=self._storage_status(),
+                            now_monotonic=now,
+                        )
+                    except Exception:
+                        if now - self._last_diagnostic_error_log >= 60.0:
+                            LOGGER.exception("diagnostic telemetry sampling failed")
+                            self._last_diagnostic_error_log = now
                 allocator_idle = self.allocator_trim_safe(statuses, detector_runtime)
                 self._memory_trimmer.observe_idle(allocator_idle, now=now)
                 if now - telemetry_sample_at >= self._sample_interval_seconds:
+                    # A telemetry-store failure must not turn into a one-second
+                    # retry loop that competes with cameras and inference.
+                    telemetry_sample_at = now
                     self._inference.maintain()
                     process_memory = process_memory_status()
                     self._memory_trimmer.maybe_trim(process_memory, now=now)
@@ -349,7 +359,7 @@ class ApplicationRuntimeMonitor:
                         self._telemetry_store.write_buckets(system_bucket, camera_buckets)
                         self._telemetry_store.refresh_rollups(sampled_at=sampled_at)
                         self._telemetry_store.enforce_retention(now=sampled_at)
-                    telemetry_sample_at = now
+                        self._telemetry_store.enforce_operational_budget()
             except Exception:
                 LOGGER.exception("application runtime monitor failed")
             self._stop.wait(self._poll_interval_seconds)

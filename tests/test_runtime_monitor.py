@@ -110,6 +110,21 @@ class ApplicationRuntimeMonitorTest(unittest.TestCase):
 
         self.assertFalse(monitor.running)
 
+    def test_diagnostic_failure_does_not_stop_operational_maintenance(self) -> None:
+        monitor, inference, _events, _state_events = runtime_monitor(
+            statuses=[{"id": "gate", "connected": True}]
+        )
+        monitor._diagnostics = Mock()
+        monitor._diagnostics.observe.side_effect = RuntimeError("diagnostic store busy")
+
+        monitor.start()
+        deadline = time.monotonic() + 1.0
+        while not inference.maintain.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        monitor.stop()
+
+        inference.maintain.assert_called()
+
     def test_worker_memory_deduplicates_shared_worker_pid(self) -> None:
         monitor, inference, _events, _state_events = runtime_monitor()
         inference.semantic_search.status.return_value = {

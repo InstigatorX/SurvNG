@@ -543,13 +543,13 @@ class EventApiSerializationTest(unittest.TestCase):
 
     def test_telemetry_history_survives_interruption_annotation_failure(self) -> None:
         events = SimpleNamespace(
-            lifecycle_events=Mock(return_value=[]),
             tracking_capacity_activity=Mock(return_value=[]),
         )
         telemetry = SimpleNamespace(
             sample_times=Mock(side_effect=RuntimeError("database busy")),
             operational_history=Mock(return_value=[{"sampled_at": "2026-08-07T10:00:00+00:00"}]),
             memory_history=Mock(return_value=[]),
+            lifecycle_events=Mock(return_value=[]),
         )
         fake_manager = SimpleNamespace(events=events, telemetry=telemetry)
 
@@ -564,13 +564,13 @@ class EventApiSerializationTest(unittest.TestCase):
 
     def test_camera_telemetry_omits_system_interruption_annotations(self) -> None:
         events = SimpleNamespace(
-            lifecycle_events=Mock(return_value=[]),
             tracking_capacity_activity=Mock(return_value=[]),
         )
         telemetry = SimpleNamespace(
             sample_times=Mock(return_value=["2026-08-07T10:00:00+00:00"]),
             operational_history=Mock(return_value=[]),
             memory_history=Mock(return_value=[]),
+            lifecycle_events=Mock(return_value=[]),
         )
         fake_manager = SimpleNamespace(events=events, telemetry=telemetry)
 
@@ -581,7 +581,7 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(history["interruptions"], [])
         self.assertEqual(history["interruption_summary"]["total"], 0)
         telemetry.sample_times.assert_not_called()
-        events.lifecycle_events.assert_not_called()
+        telemetry.lifecycle_events.assert_not_called()
 
     def test_object_tracking_catalog_exposes_only_safe_production_backend(self) -> None:
         catalog = main.object_tracking_catalog()

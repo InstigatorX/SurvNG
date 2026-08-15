@@ -547,7 +547,7 @@ def apply_config_update(
 def _record_process_lifecycle(kind: str) -> None:
     """Record restart evidence without making telemetry a lifecycle dependency."""
     try:
-        manager.events.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
+        manager.telemetry.record_lifecycle_event(PROCESS_INSTANCE_ID, kind)
     except Exception:
         logging.getLogger(__name__).exception(
             "could not persist process lifecycle event %s",
