@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
+import queue
+import re
 import subprocess
+import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
@@ -20,6 +24,7 @@ from .object_tracking import (
     build_builtin_object_tracker_registry,
 )
 from .zones import apply_detection_zones
+from .video_frames import DecodedVideoFrame, VideoFrameReference
 
 
 TRACKING_COMPARISON_IMPLEMENTATIONS = (
@@ -59,7 +64,13 @@ def sampled_video_frames(
     start_offset_seconds: float = 0.0,
     concat_input: bool = False,
     probe_path: Path | None = None,
-) -> Iterator[tuple[float, np.ndarray]]:
+) -> Iterator[DecodedVideoFrame]:
+    """Sample frames using ``start_epoch`` as the epoch at the seek point.
+
+    FFmpeg resets output timestamps after ``-ss`` on supported builds, so a
+    source PTS is relative to ``start_offset_seconds``. Callers sampling a
+    segment mid-file must pass the wall-clock epoch of that seek point.
+    """
     if ffmpeg_path:
         yield from _ffmpeg_sampled_video_frames(
             path,
@@ -80,6 +91,9 @@ def sampled_video_frames(
         source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         if not np.isfinite(source_fps) or source_fps <= 0.0:
             source_fps = 30.0
+        source_start = max(0.0, float(start_offset_seconds))
+        if source_start > 0.0:
+            capture.set(cv2.CAP_PROP_POS_MSEC, source_start * 1000.0)
         interval = 1.0 / max(0.1, float(sample_fps))
         next_sample = 0.0
         frame_index = 0
@@ -93,7 +107,21 @@ def sampled_video_frames(
                 break
             if offset + 1e-6 < next_sample:
                 continue
-            yield start_epoch + offset, frame
+            captured_at = start_epoch + offset
+            yield DecodedVideoFrame(
+                captured_at,
+                frame,
+                VideoFrameReference(
+                    source_path=path,
+                    seek_offset_seconds=source_start,
+                    pts=max(0, round(offset * source_fps)),
+                    pts_seconds=source_start + offset,
+                    time_base_num=1,
+                    time_base_den=max(1, round(source_fps)),
+                    captured_at=captured_at,
+                    exact=False,
+                ),
+            )
             next_sample += interval
     finally:
         capture.release()
@@ -110,12 +138,12 @@ def _ffmpeg_sampled_video_frames(
     start_offset_seconds: float,
     concat_input: bool,
     probe_path: Path | None,
-) -> Iterator[tuple[float, np.ndarray]]:
+) -> Iterator[DecodedVideoFrame]:
     # Opening another cv2.VideoCapture inside the server can contend with all
     # active camera capture threads. ffprobe is isolated and substantially
     # faster under a full camera workload. A constituent file is used when the
     # decoder input itself is an ffconcat manifest.
-    source_width, source_height = _ffprobe_video_dimensions(
+    source_width, source_height, time_base_num, time_base_den = _ffprobe_video_metadata(
         probe_path or path,
         ffmpeg_path,
     )
@@ -127,15 +155,19 @@ def _ffmpeg_sampled_video_frames(
     output_height -= output_height % 2
     frame_bytes = output_width * output_height * 3
     input_options = ["-f", "concat", "-safe", "0"] if concat_input else []
+    duration = max(0.1, float(duration_seconds))
     command = [
         ffmpeg_path,
         "-nostdin",
-        "-v", "error",
+        "-v", "info",
         *input_options,
         "-i", str(path),
         "-ss", f"{max(0.0, float(start_offset_seconds)):.3f}",
-        "-t", f"{max(0.1, float(duration_seconds)):.3f}",
-        "-vf", f"fps={max(0.1, float(sample_fps)):.6f},scale={output_width}:{output_height}",
+        "-t", f"{duration:.3f}",
+        "-vf", (
+            f"scale={output_width}:{output_height},showinfo@source,"
+            f"fps={max(0.1, float(sample_fps)):.6f},showinfo@sampled"
+        ),
         "-an", "-sn", "-dn",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
@@ -144,10 +176,61 @@ def _ffmpeg_sampled_video_frames(
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         bufsize=frame_bytes * 2,
     )
-    frame_index = 0
+    timestamps: queue.Queue[tuple[int, float] | None] = queue.Queue()
+    frame_pattern = re.compile(
+        r"\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:([-+0-9.eE]+).*"
+        r"\bchecksum:([0-9A-Fa-f]+)"
+    )
+
+    def read_timestamps() -> None:
+        stderr = process.stderr
+        if stderr is None:
+            timestamps.put(None)
+            return
+        try:
+            source_by_checksum: dict[str, list[tuple[int, float]]] = {}
+            last_source_time = float("-inf")
+            for raw_line in iter(stderr.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace")
+                match = frame_pattern.search(line)
+                if not match:
+                    continue
+                pts = int(match.group(1))
+                pts_seconds = float(match.group(2))
+                checksum = match.group(3).upper()
+                if "showinfo@source" in line:
+                    source_by_checksum.setdefault(checksum, []).append(
+                        (pts, pts_seconds)
+                    )
+                    continue
+                if "showinfo@sampled" not in line:
+                    continue
+                candidates = source_by_checksum.get(checksum, [])
+                eligible = [
+                    item for item in candidates if item[1] >= last_source_time - 1e-9
+                ]
+                if not eligible:
+                    timestamps.put(None)
+                    return
+                source_pts, source_time = min(
+                    eligible,
+                    key=lambda item: abs(item[1] - pts_seconds),
+                )
+                last_source_time = source_time
+                candidates.remove((source_pts, source_time))
+                timestamps.put((source_pts, source_time))
+        finally:
+            timestamps.put(None)
+
+    timestamp_thread = threading.Thread(
+        target=read_timestamps,
+        name="survng-frame-pts",
+        daemon=True,
+    )
+    timestamp_thread.start()
     try:
         if process.stdout is None:
             raise RuntimeError("comparison decoder output is unavailable")
@@ -163,8 +246,27 @@ def _ffmpeg_sampled_video_frames(
             if len(payload) != frame_bytes:
                 raise RuntimeError("comparison decoder returned a partial frame")
             frame = np.frombuffer(payload, dtype=np.uint8).reshape((output_height, output_width, 3)).copy()
-            yield start_epoch + frame_index / max(0.1, float(sample_fps)), frame
-            frame_index += 1
+            try:
+                timestamp = timestamps.get(timeout=5.0)
+            except queue.Empty as exc:
+                raise RuntimeError("comparison decoder frame timestamp timed out") from exc
+            if timestamp is None:
+                raise RuntimeError("comparison decoder frame timestamp is unavailable")
+            pts, pts_seconds = timestamp
+            captured_at = start_epoch + pts_seconds
+            yield DecodedVideoFrame(
+                captured_at,
+                frame,
+                VideoFrameReference(
+                    source_path=path,
+                    seek_offset_seconds=max(0.0, float(start_offset_seconds)),
+                    pts=pts,
+                    pts_seconds=pts_seconds,
+                    time_base_num=time_base_num,
+                    time_base_den=time_base_den,
+                    captured_at=captured_at,
+                ),
+            )
         return_code = process.wait(timeout=5.0)
         if return_code != 0:
             raise RuntimeError("comparison video decoder failed")
@@ -178,9 +280,15 @@ def _ffmpeg_sampled_video_frames(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2.0)
+        timestamp_thread.join(timeout=1.0)
+        if process.stderr is not None:
+            process.stderr.close()
 
 
-def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
+def _ffprobe_video_metadata(
+    path: Path,
+    ffmpeg_path: str,
+) -> tuple[int, int, int, int]:
     ffprobe_path = str(Path(ffmpeg_path).with_name("ffprobe"))
     try:
         result = subprocess.run(
@@ -188,8 +296,8 @@ def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
                 ffprobe_path,
                 "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "csv=p=0:s=x",
+                "-show_entries", "stream=width,height,time_base",
+                "-of", "json",
                 str(path),
             ],
             capture_output=True,
@@ -197,14 +305,78 @@ def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
             timeout=5.0,
             check=False,
         )
-        dimensions = result.stdout.strip().split("x", 1)
-        if result.returncode == 0 and len(dimensions) == 2:
-            width, height = (int(value) for value in dimensions)
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") if isinstance(payload, dict) else None
+        if result.returncode == 0 and isinstance(streams, list) and streams:
+            stream = streams[0]
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+            time_base = str(stream.get("time_base") or "1/1").split("/", 1)
+            time_base_num = int(time_base[0])
+            time_base_den = int(time_base[1]) if len(time_base) > 1 else 1
             if width > 0 and height > 0:
-                return width, height
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+                return width, height, time_base_num, max(1, time_base_den)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError, subprocess.TimeoutExpired):
         pass
     raise RuntimeError("comparison video dimensions are unavailable")
+
+
+def _ffprobe_video_dimensions(path: Path, ffmpeg_path: str) -> tuple[int, int]:
+    width, height, _time_base_num, _time_base_den = _ffprobe_video_metadata(
+        path,
+        ffmpeg_path,
+    )
+    return width, height
+
+
+def video_frame_at_reference(
+    reference: VideoFrameReference,
+    *,
+    ffmpeg_path: str,
+    maximum_width: int,
+) -> DecodedVideoFrame | None:
+    """Re-decode the exact source PTS identified during recorded sampling."""
+    if not reference.exact or maximum_width <= 0:
+        return None
+    source_width, source_height, _time_base_num, _time_base_den = (
+        _ffprobe_video_metadata(reference.source_path, ffmpeg_path)
+    )
+    output_width = max(2, min(source_width, max(64, int(maximum_width))))
+    output_height = max(2, int(round(source_height * output_width / source_width)))
+    output_width -= output_width % 2
+    output_height -= output_height % 2
+    command = [
+        ffmpeg_path,
+        "-nostdin",
+        "-v", "error",
+        "-i", str(reference.source_path),
+        "-ss", f"{max(0.0, reference.seek_offset_seconds):.3f}",
+        "-vf", (
+            f"select='eq(pts\\,{reference.pts})',"
+            f"scale={output_width}:{output_height},fps=1"
+        ),
+        "-frames:v", "1",
+        "-an", "-sn", "-dn",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "pipe:1",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    expected_bytes = output_width * output_height * 3
+    if result.returncode != 0 or len(result.stdout) != expected_bytes:
+        return None
+    frame = np.frombuffer(result.stdout, dtype=np.uint8).reshape(
+        (output_height, output_width, 3)
+    ).copy()
+    return DecodedVideoFrame(reference.captured_at, frame, reference)
 
 
 class TrackingComparisonRunner:
@@ -251,14 +423,19 @@ class TrackingComparisonRunner:
         last_epoch: float | None = None
         frame_width = 0
         frame_height = 0
+        exact_timestamp_frames = 0
 
         frame_iterator = iter(frames)
         while True:
             decode_started = time.perf_counter()
             try:
-                captured_at, frame = next(frame_iterator)
+                sample = next(frame_iterator)
             except StopIteration:
                 break
+            captured_at, frame = sample
+            reference = getattr(sample, "reference", None)
+            if reference is not None and reference.exact:
+                exact_timestamp_frames += 1
             frame_decode_ms += (time.perf_counter() - decode_started) * 1000.0
             if first_epoch is None:
                 first_epoch = captured_at
@@ -349,6 +526,12 @@ class TrackingComparisonRunner:
             "start_epoch": round(first_epoch, 3),
             "end_epoch": round(last_epoch, 3),
             "duration_seconds": round(max(0.0, last_epoch - first_epoch), 3),
+            "timestamp_source": (
+                "source_pts"
+                if exact_timestamp_frames == frames_processed
+                else "mixed_or_estimated"
+            ),
+            "source_pts_frames": exact_timestamp_frames,
             "detection_ms": round(detection_ms, 2),
             "average_detection_ms_per_frame": round(detection_ms / frames_processed, 3),
             "appearance_ms": round(appearance_ms, 2),

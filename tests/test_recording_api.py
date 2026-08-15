@@ -482,7 +482,13 @@ class RecordingApiTest(unittest.TestCase):
 
             def create_preview(command: list[str], **_kwargs: object) -> SimpleNamespace:
                 Path(command[-1]).write_bytes(b"jpeg")
-                return SimpleNamespace(returncode=0, stderr=b"")
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr=(
+                        b"[showinfo@preview] n: 0 pts: 810 "
+                        b"pts_time:0.009 checksum:AAAA\n"
+                    ),
+                )
 
             row = {
                 "path": str(source_path),
@@ -524,7 +530,13 @@ class RecordingApiTest(unittest.TestCase):
 
             def create_preview(command: list[str], **_kwargs: object) -> SimpleNamespace:
                 Path(command[-1]).write_bytes(b"jpeg")
-                return SimpleNamespace(returncode=0, stderr=b"")
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr=(
+                        b"[showinfo@preview] n: 0 pts: 810 "
+                        b"pts_time:0.009 checksum:AAAA\n"
+                    ),
+                )
 
             row = {
                 "path": str(source_path),
@@ -553,6 +565,11 @@ class RecordingApiTest(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("-ss") + 1], "7.900")
             self.assertIn("min(1280,iw)", command[command.index("-vf") + 1])
+            actual_epoch, source = (
+                main._recording_media_runtime._recording_preview_timestamp(preview)
+            )
+            self.assertAlmostEqual(actual_epoch or 0.0, 107.909, places=6)
+            self.assertEqual(source, "source_pts")
 
     def test_recording_preview_reports_index_gap_without_storage_scan(self) -> None:
         recorder = Mock()

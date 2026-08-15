@@ -15,7 +15,8 @@ import numpy as np
 from .camera_capture import CameraCaptureService
 from .config import CameraConfig
 from .security import redact_secret_text
-from .tracking_comparison import sampled_video_frames
+from .tracking_comparison import sampled_video_frames, video_frame_at_reference
+from .video_frames import DecodedVideoFrame, VideoFrameReference
 
 LOGGER = logging.getLogger(__name__)
 TRACKING_CATCHUP_SECONDS = 10.0
@@ -125,7 +126,7 @@ class TrackingFrameService:
         end_epoch: float,
         sample_fps: float,
         frame_width: int,
-    ) -> Iterator[tuple[float, np.ndarray]]:
+    ) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
         if end_epoch <= start_epoch or frame_width <= 0:
             return
         rows = sorted(
@@ -154,7 +155,7 @@ class TrackingFrameService:
                 )
             )
 
-        def recorded_samples() -> Iterator[tuple[float, np.ndarray]]:
+        def recorded_samples() -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
             last_recorded_epoch = start_epoch - interval
             for row in rows:
                 if self.stop_event.is_set():
@@ -170,7 +171,7 @@ class TrackingFrameService:
                 if not path.is_file():
                     continue
                 try:
-                    for captured_at, frame in sampled_video_frames(
+                    for sample in sampled_video_frames(
                         path,
                         start_epoch=sample_start,
                         sample_fps=sample_fps,
@@ -180,6 +181,7 @@ class TrackingFrameService:
                         start_offset_seconds=max(0.0, sample_start - row_start),
                         probe_path=path,
                     ):
+                        captured_at, _frame = sample
                         if self.stop_event.is_set():
                             return
                         if captured_at <= last_recorded_epoch + interval * 0.5:
@@ -187,7 +189,7 @@ class TrackingFrameService:
                         if captured_at > end_epoch + 1e-6:
                             break
                         last_recorded_epoch = captured_at
-                        yield captured_at, frame
+                        yield sample
                 except RuntimeError as error:
                     LOGGER.warning(
                         "recorded tracking catch-up skipped %s/%s: %s",
@@ -197,11 +199,12 @@ class TrackingFrameService:
                     )
 
         last_epoch = start_epoch - interval
-        for captured_at, frame in merge(
+        for sample in merge(
             recorded_samples(),
             buffered,
             key=lambda sample: sample[0],
         ):
+            captured_at, _frame = sample
             if self.stop_event.is_set():
                 return
             if captured_at <= last_epoch + interval * 0.5:
@@ -209,12 +212,13 @@ class TrackingFrameService:
             if captured_at > end_epoch + 1e-6:
                 break
             last_epoch = captured_at
-            yield captured_at, frame
+            yield sample
 
     def recorded_frame_at(
         self,
         captured_at: float,
         frame_width: int,
+        reference: VideoFrameReference | None = None,
     ) -> np.ndarray | None:
         """Decode one full-detail frame nearest a nominated tracking timestamp.
 
@@ -236,6 +240,20 @@ class TrackingFrameService:
                 str(row.get("path") or ""),
             ),
         )
+        if reference is not None and reference.exact:
+            for row in rows:
+                path = Path(str(row.get("path") or ""))
+                if (
+                    path.is_file()
+                    and reference.source_path.resolve() == path.resolve()
+                ):
+                    exact = video_frame_at_reference(
+                        reference,
+                        ffmpeg_path=self.recorder.ffmpeg_path,
+                        maximum_width=frame_width,
+                    )
+                    return exact.frame if exact is not None else None
+            return None
         for row in rows:
             row_start = float(row.get("start_epoch") or 0.0)
             row_end = float(row.get("end_epoch") or row_start)

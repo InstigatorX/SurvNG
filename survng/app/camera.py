@@ -38,6 +38,7 @@ from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .object_activity import AttributionMode, ObjectActivityAttributor
 from .tracking_frames import TrackingFrameService
+from .video_frames import DecodedVideoFrame
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
     MotionDebugSnapshotStore,
@@ -125,8 +126,12 @@ class CameraWorker:
                 self.motion_state.detection_enabled() and not self._stop.is_set()
             ),
             lifecycle_lock=self._lifecycle_lock,
-            cover_frame_provider=lambda captured_at, width: (
-                self.tracking_frames.recorded_frame_at(captured_at, width)
+            cover_frame_provider=lambda captured_at, width, reference: (
+                self.tracking_frames.recorded_frame_at(
+                    captured_at,
+                    width,
+                    reference,
+                )
             ),
             snapshot_writer=lambda frame, event_at: self.media.write_snapshot(
                 frame,
@@ -486,7 +491,7 @@ class CameraWorker:
         end_epoch: float,
         sample_fps: float,
         frame_width: int,
-    ) -> Iterator[tuple[float, np.ndarray]]:
+    ) -> Iterator[tuple[float, np.ndarray] | DecodedVideoFrame]:
         yield from self.tracking_frames.recorded_frames(
             start_epoch,
             end_epoch,

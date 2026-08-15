@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import mmap
 import os
+import re
 import shutil
 import signal
 import struct
@@ -275,16 +277,18 @@ class RecordingMediaRuntime:
         return str(devices[0]) if devices else str(info.get('device') or '')
 
     def _media_export_manager(self) -> MediaExportManager:
+        active_manager = self.manager
         with self.media_exports_lock:
             if self.media_exports is None:
-                self.media_exports = self._new_media_export_manager()
+                self.media_exports = self._new_media_export_manager(active_manager)
             selected = self.media_exports
             correctly_bound = (
-                selected.storage_dir == self.manager.storage_dir.resolve()
-                and selected.database_dir == self.manager.database_dir.resolve()
+                selected.storage_dir == active_manager.storage_dir.resolve()
+                and selected.database_dir == active_manager.database_dir.resolve()
+                and selected.media_storage is active_manager.media_storage
             )
         if not correctly_bound:
-            if not self.rebind_media_exports():
+            if not self.rebind_media_exports(active_manager=active_manager):
                 raise HTTPException(
                     status_code=503,
                     detail='media exports are unavailable while storage is being reconfigured',
@@ -293,26 +297,33 @@ class RecordingMediaRuntime:
                 selected = self.media_exports
         return selected
 
-    def _new_media_export_manager(self) -> MediaExportManager:
+    def _new_media_export_manager(
+        self, active_manager: AppManager | None = None
+    ) -> MediaExportManager:
+        selected_manager = active_manager or self.manager
         return MediaExportManager(
-            storage_dir=self.manager.storage_dir,
-            database_dir=self.manager.database_dir,
-            recorder=lambda: self.manager.recorder,
+            storage_dir=selected_manager.storage_dir,
+            database_dir=selected_manager.database_dir,
+            recorder=lambda: selected_manager.recorder,
             ffmpeg_path=lambda: self.config.ffmpeg_path,
             hardware_backend=self._media_export_hardware_backend,
             hardware_device=self._media_export_hardware_device,
-            media_storage=self.manager.media_storage,
+            media_storage=selected_manager.media_storage,
         )
 
-    def rebind_media_exports(self) -> bool:
+    def rebind_media_exports(
+        self, *, active_manager: AppManager | None = None
+    ) -> bool:
         """Move the export worker to the current manager's storage generation."""
+        selected_manager = active_manager or self.manager
         with self.media_exports_lock:
             previous = self.media_exports
             if previous is None:
                 return True
             if (
-                previous.storage_dir == self.manager.storage_dir.resolve()
-                and previous.database_dir == self.manager.database_dir.resolve()
+                previous.storage_dir == selected_manager.storage_dir.resolve()
+                and previous.database_dir == selected_manager.database_dir.resolve()
+                and previous.media_storage is selected_manager.media_storage
             ):
                 return True
             was_running = previous.is_running()
@@ -323,7 +334,7 @@ class RecordingMediaRuntime:
                 )
                 return False
             try:
-                replacement = self._new_media_export_manager()
+                replacement = self._new_media_export_manager(selected_manager)
                 if was_running:
                     replacement.start()
             except Exception:
@@ -677,18 +688,23 @@ class RecordingMediaRuntime:
         except OSError as exc:
             raise HTTPException(status_code=404, detail='recording file not found') from exc
         fingerprint = (
-            f'v2:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
-            f'{preview_offset:.3f}:{requested_width}'
+            f'v3:{source_path}:{stat.st_mtime_ns}:{stat.st_size}:'
+            f'{preview_offset:.3f}:{requested_width}:{int(exact)}'
         )
         cache_key = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:32]
         cache_dir = selected_manager.database_dir / 'recording-preview-cache'
         preview_path = cache_dir / f'{cache_key}.jpg'
-        if self._recording_preview_ready(preview_path, touch=True):
+        metadata_path = preview_path.with_suffix('.json')
+        if self._recording_preview_ready(preview_path, touch=True) and (
+            not exact or metadata_path.is_file()
+        ):
             return preview_path
         with self.recording_preview_locks_guard:
             lock = self.recording_preview_locks.setdefault(cache_key, threading.Lock())
         with lock:
-            if self._recording_preview_ready(preview_path, touch=True):
+            if self._recording_preview_ready(preview_path, touch=True) and (
+                not exact or metadata_path.is_file()
+            ):
                 return preview_path
             if not self.recording_preview_build_limiter.acquire(timeout=3.0):
                 raise HTTPException(status_code=429, detail='recording preview generator is busy', headers={'Retry-After': '1'})
@@ -696,7 +712,7 @@ class RecordingMediaRuntime:
             try:
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 jpeg_quality = 3 if requested_width > 480 else 5
-                command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', f"scale='min({requested_width},iw)':-2", '-q:v', str(jpeg_quality), '-y', str(temporary)]
+                command = [selected_config.ffmpeg_path, '-hide_banner', '-loglevel', 'info' if exact else 'error', '-ss', f'{preview_offset:.3f}', '-i', str(source_path), '-map', '0:v:0', '-frames:v', '1', '-threads', '1', '-vf', f"showinfo@preview,scale='min({requested_width},iw)':-2" if exact else f"scale='min({requested_width},iw)':-2", '-q:v', str(jpeg_quality), '-y', str(temporary)]
                 try:
                     result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8)
                 except subprocess.TimeoutExpired as exc:
@@ -708,11 +724,43 @@ class RecordingMediaRuntime:
                     LOGGER.warning('recording preview failed for %s at %.3f: %s', source_path.name, preview_offset, redact_secret_text(error[-300:]))
                     raise HTTPException(status_code=500, detail='recording preview failed')
                 os.replace(temporary, preview_path)
+                if exact:
+                    timestamp_match = re.search(
+                        rb'showinfo@preview[^\r\n]*\bpts_time:([-+0-9.eE]+)',
+                        result.stderr or b'',
+                    )
+                    actual_epoch = None
+                    timestamp_source = 'requested_offset'
+                    if timestamp_match is not None:
+                        actual_epoch = start_epoch + preview_offset + float(
+                            timestamp_match.group(1)
+                        )
+                        timestamp_source = 'source_pts'
+                    metadata_path.write_text(
+                        json.dumps({
+                            'actual_epoch': actual_epoch,
+                            'requested_epoch': epoch,
+                            'timestamp_source': timestamp_source,
+                        }, separators=(',', ':')),
+                        encoding='utf-8',
+                    )
             finally:
                 temporary.unlink(missing_ok=True)
                 self.recording_preview_build_limiter.release()
             self._maintain_recording_preview_cache(preview_path)
             return preview_path
+
+    @staticmethod
+    def _recording_preview_timestamp(path: Path) -> tuple[float | None, str]:
+        """Return persisted source timing for a generated recording preview."""
+        metadata_path = path.with_suffix('.json')
+        try:
+            payload = json.loads(metadata_path.read_text(encoding='utf-8'))
+            actual = payload.get('actual_epoch')
+            source = str(payload.get('timestamp_source') or 'requested_offset')
+            return (float(actual) if actual is not None else None, source)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            return None, 'requested_offset'
 
     def _recording_preview_ready(self, path: Path, *, touch: bool=False) -> bool:
         try:
@@ -742,6 +790,7 @@ class RecordingMediaRuntime:
                     stat = path.stat()
                     if now_epoch - stat.st_mtime > self.recording_preview_max_age_seconds:
                         path.unlink(missing_ok=True)
+                        path.with_suffix('.json').unlink(missing_ok=True)
                     else:
                         entries.append((stat.st_mtime, stat.st_size, path))
                 except OSError:
@@ -756,6 +805,7 @@ class RecordingMediaRuntime:
                     break
                 try:
                     path.unlink(missing_ok=True)
+                    path.with_suffix('.json').unlink(missing_ok=True)
                     total_size -= size
                 except OSError:
                     continue

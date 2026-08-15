@@ -70,6 +70,7 @@ class RecordingRouteDependencies:
     recording_rows: Callable[..., list[dict]]
     recording_day_rows: Callable[..., list[dict]]
     recording_preview_path: Callable[[dict, float], Path]
+    recording_preview_timestamp: Callable[[Path], tuple[float | None, str]]
     recording_day_fmp4_paths: Callable[..., tuple[Path, Path]]
     recording_file_response: Callable[[Path, str], FileResponse]
     event_clip_window: Callable[..., tuple[float, float]]
@@ -650,10 +651,20 @@ def create_recording_router(deps: RecordingRouteDependencies) -> RecordingRouteB
             width=width,
             exact=exact,
         )
+        actual_epoch, timestamp_source = deps.recording_preview_timestamp(
+            preview_path
+        )
+        headers = {
+            "Cache-Control": "private, max-age=3600",
+            "X-SurvNG-Requested-Timestamp": f"{epoch:.6f}",
+            "X-SurvNG-Timestamp-Source": timestamp_source,
+        }
+        if actual_epoch is not None:
+            headers["X-SurvNG-Actual-Timestamp"] = f"{actual_epoch:.6f}"
         return FileResponse(
             preview_path,
             media_type="image/jpeg",
-            headers={"Cache-Control": "private, max-age=3600"},
+            headers=headers,
         )
 
 

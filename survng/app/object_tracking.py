@@ -16,6 +16,7 @@ from .detector import detection_failure
 from .security import redact_secret_text
 from .domain_events import TrackingCompleted
 from .visual_quality import image_quality
+from .video_frames import DecodedVideoFrame, VideoFrameReference
 from .zones import apply_detection_zones
 
 
@@ -26,11 +27,17 @@ TRACKING_CATCHUP_RETRY_SECONDS = 0.25
 Box = tuple[float, float, float, float]
 FrameSample = tuple[np.ndarray, float, float]
 FrameProvider = Callable[[], FrameSample | None]
-CatchupFrameProvider = Callable[[float, float, float, int], Iterable[tuple[float, np.ndarray]]]
+CatchupFrameProvider = Callable[
+    [float, float, float, int],
+    Iterable[tuple[float, np.ndarray] | DecodedVideoFrame],
+]
 TrackingUpdate = Callable[[int, dict[str, Any], list[dict[str, Any]] | None], object | None]
 TrackingPublisher = Callable[[str, dict[str, Any]], None]
 AppearanceIndexWriter = Callable[[int, str, Iterable[dict[str, Any]]], int]
-TrackingCoverFrameProvider = Callable[[float, int], np.ndarray | None]
+TrackingCoverFrameProvider = Callable[
+    [float, int, VideoFrameReference | None],
+    np.ndarray | None,
+]
 TrackingSnapshotWriter = Callable[[np.ndarray, datetime], str]
 TrackingCoverPromoter = Callable[..., dict[str, Any] | None]
 
@@ -45,6 +52,7 @@ class _TrackingCoverCandidate:
     quality_score: float
     detection_confidence: float
     fully_framed: bool
+    frame_reference: VideoFrameReference | None = None
 
     @property
     def score(self) -> tuple[int, float, float, float, float]:
@@ -1248,6 +1256,7 @@ class ObjectTrackingSession:
         captured_at: float,
         tracked_objects: list[dict[str, Any]],
         primary_track_ids: set[int],
+        frame_reference: VideoFrameReference | None = None,
     ) -> None:
         """Remember metadata for the best later view without retaining its frame."""
         if (
@@ -1299,9 +1308,12 @@ class ObjectTrackingSession:
             quality_score=float(quality),
             detection_confidence=_confidence(item),
             fully_framed=clearance >= 0.01,
+            frame_reference=frame_reference,
         )
         if self._cover_baseline is None:
             self._cover_baseline = candidate
+        elif frame_reference is None or not frame_reference.exact:
+            return
         if self._cover_candidate is None or candidate.score > self._cover_candidate.score:
             self._cover_candidate = candidate
 
@@ -1312,6 +1324,8 @@ class ObjectTrackingSession:
         if (
             baseline is None
             or candidate is None
+            or candidate.frame_reference is None
+            or not candidate.frame_reference.exact
             or self.cover_frame_provider is None
             or self.snapshot_writer is None
             or self.cover_promoter is None
@@ -1328,7 +1342,11 @@ class ObjectTrackingSession:
             "cover_promotion_result": "decode_unavailable",
             "cover_source": "object_tracking",
         }
-        frame = self.cover_frame_provider(candidate.captured_at, self._frame_width)
+        frame = self.cover_frame_provider(
+            candidate.captured_at,
+            self._frame_width,
+            candidate.frame_reference,
+        )
         if frame is None or not frame.size:
             return
         frame_height, frame_width = frame.shape[:2]
@@ -1474,6 +1492,12 @@ class ObjectTrackingSession:
             "cover_verification_inference_ms": inference_ms,
             "cover_verification_detection_count": len(detected_objects),
             "cover_verified_quality_score": round(final_quality, 6),
+            "cover_frame_timestamp_source": "source_pts",
+            "cover_frame_pts": candidate.frame_reference.pts,
+            "cover_frame_time_base": (
+                f"{candidate.frame_reference.time_base_num}/"
+                f"{candidate.frame_reference.time_base_den}"
+            ),
         }
 
     @staticmethod
@@ -1728,6 +1752,7 @@ class ObjectTrackingSession:
                 sample_epoch: float,
                 *,
                 catchup: bool,
+                frame_reference: VideoFrameReference | None = None,
             ) -> bool:
                 nonlocal consecutive_failures, frames_processed
                 source_height = int(frame.shape[0])
@@ -1777,6 +1802,7 @@ class ObjectTrackingSession:
                     sample_epoch,
                     tracked,
                     primary_track_ids,
+                    frame_reference,
                 )
                 frames_processed += 1
                 if catchup:
@@ -1808,12 +1834,19 @@ class ObjectTrackingSession:
                     )
                 )
                 try:
-                    for sample_epoch, frame in catchup_frames:
+                    for sample in catchup_frames:
+                        sample_epoch, frame = sample
+                        frame_reference = getattr(sample, "reference", None)
                         if stop.is_set() or time.monotonic() >= self._deadline:
                             break
                         if sample_epoch <= captured_at or sample_epoch > target_epoch:
                             continue
-                        process_frame(frame, sample_epoch, catchup=True)
+                        process_frame(
+                            frame,
+                            sample_epoch,
+                            catchup=True,
+                            frame_reference=frame_reference,
+                        )
                         captured_at = sample_epoch
                         advanced = True
                 finally:

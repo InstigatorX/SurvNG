@@ -484,7 +484,10 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             completed = SimpleNamespace(
                 returncode=0,
                 stdout=encoded_first.tobytes() + encoded_second.tobytes(),
-                stderr=b"",
+                stderr=(
+                    b"[showinfo@event_sample] n: 0 pts: 45000 pts_time:0.5\n"
+                    b"[showinfo@event_sample] n: 1 pts: 94500 pts_time:1.05\n"
+                ),
             )
             with patch(
                 "survng.app.motion_pipeline.object_detection.subprocess.run",
@@ -496,11 +499,15 @@ class RecordedObjectConsensusTest(unittest.TestCase):
 
         self.assertEqual(run.call_count, 1)
         self.assertEqual(process_count, 1)
-        self.assertTrue(np.array_equal(frames[0.5], first))
-        self.assertTrue(np.array_equal(frames[1.0], second))
+        self.assertTrue(np.array_equal(frames[0.5].frame, first))
+        self.assertTrue(np.array_equal(frames[1.0].frame, second))
+        self.assertEqual(frames[0.5].actual_offset, 0.5)
+        self.assertEqual(frames[1.0].actual_offset, 1.05)
+        self.assertTrue(frames[1.0].exact_timestamp)
         command = run.call_args.args[0]
         self.assertIn("-fps_mode", command)
         self.assertIn("select=", " ".join(command))
+        self.assertIn("showinfo@event_sample", " ".join(command))
 
     def test_per_class_confidence_sets_inference_floor_and_object_eligibility(self) -> None:
         class Detector:

@@ -55,6 +55,7 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
         recording_rows=lambda *_args, **_kwargs: [],
         recording_day_rows=lambda *_args, **_kwargs: [],
         recording_preview_path=lambda *_args, **_kwargs: Path("preview.jpg"),
+        recording_preview_timestamp=lambda _path: (None, "requested_offset"),
         recording_day_fmp4_paths=lambda *_args, **_kwargs: (
             Path("init.mp4"),
             Path("media.m4s"),
@@ -66,6 +67,32 @@ def _dependencies(get_manager) -> RecordingRouteDependencies:
 
 
 class RecordingRouteLifecycleTests(TestCase):
+    def test_exact_preview_reports_requested_and_decoded_timestamps(self) -> None:
+        recorder = SimpleNamespace(
+            recording_rows_between=lambda *_args, **_kwargs: [{
+                "path": "/recordings/gate.mp4",
+                "start_epoch": 100.0,
+                "end_epoch": 110.0,
+            }]
+        )
+        manager = SimpleNamespace(
+            camera=lambda camera_id: object() if camera_id == "gate" else None,
+            recorder=recorder,
+        )
+        dependencies = replace(
+            _dependencies(lambda: manager),
+            recording_preview_path=lambda *_args, **_kwargs: Path("preview.jpg"),
+            recording_preview_timestamp=lambda _path: (107.909, "source_pts"),
+        )
+
+        response = create_recording_router(dependencies).handlers[
+            "recording_preview"
+        ]("gate", 107.9, "main", 1280, True)
+
+        self.assertEqual(response.headers["x-survng-requested-timestamp"], "107.900000")
+        self.assertEqual(response.headers["x-survng-actual-timestamp"], "107.909000")
+        self.assertEqual(response.headers["x-survng-timestamp-source"], "source_pts")
+
     def test_request_holds_manager_lease_while_query_runs(self) -> None:
         active_manager = _Manager("current")
         access = ManagerAccessCoordinator()

@@ -11,6 +11,7 @@ import numpy as np
 
 from survng.app.config import CameraConfig
 from survng.app.tracking_frames import TrackingFrameService
+from survng.app.video_frames import DecodedVideoFrame, VideoFrameReference
 
 
 def _service(
@@ -106,6 +107,29 @@ def test_recorded_and_buffered_frames_merge_in_timestamp_order_without_duplicate
     recorder.recording_rows_between.assert_called_once_with(
         "gate", 100.0, 101.0, source="main"
     )
+
+
+def test_recorded_catchup_uses_requested_window_as_post_seek_pts_origin() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "segment.mp4"
+        path.write_bytes(b"segment")
+        recorder.recording_rows_between.return_value = [{
+            "path": str(path),
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+        }]
+        service = _service(recorder=recorder)
+
+        with patch(
+            "survng.app.tracking_frames.sampled_video_frames",
+            return_value=iter([]),
+        ) as sampled:
+            list(service.recorded_frames(106.0, 107.0, 2.0, 640))
+
+    assert sampled.call_args.kwargs["start_epoch"] == 106.0
+    assert sampled.call_args.kwargs["start_offset_seconds"] == 6.0
 
 
 def test_stopped_service_does_not_request_new_capture_frames() -> None:
@@ -228,3 +252,79 @@ def test_recorded_cover_frame_bypasses_buffer_and_decodes_nominated_main_frame()
     )
     assert decoder.call_args.kwargs["maximum_width"] == 2560
     assert decoder.call_args.kwargs["start_offset_seconds"] == 4.25
+
+
+def test_recorded_cover_frame_uses_exact_reference_before_timestamp_fallback() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "segment.mp4"
+        path.write_bytes(b"segment")
+        recorder.recording_rows_between.return_value = [{
+            "path": str(path),
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+        }]
+        service = _service(recorder=recorder)
+        reference = VideoFrameReference(
+            source_path=path,
+            seek_offset_seconds=4.0,
+            pts=3000,
+            pts_seconds=0.25,
+            time_base_num=1,
+            time_base_den=90000,
+            captured_at=104.25,
+        )
+        full_detail = np.full((1920, 2560, 3), 9, dtype=np.uint8)
+
+        with (
+            patch(
+                "survng.app.tracking_frames.video_frame_at_reference",
+                return_value=DecodedVideoFrame(104.25, full_detail, reference),
+            ) as exact_decoder,
+            patch("survng.app.tracking_frames.sampled_video_frames") as fallback,
+        ):
+            selected = service.recorded_frame_at(104.25, 2560, reference)
+
+    assert selected is full_detail
+    exact_decoder.assert_called_once_with(
+        reference,
+        ffmpeg_path="/usr/bin/ffmpeg",
+        maximum_width=2560,
+    )
+    fallback.assert_not_called()
+
+
+def test_recorded_cover_does_not_approximate_when_exact_reference_fails() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "segment.mp4"
+        path.write_bytes(b"segment")
+        recorder.recording_rows_between.return_value = [{
+            "path": str(path),
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+        }]
+        service = _service(recorder=recorder)
+        reference = VideoFrameReference(
+            source_path=path,
+            seek_offset_seconds=4.0,
+            pts=3000,
+            pts_seconds=0.25,
+            time_base_num=1,
+            time_base_den=90000,
+            captured_at=104.25,
+        )
+
+        with (
+            patch(
+                "survng.app.tracking_frames.video_frame_at_reference",
+                return_value=None,
+            ),
+            patch("survng.app.tracking_frames.sampled_video_frames") as fallback,
+        ):
+            selected = service.recorded_frame_at(104.25, 2560, reference)
+
+    assert selected is None
+    fallback.assert_not_called()

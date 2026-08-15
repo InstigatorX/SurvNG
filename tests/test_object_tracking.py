@@ -22,6 +22,7 @@ from survng.app.object_tracking import (
     ultralytics_deepocsort_dependency_status,
     ultralytics_fasttrack_dependency_status,
 )
+from survng.app.video_frames import VideoFrameReference
 
 
 def detection(
@@ -593,7 +594,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             update_event=lambda *_args: {},
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
-            cover_frame_provider=lambda _captured_at, _width: np.full(
+            cover_frame_provider=lambda _captured_at, _width, _reference: np.full(
                 (200, 300, 3), 127, dtype=np.uint8
             ),
             snapshot_writer=lambda _frame, _event_at: "snapshots/gate/better.webp",
@@ -622,6 +623,15 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             104.0,
             [closer],
             {4},
+            VideoFrameReference(
+                source_path=Path("segment.mp4"),
+                seek_offset_seconds=4.0,
+                pts=123,
+                pts_seconds=0.0,
+                time_base_num=1,
+                time_base_den=90000,
+                captured_at=104.0,
+            ),
         )
         session._promote_cover_candidate(7)
 
@@ -672,7 +682,7 @@ class ObjectTrackingSessionTest(unittest.TestCase):
             update_event=lambda *_args: {},
             publisher=None,
             limiter=threading.BoundedSemaphore(1),
-            cover_frame_provider=lambda _captured_at, _width: np.zeros((100, 100, 3), dtype=np.uint8),
+            cover_frame_provider=lambda _captured_at, _width, _reference: np.zeros((100, 100, 3), dtype=np.uint8),
             snapshot_writer=lambda _frame, _event_at: "snapshots/gate/better.webp",
             cover_promoter=promoter,
         )

@@ -1266,6 +1266,10 @@ class SemanticSearchService(DisabledSemanticSearch):
         with self._lifecycle_lock:
             if self._state in {"initializing", "recovering", "ready", "stopping"}:
                 return
+            # A stop during bootstrap has no worker available to consume the
+            # sentinel. Never let that stale sentinel terminate the next
+            # generation as soon as it starts.
+            self._drain_queue()
             self._storage_dir = Path(storage_dir)
             self._media_storage = media_storage
             self._stop.clear()
@@ -1645,6 +1649,17 @@ class SemanticSearchService(DisabledSemanticSearch):
         for thread in (bootstrap_thread, backfill_thread, worker_thread):
             if thread and thread is not threading.current_thread():
                 thread.join(timeout=5.0)
+        alive = [
+            thread.name
+            for thread in (bootstrap_thread, backfill_thread, worker_thread)
+            if thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ]
+        if alive:
+            raise RuntimeError(
+                "semantic search workers did not stop: " + ", ".join(alive)
+            )
         with self._encoder_lock:
             if self.encoder:
                 self.encoder.close()
@@ -1652,3 +1667,15 @@ class SemanticSearchService(DisabledSemanticSearch):
         with self._lifecycle_lock:
             self._state = "stopped"
             self._next_retry_at = 0.0
+            self._bootstrap_thread = None
+            self._backfill_thread = None
+            self._thread = None
+
+    def _drain_queue(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
+            else:
+                self._queue.task_done()

@@ -94,10 +94,15 @@ try {
     // A seek outside the current 15-minute window loads another manifest;
     // a seek within it intentionally reuses the active media timeline. Both
     // paths are valid as long as playback settles on the requested position.
-    await page.waitForFunction(() => {
+    await page.waitForFunction((expected) => {
       const element = document.querySelector(".recordings-v2-player video");
-      return element && !element.seeking && element.readyState >= 2 && element.videoWidth > 0;
-    }, null, { timeout: 30_000 });
+      const slider = document.querySelector(".recordings-v2-track input");
+      const notice = document.querySelector(".recordings-v2-notice")?.textContent || "";
+      return element && slider
+        && !element.seeking && element.readyState >= 2 && element.videoWidth > 0
+        && Math.abs(Number(slider.value) - expected) <= 1
+        && !/loading|seeking/i.test(notice);
+    }, expectedSeconds, { timeout: 30_000 });
     const alignedSeconds = await page.locator(".recordings-v2-track input").inputValue().then(Number);
     if (Math.abs(alignedSeconds - expectedSeconds) > 1) {
       failures.push(`window scrub ${index + 1}: timeline is misaligned by ${Math.abs(alignedSeconds - expectedSeconds).toFixed(1)}s`);

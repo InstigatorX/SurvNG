@@ -10,7 +10,12 @@ import numpy as np
 
 from survng.app.config import CameraConfig, ObjectTrackingConfig
 from survng.app.object_tracking import ByteTrackObjectTracker, ObjectTrackerRegistry
-from survng.app.tracking_comparison import TrackingComparisonRunner, sampled_video_frames
+from survng.app.tracking_comparison import (
+    TrackingComparisonRunner,
+    sampled_video_frames,
+    video_frame_at_reference,
+)
+from survng.app.video_frames import VideoFrameReference
 
 
 class Detector:
@@ -164,6 +169,12 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         payload = bytes(range(96)) * 2
         process = SimpleNamespace(
             stdout=BytesIO(payload),
+            stderr=BytesIO(
+                b"[showinfo@source] n: 0 pts: 4500 pts_time:0.05 checksum:AAAA\n"
+                b"[showinfo@sampled] n: 0 pts: 0 pts_time:0 checksum:AAAA\n"
+                b"[showinfo@source] n: 1 pts: 45000 pts_time:0.5 checksum:BBBB\n"
+                b"[showinfo@sampled] n: 1 pts: 1 pts_time:0.5 checksum:BBBB\n"
+            ),
             wait=Mock(return_value=0),
             poll=Mock(return_value=0),
             terminate=Mock(),
@@ -172,7 +183,10 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
         with (
             patch(
                 "survng.app.tracking_comparison.subprocess.run",
-                return_value=SimpleNamespace(returncode=0, stdout="8x4\n"),
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
+                ),
             ) as ffprobe,
             patch("survng.app.tracking_comparison.subprocess.Popen", return_value=process) as popen,
         ):
@@ -189,13 +203,56 @@ class TrackingComparisonRunnerTest(unittest.TestCase):
             ))
 
         self.assertEqual(ffprobe.call_args.args[0][-1], "first-segment.mp4")
-        self.assertEqual([epoch for epoch, _frame in frames], [50.0, 50.5])
+        self.assertEqual([epoch for epoch, _frame in frames], [50.05, 50.5])
+        self.assertEqual(frames[1].reference.pts, 45000)
+        self.assertEqual(frames[1].reference.time_base_den, 90000)
         self.assertEqual([frame.shape for _epoch, frame in frames], [(4, 8, 3), (4, 8, 3)])
         command = popen.call_args.args[0]
-        self.assertIn("fps=2.000000,scale=8:4", command)
+        self.assertIn(
+            "scale=8:4,showinfo@source,fps=2.000000,showinfo@sampled",
+            command[command.index("-vf") + 1],
+        )
         self.assertEqual(command[command.index("-f") + 1], "concat")
         self.assertEqual(command[command.index("-safe") + 1], "0")
         self.assertEqual(command[command.index("-ss") + 1], "1.250")
+
+    def test_exact_frame_reference_redecodes_the_identified_pts(self) -> None:
+        reference = VideoFrameReference(
+            source_path=Path("segment.mp4"),
+            seek_offset_seconds=6.0,
+            pts=32871,
+            pts_seconds=0.365233,
+            time_base_num=1,
+            time_base_den=90000,
+            captured_at=100.365233,
+        )
+        raw = bytes(range(96))
+        probe = SimpleNamespace(
+            returncode=0,
+            stdout='{"streams":[{"width":8,"height":4,"time_base":"1/90000"}]}',
+        )
+        decoded = SimpleNamespace(returncode=0, stdout=raw)
+
+        with patch(
+            "survng.app.tracking_comparison.subprocess.run",
+            side_effect=[probe, decoded],
+        ) as run:
+            sample = video_frame_at_reference(
+                reference,
+                ffmpeg_path="ffmpeg",
+                maximum_width=8,
+            )
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.captured_at, reference.captured_at)
+        self.assertIs(sample.reference, reference)
+        self.assertEqual(sample.frame.shape, (4, 8, 3))
+        command = run.call_args_list[1].args[0]
+        self.assertIn(
+            "select='eq(pts\\,32871)'",
+            command[command.index("-vf") + 1],
+        )
+        self.assertEqual(command[command.index("-ss") + 1], "6.000")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from survng.app.config import AppConfig, CameraConfig, DetectorConfig, ObjectTrackingConfig
@@ -939,6 +942,41 @@ class ConfigReloadTest(unittest.TestCase):
             self.assertIs(runtime.media_exports, replacement)
         finally:
             runtime.media_exports = previous_value
+
+    def test_media_exports_rebind_when_only_media_locations_change(self) -> None:
+        runtime = main._recording_media_runtime
+        previous_value = runtime.media_exports
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            previous = Mock()
+            previous.storage_dir = root
+            previous.database_dir = root
+            previous.media_storage = object()
+            previous.is_running.return_value = False
+            previous.stop.return_value = True
+            replacement = Mock()
+            manager = SimpleNamespace(
+                storage_dir=root,
+                database_dir=root,
+                media_storage=object(),
+            )
+            try:
+                runtime.media_exports = previous
+                with (
+                    patch.object(main, "manager", manager),
+                    patch.object(
+                        runtime,
+                        "_new_media_export_manager",
+                        return_value=replacement,
+                    ) as factory,
+                ):
+                    rebound = runtime.rebind_media_exports()
+
+                self.assertTrue(rebound)
+                factory.assert_called_once_with(manager)
+                self.assertIs(runtime.media_exports, replacement)
+            finally:
+                runtime.media_exports = previous_value
 
     def test_failed_media_export_rebind_restores_previous_worker(self) -> None:
         runtime = main._recording_media_runtime

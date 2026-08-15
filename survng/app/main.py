@@ -1029,6 +1029,9 @@ _recording_route_bundle = create_recording_router(
                 **kwargs,
             )
         ),
+        recording_preview_timestamp=(
+            _recording_media_runtime._recording_preview_timestamp
+        ),
         recording_day_fmp4_paths=lambda active_manager, *args, **kwargs: (
             _recording_media_runtime._recording_day_fmp4_paths(
                 *args,

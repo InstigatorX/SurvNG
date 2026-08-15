@@ -6,7 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import cv2
@@ -485,6 +485,48 @@ class SemanticIndexTest(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(service.status()["state"], "stopped")
+
+    def test_restart_discards_sentinel_left_by_stop_during_bootstrap(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        service._state = "initializing"
+        service.close()
+        self.assertEqual(service._queue.qsize(), 1)
+
+        fake_thread = Mock()
+        fake_thread.is_alive.return_value = False
+        with patch(
+            "survng.app.semantic_search.threading.Thread",
+            return_value=fake_thread,
+        ):
+            service.start(object(), Path(self.temporary.name))
+
+        self.assertEqual(service._queue.qsize(), 0)
+        fake_thread.start.assert_called_once()
+
+    def test_close_fails_if_a_semantic_worker_remains_alive(self) -> None:
+        from survng.app.config import SemanticSearchConfig
+
+        service = SemanticSearchService(
+            SemanticSearchConfig(enabled=True), self.index, Path(self.temporary.name), {}
+        )
+        encoder = Mock()
+        worker = Mock(name="semantic-worker")
+        worker.name = "survng-semantic"
+        worker.is_alive.return_value = True
+        service.encoder = encoder
+        service._thread = worker
+        service._state = "ready"
+
+        with self.assertRaisesRegex(RuntimeError, "workers did not stop"):
+            service.close()
+
+        self.assertEqual(service._state, "stopping")
+        encoder.abort.assert_called_once()
+        encoder.close.assert_not_called()
 
     def test_initialization_falls_back_to_cpu_after_configured_device_crashes(self) -> None:
         from survng.app.config import SemanticSearchConfig

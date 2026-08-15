@@ -187,6 +187,8 @@ def _incident_event_payload(event: dict) -> dict:
                 "incident_eligible",
                 "temporal_consensus",
                 "temporal_sample_offset_seconds",
+                "temporal_requested_sample_offset_seconds",
+                "temporal_sample_timestamp_source",
                 "temporal_observations",
                 "temporal_track_observations",
                 "temporal_incident_observations",
