@@ -196,6 +196,14 @@ class CameraWorker:
             queue_size=MOTION_QUEUE_SIZE,
             retry_limit=MOTION_EVENT_MAX_RETRIES,
             camera_id=camera.id,
+            durable_store=(
+                motion_decision_handler_factory.events
+                if hasattr(
+                    motion_decision_handler_factory.events,
+                    "enqueue_motion_trigger",
+                )
+                else None
+            ),
         )
         self.motion_qualification = MotionQualificationService(
             camera=camera,

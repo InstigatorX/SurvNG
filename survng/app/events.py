@@ -132,6 +132,27 @@ class EventStore:
             )
             conn.execute(
                 """
+                create table if not exists motion_trigger_jobs (
+                    id text primary key,
+                    camera_id text not null,
+                    payload_json text not null,
+                    state text not null,
+                    lease_expires_at real,
+                    created_at text not null,
+                    updated_at text not null
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_motion_trigger_jobs_claim "
+                "on motion_trigger_jobs(camera_id, state, created_at)"
+            )
+            conn.execute(
+                "update motion_trigger_jobs set state = 'queued', "
+                "lease_expires_at = null where state = 'running'"
+            )
+            conn.execute(
+                """
                 create table if not exists motion_audits (
                     id integer primary key autoincrement,
                     event_id integer,
@@ -471,6 +492,69 @@ class EventStore:
         with self._connect() as conn:
             rows = conn.execute(
                 "select state, count(*) as count from detection_jobs "
+                "where camera_id = ? group by state",
+                (camera_id,),
+            ).fetchall()
+        return {str(row["state"]): int(row["count"]) for row in rows}
+
+    def enqueue_motion_trigger(
+        self,
+        *,
+        job_id: str,
+        camera_id: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "insert or ignore into motion_trigger_jobs "
+                "(id, camera_id, payload_json, state, created_at, updated_at) "
+                "values (?, ?, ?, 'queued', ?, ?)",
+                (job_id, camera_id, json.dumps(payload, separators=(",", ":")), now, now),
+            )
+        return bool(cursor.rowcount)
+
+    def claim_motion_trigger(
+        self,
+        camera_id: str,
+        job_id: str | None = None,
+        *,
+        lease_seconds: float = 60.0,
+    ) -> dict[str, Any] | None:
+        now_epoch = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            if job_id:
+                row = conn.execute(
+                    "select * from motion_trigger_jobs where id = ? and camera_id = ? "
+                    "and state in ('queued', 'running')",
+                    (job_id, camera_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "select * from motion_trigger_jobs where camera_id = ? and "
+                    "(state = 'queued' or (state = 'running' and lease_expires_at <= ?)) "
+                    "order by created_at, id limit 1",
+                    (camera_id, now_epoch),
+                ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "update motion_trigger_jobs set state = 'running', lease_expires_at = ?, "
+                "updated_at = ? where id = ?",
+                (now_epoch + lease_seconds, now_iso, str(row["id"])),
+            )
+            return {**dict(row), "payload": json.loads(str(row["payload_json"]))}
+
+    def complete_motion_trigger(self, job_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("delete from motion_trigger_jobs where id = ?", (job_id,))
+
+    def motion_trigger_status(self, camera_id: str) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select state, count(*) as count from motion_trigger_jobs "
                 "where camera_id = ? group by state",
                 (camera_id,),
             ).fetchall()

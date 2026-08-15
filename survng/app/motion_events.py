@@ -4,16 +4,24 @@ import math
 import queue
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 from .motion import MotionQualificationResult
 from .ema_v2 import MotionEpisodeController
 
 StatCallback = Callable[[str], None]
+
+
+class MotionTriggerStore(Protocol):
+    def enqueue_motion_trigger(self, *, job_id: str, camera_id: str, payload: dict[str, Any]) -> bool: ...
+    def claim_motion_trigger(self, camera_id: str, job_id: str | None = None, *, lease_seconds: float = 60.0) -> dict[str, Any] | None: ...
+    def complete_motion_trigger(self, job_id: str) -> None: ...
+    def motion_trigger_status(self, camera_id: str) -> dict[str, int]: ...
 
 
 class RetryDisposition(StrEnum):
@@ -69,6 +77,7 @@ class MotionTrigger:
     episode_id: str = ""
     detection_intent_id: str = ""
     lifecycle_generation: int = 0
+    delivery_job_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.topic, str) or not self.topic.strip():
@@ -108,6 +117,8 @@ class MotionTrigger:
             self.lifecycle_generation, int
         ):
             raise TypeError("motion trigger lifecycle generation must be an integer")
+        if not isinstance(self.delivery_job_id, str):
+            raise TypeError("motion trigger delivery job ID must be a string")
         if self.retry_batch is not None and (
             not isinstance(self.retry_batch, tuple)
             or not all(isinstance(item, MotionTrigger) for item in self.retry_batch)
@@ -125,6 +136,50 @@ class MotionTrigger:
             self.audit_snapshot_path, str
         ):
             raise TypeError("motion trigger audit snapshot path must be a string")
+
+    def durable_payload(self) -> dict[str, Any]:
+        return {
+            "topic": self.topic,
+            "message": self.message,
+            "event_at": self.event_at.isoformat(),
+            "received_at": self.received_at,
+            "prequalified": self.prequalified.as_dict() if self.prequalified else None,
+            "decision_id": self.decision_id,
+            "audit_snapshot_path": self.audit_snapshot_path,
+            "event_timing": self.event_timing.to_payload() if self.event_timing else None,
+            "episode_id": self.episode_id,
+            "detection_intent_id": self.detection_intent_id,
+            "lifecycle_generation": self.lifecycle_generation,
+        }
+
+    @classmethod
+    def from_durable_payload(cls, payload: dict[str, Any], job_id: str) -> "MotionTrigger":
+        prequalified = payload.get("prequalified")
+        timing = payload.get("event_timing")
+        return cls(
+            topic=str(payload["topic"]),
+            message=str(payload.get("message") or ""),
+            event_at=datetime.fromisoformat(str(payload["event_at"])),
+            received_at=float(payload["received_at"]),
+            prequalified=(MotionQualificationResult(**prequalified) if prequalified else None),
+            decision_id=str(payload.get("decision_id") or ""),
+            audit_snapshot_path=payload.get("audit_snapshot_path"),
+            event_timing=(
+                MotionEventTiming(
+                    sampling_at=datetime.fromisoformat(str(timing["sampling_at"])),
+                    received_at=datetime.fromisoformat(str(timing["received_at"])),
+                    camera_event_at=(datetime.fromisoformat(str(timing["camera_event_at"])) if timing.get("camera_event_at") else None),
+                    camera_to_receive_delta_seconds=timing.get("camera_to_receive_delta_seconds"),
+                    estimated_clock_offset_seconds=timing.get("estimated_clock_offset_seconds"),
+                    estimated_delivery_delay_seconds=timing.get("estimated_delivery_delay_seconds"),
+                    selection_reason=str(timing.get("selection_reason") or "receipt_time"),
+                ) if timing else None
+            ),
+            episode_id=str(payload.get("episode_id") or ""),
+            detection_intent_id=str(payload.get("detection_intent_id") or ""),
+            lifecycle_generation=int(payload.get("lifecycle_generation") or 0),
+            delivery_job_id=job_id,
+        )
 
 @dataclass(frozen=True, slots=True)
 class MotionTriggerBatch:
@@ -171,6 +226,7 @@ class MotionEventCoordinator:
         queue_size: int,
         retry_limit: int,
         camera_id: str = "camera",
+        durable_store: MotionTriggerStore | None = None,
     ) -> None:
         self.queue: queue.Queue[MotionTrigger | None] = queue.Queue(
             maxsize=queue_size
@@ -178,6 +234,8 @@ class MotionEventCoordinator:
         self.retry_batches: deque[MotionTrigger] = deque()
         self._active_triggers: MotionTriggerBatch | None = None
         self.episode_controller = MotionEpisodeController(camera_id)
+        self.camera_id = camera_id
+        self.durable_store = durable_store
         self._retry_limit = retry_limit
         self._lock = threading.RLock()
         self._runtime_metrics = {
@@ -202,12 +260,22 @@ class MotionEventCoordinator:
             raise TypeError("motion coordinator accepts only MotionTrigger values")
         if on_trigger is not None:
             on_trigger("triggers")
+        if self.durable_store is not None and not trigger.delivery_job_id:
+            trigger.delivery_job_id = trigger.detection_intent_id or uuid.uuid4().hex
+            self.durable_store.enqueue_motion_trigger(
+                job_id=trigger.delivery_job_id,
+                camera_id=self.camera_id,
+                payload=trigger.durable_payload(),
+            )
         try:
             self.queue.put_nowait(trigger)
             self._record_enqueue()
             return True
         except queue.Full:
             if not evict_oldest:
+                if self.durable_store is not None:
+                    self._record_enqueue()
+                    return True
                 self._record_rejected()
                 if on_drop is not None:
                     on_drop("dropped_triggers")
@@ -252,8 +320,38 @@ class MotionEventCoordinator:
         with self._lock:
             if self.retry_batches:
                 return self.retry_batches.popleft()
-        item = self.queue.get(timeout=timeout)
-        return item
+        from_queue = True
+        try:
+            item = self.queue.get(timeout=min(timeout, 0.1))
+        except queue.Empty:
+            from_queue = False
+            item = None
+            if self.durable_store is None:
+                raise
+        if item is not None and self.durable_store is not None:
+            claimed = self.durable_store.claim_motion_trigger(
+                self.camera_id,
+                item.delivery_job_id or None,
+            )
+            if claimed is None:
+                return self.next_trigger(max(0.0, timeout - 0.1))
+            item.delivery_job_id = str(claimed["id"])
+            return item
+        if from_queue:
+            return item
+        claimed = self.durable_store.claim_motion_trigger(self.camera_id)
+        if claimed is None:
+            raise queue.Empty
+        return MotionTrigger.from_durable_payload(
+            dict(claimed["payload"]),
+            str(claimed["id"]),
+        )
+
+    def complete_deliveries(self, triggers: MotionTriggerBatch) -> None:
+        if self.durable_store is None:
+            return
+        for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
+            self.durable_store.complete_motion_trigger(job_id)
 
     def retry_queue_depth(self) -> int:
         with self._lock:
@@ -344,13 +442,18 @@ class MotionEventCoordinator:
 
     def runtime_status(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            status = {
                 **self._runtime_metrics,
                 "queue_depth": self.queue.qsize(),
                 "queue_capacity": self.queue.maxsize,
                 "retry_queue_depth": len(self.retry_batches),
                 "episode": self.episode_controller.snapshot(),
             }
+        if self.durable_store is not None:
+            status["durable_delivery"] = self.durable_store.motion_trigger_status(
+                self.camera_id
+            )
+        return status
 
     def _record_enqueue(self, *, evicted: int = 0) -> None:
         # qsize() is an observational value because Queue owns its own lock and

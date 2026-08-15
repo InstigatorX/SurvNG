@@ -254,7 +254,7 @@ class MotionDecisionOrchestrator:
         if stop_event.is_set():
             if not any(item.retry_count > 0 for item in triggers):
                 self._abort_episode_intents(triggers)
-            self._complete_adaptive_trigger(triggers)
+            self._complete_adaptive_trigger(triggers, complete_delivery=False)
             self._events.set_active(None)
             return
         self._mark_episode_intents_running(triggers)
@@ -308,7 +308,7 @@ class MotionDecisionOrchestrator:
         )
         if stop_event.is_set():
             self._abort_episode_intents(triggers)
-            self._complete_adaptive_trigger(triggers)
+            self._complete_adaptive_trigger(triggers, complete_delivery=False)
             self._events.set_active(None)
             return
 
@@ -840,7 +840,12 @@ class MotionDecisionOrchestrator:
             category="visual_backup",
         )
 
-    def _complete_adaptive_trigger(self, triggers: MotionTriggerBatch) -> None:
+    def _complete_adaptive_trigger(
+        self,
+        triggers: MotionTriggerBatch,
+        *,
+        complete_delivery: bool = True,
+    ) -> None:
         completed_monotonic = time.monotonic()
         for intent_id in {
             item.detection_intent_id for item in triggers if item.detection_intent_id
@@ -853,6 +858,8 @@ class MotionDecisionOrchestrator:
             except ValueError:
                 # A stopped generation may already have aborted the reservation.
                 pass
+        if complete_delivery:
+            self._events.complete_deliveries(triggers)
 
     def _mark_episode_intents_running(self, triggers: MotionTriggerBatch) -> None:
         started_monotonic = time.monotonic()

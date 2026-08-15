@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import queue
+import tempfile
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from survng.app.ema_v2 import CameraNotice
+from survng.app.events import EventStore
 from survng.app.motion_events import (
     MotionEventCoordinator,
     MotionTrigger,
@@ -66,6 +69,35 @@ def test_successful_enqueue_records_minimum_sampled_high_water() -> None:
     assert coordinator.enqueue(_trigger())
 
     assert coordinator.runtime_status()["queue_high_water"] == 1
+
+
+def test_durable_trigger_overflow_survives_coordinator_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        first = MotionEventCoordinator(
+            queue_size=1,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        assert first.enqueue(_trigger(1), evict_oldest=False)
+        assert first.enqueue(_trigger(2), evict_oldest=False)
+        assert first.runtime_status()["durable_delivery"] == {"queued": 2}
+
+        restored_store = EventStore(Path(tmpdir))
+        restored = MotionEventCoordinator(
+            queue_size=1,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=restored_store,
+        )
+        recovered = restored.next_trigger(timeout=0.2)
+        assert recovered is not None
+        assert recovered.message == "1"
+        restored.complete_deliveries(MotionTriggerBatch((recovered,)))
+        second = restored.next_trigger(timeout=0.2)
+        assert second is not None
+        assert second.message == "2"
 
 
 def test_coalesce_preserves_batch_order_and_stop_sentinel() -> None:
