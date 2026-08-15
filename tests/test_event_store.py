@@ -67,6 +67,38 @@ class EventStoreTest(unittest.TestCase):
                 count = connection.execute("select count(*) from events").fetchone()[0]
             self.assertEqual(count, 1)
 
+    def test_motion_trigger_lease_is_not_stolen_by_store_recreation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            store.enqueue_motion_trigger(
+                job_id="trigger-1",
+                camera_id="gate",
+                payload={"topic": "onvif/motion"},
+            )
+            self.assertIsNotNone(store.claim_motion_trigger("gate"))
+            concurrent = EventStore(root)
+            self.assertIsNone(concurrent.claim_motion_trigger("gate"))
+            store.release_motion_trigger("trigger-1")
+            self.assertIsNotNone(concurrent.claim_motion_trigger("gate"))
+
+    def test_motion_trigger_poison_job_reaches_explicit_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.enqueue_motion_trigger(
+                job_id="trigger-1",
+                camera_id="gate",
+                payload={"topic": "onvif/motion"},
+            )
+            for attempt in range(1, 6):
+                self.assertIsNotNone(
+                    store.claim_motion_trigger("gate", "trigger-1")
+                )
+                retrying = store.fail_motion_trigger("trigger-1", "detector failed")
+                self.assertEqual(retrying, attempt < 5)
+            self.assertEqual(store.motion_trigger_status("gate"), {"failed": 1})
+            self.assertIsNone(store.claim_motion_trigger("gate"))
+
     def test_snapshot_size_backfill_yields_writer_between_bounded_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

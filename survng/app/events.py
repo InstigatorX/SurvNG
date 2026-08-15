@@ -137,19 +137,36 @@ class EventStore:
                     camera_id text not null,
                     payload_json text not null,
                     state text not null,
+                    attempts integer not null default 0,
+                    available_at real not null default 0,
                     lease_expires_at real,
+                    last_error text not null default '',
                     created_at text not null,
                     updated_at text not null
                 )
                 """
             )
+            trigger_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "pragma table_info(motion_trigger_jobs)"
+                ).fetchall()
+            }
+            if "attempts" not in trigger_columns:
+                conn.execute(
+                    "alter table motion_trigger_jobs add column attempts integer not null default 0"
+                )
+            if "available_at" not in trigger_columns:
+                conn.execute(
+                    "alter table motion_trigger_jobs add column available_at real not null default 0"
+                )
+            if "last_error" not in trigger_columns:
+                conn.execute(
+                    "alter table motion_trigger_jobs add column last_error text not null default ''"
+                )
             conn.execute(
                 "create index if not exists idx_motion_trigger_jobs_claim "
                 "on motion_trigger_jobs(camera_id, state, created_at)"
-            )
-            conn.execute(
-                "update motion_trigger_jobs set state = 'queued', "
-                "lease_expires_at = null where state = 'running'"
             )
             conn.execute(
                 """
@@ -508,9 +525,9 @@ class EventStore:
         with self._connect() as conn:
             cursor = conn.execute(
                 "insert or ignore into motion_trigger_jobs "
-                "(id, camera_id, payload_json, state, created_at, updated_at) "
-                "values (?, ?, ?, 'queued', ?, ?)",
-                (job_id, camera_id, json.dumps(payload, separators=(",", ":")), now, now),
+                "(id, camera_id, payload_json, state, available_at, created_at, updated_at) "
+                "values (?, ?, ?, 'queued', ?, ?, ?)",
+                (job_id, camera_id, json.dumps(payload, separators=(",", ":")), time.time(), now, now),
             )
         return bool(cursor.rowcount)
 
@@ -534,14 +551,15 @@ class EventStore:
             else:
                 row = conn.execute(
                     "select * from motion_trigger_jobs where camera_id = ? and "
-                    "(state = 'queued' or (state = 'running' and lease_expires_at <= ?)) "
+                    "((state = 'queued' and available_at <= ?) or "
+                    "(state = 'running' and lease_expires_at <= ?)) "
                     "order by created_at, id limit 1",
-                    (camera_id, now_epoch),
+                    (camera_id, now_epoch, now_epoch),
                 ).fetchone()
             if row is None:
                 return None
             conn.execute(
-                "update motion_trigger_jobs set state = 'running', lease_expires_at = ?, "
+                "update motion_trigger_jobs set state = 'running', attempts = attempts + 1, lease_expires_at = ?, "
                 "updated_at = ? where id = ?",
                 (now_epoch + lease_seconds, now_iso, str(row["id"])),
             )
@@ -550,6 +568,46 @@ class EventStore:
     def complete_motion_trigger(self, job_id: str) -> None:
         with self._connect() as conn:
             conn.execute("delete from motion_trigger_jobs where id = ?", (job_id,))
+
+    def release_motion_trigger(self, job_id: str) -> None:
+        """Return a graceful-shutdown lease without disturbing another owner."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "update motion_trigger_jobs set state = 'queued', "
+                "lease_expires_at = null, updated_at = ? "
+                "where id = ? and state = 'running'",
+                (now, job_id),
+            )
+
+    def fail_motion_trigger(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        maximum_attempts: int = 5,
+    ) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "select attempts from motion_trigger_jobs where id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            retry = int(row["attempts"]) < maximum_attempts
+            conn.execute(
+                "update motion_trigger_jobs set state = ?, available_at = ?, "
+                "lease_expires_at = null, last_error = ?, updated_at = ? where id = ?",
+                (
+                    "queued" if retry else "failed",
+                    time.time() + min(30.0, max(1, int(row["attempts"])) * 2.0),
+                    str(error)[:1000],
+                    now,
+                    job_id,
+                ),
+            )
+            return retry
 
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]:
         with self._connect() as conn:

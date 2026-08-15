@@ -21,6 +21,8 @@ class MotionTriggerStore(Protocol):
     def enqueue_motion_trigger(self, *, job_id: str, camera_id: str, payload: dict[str, Any]) -> bool: ...
     def claim_motion_trigger(self, camera_id: str, job_id: str | None = None, *, lease_seconds: float = 60.0) -> dict[str, Any] | None: ...
     def complete_motion_trigger(self, job_id: str) -> None: ...
+    def release_motion_trigger(self, job_id: str) -> None: ...
+    def fail_motion_trigger(self, job_id: str, error: str, *, maximum_attempts: int = 5) -> bool: ...
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]: ...
 
 
@@ -353,6 +355,18 @@ class MotionEventCoordinator:
         for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
             self.durable_store.complete_motion_trigger(job_id)
 
+    def release_deliveries(self, triggers: MotionTriggerBatch) -> None:
+        if self.durable_store is None:
+            return
+        for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
+            self.durable_store.release_motion_trigger(job_id)
+
+    def fail_deliveries(self, triggers: MotionTriggerBatch, error: str) -> None:
+        if self.durable_store is None:
+            return
+        for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
+            self.durable_store.fail_motion_trigger(job_id, error)
+
     def retry_queue_depth(self) -> int:
         with self._lock:
             return len(self.retry_batches)
@@ -379,6 +393,14 @@ class MotionEventCoordinator:
                 break
             if item is None:
                 return None
+            if self.durable_store is not None:
+                claimed = self.durable_store.claim_motion_trigger(
+                    self.camera_id,
+                    item.delivery_job_id or None,
+                )
+                if claimed is None:
+                    continue
+                item.delivery_job_id = str(claimed["id"])
             triggers.append(item)
             quiet_deadline = min(hard_deadline, time.monotonic() + quiet_seconds)
         return MotionTriggerBatch(tuple(triggers))

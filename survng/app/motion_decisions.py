@@ -201,10 +201,21 @@ class MotionDecisionOrchestrator:
                 failed_triggers = self._events.take_failed_active()
                 self._state.increment_stat("event_worker_errors", 1)
                 LOGGER.exception("motion event cycle failed for %s", self._camera_id)
-                if failed_triggers and not stop_event.is_set():
-                    disposition = self.retry_batch(failed_triggers, stop_event)
-                    if disposition == RetryDisposition.DROPPED:
-                        self._fail_episode_intents(failed_triggers)
+                if failed_triggers:
+                    if stop_event.is_set():
+                        self._abort_episode_intents(failed_triggers)
+                        self._events.release_deliveries(failed_triggers)
+                    else:
+                        disposition = self.retry_batch(failed_triggers, stop_event)
+                        if disposition == RetryDisposition.DROPPED:
+                            self._fail_episode_intents(failed_triggers)
+                            self._events.fail_deliveries(
+                                failed_triggers,
+                                "motion decision retry limit exceeded",
+                            )
+                        elif disposition == RetryDisposition.STOPPED:
+                            self._abort_episode_intents(failed_triggers)
+                            self._events.release_deliveries(failed_triggers)
 
     def retry_batch(
         self,
@@ -254,6 +265,7 @@ class MotionDecisionOrchestrator:
         if stop_event.is_set():
             if not any(item.retry_count > 0 for item in triggers):
                 self._abort_episode_intents(triggers)
+            self._events.release_deliveries(triggers)
             self._complete_adaptive_trigger(triggers, complete_delivery=False)
             self._events.set_active(None)
             return
@@ -308,6 +320,7 @@ class MotionDecisionOrchestrator:
         )
         if stop_event.is_set():
             self._abort_episode_intents(triggers)
+            self._events.release_deliveries(triggers)
             self._complete_adaptive_trigger(triggers, complete_delivery=False)
             self._events.set_active(None)
             return
@@ -374,6 +387,7 @@ class MotionDecisionOrchestrator:
             ),
             "would_suppress": bool(mode in AUDITED_MODES and not result.accepted),
             "motion_episode_sequence": self._events.current_episode_sequence(),
+            "detection_intent_id": representative.delivery_job_id,
         }
         effective_accepted = bool(
             mode in {"off", "audit"}
