@@ -22,11 +22,21 @@ from survng.app.semantic_search import (
     fingerprint_model_package,
     normalized_matrix,
     semantic_query_plan,
+    semantic_event_objects,
     _semantic_text_inputs,
 )
 
 
 class SemanticIndexTest(unittest.TestCase):
+    def test_semantic_objects_exclude_boxes_not_visible_in_promoted_cover(self) -> None:
+        visible = {"label": "car", "snapshot_visible": True}
+        absent = {"label": "person", "snapshot_visible": False}
+
+        self.assertEqual(
+            semantic_event_objects({"objects": [visible, absent, {"status": "tracking"}]}),
+            [visible],
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temporary.name) / "events.db"

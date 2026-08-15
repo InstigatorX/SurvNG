@@ -210,3 +210,62 @@ class TrackingFrameService:
                 break
             last_epoch = captured_at
             yield captured_at, frame
+
+    def recorded_frame_at(
+        self,
+        captured_at: float,
+        frame_width: int,
+    ) -> np.ndarray | None:
+        """Decode one full-detail frame nearest a nominated tracking timestamp.
+
+        This deliberately bypasses the low-resolution in-memory history. Cover
+        promotion happens after tracking completes, when the finalized main
+        recording can provide a durable image at the camera's native aspect.
+        """
+        if self.stop_event.is_set() or captured_at <= 0.0 or frame_width <= 0:
+            return None
+        rows = sorted(
+            self.recorder.recording_rows_between(
+                self.camera.id,
+                captured_at - 0.05,
+                captured_at + 0.05,
+                source="main",
+            ),
+            key=lambda row: (
+                abs(float(row.get("start_epoch") or 0.0) - captured_at),
+                str(row.get("path") or ""),
+            ),
+        )
+        for row in rows:
+            row_start = float(row.get("start_epoch") or 0.0)
+            row_end = float(row.get("end_epoch") or row_start)
+            if not (row_start <= captured_at <= row_end + 1e-6):
+                continue
+            path = Path(str(row.get("path") or ""))
+            if not path.is_file():
+                continue
+            try:
+                samples = iter(sampled_video_frames(
+                    path,
+                    start_epoch=captured_at,
+                    sample_fps=1.0,
+                    duration_seconds=0.1,
+                    ffmpeg_path=self.recorder.ffmpeg_path,
+                    maximum_width=frame_width,
+                    start_offset_seconds=max(0.0, captured_at - row_start),
+                    probe_path=path,
+                ))
+                try:
+                    return next(samples, (None, None))[1]
+                finally:
+                    close_samples = getattr(samples, "close", None)
+                    if callable(close_samples):
+                        close_samples()
+            except (OSError, RuntimeError) as error:
+                LOGGER.warning(
+                    "tracking cover frame decode skipped %s/%s: %s",
+                    self.camera.id,
+                    path.name,
+                    redact_secret_text(error),
+                )
+        return None

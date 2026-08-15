@@ -199,3 +199,32 @@ def test_recorded_catchup_streams_and_stops_before_decoding_later_segments() -> 
             assert list(samples) == []
 
     assert opened == ["first.mp4"]
+
+
+def test_recorded_cover_frame_bypasses_buffer_and_decodes_nominated_main_frame() -> None:
+    recorder = Mock()
+    recorder.ffmpeg_path = "/usr/bin/ffmpeg"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "segment.mp4"
+        path.write_bytes(b"segment")
+        recorder.recording_rows_between.return_value = [{
+            "path": str(path),
+            "start_epoch": 100.0,
+            "end_epoch": 110.0,
+        }]
+        service = _service(recorder=recorder)
+        service.frames.append((104.0, np.full((10, 20, 3), 3, dtype=np.uint8)))
+        full_detail = np.full((1920, 2560, 3), 9, dtype=np.uint8)
+
+        with patch(
+            "survng.app.tracking_frames.sampled_video_frames",
+            return_value=iter([(104.25, full_detail)]),
+        ) as decoder:
+            selected = service.recorded_frame_at(104.25, 2560)
+
+    assert selected is full_detail
+    recorder.recording_rows_between.assert_called_once_with(
+        "gate", 104.2, 104.3, source="main"
+    )
+    assert decoder.call_args.kwargs["maximum_width"] == 2560
+    assert decoder.call_args.kwargs["start_offset_seconds"] == 4.25

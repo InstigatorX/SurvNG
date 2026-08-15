@@ -2702,6 +2702,102 @@ class EventStore:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None
 
+    def promote_tracking_cover(
+        self,
+        event_id: int,
+        *,
+        snapshot_path: str,
+        captured_at: float,
+        frame_width: int,
+        frame_height: int,
+        tracked_objects: list[dict[str, Any]],
+        cover_metrics: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Replace only presentation evidence with a better tracked frame.
+
+        Detection/admission facts remain intact. Boxes are refreshed for the
+        promoted frame, and objects not visible there are explicitly excluded
+        from image annotations and crop-based indexing.
+        """
+        portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
+        if not portable_snapshot or frame_width <= 0 or frame_height <= 0:
+            return None
+        snapshot_size_bytes = self._snapshot_file_size(portable_snapshot)
+        candidates = {
+            str(item.get("track_id")): item
+            for item in tracked_objects
+            if isinstance(item, dict)
+            and item.get("track_id") is not None
+            and isinstance(item.get("box"), dict)
+        }
+        if not candidates:
+            self._delete_snapshot_if_unreferenced(portable_snapshot)
+            return None
+        replaced_snapshot = ""
+        matched = 0
+        updated = None
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select objects_json, snapshot_path from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is not None:
+                try:
+                    objects = json.loads(str(row["objects_json"] or "[]"))
+                except (TypeError, ValueError):
+                    objects = []
+                if not isinstance(objects, list):
+                    objects = []
+                for item in objects:
+                    if not isinstance(item, dict) or not item.get("label"):
+                        continue
+                    candidate = candidates.get(str(item.get("track_id")))
+                    if candidate is None:
+                        item["snapshot_visible"] = False
+                        continue
+                    item["box"] = dict(candidate["box"])
+                    item["detection_frame_width"] = int(frame_width)
+                    item["detection_frame_height"] = int(frame_height)
+                    item["snapshot_visible"] = True
+                    item["snapshot_source"] = "object_tracking"
+                    item["snapshot_captured_at"] = datetime.fromtimestamp(
+                        captured_at,
+                        timezone.utc,
+                    ).isoformat()
+                    item["snapshot_detection_confidence"] = float(
+                        candidate.get("confidence") or 0.0
+                    )
+                    if item.get("snapshot_primary_subject") is True:
+                        for key, value in cover_metrics.items():
+                            if key.startswith("snapshot_"):
+                                item[key] = value
+                    matched += 1
+                if matched > 0:
+                    replaced_snapshot = str(row["snapshot_path"] or "")
+                    conn.execute(
+                        """
+                        update events
+                        set snapshot_path = ?, snapshot_size_bytes = ?, objects_json = ?
+                        where id = ?
+                        """,
+                        (
+                            portable_snapshot,
+                            snapshot_size_bytes,
+                            json.dumps(objects, separators=(",", ":")),
+                            event_id,
+                        ),
+                    )
+                    updated = conn.execute(
+                        "select * from events where id = ?",
+                        (event_id,),
+                    ).fetchone()
+        if updated is None:
+            self._delete_snapshot_if_unreferenced(portable_snapshot)
+            return None
+        if replaced_snapshot and replaced_snapshot != portable_snapshot:
+            self._delete_snapshot_if_unreferenced(replaced_snapshot)
+        return dict(updated) if updated is not None else None
+
     def _snapshot_file_size(self, raw_path: str) -> int:
         """Return an incident snapshot's size without allowing arbitrary paths."""
         if not raw_path:

@@ -16,6 +16,8 @@ from .object_tracking import (
     FrameSample,
     ObjectTrackingSession,
     ObjectTrackingSessionFactory,
+    TrackingCoverFrameProvider,
+    TrackingSnapshotWriter,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +41,8 @@ class ObjectTrackingLifecycle:
         history: Callable[[], TrackingHistory],
         accepting: Callable[[], bool],
         lifecycle_lock: threading.RLock,
+        cover_frame_provider: TrackingCoverFrameProvider | None = None,
+        snapshot_writer: TrackingSnapshotWriter | None = None,
     ) -> None:
         self.camera = camera
         self.frame_provider = frame_provider
@@ -47,6 +51,8 @@ class ObjectTrackingLifecycle:
         self.history = history
         self.accepting = accepting
         self.lifecycle_lock = lifecycle_lock
+        self.cover_frame_provider = cover_frame_provider
+        self.snapshot_writer = snapshot_writer
         self._session = self.create(factory)
 
     def current(self) -> ObjectTrackingSession:
@@ -69,6 +75,8 @@ class ObjectTrackingLifecycle:
             camera=self.camera,
             frame_provider=self.frame_provider,
             catchup_frame_provider=self.catchup_frame_provider,
+            cover_frame_provider=self.cover_frame_provider,
+            snapshot_writer=self.snapshot_writer,
         )
 
     def prewarm(self) -> FrameSample | None:

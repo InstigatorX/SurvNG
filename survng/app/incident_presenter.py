@@ -144,11 +144,14 @@ def _best_incident_event(events: list[dict]) -> dict:
             eligible_objects += 1
         best_confidence = max(confidences, default=0.0)
         best_quality = max(quality_scores, default=0.0)
+        fully_framed_primary = any(
+            clearance >= 0.01 for clearance in primary_clearances
+        )
         return (
             int(primary_objects > 0),
-            int(bool(primary_clearances)),
-            max(primary_clearances, default=0.0),
+            int(fully_framed_primary),
             max(primary_areas, default=0.0),
+            max(primary_clearances, default=0.0),
             int(bool(quality_scores)),
             best_quality,
             eligible_objects,
@@ -204,6 +207,10 @@ def _incident_event_payload(event: dict) -> dict:
                 "snapshot_primary_subject",
                 "snapshot_edge_clearance_ratio",
                 "snapshot_subject_area_ratio",
+                "snapshot_visible",
+                "snapshot_source",
+                "snapshot_captured_at",
+                "snapshot_detection_confidence",
                 "motion_correlated",
                 "motion_correlation",
                 "motion_correlation_threshold",

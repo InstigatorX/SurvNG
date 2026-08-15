@@ -1086,6 +1086,14 @@ class AppManager:
         self.mqtt.publish(f"camera/{camera_id}/{event_type}", payload)
         self.state_events.publish(event_type, payload)
         if event_type == "object_tracking" and payload.get("state") != "active":
+            if payload.get("cover_promoted") and payload.get("event_id"):
+                event_id = int(payload["event_id"])
+                event = self.events.get(event_id)
+                if event:
+                    # The full-frame and object-crop embeddings must describe
+                    # the newly promoted cover, not the original early sample.
+                    self.semantic_search.index.delete_event(event_id)
+                    self.semantic_search.queue_event(event)
             # Existing incident clients already use this event to coalesce refreshes.
             self.state_events.publish("incident", {
                 "event_id": payload.get("event_id"),

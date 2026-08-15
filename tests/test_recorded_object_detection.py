@@ -395,6 +395,24 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         )
         self.assertFalse(_representative_needs_refinement(objects))
 
+    def test_representative_prefers_close_fully_framed_subject_over_tiny_centered_subject(self) -> None:
+        """Gate-like approach should favor useful detail after framing is safe."""
+        rows, columns = np.indices((200, 300))
+        checker = (((rows // 4) + (columns // 4)) % 2 * 220).astype(np.uint8)
+        frame = np.repeat(checker[..., None], 3, axis=2)
+        distant = detected("car", 0.88, (140, 95, 150, 100))
+        approaching = detected("car", 0.93, (165, 75, 260, 145))
+        samples = [
+            _RecordedDetectionSample(-1.0, frame, [distant], "distant.mp4"),
+            _RecordedDetectionSample(4.0, frame, [approaching], "approaching.mp4"),
+        ]
+
+        selected, objects = _temporal_consensus(samples, minimum_confirmations=2)
+
+        self.assertEqual(selected.recording_path, "approaching.mp4")
+        self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 4.0)
+        self.assertGreater(objects[0]["snapshot_subject_area_ratio"], 0.05)
+
     def test_clipped_new_subject_requests_one_bounded_refinement_stage(self) -> None:
         frame = np.full((100, 100, 3), 127, dtype=np.uint8)
         person = detected("person", 0.88, (0, 10, 22, 95))

@@ -15,6 +15,7 @@ from .config import CameraConfig, ObjectTrackingConfig
 from .detector import detection_failure
 from .security import redact_secret_text
 from .domain_events import TrackingCompleted
+from .visual_quality import image_quality
 from .zones import apply_detection_zones
 
 
@@ -29,6 +30,31 @@ CatchupFrameProvider = Callable[[float, float, float, int], Iterable[tuple[float
 TrackingUpdate = Callable[[int, dict[str, Any], list[dict[str, Any]] | None], object | None]
 TrackingPublisher = Callable[[str, dict[str, Any]], None]
 AppearanceIndexWriter = Callable[[int, str, Iterable[dict[str, Any]]], int]
+TrackingCoverFrameProvider = Callable[[float, int], np.ndarray | None]
+TrackingSnapshotWriter = Callable[[np.ndarray, datetime], str]
+TrackingCoverPromoter = Callable[..., dict[str, Any] | None]
+
+
+@dataclass(frozen=True, slots=True)
+class _TrackingCoverCandidate:
+    captured_at: float
+    tracked_objects: tuple[dict[str, Any], ...]
+    primary_track_id: int
+    subject_area_ratio: float
+    edge_clearance_ratio: float
+    quality_score: float
+    detection_confidence: float
+    fully_framed: bool
+
+    @property
+    def score(self) -> tuple[int, float, float, float, float]:
+        return (
+            int(self.fully_framed),
+            self.subject_area_ratio,
+            self.quality_score,
+            self.detection_confidence,
+            self.captured_at,
+        )
 
 
 class AdaptiveTrackingLimiter:
@@ -1005,6 +1031,9 @@ class ObjectTrackingSession:
         appearance_encoder: AppearanceEncoder | None = None,
         appearance_indexer: AppearanceIndexWriter | None = None,
         catchup_frame_provider: CatchupFrameProvider | None = None,
+        cover_frame_provider: TrackingCoverFrameProvider | None = None,
+        snapshot_writer: TrackingSnapshotWriter | None = None,
+        cover_promoter: TrackingCoverPromoter | None = None,
     ) -> None:
         self.camera = camera
         self.config = config
@@ -1017,6 +1046,9 @@ class ObjectTrackingSession:
         self.appearance_encoder = appearance_encoder
         self.appearance_indexer = appearance_indexer
         self.catchup_frame_provider = catchup_frame_provider
+        self.cover_frame_provider = cover_frame_provider
+        self.snapshot_writer = snapshot_writer
+        self.cover_promoter = cover_promoter
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._stop = threading.Event()
@@ -1037,6 +1069,9 @@ class ObjectTrackingSession:
         self._catchup_frames_processed = 0
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
+        self._cover_baseline: _TrackingCoverCandidate | None = None
+        self._cover_candidate: _TrackingCoverCandidate | None = None
+        self._cover_promotion: dict[str, Any] | None = None
 
     @staticmethod
     def _idle_status() -> dict[str, Any]:
@@ -1072,6 +1107,10 @@ class ObjectTrackingSession:
             "capacity_wait_seconds_total": 0.0,
             "capacity_wait_seconds_max": 0.0,
             "capacity_wait_seconds_last": 0.0,
+            "cover_promoted": False,
+            "cover_promotion_attempted": False,
+            "cover_promotion_result": "",
+            "cover_verification_inference_ms": 0.0,
         }
 
     def start(
@@ -1203,6 +1242,322 @@ class ObjectTrackingSession:
                 "worker_running": bool(self._thread is not None and self._thread.is_alive()),
             }
 
+    def _consider_cover_candidate(
+        self,
+        frame: np.ndarray,
+        captured_at: float,
+        tracked_objects: list[dict[str, Any]],
+        primary_track_ids: set[int],
+    ) -> None:
+        """Remember metadata for the best later view without retaining its frame."""
+        if (
+            frame is None
+            or not frame.size
+            or self._frame_width <= 0
+            or self._frame_height <= 0
+        ):
+            return
+        primary: list[tuple[dict[str, Any], Box, float]] = []
+        frame_area = float(self._frame_width * self._frame_height)
+        for item in tracked_objects:
+            try:
+                track_id = int(item.get("track_id"))
+            except (TypeError, ValueError):
+                continue
+            box = _box(item.get("box"))
+            if track_id not in primary_track_ids or box is None:
+                continue
+            area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]) / frame_area
+            primary.append((item, box, area))
+        if not primary:
+            return
+        item, box, area = max(primary, key=lambda value: value[2])
+        clearance = max(
+            0.0,
+            min(
+                box[0] / self._frame_width,
+                box[1] / self._frame_height,
+                (self._frame_width - box[2]) / self._frame_width,
+                (self._frame_height - box[3]) / self._frame_height,
+            ),
+        )
+        source_height, source_width = frame.shape[:2]
+        scale_x = source_width / self._frame_width
+        scale_y = source_height / self._frame_height
+        x1 = max(0, min(source_width, int(np.floor(box[0] * scale_x))))
+        y1 = max(0, min(source_height, int(np.floor(box[1] * scale_y))))
+        x2 = max(0, min(source_width, int(np.ceil(box[2] * scale_x))))
+        y2 = max(0, min(source_height, int(np.ceil(box[3] * scale_y))))
+        crop = frame[y1:y2, x1:x2]
+        quality = image_quality(crop).score if crop.size else 0.0
+        candidate = _TrackingCoverCandidate(
+            captured_at=float(captured_at),
+            tracked_objects=tuple(dict(value) for value in tracked_objects),
+            primary_track_id=int(item["track_id"]),
+            subject_area_ratio=float(area),
+            edge_clearance_ratio=float(clearance),
+            quality_score=float(quality),
+            detection_confidence=_confidence(item),
+            fully_framed=clearance >= 0.01,
+        )
+        if self._cover_baseline is None:
+            self._cover_baseline = candidate
+        if self._cover_candidate is None or candidate.score > self._cover_candidate.score:
+            self._cover_candidate = candidate
+
+    def _promote_cover_candidate(self, event_id: int) -> None:
+        """Verify and persist one materially better tracked cover."""
+        baseline = self._cover_baseline
+        candidate = self._cover_candidate
+        if (
+            baseline is None
+            or candidate is None
+            or self.cover_frame_provider is None
+            or self.snapshot_writer is None
+            or self.cover_promoter is None
+            or candidate.captured_at < baseline.captured_at + 0.25
+            or not candidate.fully_framed
+            or candidate.subject_area_ratio
+            < max(baseline.subject_area_ratio * 1.5, baseline.subject_area_ratio + 0.0025)
+            or candidate.quality_score < max(0.12, baseline.quality_score * 0.55)
+        ):
+            return
+        self._cover_promotion = {
+            "cover_promoted": False,
+            "cover_promotion_attempted": True,
+            "cover_promotion_result": "decode_unavailable",
+            "cover_source": "object_tracking",
+        }
+        frame = self.cover_frame_provider(candidate.captured_at, self._frame_width)
+        if frame is None or not frame.size:
+            return
+        frame_height, frame_width = frame.shape[:2]
+        expected_objects = [dict(item) for item in candidate.tracked_objects]
+        for item in expected_objects:
+            box = item.get("box")
+            if isinstance(box, dict):
+                item["box"] = dict(box)
+        _rescale_detection_boxes(
+            expected_objects,
+            self._frame_width,
+            self._frame_height,
+            frame_width,
+            frame_height,
+        )
+        inference_started = time.monotonic()
+        try:
+            detected_objects = self.detector.detect(
+                frame,
+                confidence_threshold=self.config.low_confidence_threshold,
+            )
+        except Exception as error:
+            self._cover_promotion.update({
+                "cover_promotion_result": "detector_error",
+                "cover_verification_error": redact_secret_text(error)[:160],
+                "cover_verification_inference_ms": round(
+                    (time.monotonic() - inference_started) * 1000.0,
+                    3,
+                ),
+            })
+            LOGGER.warning(
+                "tracked cover verification failed for %s event %d: %s",
+                self.camera.id,
+                event_id,
+                redact_secret_text(error),
+            )
+            return
+        inference_ms = round((time.monotonic() - inference_started) * 1000.0, 3)
+        failure = detection_failure(detected_objects)
+        if failure:
+            self._cover_promotion.update({
+                "cover_promotion_result": "detector_unavailable",
+                "cover_verification_error": failure[:160],
+                "cover_verification_inference_ms": inference_ms,
+            })
+            return
+        tracked_objects = self._associate_cover_detections(
+            expected_objects,
+            detected_objects,
+            candidate.primary_track_id,
+            frame_width,
+            frame_height,
+        )
+        primary = next(
+            (
+                item
+                for item in tracked_objects
+                if int(item.get("track_id") or 0) == candidate.primary_track_id
+            ),
+            None,
+        )
+        primary_box = _box(primary.get("box")) if primary is not None else None
+        if primary_box is None:
+            self._cover_promotion.update({
+                "cover_promotion_result": "primary_subject_not_verified",
+                "cover_verification_inference_ms": inference_ms,
+                "cover_verification_detection_count": len(detected_objects),
+            })
+            return
+        final_area = (
+            (primary_box[2] - primary_box[0])
+            * (primary_box[3] - primary_box[1])
+            / float(frame_width * frame_height)
+        )
+        final_clearance = max(
+            0.0,
+            min(
+                primary_box[0] / frame_width,
+                primary_box[1] / frame_height,
+                (frame_width - primary_box[2]) / frame_width,
+                (frame_height - primary_box[3]) / frame_height,
+            ),
+        )
+        crop_x1 = max(0, min(frame_width, int(np.floor(primary_box[0]))))
+        crop_y1 = max(0, min(frame_height, int(np.floor(primary_box[1]))))
+        crop_x2 = max(0, min(frame_width, int(np.ceil(primary_box[2]))))
+        crop_y2 = max(0, min(frame_height, int(np.ceil(primary_box[3]))))
+        verified_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        final_quality = image_quality(verified_crop).score if verified_crop.size else 0.0
+        if (
+            final_clearance < 0.01
+            or final_area
+            < max(baseline.subject_area_ratio * 1.5, baseline.subject_area_ratio + 0.0025)
+            or final_quality < max(0.12, baseline.quality_score * 0.55)
+        ):
+            self._cover_promotion.update({
+                "cover_promotion_result": "verified_frame_not_better",
+                "cover_verification_inference_ms": inference_ms,
+                "cover_verified_subject_area_ratio": round(final_area, 6),
+                "cover_verified_edge_clearance_ratio": round(final_clearance, 6),
+                "cover_verified_quality_score": round(final_quality, 6),
+            })
+            return
+        snapshot_path = self.snapshot_writer(
+            frame,
+            datetime.fromtimestamp(candidate.captured_at, timezone.utc),
+        )
+        promoted = self.cover_promoter(
+            event_id,
+            snapshot_path=snapshot_path,
+            captured_at=candidate.captured_at,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            tracked_objects=tracked_objects,
+            cover_metrics={
+                "snapshot_primary_subject": True,
+                "snapshot_subject_area_ratio": round(final_area, 6),
+                "snapshot_edge_clearance_ratio": round(final_clearance, 6),
+                "snapshot_quality_score": round(final_quality, 6),
+            },
+        )
+        if promoted is None:
+            self._cover_promotion.update({
+                "cover_promotion_result": "event_unavailable",
+                "cover_verification_inference_ms": inference_ms,
+            })
+            return
+        self._cover_promotion = {
+            "cover_promoted": True,
+            "cover_promotion_attempted": True,
+            "cover_promotion_result": "promoted",
+            "cover_source": "object_tracking",
+            "cover_captured_at": datetime.fromtimestamp(
+                candidate.captured_at,
+                timezone.utc,
+            ).isoformat(),
+            "cover_primary_track_id": candidate.primary_track_id,
+            "cover_subject_area_ratio": round(final_area, 6),
+            "cover_previous_subject_area_ratio": round(
+                baseline.subject_area_ratio,
+                6,
+            ),
+            "cover_verification_inference_ms": inference_ms,
+            "cover_verification_detection_count": len(detected_objects),
+            "cover_verified_quality_score": round(final_quality, 6),
+        }
+
+    @staticmethod
+    def _associate_cover_detections(
+        expected_objects: list[dict[str, Any]],
+        detected_objects: list[dict[str, Any]],
+        primary_track_id: int,
+        frame_width: int,
+        frame_height: int,
+    ) -> list[dict[str, Any]]:
+        """Associate detections from the saved pixels with nominated tracks."""
+        usable = [
+            item
+            for item in detected_objects
+            if isinstance(item, dict)
+            and item.get("label")
+            and _box(item.get("box")) is not None
+        ]
+        used: set[int] = set()
+        verified: list[dict[str, Any]] = []
+        diagonal = max(1.0, float(np.hypot(frame_width, frame_height)))
+        ordered = sorted(
+            expected_objects,
+            key=lambda item: int(int(item.get("track_id") or 0) == primary_track_id),
+            reverse=True,
+        )
+        for expected in ordered:
+            expected_box = _box(expected.get("box"))
+            if expected_box is None:
+                continue
+            expected_center = (
+                (expected_box[0] + expected_box[2]) / 2.0,
+                (expected_box[1] + expected_box[3]) / 2.0,
+            )
+            expected_diagonal_ratio = float(np.hypot(
+                expected_box[2] - expected_box[0],
+                expected_box[3] - expected_box[1],
+            )) / diagonal
+            distance_limit = max(0.04, min(0.12, expected_diagonal_ratio * 0.75))
+            matches: list[tuple[float, float, int, dict[str, Any]]] = []
+            for index, detected in enumerate(usable):
+                if index in used or str(detected.get("label")) != str(expected.get("label")):
+                    continue
+                detected_box = _box(detected.get("box"))
+                if detected_box is None:
+                    continue
+                overlap = _iou(expected_box, detected_box)
+                detected_center = (
+                    (detected_box[0] + detected_box[2]) / 2.0,
+                    (detected_box[1] + detected_box[3]) / 2.0,
+                )
+                distance = float(np.hypot(
+                    expected_center[0] - detected_center[0],
+                    expected_center[1] - detected_center[1],
+                )) / diagonal
+                if overlap < 0.05 and distance > distance_limit:
+                    continue
+                score = (
+                    2.0 * overlap
+                    + max(0.0, 1.0 - distance / distance_limit)
+                    + 0.1 * _confidence(detected)
+                )
+                matches.append((score, overlap, index, detected))
+            matches.sort(key=lambda item: item[0], reverse=True)
+            if not matches:
+                continue
+            if (
+                len(matches) > 1
+                and matches[0][1] < 0.25
+                and matches[0][0] - matches[1][0] < 0.15
+            ):
+                continue
+            _score, _overlap, index, detected = matches[0]
+            used.add(index)
+            verified.append({
+                **expected,
+                "box": dict(detected["box"]),
+                "confidence": float(detected.get("confidence") or 0.0),
+                "cover_verification_confidence": float(
+                    detected.get("confidence") or 0.0
+                ),
+            })
+        return verified
+
     def _run(
         self,
         event_id: int,
@@ -1297,6 +1652,15 @@ class ObjectTrackingSession:
             self._catchup_frames_processed = 0
             self._coverage_gap_count = 0
             self._maximum_coverage_gap_seconds = 0.0
+            self._cover_baseline = None
+            self._cover_candidate = None
+            self._cover_promotion = None
+            self._set_status(
+                cover_promoted=False,
+                cover_promotion_attempted=False,
+                cover_promotion_result="",
+                cover_verification_inference_ms=0.0,
+            )
             tracker = self.tracker_registry.create(
                 self.config.implementation,
                 self.config,
@@ -1327,6 +1691,25 @@ class ObjectTrackingSession:
             for detected in initial_objects:
                 detected["_tracking_first_seen_at"] = seed_epoch
             initial_tracked = tracker.update(initial_objects, captured_at, confirm_new=True)
+            primary_track_ids = {
+                int(item["track_id"])
+                for item in initial_tracked
+                if item.get("track_id") is not None
+                and item.get("snapshot_primary_subject") is True
+            }
+            if not primary_track_ids:
+                primary_track_ids = {
+                    int(item["track_id"])
+                    for item in initial_tracked
+                    if item.get("track_id") is not None
+                }
+            if initial_frame is not None:
+                self._consider_cover_candidate(
+                    initial_frame,
+                    captured_at,
+                    initial_tracked,
+                    primary_track_ids,
+                )
             self._set_status(enabled=True, active=True, event_id=event_id, last_error="")
             self._persist(
                 event_id,
@@ -1389,6 +1772,12 @@ class ObjectTrackingSession:
                     self._frame_height,
                 )
                 tracked = tracker.update(objects, sample_epoch)
+                self._consider_cover_candidate(
+                    frame,
+                    sample_epoch,
+                    tracked,
+                    primary_track_ids,
+                )
                 frames_processed += 1
                 if catchup:
                     self._catchup_frames_processed += 1
@@ -1547,6 +1936,15 @@ class ObjectTrackingSession:
                 next_sample = max(next_sample + interval, time.monotonic())
             final_epoch = time.time()
             final_state = "interrupted" if self._coverage_gap_count else "complete"
+            if final_state == "complete" and not stop.is_set():
+                try:
+                    self._promote_cover_candidate(event_id)
+                except Exception:
+                    LOGGER.exception(
+                        "tracked cover promotion failed for %s event %d",
+                        self.camera.id,
+                        event_id,
+                    )
             self._persist(event_id, tracker, final_epoch, None, frames_processed, final_state)
             self._set_status(
                 enabled=True,
@@ -1642,6 +2040,8 @@ class ObjectTrackingSession:
                 },
             },
         }
+        if self._cover_promotion:
+            payload.update(self._cover_promotion)
         if self._frame_width > 0 and self._frame_height > 0:
             payload["frame_width"] = self._frame_width
             payload["frame_height"] = self._frame_height
@@ -1683,6 +2083,7 @@ class ObjectTrackingSession:
                     | avoided_by_label.keys()
                 )
             },
+            **(self._cover_promotion or {}),
         )
         if state in {"complete", "interrupted"}:
             self._publish_safely(event_id, payload)
@@ -1923,6 +2324,7 @@ class ObjectTrackingSessionFactory:
         tracker_registry: ObjectTrackerRegistry | None = None,
         appearance_encoder: AppearanceEncoder | None = None,
         appearance_indexer: AppearanceIndexWriter | None = None,
+        cover_promoter: TrackingCoverPromoter | None = None,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -1932,6 +2334,7 @@ class ObjectTrackingSessionFactory:
         self.tracker_registry = tracker_registry or build_builtin_object_tracker_registry()
         self.appearance_encoder = appearance_encoder
         self.appearance_indexer = appearance_indexer
+        self.cover_promoter = cover_promoter
         # Fail configuration loading before any event tries to start a session.
         self.tracker_registry.require(config.implementation)
 
@@ -1940,6 +2343,8 @@ class ObjectTrackingSessionFactory:
         camera: CameraConfig,
         frame_provider: FrameProvider,
         catchup_frame_provider: CatchupFrameProvider | None = None,
+        cover_frame_provider: TrackingCoverFrameProvider | None = None,
+        snapshot_writer: TrackingSnapshotWriter | None = None,
     ) -> ObjectTrackingSession:
         return ObjectTrackingSession(
             camera=camera,
@@ -1953,4 +2358,7 @@ class ObjectTrackingSessionFactory:
             appearance_encoder=self.appearance_encoder,
             appearance_indexer=self.appearance_indexer,
             catchup_frame_provider=catchup_frame_provider,
+            cover_frame_provider=cover_frame_provider,
+            snapshot_writer=snapshot_writer,
+            cover_promoter=self.cover_promoter,
         )

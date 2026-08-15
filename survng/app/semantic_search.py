@@ -153,7 +153,9 @@ def semantic_event_objects(event: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     return [
         item for item in raw_objects
-        if isinstance(item, dict) and str(item.get("label") or "").strip()
+        if isinstance(item, dict)
+        and str(item.get("label") or "").strip()
+        and item.get("snapshot_visible") is not False
     ]
 
 

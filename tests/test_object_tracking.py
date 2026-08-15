@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -570,6 +570,124 @@ class ByteTrackObjectTrackerTest(unittest.TestCase):
 
 
 class ObjectTrackingSessionTest(unittest.TestCase):
+    def test_tracking_promotes_materially_larger_fully_framed_seed_subject(self) -> None:
+        promoted: dict = {}
+
+        class Detector:
+            config = SimpleNamespace(confidence_threshold=0.7)
+
+            @staticmethod
+            def detect(_frame, confidence_threshold=None):
+                del confidence_threshold
+                return [detection("car", 0.96, (60, 35, 210, 145))]
+
+        def promote(_event_id: int, **values: object) -> dict:
+            promoted.update(values)
+            return {"id": 7}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=Detector(),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            cover_frame_provider=lambda _captured_at, _width: np.full(
+                (200, 300, 3), 127, dtype=np.uint8
+            ),
+            snapshot_writer=lambda _frame, _event_at: "snapshots/gate/better.webp",
+            cover_promoter=promote,
+        )
+        session._frame_width = 100
+        session._frame_height = 100
+        initial = {
+            **detection("car", 0.82, (45, 45, 55, 55)),
+            "track_id": 4,
+            "snapshot_primary_subject": True,
+        }
+        closer = {
+            **detection("car", 0.94, (25, 20, 75, 70)),
+            "track_id": 4,
+        }
+
+        session._consider_cover_candidate(
+            np.full((100, 100, 3), 127, dtype=np.uint8),
+            100.0,
+            [initial],
+            {4},
+        )
+        session._consider_cover_candidate(
+            np.full((100, 100, 3), 127, dtype=np.uint8),
+            104.0,
+            [closer],
+            {4},
+        )
+        session._promote_cover_candidate(7)
+
+        self.assertEqual(promoted["snapshot_path"], "snapshots/gate/better.webp")
+        self.assertEqual(promoted["captured_at"], 104.0)
+        self.assertEqual(promoted["frame_width"], 300)
+        self.assertEqual(promoted["frame_height"], 200)
+        self.assertEqual(promoted["tracked_objects"][0]["box"]["x1"], 60)
+        self.assertEqual(promoted["tracked_objects"][0]["box"]["y2"], 145)
+        self.assertEqual(
+            promoted["tracked_objects"][0]["cover_verification_confidence"],
+            0.96,
+        )
+        self.assertTrue(session._cover_promotion["cover_promoted"])
+        self.assertEqual(session._cover_promotion["cover_promotion_result"], "promoted")
+        self.assertGreaterEqual(
+            session._cover_promotion["cover_verification_inference_ms"],
+            0.0,
+        )
+
+    def test_cover_verification_rejects_ambiguous_same_label_matches(self) -> None:
+        expected = [{
+            **detection("person", 0.9, (80, 40, 120, 160)),
+            "track_id": 4,
+        }]
+        detected = [
+            detection("person", 0.91, (50, 40, 90, 160)),
+            detection("person", 0.90, (110, 40, 150, 160)),
+        ]
+
+        verified = ObjectTrackingSession._associate_cover_detections(
+            expected,
+            detected,
+            4,
+            200,
+            200,
+        )
+
+        self.assertEqual(verified, [])
+
+    def test_tracking_does_not_promote_a_larger_edge_clipped_subject(self) -> None:
+        promoter = Mock()
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(),
+            detector=SimpleNamespace(config=SimpleNamespace(confidence_threshold=0.7)),
+            frame_provider=lambda: None,
+            update_event=lambda *_args: {},
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+            cover_frame_provider=lambda _captured_at, _width: np.zeros((100, 100, 3), dtype=np.uint8),
+            snapshot_writer=lambda _frame, _event_at: "snapshots/gate/better.webp",
+            cover_promoter=promoter,
+        )
+        session._frame_width = 100
+        session._frame_height = 100
+        initial = {**detection("car", 0.8, (40, 40, 60, 60)), "track_id": 4}
+        clipped = {**detection("car", 0.95, (20, 20, 100, 90)), "track_id": 4}
+        frame = np.full((100, 100, 3), 127, dtype=np.uint8)
+
+        session._consider_cover_candidate(frame, 100.0, [initial], {4})
+        session._consider_cover_candidate(frame, 104.0, [clipped], {4})
+        session._promote_cover_candidate(7)
+
+        promoter.assert_not_called()
+
     def test_reid_recovery_telemetry_accumulates_across_sessions(self) -> None:
         persisted: dict = {}
 
@@ -1374,6 +1492,59 @@ class ObjectTrackingSessionTest(unittest.TestCase):
 
 
 class ObjectTrackingPersistenceTest(unittest.TestCase):
+    def test_promoted_cover_updates_visible_track_boxes_and_removes_old_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = Path(tmpdir)
+            snapshot_dir = storage / "snapshots" / "gate"
+            snapshot_dir.mkdir(parents=True)
+            old_snapshot = snapshot_dir / "old.webp"
+            new_snapshot = snapshot_dir / "new.webp"
+            old_snapshot.write_bytes(b"old")
+            new_snapshot.write_bytes(b"new-image")
+            store = EventStore(storage)
+            event = store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(old_snapshot),
+                objects_json=json.dumps([
+                    {
+                        **detection("car", 0.82, (10, 10, 30, 30)),
+                        "track_id": 7,
+                        "snapshot_primary_subject": True,
+                    },
+                    {**detection("person", 0.9, (40, 10, 60, 50)), "track_id": 8},
+                    {"status": "object_tracking", "object_tracking": {"state": "active"}},
+                ]),
+            )
+
+            updated = store.promote_tracking_cover(
+                int(event["id"]),
+                snapshot_path=str(new_snapshot),
+                captured_at=100.0,
+                frame_width=300,
+                frame_height=200,
+                tracked_objects=[{
+                    **detection("car", 0.94, (75, 40, 225, 140)),
+                    "track_id": 7,
+                }],
+                cover_metrics={
+                    "snapshot_subject_area_ratio": 0.25,
+                    "snapshot_edge_clearance_ratio": 0.2,
+                },
+            )
+
+            self.assertIsNotNone(updated)
+            objects = json.loads(str(updated["objects_json"]))
+            self.assertEqual(updated["snapshot_path"], "snapshots/gate/new.webp")
+            self.assertEqual(updated["snapshot_size_bytes"], 9)
+            self.assertEqual(objects[0]["box"]["x1"], 75)
+            self.assertEqual(objects[0]["detection_frame_width"], 300)
+            self.assertEqual(objects[0]["snapshot_source"], "object_tracking")
+            self.assertTrue(objects[0]["snapshot_visible"])
+            self.assertFalse(objects[1]["snapshot_visible"])
+            self.assertFalse(old_snapshot.exists())
+            self.assertTrue(new_snapshot.exists())
+
     def test_replaces_tracking_metadata_and_assigns_initial_track_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

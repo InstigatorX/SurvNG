@@ -495,8 +495,8 @@ def _temporal_consensus(
         return (
             int(bool(primary_visible)),
             fully_framed_primary,
-            best_primary_clearance,
             best_primary_area,
+            best_primary_clearance,
             len(admitted_visible),
             len(visible),
             face_quality,

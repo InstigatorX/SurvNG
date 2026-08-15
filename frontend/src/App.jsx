@@ -2214,7 +2214,7 @@ function incidentZones(incident) {
 function objectBoxes(event, incidentEligibleOnly = false) {
   return eventObjects(event)
     .map((object) => ({ object, box: object?.box }))
-    .filter(({ object, box }) => object?.label && (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
+    .filter(({ object, box }) => object?.label && object.snapshot_visible !== false && (!incidentEligibleOnly || object.incident_eligible !== false) && box && [box.x1, box.y1, box.x2, box.y2].every((value) => Number.isFinite(Number(value))))
     .map(({ object, box }) => ({
       label: object.label,
       confidence: object.confidence,

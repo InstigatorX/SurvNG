@@ -125,6 +125,13 @@ class CameraWorker:
                 self.motion_state.detection_enabled() and not self._stop.is_set()
             ),
             lifecycle_lock=self._lifecycle_lock,
+            cover_frame_provider=lambda captured_at, width: (
+                self.tracking_frames.recorded_frame_at(captured_at, width)
+            ),
+            snapshot_writer=lambda frame, event_at: self.media.write_snapshot(
+                frame,
+                event_at,
+            ),
         )
         self.motion_decision_handler = motion_decision_handler_factory.create(
             camera_id=camera.id,

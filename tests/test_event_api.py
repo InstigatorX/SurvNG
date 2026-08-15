@@ -1420,6 +1420,36 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(selected["id"], 21)
 
+    def test_incident_representative_prefers_larger_fully_framed_primary_subject(self) -> None:
+        distant = _event_row({
+            "id": 22,
+            "objects_json": json.dumps([{
+                "label": "car",
+                "confidence": 0.90,
+                "incident_eligible": True,
+                "snapshot_primary_subject": True,
+                "snapshot_edge_clearance_ratio": 0.40,
+                "snapshot_subject_area_ratio": 0.001,
+                "snapshot_quality_score": 0.91,
+            }]),
+        })
+        close = _event_row({
+            "id": 23,
+            "objects_json": json.dumps([{
+                "label": "car",
+                "confidence": 0.88,
+                "incident_eligible": True,
+                "snapshot_primary_subject": True,
+                "snapshot_edge_clearance_ratio": 0.08,
+                "snapshot_subject_area_ratio": 0.08,
+                "snapshot_quality_score": 0.87,
+            }]),
+        })
+
+        selected = _best_incident_event([distant, close])
+
+        self.assertEqual(selected["id"], 23)
+
     def test_linked_motion_observation_extends_incident_without_duplicate_event(self) -> None:
         incident = _incident_row("foyer", [{
             "id": 42,

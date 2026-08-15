@@ -449,6 +449,7 @@ class InferenceLifecycle:
             limiter=limiter,
             appearance_encoder=self.person_reidentifier,
             appearance_indexer=self.appearance_index.replace_event,
+            cover_promoter=self.events.promote_tracking_cover,
         )
 
     def _build_backfill(self, config: DetectorConfig) -> DeferredAppearanceBackfill:
