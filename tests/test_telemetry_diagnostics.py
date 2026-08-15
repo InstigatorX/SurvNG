@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -62,7 +62,7 @@ def test_camera_outages_are_not_reported_during_startup_admission(tmp_path) -> N
         controller.observe(
             status,
             detector_runtime={},
-            camera_startup_complete=False,
+            camera_startup_status={"complete": False},
             now_monotonic=10 + index * 5,
             sampled_at=started,
         )
@@ -74,11 +74,46 @@ def test_camera_outages_are_not_reported_during_startup_admission(tmp_path) -> N
         controller.observe(
             status,
             detector_runtime={},
-            camera_startup_complete=True,
+            camera_startup_status={"complete": True},
             now_monotonic=40 + index * 5,
             sampled_at=started,
         )
     assert len(store.diagnostic_sessions(active_only=True, now=started)) == 1
+
+
+def test_degraded_startup_camera_gets_recovery_grace_before_outage(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    controller = DiagnosticTelemetryController(store)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    status = [{"id": "gate", "expected_enabled": True, "connected": False}]
+    startup = {
+        "complete": True,
+        "cameras": {
+            "gate": {
+                "phase": "degraded",
+                "completed_at": started.isoformat(),
+            }
+        },
+    }
+    for index in range(12):
+        controller.observe(
+            status,
+            detector_runtime={},
+            camera_startup_status=startup,
+            now_monotonic=10 + index * 5,
+            sampled_at=started + timedelta(seconds=index * 5),
+        )
+    assert not store.operational_event_history(hours=1, now=started + timedelta(seconds=60))
+
+    for index in range(3):
+        controller.observe(
+            status,
+            detector_runtime={},
+            camera_startup_status=startup,
+            now_monotonic=100 + index * 5,
+            sampled_at=started + timedelta(seconds=90 + index * 5),
+        )
+    assert len(store.diagnostic_sessions(active_only=True, now=started + timedelta(seconds=100))) == 1
 
 
 def test_sustained_detector_backlog_uses_available_runtime_signal(tmp_path) -> None:

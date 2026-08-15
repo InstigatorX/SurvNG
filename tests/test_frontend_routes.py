@@ -4,6 +4,7 @@ import unittest
 
 from survng.app.main import (
     app,
+    manager,
     recording_exports_page,
     recording_search_page,
     recordings_page,
@@ -11,6 +12,9 @@ from survng.app.main import (
 
 
 class FrontendRouteTest(unittest.TestCase):
+    def test_imported_application_uses_isolated_test_runtime(self) -> None:
+        self.assertIn("survng-pytest-", str(manager.database_dir))
+
     def test_recording_subpages_serve_the_recordings_application(self) -> None:
         for page in (recordings_page, recording_search_page, recording_exports_page):
             with self.subTest(page=page.__name__):

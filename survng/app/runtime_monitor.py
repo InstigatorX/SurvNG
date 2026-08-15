@@ -345,9 +345,7 @@ class ApplicationRuntimeMonitor:
                             statuses,
                             detector_runtime=detector_runtime,
                             storage_status=self._storage_status(),
-                            camera_startup_complete=bool(
-                                self._camera_startup_status().get("complete", True)
-                            ),
+                            camera_startup_status=self._camera_startup_status(),
                             now_monotonic=now,
                         )
                     except Exception:

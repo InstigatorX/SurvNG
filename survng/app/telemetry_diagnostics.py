@@ -7,7 +7,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from .telemetry_contract import DIAGNOSTIC_DURATIONS_SECONDS, DIAGNOSTIC_SCOPES
@@ -38,6 +38,7 @@ class DiagnosticTelemetryController:
 
     SAMPLE_INTERVAL_SECONDS = 5.0
     PREBUFFER_SAMPLES = 60
+    STARTUP_RECOVERY_GRACE_SECONDS = 90.0
 
     def __init__(self, store: TelemetryStore) -> None:
         self._store = store
@@ -79,7 +80,7 @@ class DiagnosticTelemetryController:
         *,
         detector_runtime: dict[str, Any],
         storage_status: dict[str, Any] | None = None,
-        camera_startup_complete: bool = True,
+        camera_startup_status: dict[str, Any] | None = None,
         now_monotonic: float | None = None,
         sampled_at: datetime | None = None,
     ) -> None:
@@ -117,7 +118,7 @@ class DiagnosticTelemetryController:
         self._detect_anomalies(
             payload,
             current,
-            camera_startup_complete=camera_startup_complete,
+            camera_startup_status=camera_startup_status,
         )
 
     @staticmethod
@@ -198,7 +199,7 @@ class DiagnosticTelemetryController:
         payload: dict[str, Any],
         current: datetime,
         *,
-        camera_startup_complete: bool,
+        camera_startup_status: dict[str, Any] | None,
     ) -> None:
         cameras = dict(payload.get("cameras") or {})
         present: set[str] = set()
@@ -206,7 +207,11 @@ class DiagnosticTelemetryController:
             if not isinstance(camera, dict):
                 continue
             present.add(str(camera_id))
-            if not camera_startup_complete:
+            if not self._camera_outage_detection_ready(
+                str(camera_id),
+                camera_startup_status,
+                current,
+            ):
                 self._camera_unavailable_samples[str(camera_id)] = 0
                 continue
             unhealthy = bool(camera.get("expected_enabled", True)) and not bool(
@@ -276,6 +281,36 @@ class DiagnosticTelemetryController:
             )
         elif not storage_failed:
             self._storage_anomaly_active = False
+
+    @classmethod
+    def _camera_outage_detection_ready(
+        cls,
+        camera_id: str,
+        startup: dict[str, Any] | None,
+        current: datetime,
+    ) -> bool:
+        if not startup:
+            return True
+        if not bool(startup.get("complete", True)):
+            return False
+        camera = dict(startup.get("cameras") or {}).get(camera_id)
+        if not isinstance(camera, dict):
+            return True
+        phase = str(camera.get("phase") or "")
+        if phase in {"queued", "starting"}:
+            return False
+        if phase != "degraded":
+            return True
+        completed_raw = str(camera.get("completed_at") or "")
+        try:
+            completed = datetime.fromisoformat(completed_raw.replace("Z", "+00:00"))
+            if completed.tzinfo is None:
+                completed = completed.replace(tzinfo=timezone.utc)
+            return current.astimezone(timezone.utc) >= completed.astimezone(
+                timezone.utc
+            ) + timedelta(seconds=cls.STARTUP_RECOVERY_GRACE_SECONDS)
+        except ValueError:
+            return False
 
     def stop(self, session_id: str) -> bool:
         return self._store.stop_diagnostic_session(session_id)
