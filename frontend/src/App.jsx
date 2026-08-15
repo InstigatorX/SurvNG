@@ -108,6 +108,13 @@ import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPat
 import { nextFaceReviewObservation } from "./faceReview.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
+const MEDIA_STORAGE_ROLES = [
+  ["recordings", "Recordings"],
+  ["snapshots", "Snapshots"],
+  ["motion_audits", "Motion audits"],
+  ["clips", "Clips"],
+  ["exports", "Exports"],
+];
 const LEGACY_INCIDENT_FILTER_KEYS = [
   "survng.liveEventFilter.v2",
   "survng.incidentDay.v1",
@@ -761,6 +768,22 @@ function useStoredState(key, initialValue) {
     writeStoredValue(browserStorage(window), key, value);
   }, [key, value]);
   return [value, setValue];
+}
+
+function mediaStorageConfigurationError(mediaStorage) {
+  const locations = mediaStorage?.locations || [];
+  if (!locations.length) return "";
+  const enabledRoles = new Set(
+    locations
+      .filter((location) => location.enabled !== false)
+      .flatMap((location) => location.roles || []),
+  );
+  const missing = MEDIA_STORAGE_ROLES
+    .filter(([role]) => !enabledRoles.has(role))
+    .map(([, label]) => label);
+  return missing.length
+    ? `At least one enabled media location must accept: ${missing.join(", ")}.`
+    : "";
 }
 
 function clearLegacyIncidentFilterStorage() {
@@ -9118,6 +9141,11 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       }
       ids.add(camera.id);
     }
+    const mediaStorageError = mediaStorageConfigurationError(configToSave.media_storage);
+    if (mediaStorageError) {
+      setSaveNotice({ state: "error", text: mediaStorageError });
+      return;
+    }
     setGeneralSaving(true);
     setSaveNotice({ state: "saving", text: "Saving settings..." });
     try {
@@ -9126,7 +9154,13 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(configToSave),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload.detail === "string"
+          ? payload.detail
+          : `Configuration could not be saved (${response.status}).`;
+        throw new Error(detail);
+      }
       const payload = await response.json();
       const reloaded = await load();
       setSaveNotice(reloaded
@@ -11100,9 +11134,13 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
             {!mediaLocations.length ? <div className="probe-result ok"><strong>Single media location</strong><span>All media continues to use Storage Directory. Add locations only when the additional filesystems are mounted and writable.</span></div> : null}
             <div className="media-location-list">
               {mediaLocations.map((location, index) => {
-                const status = retentionStatus?.plan?.storage?.locations?.find((item) => item.id === location.id);
-                return <article className="media-location-card" key={`${location.id}-${index}`}>
-                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state || "restart to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
+                const candidateStatus = retentionStatus?.plan?.storage?.locations?.find((item) => item.id === location.id);
+                const normalizePath = (value) => String(value || "").replace(/\/+$/, "");
+                const status = candidateStatus && normalizePath(candidateStatus.path) === normalizePath(location.path)
+                  ? candidateStatus
+                  : null;
+                return <article className="media-location-card" key={index}>
+                  <header><strong>{location.name || location.id || `Location ${index + 1}`}</strong><span className={`retention-state ${status?.state === "online" ? "running" : status?.state || "idle"}`}>{status?.state || "save to inspect"}</span><button type="button" className="danger compact" aria-label={`Remove ${location.name || location.id}`} onClick={() => updateConfig(["media_storage", "locations"], mediaLocations.filter((_item, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></header>
                   <div className="admin-field-grid">
                     <label>ID<input value={location.id || ""} onChange={(event) => updateMediaLocation(index, "id", event.target.value)} /></label>
                     <label>Name<input value={location.name || ""} onChange={(event) => updateMediaLocation(index, "name", event.target.value)} /></label>
@@ -11110,7 +11148,7 @@ function GeneralSettings({ config, updateConfig, timeZone, setTimeZone, theme, s
                     <label>Reserve free space<input type="number" min="0" max="95" step="1" value={location.reserve_percent ?? 15} onChange={(event) => updateMediaLocation(index, "reserve_percent", Number(event.target.value))} /></label>
                     <label>Priority<input type="number" min="1" max="1000" step="1" value={location.priority ?? 100} onChange={(event) => updateMediaLocation(index, "priority", Number(event.target.value))} /></label>
                   </div>
-                  <div className="media-location-roles">{[["recordings", "Recordings"], ["snapshots", "Snapshots"], ["motion_audits", "Motion audits"], ["clips", "Clips"], ["exports", "Exports"]].map(([role, label]) => <label key={role}><input type="checkbox" checked={(location.roles || []).includes(role)} onChange={(event) => toggleMediaRole(index, role, event.target.checked)} />{label}</label>)}</div>
+                  <div className="media-location-roles">{MEDIA_STORAGE_ROLES.map(([role, label]) => <label key={role}><input type="checkbox" checked={(location.roles || []).includes(role)} onChange={(event) => toggleMediaRole(index, role, event.target.checked)} />{label}</label>)}</div>
                   <div className="media-location-flags"><label><input type="checkbox" checked={location.enabled ?? true} onChange={(event) => updateMediaLocation(index, "enabled", event.target.checked)} />Accept new media</label><label><input type="checkbox" checked={location.require_mount ?? false} onChange={(event) => updateMediaLocation(index, "require_mount", event.target.checked)} />Require a real mount</label></div>
                   {status ? <small>{formatBytes(status.free_bytes)} free of {formatBytes(status.total_bytes)} · {Number(status.free_percent || 0).toFixed(1)}% free</small> : null}
                 </article>;

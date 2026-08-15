@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from survng.app.config import AppConfig, CameraMotionQualificationConfig, MotionQualificationConfig
-from survng.app.manager import validate_motion_pipeline_configuration
+from survng.app.manager import validate_manager_configuration, validate_motion_pipeline_configuration
 from survng.app.motion_pipeline import (
     MotionPipelineFactory,
     analysis_preset_selections,
@@ -20,6 +20,40 @@ from survng.app.motion_pipeline import (
 
 
 class MotionPipelineConfigurationTest(unittest.TestCase):
+    def test_application_preflight_requires_complete_media_role_coverage(self) -> None:
+        config = AppConfig.model_validate({
+            "media_storage": {
+                "locations": [{
+                    "id": "audit-only",
+                    "path": "/mnt/audit-only",
+                    "roles": ["motion_audits"],
+                }],
+            },
+        })
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "enabled media location must accept: recordings, snapshots, clips, exports",
+        ):
+            validate_manager_configuration(config)
+
+    def test_application_preflight_accepts_roles_split_across_locations(self) -> None:
+        config = AppConfig.model_validate({
+            "media_storage": {
+                "locations": [{
+                    "id": "recordings",
+                    "path": "/mnt/recordings",
+                    "roles": ["recordings", "clips"],
+                }, {
+                    "id": "evidence",
+                    "path": "/mnt/evidence",
+                    "roles": ["snapshots", "motion_audits", "exports"],
+                }],
+            },
+        })
+
+        validate_manager_configuration(config)
+
     def test_guided_helpers_identify_presets_and_update_fusion(self) -> None:
         graphs = resolve_motion_pipeline_graphs(
             MotionQualificationConfig(),

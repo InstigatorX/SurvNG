@@ -45,7 +45,7 @@ from .face_routes import (
     create_face_router,
 )
 from .frontend_routes import FrontendRouteDependencies, create_frontend_router
-from .manager import AppManager, validate_motion_pipeline_configuration
+from .manager import AppManager, validate_manager_configuration
 from .manager_access import ManagerAccessCoordinator
 from .manager_reload import ManagerGenerationLifecycle, ManagerReloadHooks
 from .media_exports import MediaExportManager
@@ -676,7 +676,7 @@ app.include_router(
             apply_config=apply_config_update,
             reload_manager=reload_manager,
             save_config=save_config,
-            validate_config=validate_motion_pipeline_configuration,
+            validate_config=validate_manager_configuration,
             lock=MANAGER_RELOAD_LOCK,
             probe_limiter=CONFIG_PROBE_LIMITER,
         )

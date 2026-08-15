@@ -76,6 +76,32 @@ class ManagerShutdownIncompleteError(RuntimeError):
         super().__init__(f"camera shutdown remains active: {residuals}")
 
 
+def validate_media_storage_configuration(config: AppConfig) -> None:
+    if config.media_storage.locations:
+        required_roles = {
+            "recordings": "recordings",
+            "snapshots": "snapshots",
+            "motion_audits": "motion audits",
+            "clips": "clips",
+            "exports": "exports",
+        }
+        enabled_roles = {
+            role
+            for location in config.media_storage.locations
+            if location.enabled
+            for role in location.roles
+        }
+        missing_roles = [
+            label for role, label in required_roles.items()
+            if role not in enabled_roles
+        ]
+        if missing_roles:
+            raise ValueError(
+                "at least one enabled media location must accept: "
+                + ", ".join(missing_roles)
+            )
+
+
 def validate_motion_pipeline_configuration(config: AppConfig) -> None:
     def selected_sources(value: object) -> set[str]:
         if isinstance(value, str):
@@ -152,9 +178,14 @@ def validate_motion_pipeline_configuration(config: AppConfig) -> None:
                 pipeline.close()
 
 
+def validate_manager_configuration(config: AppConfig) -> None:
+    validate_media_storage_configuration(config)
+    validate_motion_pipeline_configuration(config)
+
+
 class AppManager:
     def __init__(self, config: AppConfig) -> None:
-        validate_motion_pipeline_configuration(config)
+        validate_manager_configuration(config)
         self.config = config
         self.storage_dir = Path(config.storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
