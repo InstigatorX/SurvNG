@@ -39,6 +39,10 @@ class InferenceUnavailable(RuntimeError):
     pass
 
 
+class InferenceRollbackIncomplete(InferenceUnavailable):
+    """A failed reconfiguration could not restore the previous safe pool."""
+
+
 class InferenceWorkload(IntEnum):
     """Security work runs before optional enrichment on each worker."""
 
@@ -416,7 +420,7 @@ class _InferenceWorker:
                             rollback_errors.append(exc)
                 if rollback_errors:
                     details = "; ".join(str(exc) for exc in rollback_errors)
-                    raise RuntimeError(
+                    raise InferenceRollbackIncomplete(
                         f"{self.role} inference rollback failed: {details}"
                     ) from reconfigure_error
                 raise
@@ -930,6 +934,7 @@ class InferenceSupervisor:
         self._initial_active = 0
         self._refinement_active = 0
         self._optional_active = 0
+        self._offline_active = 0
         self._device_workload_stats: dict[InferenceWorkload, dict[str, float | int]] = {
             workload: {
                 "admitted": 0,
@@ -1041,10 +1046,20 @@ class InferenceSupervisor:
                     if initial:
                         self._initial_waiting = max(0, self._initial_waiting - 1)
             else:
-                if shed_optional and (self._security_waiting or self._security_active):
+                offline = workload is InferenceWorkload.OFFLINE
+                if shed_optional and (
+                    self._security_waiting
+                    or self._security_active
+                    or self._offline_active
+                ):
                     self._device_workload_stats[workload]["shed"] += 1
                     return False
-                while self._security_waiting or self._security_active:
+                while (
+                    self._security_waiting
+                    or self._security_active
+                    or (offline and self._optional_active)
+                    or (not offline and self._offline_active)
+                ):
                     if not self._device_accepting:
                         self._device_workload_stats[workload]["shed"] += 1
                         return False
@@ -1054,6 +1069,8 @@ class InferenceSupervisor:
                         return False
                     self._device_condition.wait(remaining)
                 self._optional_active += 1
+                if offline:
+                    self._offline_active += 1
             wait_ms = max(0.0, (time.monotonic() - started) * 1000.0)
             stats = self._device_workload_stats[workload]
             stats["admitted"] += 1
@@ -1071,6 +1088,8 @@ class InferenceSupervisor:
                     self._refinement_active = max(0, self._refinement_active - 1)
             else:
                 self._optional_active = max(0, self._optional_active - 1)
+                if workload is InferenceWorkload.OFFLINE:
+                    self._offline_active = max(0, self._offline_active - 1)
             self._device_workload_stats[workload]["completed"] += 1
             self._device_condition.notify_all()
 
@@ -1094,6 +1113,7 @@ class InferenceSupervisor:
                 "initial_active": self._initial_active,
                 "refinement_active": self._refinement_active,
                 "optional_active": self._optional_active,
+                "offline_active": self._offline_active,
                 "accepting": self._device_accepting,
                 "classes": {},
             }
@@ -1184,11 +1204,17 @@ class InferenceSupervisor:
             previously_accepting = self._device_accepting
             self._device_accepting = False
             self._device_condition.notify_all()
+        resume_admission = previously_accepting
         try:
             self._reconfigure_roles_unfenced(config, roles)
+        except InferenceRollbackIncomplete:
+            # A partially restored pool must remain fenced until an explicit
+            # successful restart/reconfiguration proves it is healthy.
+            resume_admission = False
+            raise
         finally:
             with self._device_condition:
-                self._device_accepting = previously_accepting
+                self._device_accepting = resume_admission
                 self._device_condition.notify_all()
 
     def _reconfigure_roles_unfenced(
@@ -1296,7 +1322,7 @@ class InferenceSupervisor:
                 if "reid" not in completed:
                     self._reid.update_config_reference(previous_config)
                 if rollback_failures:
-                    raise RuntimeError(
+                    raise InferenceRollbackIncomplete(
                         "inference rollback incomplete: "
                         + "; ".join(rollback_failures)
                     ) from reconfigure_error
@@ -1329,7 +1355,7 @@ class InferenceSupervisor:
                     except BaseException as rollback_error:
                         rollback_errors.append(rollback_error)
                 if rollback_errors:
-                    raise RuntimeError(
+                    raise InferenceRollbackIncomplete(
                         "object inference pool rollback failed: "
                         + "; ".join(str(item) for item in rollback_errors)
                     ) from error
@@ -1354,7 +1380,7 @@ class InferenceSupervisor:
                 except BaseException as restore_error:
                     restore_errors.append(restore_error)
             if restore_errors:
-                raise RuntimeError(
+                raise InferenceRollbackIncomplete(
                     "object inference pool stop rollback failed: "
                     + "; ".join(str(item) for item in restore_errors)
                 ) from stop_error
@@ -1388,7 +1414,7 @@ class InferenceSupervisor:
                 except BaseException as restore_error:
                     restore_errors.append(restore_error)
             if restore_errors:
-                raise RuntimeError(
+                raise InferenceRollbackIncomplete(
                     "object inference pool restore failed: "
                     + "; ".join(str(item) for item in restore_errors)
                 ) from error
@@ -1593,7 +1619,10 @@ class InferenceSupervisor:
             # work is pending, retaining that old sample is worse than
             # dropping it and allowing the next fresh sample to recover.
             if workload >= InferenceWorkload.TRACKING:
-                return []
+                return [{
+                    "status": "inference_deferred",
+                    "error": f"{workload.name.lower()} inference deferred for security work",
+                }]
             return [{
                 "status": "detector_unavailable",
                 "error": f"{workload.name.lower()} inference admission timed out",

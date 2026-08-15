@@ -19,10 +19,10 @@ StatCallback = Callable[[str], None]
 
 class MotionTriggerStore(Protocol):
     def enqueue_motion_trigger(self, *, job_id: str, camera_id: str, payload: dict[str, Any]) -> bool: ...
-    def claim_motion_trigger(self, camera_id: str, job_id: str | None = None, *, lease_seconds: float = 60.0) -> dict[str, Any] | None: ...
-    def complete_motion_trigger(self, job_id: str) -> None: ...
-    def release_motion_trigger(self, job_id: str) -> None: ...
-    def fail_motion_trigger(self, job_id: str, error: str, *, maximum_attempts: int = 5) -> bool: ...
+    def claim_motion_trigger(self, camera_id: str, job_id: str | None = None, *, lease_seconds: float = 60.0, lease_owner: str = "") -> dict[str, Any] | None: ...
+    def complete_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None: ...
+    def release_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None: ...
+    def fail_motion_trigger(self, job_id: str, error: str, *, maximum_attempts: int = 5, lease_owner: str = "") -> bool: ...
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]: ...
 
 
@@ -238,6 +238,7 @@ class MotionEventCoordinator:
         self.episode_controller = MotionEpisodeController(camera_id)
         self.camera_id = camera_id
         self.durable_store = durable_store
+        self._lease_owner = uuid.uuid4().hex
         self._retry_limit = retry_limit
         self._lock = threading.RLock()
         self._runtime_metrics = {
@@ -248,6 +249,8 @@ class MotionEventCoordinator:
             "retries_scheduled": 0,
             "retries_dropped": 0,
             "retry_high_water": 0,
+            "durable_wake_evictions": 0,
+            "durable_deferred": 0,
         }
 
     def enqueue(
@@ -276,7 +279,7 @@ class MotionEventCoordinator:
         except queue.Full:
             if not evict_oldest:
                 if self.durable_store is not None:
-                    self._record_enqueue()
+                    self._record_durable_deferred()
                     return True
                 self._record_rejected()
                 if on_drop is not None:
@@ -291,12 +294,15 @@ class MotionEventCoordinator:
             try:
                 self.queue.put_nowait(trigger)
                 queued = True
-                self._record_enqueue(evicted=dropped)
+                if self.durable_store is not None:
+                    self._record_enqueue(durable_wake_evictions=dropped)
+                else:
+                    self._record_enqueue(evicted=dropped)
             except queue.Full:
                 dropped += 1
                 queued = False
                 self._record_rejected(evicted=max(0, dropped - 1))
-            if on_drop is not None:
+            if on_drop is not None and self.durable_store is None:
                 for _ in range(dropped):
                     on_drop("dropped_triggers")
             return queued
@@ -319,53 +325,69 @@ class MotionEventCoordinator:
             pass
 
     def next_trigger(self, timeout: float) -> MotionTrigger | None:
-        with self._lock:
-            if self.retry_batches:
-                return self.retry_batches.popleft()
-        from_queue = True
-        try:
-            item = self.queue.get(timeout=min(timeout, 0.1))
-        except queue.Empty:
-            from_queue = False
-            item = None
-            if self.durable_store is None:
-                raise
-        if item is not None and self.durable_store is not None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lock:
+                if self.retry_batches:
+                    return self.retry_batches.popleft()
+            remaining = max(0.0, deadline - time.monotonic())
+            from_queue = True
+            try:
+                item = self.queue.get(timeout=min(remaining, 0.1))
+            except queue.Empty:
+                from_queue = False
+                item = None
+                if self.durable_store is None:
+                    raise
+            if item is not None and self.durable_store is not None:
+                claimed = self.durable_store.claim_motion_trigger(
+                    self.camera_id,
+                    item.delivery_job_id or None,
+                    lease_owner=self._lease_owner,
+                )
+                if claimed is None:
+                    if time.monotonic() >= deadline:
+                        raise queue.Empty
+                    continue
+                item.delivery_job_id = str(claimed["id"])
+                return item
+            if from_queue:
+                return item
             claimed = self.durable_store.claim_motion_trigger(
                 self.camera_id,
-                item.delivery_job_id or None,
+                lease_owner=self._lease_owner,
             )
-            if claimed is None:
-                return self.next_trigger(max(0.0, timeout - 0.1))
-            item.delivery_job_id = str(claimed["id"])
-            return item
-        if from_queue:
-            return item
-        claimed = self.durable_store.claim_motion_trigger(self.camera_id)
-        if claimed is None:
-            raise queue.Empty
-        return MotionTrigger.from_durable_payload(
-            dict(claimed["payload"]),
-            str(claimed["id"]),
-        )
+            if claimed is not None:
+                return MotionTrigger.from_durable_payload(
+                    dict(claimed["payload"]),
+                    str(claimed["id"]),
+                )
+            if time.monotonic() >= deadline:
+                raise queue.Empty
 
     def complete_deliveries(self, triggers: MotionTriggerBatch) -> None:
         if self.durable_store is None:
             return
         for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
-            self.durable_store.complete_motion_trigger(job_id)
+            self.durable_store.complete_motion_trigger(
+                job_id, lease_owner=self._lease_owner
+            )
 
     def release_deliveries(self, triggers: MotionTriggerBatch) -> None:
         if self.durable_store is None:
             return
         for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
-            self.durable_store.release_motion_trigger(job_id)
+            self.durable_store.release_motion_trigger(
+                job_id, lease_owner=self._lease_owner
+            )
 
     def fail_deliveries(self, triggers: MotionTriggerBatch, error: str) -> None:
         if self.durable_store is None:
             return
         for job_id in {item.delivery_job_id for item in triggers if item.delivery_job_id}:
-            self.durable_store.fail_motion_trigger(job_id, error)
+            self.durable_store.fail_motion_trigger(
+                job_id, error, lease_owner=self._lease_owner
+            )
 
     def retry_queue_depth(self) -> int:
         with self._lock:
@@ -397,6 +419,7 @@ class MotionEventCoordinator:
                 claimed = self.durable_store.claim_motion_trigger(
                     self.camera_id,
                     item.delivery_job_id or None,
+                    lease_owner=self._lease_owner,
                 )
                 if claimed is None:
                     continue
@@ -477,7 +500,12 @@ class MotionEventCoordinator:
             )
         return status
 
-    def _record_enqueue(self, *, evicted: int = 0) -> None:
+    def _record_enqueue(
+        self,
+        *,
+        evicted: int = 0,
+        durable_wake_evictions: int = 0,
+    ) -> None:
         # qsize() is an observational value because Queue owns its own lock and
         # the consumer may drain immediately after admission. A successful
         # enqueue nevertheless establishes a minimum sampled depth of one.
@@ -485,10 +513,18 @@ class MotionEventCoordinator:
         with self._lock:
             self._runtime_metrics["enqueued"] += 1
             self._runtime_metrics["evicted"] += max(0, evicted)
+            self._runtime_metrics["durable_wake_evictions"] += max(
+                0, durable_wake_evictions
+            )
             self._runtime_metrics["queue_high_water"] = max(
                 self._runtime_metrics["queue_high_water"],
                 observed_depth,
             )
+
+    def _record_durable_deferred(self) -> None:
+        with self._lock:
+            self._runtime_metrics["enqueued"] += 1
+            self._runtime_metrics["durable_deferred"] += 1
 
     def _record_rejected(self, *, evicted: int = 0) -> None:
         with self._lock:

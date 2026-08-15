@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from survng.app.events import EventStore
 
 
@@ -37,7 +39,7 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(claimed["payload"]["event_at"], "2026-08-15T12:00:00+00:00")
 
             recreated = EventStore(root)
-            with recreated._connect() as connection:
+            with recreated._connect_jobs() as connection:
                 connection.execute(
                     "update detection_jobs set lease_expires_at = 0 where id = 'job-1'"
                 )
@@ -46,6 +48,117 @@ class EventStoreTest(unittest.TestCase):
             self.assertEqual(reclaimed["attempts"], 2)
             recreated.complete_detection_job("job-1", 42)
             self.assertEqual(recreated.detection_job_status("gate"), {"completed": 1})
+
+    def test_security_work_ledger_is_separate_from_general_event_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            blocker = store._connect()
+            blocker.execute("begin immediate")
+            try:
+                self.assertTrue(store.enqueue_motion_trigger(
+                    job_id="trigger-1",
+                    camera_id="gate",
+                    payload={"score": np.float32(0.75)},
+                ))
+            finally:
+                blocker.rollback()
+                blocker.close()
+            self.assertTrue(store.jobs_db_path.exists())
+            with store._connect_jobs() as connection:
+                self.assertEqual(connection.execute("pragma synchronous").fetchone()[0], 2)
+            with store._connect() as connection:
+                legacy = connection.execute(
+                    "select count(*) from sqlite_master where type = 'table' "
+                    "and name in ('detection_jobs', 'motion_trigger_jobs')"
+                ).fetchone()[0]
+            self.assertEqual(legacy, 0)
+
+    def test_legacy_security_jobs_migrate_before_source_tables_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            database = root / "survng.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "create table detection_jobs (id text primary key, camera_id text, "
+                    "dedupe_key text, payload_json text, state text, attempts integer, "
+                    "available_at real, lease_expires_at real, event_id integer, "
+                    "last_error text, created_at text, updated_at text)"
+                )
+                connection.execute(
+                    "insert into detection_jobs values "
+                    "('job-1','gate','episode:1','{}','queued',0,0,null,null,'','now','now')"
+                )
+                connection.execute(
+                    "create table motion_trigger_jobs (id text primary key, camera_id text, "
+                    "payload_json text, state text, attempts integer, available_at real, "
+                    "lease_expires_at real, last_error text, created_at text, updated_at text)"
+                )
+                connection.execute(
+                    "insert into motion_trigger_jobs values "
+                    "('trigger-1','gate','{}','queued',0,0,null,'','now','now')"
+                )
+
+            store = EventStore(root)
+
+            self.assertEqual(store.detection_job_status("gate"), {"queued": 1})
+            self.assertEqual(store.motion_trigger_status("gate"), {"queued": 1})
+            with store._connect() as connection:
+                remaining = connection.execute(
+                    "select count(*) from sqlite_master where type = 'table' "
+                    "and name in ('detection_jobs', 'motion_trigger_jobs')"
+                ).fetchone()[0]
+            self.assertEqual(remaining, 0)
+
+    def test_nonfinite_durable_job_payload_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            with self.assertRaises(ValueError):
+                store.enqueue_motion_trigger(
+                    job_id="trigger-1",
+                    camera_id="gate",
+                    payload={"score": float("nan")},
+                )
+
+    def test_motion_trigger_lease_owner_prevents_stale_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.enqueue_motion_trigger(
+                job_id="trigger-1",
+                camera_id="gate",
+                payload={"topic": "onvif/motion"},
+            )
+            self.assertIsNotNone(store.claim_motion_trigger(
+                "gate", "trigger-1", lease_owner="generation-a"
+            ))
+            self.assertIsNone(store.claim_motion_trigger(
+                "gate", "trigger-1", lease_owner="generation-b"
+            ))
+            store.complete_motion_trigger("trigger-1", lease_owner="generation-b")
+            self.assertEqual(store.motion_trigger_status("gate"), {"running": 1})
+            store.complete_motion_trigger("trigger-1", lease_owner="generation-a")
+            self.assertEqual(store.motion_trigger_status("gate"), {})
+
+    def test_detection_job_lease_owner_prevents_stale_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="gate",
+                dedupe_key="episode:1",
+                payload={},
+            )
+            claimed = store.claim_detection_job(
+                "gate", lease_owner="generation-a"
+            )
+            self.assertIsNotNone(claimed)
+            store.complete_detection_job(
+                "job-1", 10, lease_owner="generation-b"
+            )
+            self.assertEqual(store.detection_job_status("gate"), {"running": 1})
+            store.complete_detection_job(
+                "job-1", 10, lease_owner="generation-a"
+            )
+            self.assertEqual(store.detection_job_status("gate"), {"completed": 1})
 
     def test_detection_intent_idempotently_links_one_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -91,6 +204,12 @@ class EventStoreTest(unittest.TestCase):
                 payload={"topic": "onvif/motion"},
             )
             for attempt in range(1, 6):
+                if attempt > 1:
+                    with store._connect_jobs() as connection:
+                        connection.execute(
+                            "update motion_trigger_jobs set available_at = 0 "
+                            "where id = 'trigger-1'"
+                        )
                 self.assertIsNotNone(
                     store.claim_motion_trigger("gate", "trigger-1")
                 )

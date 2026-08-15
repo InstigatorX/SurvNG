@@ -187,6 +187,13 @@ def _detect_tracking_objects(
     return list(method(frame, confidence_threshold=confidence_threshold))
 
 
+def _inference_deferred(objects: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(item, dict) and item.get("status") == "inference_deferred"
+        for item in objects
+    )
+
+
 class AppearanceEncoder(Protocol):
     @property
     def enabled(self) -> bool:
@@ -1401,6 +1408,12 @@ class ObjectTrackingSession:
             )
             return
         inference_ms = round((time.monotonic() - inference_started) * 1000.0, 3)
+        if _inference_deferred(detected_objects):
+            self._cover_promotion.update({
+                "cover_promotion_result": "inference_deferred",
+                "cover_verification_inference_ms": inference_ms,
+            })
+            return
         failure = detection_failure(detected_objects)
         if failure:
             self._cover_promotion.update({
@@ -1782,6 +1795,8 @@ class ObjectTrackingSession:
                     frame,
                     self.config.low_confidence_threshold,
                 )
+                if _inference_deferred(objects):
+                    return False
                 failure = detection_failure(objects)
                 if failure:
                     consecutive_failures += 1

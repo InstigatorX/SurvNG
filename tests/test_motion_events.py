@@ -100,6 +100,55 @@ def test_durable_trigger_overflow_survives_coordinator_restart() -> None:
         assert second.message == "2"
 
 
+def test_durable_wake_eviction_is_not_reported_as_trigger_loss() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        coordinator = MotionEventCoordinator(
+            queue_size=1,
+            retry_limit=2,
+            camera_id="gate",
+            durable_store=store,
+        )
+        drops: list[str] = []
+        assert coordinator.enqueue(_trigger(1), on_drop=drops.append)
+        assert coordinator.enqueue(_trigger(2), on_drop=drops.append)
+
+        status = coordinator.runtime_status()
+        assert drops == []
+        assert status["evicted"] == 0
+        assert status["durable_wake_evictions"] == 1
+        assert status["durable_delivery"] == {"queued": 2}
+
+
+def test_stale_durable_wakeups_are_drained_iteratively() -> None:
+    store = Mock()
+    recovered = _trigger(9999).durable_payload()
+
+    def claim(_camera_id, job_id=None, **_kwargs):
+        if job_id is not None:
+            return None
+        return {"id": "recovered", "payload": recovered}
+
+    store.claim_motion_trigger.side_effect = claim
+    store.motion_trigger_status.return_value = {}
+    coordinator = MotionEventCoordinator(
+        queue_size=1500,
+        retry_limit=1,
+        camera_id="gate",
+        durable_store=store,
+    )
+    for index in range(1200):
+        trigger = _trigger(index)
+        trigger.delivery_job_id = f"stale-{index}"
+        coordinator.queue.put_nowait(trigger)
+
+    result = coordinator.next_trigger(timeout=1.0)
+
+    assert result is not None
+    assert result.delivery_job_id == "recovered"
+    assert coordinator.queue.empty()
+
+
 def test_coalesce_preserves_batch_order_and_stop_sentinel() -> None:
     coordinator = MotionEventCoordinator(queue_size=4, retry_limit=2)
     coordinator.queue.put_nowait(_trigger(2))

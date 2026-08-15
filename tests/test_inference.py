@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from survng.app.config import DetectorConfig
 from survng.app.inference import (
+    InferenceRollbackIncomplete,
     InferenceWorkload,
     InferenceSupervisor,
     InferenceUnavailable,
@@ -214,6 +215,32 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertEqual(status["classes"]["enrichment"]["shed"], 1)
         self.assertEqual(status["classes"]["incident_initial"]["admitted"], 1)
 
+    def test_offline_lease_is_exclusive_with_optional_device_work(self) -> None:
+        self.assertTrue(
+            self.supervisor._enter_device_workload(InferenceWorkload.TRACKING)
+        )
+        offline_admitted = threading.Event()
+
+        def admit_offline() -> None:
+            if self.supervisor._enter_device_workload(
+                InferenceWorkload.OFFLINE,
+                shed_optional=False,
+                timeout=1.0,
+            ):
+                offline_admitted.set()
+
+        thread = threading.Thread(target=admit_offline)
+        thread.start()
+        self.assertFalse(offline_admitted.wait(0.05))
+        self.supervisor._leave_device_workload(InferenceWorkload.TRACKING)
+        self.assertTrue(offline_admitted.wait(1.0))
+        self.assertFalse(
+            self.supervisor._enter_device_workload(InferenceWorkload.ENRICHMENT)
+        )
+        self.supervisor._leave_device_workload(InferenceWorkload.OFFLINE)
+        thread.join(timeout=1.0)
+        self.assertEqual(self.supervisor.workload_status()["offline_active"], 0)
+
     def test_waiting_initial_runs_before_another_refinement(self) -> None:
         self.assertTrue(self.supervisor._enter_device_workload(
             InferenceWorkload.INCIDENT_REFINEMENT
@@ -310,6 +337,20 @@ class InferenceSupervisorTest(unittest.TestCase):
             self.supervisor.isolation_status()["worker_pid"],
             previous_pid,
         )
+
+    def test_incomplete_reconfiguration_rollback_keeps_device_fenced(self) -> None:
+        with patch.object(
+            self.supervisor,
+            "_reconfigure_roles_unfenced",
+            side_effect=InferenceRollbackIncomplete("rollback incomplete"),
+        ):
+            with self.assertRaises(InferenceRollbackIncomplete):
+                self.supervisor.reconfigure_roles(
+                    DetectorConfig(enabled=False),
+                    {"object"},
+                )
+
+        self.assertFalse(self.supervisor.workload_status()["accepting"])
 
     def test_role_reconfiguration_restarts_only_selected_worker(self) -> None:
         updated = DetectorConfig(enabled=False, device="GPU")

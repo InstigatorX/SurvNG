@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1038,6 +1039,63 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             result.objects[0]["status"],
             "fast_frame_invalid_provenance",
         )
+
+    def test_untrusted_live_geometry_cannot_admit_zone_object_provisionally(self) -> None:
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=True,
+                event_confirmation_frames=1,
+                event_class_confirmation_frames={},
+                event_class_confidence_thresholds={},
+                face_recognition_enabled=False,
+            )
+
+            def detect_initial(self, _frame, confidence_threshold=None):
+                return [{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "box": {"x1": 5, "y1": 5, "x2": 15, "y2": 15},
+                }]
+
+            detect = detect_initial
+
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://example.invalid/main",
+            zones=[{
+                "name": "Walkway",
+                "points": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 1.0, "y": 0.0},
+                    {"x": 1.0, "y": 1.0},
+                    {"x": 0.0, "y": 1.0},
+                ],
+            }],
+        )
+        backend = RecordedMotionObjectDetector(
+            camera,
+            Detector(),
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: TimestampedLiveFrame(
+                frame=np.zeros((20, 20, 3), dtype=np.uint8),
+                captured_at_epoch=time.time(),
+                captured_at_monotonic=time.monotonic(),
+                sequence=7,
+                camera_generation=2,
+                capture_generation=3,
+                geometry_trusted=False,
+            ),
+        )
+
+        result = backend.detect_initial(datetime.now(timezone.utc))
+
+        self.assertTrue(result.refinement_pending)
+        self.assertFalse(result.objects[0]["incident_eligible"])
+        self.assertTrue(result.objects[0]["provisional_zone_eligible"])
+        self.assertTrue(result.objects[0]["fast_geometry_untrusted"])
 
     def test_initial_and_refinement_use_distinct_inference_workloads(self) -> None:
         event_epoch = 1_800_000_000.0

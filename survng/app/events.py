@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .durable_payload import durable_json_dumps
 from .incident_utils import event_snapshot_path, portable_media_path
 from .media_storage import MediaStorageRegistry
 
@@ -41,9 +42,12 @@ class EventStore:
         self.storage_dir = storage_dir
         self.media_storage = media_storage
         self.db_path = (database_dir or storage_dir) / "survng.sqlite3"
+        self.jobs_db_path = self.db_path.parent / "detection-jobs.sqlite3"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()
+        self._init_jobs_db()
+        self._migrate_legacy_jobs()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -51,6 +55,155 @@ class EventStore:
         conn.execute("pragma busy_timeout = 10000")
         conn.execute("pragma foreign_keys = on")
         return conn
+
+    def _connect_jobs(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.jobs_db_path, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("pragma busy_timeout = 2000")
+        conn.execute("pragma synchronous = full")
+        return conn
+
+    def _init_jobs_db(self) -> None:
+        """Initialize the small local security-work ledger independently."""
+        with self._connect_jobs() as conn:
+            conn.execute("pragma journal_mode = wal")
+            conn.execute("pragma synchronous = full")
+            conn.execute(
+                """
+                create table if not exists detection_jobs (
+                    id text primary key,
+                    camera_id text not null,
+                    dedupe_key text not null,
+                    payload_json text not null,
+                    state text not null,
+                    attempts integer not null default 0,
+                    available_at real not null,
+                    lease_expires_at real,
+                    lease_owner text not null default '',
+                    event_id integer,
+                    last_error text not null default '',
+                    created_at text not null,
+                    updated_at text not null,
+                    unique(camera_id, dedupe_key)
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_detection_jobs_claim "
+                "on detection_jobs(camera_id, state, available_at, created_at)"
+            )
+            detection_columns = {
+                str(row["name"])
+                for row in conn.execute("pragma table_info(detection_jobs)").fetchall()
+            }
+            if "lease_owner" not in detection_columns:
+                conn.execute(
+                    "alter table detection_jobs "
+                    "add column lease_owner text not null default ''"
+                )
+            conn.execute(
+                """
+                create table if not exists motion_trigger_jobs (
+                    id text primary key,
+                    camera_id text not null,
+                    payload_json text not null,
+                    state text not null,
+                    attempts integer not null default 0,
+                    available_at real not null default 0,
+                    lease_expires_at real,
+                    lease_owner text not null default '',
+                    last_error text not null default '',
+                    created_at text not null,
+                    updated_at text not null
+                )
+                """
+            )
+            columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "pragma table_info(motion_trigger_jobs)"
+                ).fetchall()
+            }
+            if "lease_owner" not in columns:
+                conn.execute(
+                    "alter table motion_trigger_jobs "
+                    "add column lease_owner text not null default ''"
+                )
+            conn.execute(
+                "create index if not exists idx_motion_trigger_jobs_claim "
+                "on motion_trigger_jobs(camera_id, state, available_at, created_at)"
+            )
+
+    def _migrate_legacy_jobs(self) -> None:
+        """Move upgrade-era work tables out of the general event database once."""
+        with self._lock, self._connect() as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "select name from sqlite_master where type = 'table' "
+                    "and name in ('detection_jobs', 'motion_trigger_jobs')"
+                ).fetchall()
+            }
+            if not tables:
+                return
+            conn.execute("attach database ? as durable_jobs", (str(self.jobs_db_path),))
+            try:
+                if "detection_jobs" in tables:
+                    legacy_detection_columns = {
+                        str(row["name"])
+                        for row in conn.execute(
+                            "pragma main.table_info(detection_jobs)"
+                        ).fetchall()
+                    }
+                    detection_owner = (
+                        "lease_owner"
+                        if "lease_owner" in legacy_detection_columns
+                        else "''"
+                    )
+                    conn.execute(
+                        "insert or ignore into durable_jobs.detection_jobs "
+                        "(id, camera_id, dedupe_key, payload_json, state, attempts, "
+                        "available_at, lease_expires_at, lease_owner, event_id, last_error, "
+                        "created_at, updated_at) select id, camera_id, dedupe_key, "
+                        "payload_json, state, attempts, available_at, lease_expires_at, "
+                        f"{detection_owner}, event_id, last_error, created_at, updated_at "
+                        "from main.detection_jobs"
+                    )
+                if "motion_trigger_jobs" in tables:
+                    legacy_columns = {
+                        str(row["name"])
+                        for row in conn.execute(
+                            "pragma main.table_info(motion_trigger_jobs)"
+                        ).fetchall()
+                    }
+                    owner_value = "lease_owner" if "lease_owner" in legacy_columns else "''"
+                    conn.execute(
+                        "insert or ignore into durable_jobs.motion_trigger_jobs "
+                        "(id, camera_id, payload_json, state, attempts, available_at, "
+                        "lease_expires_at, lease_owner, last_error, created_at, updated_at) "
+                        "select id, camera_id, payload_json, state, attempts, available_at, "
+                        f"lease_expires_at, {owner_value}, last_error, created_at, updated_at "
+                        "from main.motion_trigger_jobs"
+                    )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.execute("detach database durable_jobs")
+            # Copy and source removal are intentionally separate commits. A
+            # process or power failure can leave harmless duplicate legacy
+            # rows, but can never drop the only durable copy of admitted work.
+            conn.execute("begin immediate")
+            try:
+                if "detection_jobs" in tables:
+                    conn.execute("drop table main.detection_jobs")
+                if "motion_trigger_jobs" in tables:
+                    conn.execute("drop table main.motion_trigger_jobs")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:
@@ -106,67 +259,6 @@ class EventStore:
             conn.execute(
                 "create table if not exists media_deletion_claims ("
                 "path text primary key, role text not null, claimed_at text not null)"
-            )
-            conn.execute(
-                """
-                create table if not exists detection_jobs (
-                    id text primary key,
-                    camera_id text not null,
-                    dedupe_key text not null,
-                    payload_json text not null,
-                    state text not null,
-                    attempts integer not null default 0,
-                    available_at real not null,
-                    lease_expires_at real,
-                    event_id integer,
-                    last_error text not null default '',
-                    created_at text not null,
-                    updated_at text not null,
-                    unique(camera_id, dedupe_key)
-                )
-                """
-            )
-            conn.execute(
-                "create index if not exists idx_detection_jobs_claim "
-                "on detection_jobs(camera_id, state, available_at, created_at)"
-            )
-            conn.execute(
-                """
-                create table if not exists motion_trigger_jobs (
-                    id text primary key,
-                    camera_id text not null,
-                    payload_json text not null,
-                    state text not null,
-                    attempts integer not null default 0,
-                    available_at real not null default 0,
-                    lease_expires_at real,
-                    last_error text not null default '',
-                    created_at text not null,
-                    updated_at text not null
-                )
-                """
-            )
-            trigger_columns = {
-                str(row["name"])
-                for row in conn.execute(
-                    "pragma table_info(motion_trigger_jobs)"
-                ).fetchall()
-            }
-            if "attempts" not in trigger_columns:
-                conn.execute(
-                    "alter table motion_trigger_jobs add column attempts integer not null default 0"
-                )
-            if "available_at" not in trigger_columns:
-                conn.execute(
-                    "alter table motion_trigger_jobs add column available_at real not null default 0"
-                )
-            if "last_error" not in trigger_columns:
-                conn.execute(
-                    "alter table motion_trigger_jobs add column last_error text not null default ''"
-                )
-            conn.execute(
-                "create index if not exists idx_motion_trigger_jobs_claim "
-                "on motion_trigger_jobs(camera_id, state, created_at)"
             )
             conn.execute(
                 """
@@ -418,7 +510,7 @@ class EventStore:
     ) -> str:
         """Durably admit mandatory delayed object discovery."""
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             cursor = conn.execute(
                 "insert or ignore into detection_jobs "
                 "(id, camera_id, dedupe_key, payload_json, state, available_at, "
@@ -427,7 +519,7 @@ class EventStore:
                     job_id,
                     camera_id,
                     dedupe_key,
-                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    durable_json_dumps(payload, sort_keys=True),
                     time.time(),
                     now_iso,
                     now_iso,
@@ -440,38 +532,51 @@ class EventStore:
         camera_id: str,
         *,
         lease_seconds: float = 60.0,
+        lease_owner: str = "",
     ) -> dict[str, Any] | None:
         """Claim one due job, reclaiming an expired worker lease atomically."""
         now = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             conn.execute("begin immediate")
             row = conn.execute(
                 "select * from detection_jobs where camera_id = ? and "
                 "((state = 'queued' and available_at <= ?) or "
-                "(state = 'running' and lease_expires_at <= ?)) "
+                "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?))) "
                 "order by created_at, id limit 1",
-                (camera_id, now, now),
+                (camera_id, now, now, lease_owner),
             ).fetchone()
             if row is None:
                 return None
             conn.execute(
                 "update detection_jobs set state = 'running', attempts = attempts + 1, "
-                "lease_expires_at = ?, updated_at = ? where id = ?",
-                (now + max(1.0, lease_seconds), now_iso, str(row["id"])),
+                "lease_expires_at = ?, lease_owner = ?, updated_at = ? where id = ?",
+                (
+                    now + max(1.0, lease_seconds),
+                    lease_owner,
+                    now_iso,
+                    str(row["id"]),
+                ),
             )
             result = dict(row)
             result["attempts"] = int(row["attempts"]) + 1
             result["payload"] = json.loads(str(row["payload_json"]))
             return result
 
-    def complete_detection_job(self, job_id: str, event_id: int | None) -> None:
+    def complete_detection_job(
+        self,
+        job_id: str,
+        event_id: int | None,
+        *,
+        lease_owner: str = "",
+    ) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             conn.execute(
                 "update detection_jobs set state = 'completed', event_id = ?, "
-                "lease_expires_at = null, last_error = '', updated_at = ? where id = ?",
-                (event_id, now_iso, job_id),
+                "lease_expires_at = null, lease_owner = '', last_error = '', updated_at = ? "
+                "where id = ? and (lease_owner = ? or ? = '')",
+                (event_id, now_iso, job_id, lease_owner, lease_owner),
             )
 
     def retry_detection_job(
@@ -481,32 +586,37 @@ class EventStore:
         *,
         retry_delay_seconds: float = 2.0,
         maximum_attempts: int = 5,
+        lease_owner: str = "",
     ) -> bool:
         """Release a failed lease for retry; return False once terminal."""
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             row = conn.execute(
-                "select attempts from detection_jobs where id = ?",
-                (job_id,),
+                "select attempts from detection_jobs where id = ? "
+                "and (lease_owner = ? or ? = '')",
+                (job_id, lease_owner, lease_owner),
             ).fetchone()
             if row is None:
                 return False
             retry = int(row["attempts"]) < maximum_attempts
             conn.execute(
                 "update detection_jobs set state = ?, available_at = ?, "
-                "lease_expires_at = null, last_error = ?, updated_at = ? where id = ?",
+                "lease_expires_at = null, lease_owner = '', last_error = ?, updated_at = ? "
+                "where id = ? and (lease_owner = ? or ? = '')",
                 (
                     "queued" if retry else "failed",
                     time.time() + max(0.0, retry_delay_seconds),
                     str(error)[:1000],
                     now_iso,
                     job_id,
+                    lease_owner,
+                    lease_owner,
                 ),
             )
             return retry
 
     def detection_job_status(self, camera_id: str) -> dict[str, int]:
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             rows = conn.execute(
                 "select state, count(*) as count from detection_jobs "
                 "where camera_id = ? group by state",
@@ -522,12 +632,12 @@ class EventStore:
         payload: dict[str, Any],
     ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             cursor = conn.execute(
                 "insert or ignore into motion_trigger_jobs "
                 "(id, camera_id, payload_json, state, available_at, created_at, updated_at) "
                 "values (?, ?, ?, 'queued', ?, ?, ?)",
-                (job_id, camera_id, json.dumps(payload, separators=(",", ":")), time.time(), now, now),
+                (job_id, camera_id, durable_json_dumps(payload), time.time(), now, now),
             )
         return bool(cursor.rowcount)
 
@@ -537,16 +647,18 @@ class EventStore:
         job_id: str | None = None,
         *,
         lease_seconds: float = 60.0,
+        lease_owner: str = "",
     ) -> dict[str, Any] | None:
         now_epoch = time.time()
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             conn.execute("begin immediate")
             if job_id:
                 row = conn.execute(
                     "select * from motion_trigger_jobs where id = ? and camera_id = ? "
-                    "and state in ('queued', 'running')",
-                    (job_id, camera_id),
+                    "and ((state = 'queued' and available_at <= ?) or "
+                    "(state = 'running' and (lease_expires_at <= ? or lease_owner = ?)))",
+                    (job_id, camera_id, now_epoch, now_epoch, lease_owner),
                 ).fetchone()
             else:
                 row = conn.execute(
@@ -559,25 +671,30 @@ class EventStore:
             if row is None:
                 return None
             conn.execute(
-                "update motion_trigger_jobs set state = 'running', attempts = attempts + 1, lease_expires_at = ?, "
-                "updated_at = ? where id = ?",
-                (now_epoch + lease_seconds, now_iso, str(row["id"])),
+                "update motion_trigger_jobs set state = 'running', attempts = attempts + 1, "
+                "lease_expires_at = ?, lease_owner = ?, updated_at = ? where id = ?",
+                (now_epoch + lease_seconds, lease_owner, now_iso, str(row["id"])),
             )
             return {**dict(row), "payload": json.loads(str(row["payload_json"]))}
 
-    def complete_motion_trigger(self, job_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute("delete from motion_trigger_jobs where id = ?", (job_id,))
+    def complete_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None:
+        with self._connect_jobs() as conn:
+            conn.execute(
+                "delete from motion_trigger_jobs where id = ? "
+                "and (lease_owner = ? or ? = '')",
+                (job_id, lease_owner, lease_owner),
+            )
 
-    def release_motion_trigger(self, job_id: str) -> None:
+    def release_motion_trigger(self, job_id: str, *, lease_owner: str = "") -> None:
         """Return a graceful-shutdown lease without disturbing another owner."""
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             conn.execute(
                 "update motion_trigger_jobs set state = 'queued', "
-                "lease_expires_at = null, updated_at = ? "
-                "where id = ? and state = 'running'",
-                (now, job_id),
+                "lease_expires_at = null, lease_owner = '', updated_at = ? "
+                "where id = ? and state = 'running' "
+                "and (lease_owner = ? or ? = '')",
+                (now, job_id, lease_owner, lease_owner),
             )
 
     def fail_motion_trigger(
@@ -586,31 +703,36 @@ class EventStore:
         error: str,
         *,
         maximum_attempts: int = 5,
+        lease_owner: str = "",
     ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             row = conn.execute(
-                "select attempts from motion_trigger_jobs where id = ?",
-                (job_id,),
+                "select attempts from motion_trigger_jobs where id = ? "
+                "and (lease_owner = ? or ? = '')",
+                (job_id, lease_owner, lease_owner),
             ).fetchone()
             if row is None:
                 return False
             retry = int(row["attempts"]) < maximum_attempts
             conn.execute(
                 "update motion_trigger_jobs set state = ?, available_at = ?, "
-                "lease_expires_at = null, last_error = ?, updated_at = ? where id = ?",
+                "lease_expires_at = null, lease_owner = '', last_error = ?, updated_at = ? "
+                "where id = ? and (lease_owner = ? or ? = '')",
                 (
                     "queued" if retry else "failed",
                     time.time() + min(30.0, max(1, int(row["attempts"])) * 2.0),
                     str(error)[:1000],
                     now,
                     job_id,
+                    lease_owner,
+                    lease_owner,
                 ),
             )
             return retry
 
     def motion_trigger_status(self, camera_id: str) -> dict[str, int]:
-        with self._connect() as conn:
+        with self._connect_jobs() as conn:
             rows = conn.execute(
                 "select state, count(*) as count from motion_trigger_jobs "
                 "where camera_id = ? group by state",

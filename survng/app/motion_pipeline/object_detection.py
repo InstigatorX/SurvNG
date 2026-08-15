@@ -1002,6 +1002,12 @@ class RecordedMotionObjectDetector:
             enrich_faces=False,
             workload="initial",
         )
+        zone_geometry_required = any(
+            zone.enabled
+            and zone.behavior in {"incident", "ignore"}
+            and len(zone.points) >= 3
+            for zone in self.camera.zones
+        )
         for detected in objects:
             if isinstance(detected, dict):
                 detected.update({
@@ -1014,6 +1020,16 @@ class RecordedMotionObjectDetector:
                     "capture_generation": capture_generation,
                     "frame_geometry_trusted": geometry_trusted,
                 })
+                if zone_geometry_required and not geometry_trusted:
+                    # A substream may use a different crop/FOV than the main
+                    # image on which zones were drawn. Preserve the fast
+                    # observation, but wait for the main-recording refinement
+                    # before allowing zone-based object admission or tracking.
+                    detected["provisional_zone_eligible"] = bool(
+                        detected.get("incident_eligible")
+                    )
+                    detected["incident_eligible"] = False
+                    detected["fast_geometry_untrusted"] = True
         return self._result(
             frame,
             objects,

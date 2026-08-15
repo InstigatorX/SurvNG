@@ -10,10 +10,12 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from typing import Any, Callable, Protocol
 
 import numpy as np
 
+from .durable_payload import durable_json_copy
 from .motion_pipeline.decision_handler import MotionDecisionOutcome
 from .security import redact_secret_text
 
@@ -42,12 +44,13 @@ class DetectionJobStore(Protocol):
         payload: dict[str, Any],
     ) -> str: ...
     def claim_detection_job(
-        self, camera_id: str, *, lease_seconds: float = 60.0,
+        self, camera_id: str, *, lease_seconds: float = 60.0, lease_owner: str = "",
     ) -> dict[str, Any] | None: ...
-    def complete_detection_job(self, job_id: str, event_id: int | None) -> None: ...
+    def complete_detection_job(self, job_id: str, event_id: int | None, *, lease_owner: str = "") -> None: ...
     def retry_detection_job(
         self, job_id: str, error: str, *, retry_delay_seconds: float = 2.0,
         maximum_attempts: int = 5,
+        lease_owner: str = "",
     ) -> bool: ...
     def detection_job_status(self, camera_id: str) -> dict[str, int]: ...
 
@@ -125,7 +128,7 @@ class _RefinementJob:
             "topic": self.topic,
             "message": self.message,
             "event_at": self.event_at.isoformat(),
-            "qualification": json.loads(json.dumps(self.qualification, default=str)),
+            "qualification": durable_json_copy(self.qualification),
             "existing_event_id": self.existing_event_id,
             "require_eligible_object": self.require_eligible_object,
             "require_motion_correlation": self.require_motion_correlation,
@@ -186,8 +189,8 @@ class _MemoryDetectionJobStore:
             }
             return "queued"
 
-    def claim_detection_job(self, camera_id, *, lease_seconds=60.0):
-        del lease_seconds
+    def claim_detection_job(self, camera_id, *, lease_seconds=60.0, lease_owner=""):
+        del lease_seconds, lease_owner
         with self._lock:
             for job in self._jobs.values():
                 if (
@@ -200,15 +203,17 @@ class _MemoryDetectionJobStore:
                     return copy.deepcopy(job)
         return None
 
-    def complete_detection_job(self, job_id, event_id):
+    def complete_detection_job(self, job_id, event_id, *, lease_owner=""):
+        del lease_owner
         with self._lock:
             self._jobs[job_id]["state"] = "completed"
             self._jobs[job_id]["event_id"] = event_id
 
     def retry_detection_job(
         self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
+        lease_owner="",
     ):
-        del error
+        del error, lease_owner
         with self._lock:
             job = self._jobs[job_id]
             retry = job["attempts"] < maximum_attempts
@@ -262,6 +267,7 @@ class MotionIncidentService:
         self._handed_off_event_ids: set[int] = set()
         self._handoff_event_order: deque[int] = deque()
         self._refinement_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
+        self._lease_owner = uuid.uuid4().hex
         self._refinement_callbacks: dict[str, RefinementCallback] = {}
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
@@ -556,7 +562,10 @@ class MotionIncidentService:
             stop = self._refinement_stop
             if stop is None or stop.is_set():
                 return
-            claimed = self.refinement_store.claim_detection_job(self.camera_id)
+            claimed = self.refinement_store.claim_detection_job(
+                self.camera_id,
+                lease_owner=self._lease_owner,
+            )
             if claimed is None:
                 try:
                     self._refinement_queue.get(timeout=0.5)
@@ -594,6 +603,7 @@ class MotionIncidentService:
                     retrying = self.refinement_store.retry_detection_job(
                         job_id,
                         failure["error"],
+                        lease_owner=self._lease_owner,
                     )
                     self._handoff(job.initial_outcome, job.event_at)
                     LOGGER.exception(
@@ -618,6 +628,7 @@ class MotionIncidentService:
                     retrying = self.refinement_store.retry_detection_job(
                         job_id,
                         outcome.rejection_reason or "refinement returned no terminal evidence",
+                        lease_owner=self._lease_owner,
                     )
                     if retrying:
                         try:
@@ -654,7 +665,11 @@ class MotionIncidentService:
                         )
                 with self._status_lock:
                     self._refinements_completed += 1
-                self.refinement_store.complete_detection_job(job_id, outcome.event_id)
+                self.refinement_store.complete_detection_job(
+                    job_id,
+                    outcome.event_id,
+                    lease_owner=self._lease_owner,
+                )
                 completed = True
             finally:
                 with self._status_lock:
