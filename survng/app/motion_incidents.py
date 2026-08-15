@@ -284,21 +284,6 @@ class MotionIncidentService:
         require_motion_correlation: bool = False,
         refinement_callback: RefinementCallback | None = None,
     ) -> MotionDecisionOutcome:
-        try:
-            if self.tracking_enabled():
-                # Start opening main concurrently with recorded validation so
-                # the tracking handoff does not pay another RTSP startup delay.
-                self.prewarm_tracking()
-        except Exception as error:
-            # Prewarming is an optimization. It must never prevent the core
-            # detection and incident-persistence path from running.
-            self._record_prewarm_failure(error)
-            LOGGER.warning(
-                "tracking prewarm failed for %s: %s: %s",
-                self.camera_id,
-                type(error).__name__,
-                redact_secret_text(error)[:500],
-            )
         outcome = self.decision_processor.handle(
             topic,
             message,
@@ -308,6 +293,20 @@ class MotionIncidentService:
             require_motion_correlation=require_motion_correlation,
         )
         self._record_timing(outcome)
+        try:
+            if self.tracking_enabled():
+                # Main-stream startup is optional enrichment. It must happen
+                # only after the protected initial inference and persistence
+                # path has completed.
+                self.prewarm_tracking()
+        except Exception as error:
+            self._record_prewarm_failure(error)
+            LOGGER.warning(
+                "tracking prewarm failed for %s: %s: %s",
+                self.camera_id,
+                type(error).__name__,
+                redact_secret_text(error)[:500],
+            )
         if outcome.refinement_pending:
             refinement_admission = self._queue_refinement(
                 _RefinementJob(

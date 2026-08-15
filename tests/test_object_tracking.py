@@ -1413,6 +1413,65 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[-1]["coverage_gap_count"], 1)
         self.assertGreater(updates[-1]["maximum_coverage_gap_seconds"], 3.0)
 
+    def test_expired_track_after_recorded_catchup_does_not_bridge_to_live(self) -> None:
+        terminal = threading.Event()
+        updates: list[dict] = []
+        event_epoch = time.time() - 8.0
+        event_at = datetime.fromtimestamp(event_epoch, timezone.utc)
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.7,
+                require_incident_zone=False,
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                return []
+
+        def catchup_provider(start_epoch, end_epoch, _sample_fps, _frame_width):
+            captured_at = start_epoch
+            while captured_at <= min(end_epoch, event_epoch + 5.0):
+                yield captured_at, np.zeros((100, 100, 3), dtype=np.uint8)
+                captured_at += 0.5
+
+        def live_frame():
+            raise AssertionError("expired recorded track must not bridge to live")
+
+        def update_event(_event_id, tracking, _tracked_objects):
+            updates.append(tracking)
+            if tracking.get("state") == "complete":
+                terminal.set()
+            return {}
+
+        session = ObjectTrackingSession(
+            camera=CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            config=ObjectTrackingConfig(
+                sample_fps=2.0,
+                max_session_seconds=3.0,
+                lost_timeout_seconds=1.0,
+            ),
+            detector=Detector(),
+            frame_provider=live_frame,
+            catchup_frame_provider=catchup_provider,
+            update_event=update_event,
+            publisher=None,
+            limiter=threading.BoundedSemaphore(1),
+        )
+        session.set_accepting(True)
+
+        self.assertTrue(session.start(
+            45,
+            event_at,
+            [detection("car", 0.95, (10, 10, 60, 70))],
+            np.zeros((100, 100, 3), dtype=np.uint8),
+        ))
+        self.assertTrue(terminal.wait(2.0))
+        session.stop()
+
+        self.assertEqual(updates[-1]["state"], "complete")
+        self.assertEqual(updates[-1]["coverage_gap_count"], 0)
+        self.assertFalse(updates[-1]["coverage_incomplete"])
+
     def test_detector_failures_persist_terminal_failure_state(self) -> None:
         terminal = threading.Event()
         updates: list[dict] = []

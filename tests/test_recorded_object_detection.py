@@ -907,7 +907,7 @@ class RecordedObjectConsensusTest(unittest.TestCase):
         self.assertEqual(objects[0]["temporal_sample_offset_seconds"], 8.0)
         self.assertEqual(objects[0]["temporal_peak_confidence_offset_seconds"], 8.0)
 
-    def test_initial_detection_defers_sparse_late_stages_and_reports_phase_timings(self) -> None:
+    def test_initial_detection_uses_fresh_live_frame_without_touching_recordings(self) -> None:
         event_epoch = 1_800_000_000.0
         requested_offsets: list[float] = []
 
@@ -930,11 +930,13 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             def detect(self, _frame, confidence_threshold=None):
                 return []
 
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
         backend = RecordedMotionObjectDetector(
             CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
             Detector(),
             Recorder(),
             lambda: None,
+            timestamped_live_frame_provider=lambda: (frame, event_epoch + 19.5),
         )
         with (
             patch("survng.app.motion_pipeline.object_detection.time.time", return_value=event_epoch + 20.0),
@@ -947,9 +949,9 @@ class RecordedObjectConsensusTest(unittest.TestCase):
             result = backend.detect_initial(datetime.fromtimestamp(event_epoch, timezone.utc))
 
         self.assertTrue(result.refinement_pending)
-        self.assertTrue(requested_offsets)
-        self.assertTrue(all(offset <= 1.0 for offset in requested_offsets))
-        self.assertNotIn(4.0, requested_offsets)
+        self.assertEqual(requested_offsets, [])
+        self.assertIs(result.frame, frame)
+        self.assertEqual(result.objects, [])
         self.assertEqual(
             set(result.timings_ms),
             {
@@ -965,6 +967,40 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 "workflow_ms",
             },
         )
+
+    def test_initial_detection_rejects_stale_live_frame_but_keeps_refinement_pending(self) -> None:
+        event_epoch = 1_800_000_000.0
+
+        class Detector:
+            config = SimpleNamespace(
+                confidence_threshold=0.5,
+                require_incident_zone=False,
+                event_confirmation_frames=2,
+                event_class_confirmation_frames={},
+            )
+
+            def detect(self, _frame, confidence_threshold=None):
+                raise AssertionError("stale fast frame must not reach inference")
+
+        backend = RecordedMotionObjectDetector(
+            CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main"),
+            Detector(),
+            SimpleNamespace(),
+            lambda: None,
+            timestamped_live_frame_provider=lambda: (
+                np.zeros((20, 20, 3), dtype=np.uint8),
+                event_epoch + 10.0,
+            ),
+        )
+        with patch(
+            "survng.app.motion_pipeline.object_detection.time.time",
+            return_value=event_epoch + 20.0,
+        ):
+            result = backend.detect_initial(datetime.fromtimestamp(event_epoch, timezone.utc))
+
+        self.assertTrue(result.refinement_pending)
+        self.assertIsNone(result.frame)
+        self.assertEqual(result.objects[0]["status"], "fast_frame_stale")
 
     def test_detector_uses_one_followup_stage_to_replace_clipped_cover_frame(self) -> None:
         event_epoch = 1_800_000_000.0

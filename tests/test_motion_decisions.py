@@ -229,6 +229,79 @@ def test_uncertain_camera_rejection_receives_bounded_object_verification() -> No
     state.increment_stat.assert_any_call("camera_uncertainty_checks", 1)
 
 
+def test_camera_rescue_camera_notice_bypasses_ema_qualification() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    now = datetime.now(timezone.utc)
+    qualification = Mock()
+    qualification.settings.return_value = ("camera_rescue", "balanced", 640)
+    qualification.rescue_settings.return_value = (False, 0.0)
+    qualification.suppression_verification_rate.return_value = 0.0
+    incidents = Mock()
+    incidents.process.return_value = Mock(as_dict=Mock(return_value={
+        "event_id": 42,
+        "object_detected": True,
+        "snapshot_path": "",
+    }))
+    state = Mock()
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.5),
+        qualification=qualification,
+        incidents=incidents,
+        media=Mock(),
+        analysis=Mock(),
+        state=state,
+    )
+
+    orchestrator._process_batch(MotionTriggerBatch((MotionTrigger(
+        topic="onvif/motion",
+        message="motion",
+        event_at=now,
+        received_at=now.timestamp(),
+    ),)), threading.Event())
+
+    qualification.qualify_burst.assert_not_called()
+    published = state.publish_event.call_args.args[1]
+    assert published["reason"] == "camera_primary_fast_path"
+    assert published["effective_accepted"] is True
+
+
+def test_camera_rescue_camera_notice_skips_burst_coalescing_delay() -> None:
+    events = MotionEventCoordinator(queue_size=4, retry_limit=2)
+    now = datetime.now(timezone.utc)
+    assert events.enqueue(MotionTrigger(
+        topic="onvif/motion",
+        message="motion",
+        event_at=now,
+        received_at=now.timestamp(),
+    ))
+    original_coalesce = events.coalesce
+    events.coalesce = Mock(side_effect=original_coalesce)
+    qualification = Mock()
+    qualification.settings.return_value = ("camera_rescue", "balanced", 640)
+    orchestrator = MotionDecisionOrchestrator(
+        camera_id="gate",
+        events=events,
+        audit_recorder=Mock(),
+        config=MotionQualificationConfig(burst_quiet_seconds=0.5),
+        qualification=qualification,
+        incidents=Mock(),
+        media=Mock(),
+        analysis=Mock(),
+        state=Mock(),
+    )
+    stop = threading.Event()
+    events.coalesce.side_effect = lambda *args, **kwargs: (
+        stop.set() or None
+    )
+
+    orchestrator.run_until_error(stop)
+
+    assert events.coalesce.call_args.kwargs["quiet_seconds"] == 0.0
+
+
 def test_learned_camera_nuisance_remains_suppressed_without_forced_check() -> None:
     events = MotionEventCoordinator(queue_size=4, retry_limit=2)
     now = datetime.now(timezone.utc)

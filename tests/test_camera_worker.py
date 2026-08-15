@@ -1691,8 +1691,9 @@ class CameraWorkerTest(unittest.TestCase):
 
     def test_shutdown_during_validation_does_not_start_object_detection(self) -> None:
         camera = CameraConfig(id="gate", name="Gate", stream_url="rtsp://example.invalid/main")
+        config = MotionQualificationConfig(mode="camera")
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = make_worker(camera, Path(tmpdir))
+            worker = make_worker(camera, Path(tmpdir), motion_config=config)
             event_at = datetime.now(timezone.utc)
             worker.motion_events.queue.put_nowait(MotionTrigger(
                 topic="onvif/motion",

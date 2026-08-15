@@ -38,6 +38,8 @@ RECORDED_EVENT_SETTLE_SECONDS = 0.75
 RECORDED_EVENT_RETRY_SECONDS = 24.0
 RECORDED_EVENT_RETRY_INTERVAL_SECONDS = 1.0
 RECORDED_EVENT_REFINEMENT_TIMEOUT_SECONDS = 6.0
+FAST_LIVE_FRAME_MAX_AGE_SECONDS = 1.0
+FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS = 0.5
 TEMPORAL_ASSOCIATION_MIN_IOU = 0.05
 TEMPORAL_ASSOCIATION_MAX_DISTANCE_RATIO = 2.5
 REPRESENTATIVE_DYNAMIC_DISPLACEMENT_RATIO = 0.01
@@ -734,6 +736,7 @@ class MotionRecordingProvider(Protocol):
 
 
 LiveFrameProvider = Callable[[], Frame | None]
+TimestampedLiveFrameProvider = Callable[[], tuple[Frame, float] | None]
 StopRequested = Callable[[], bool]
 
 
@@ -870,12 +873,14 @@ class RecordedMotionObjectDetector:
         detector: MotionObjectDetectorBackend,
         recorder: MotionRecordingProvider,
         live_frame_provider: LiveFrameProvider,
+        timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
     ) -> None:
         self.camera = camera
         self.detector = detector
         self.recorder = recorder
         self.live_frame_provider = live_frame_provider
+        self.timestamped_live_frame_provider = timestamped_live_frame_provider
         self.stop_requested = stop_requested
 
     def detect(self, event_at: datetime) -> RecordedDetectionResult:
@@ -888,17 +893,69 @@ class RecordedMotionObjectDetector:
         )
 
     def detect_initial(self, event_at: datetime) -> RecordedDetectionResult:
-        """Evaluate immediate evidence without occupying the decision worker.
+        """Run one strictly fresh live-frame check and always refine later.
 
-        The later +4/+8/+12-second pass is deliberately left to the bounded
-        refinement worker.  This keeps camera trigger admission responsive
-        while retaining delayed object discovery.
+        Finalized recordings intentionally lag the live edge by a segment. The
+        initial security path must not wait for that boundary. A stale or
+        unavailable live frame therefore produces a provisional no-frame result
+        rather than cancelling the authoritative recorded refinement.
         """
-        return self._detect(
-            event_at,
-            stages=RECORDED_EVENT_FRAME_STAGES[:1],
-            retry_seconds=4.0,
-            allow_representative_refinement=False,
+        workflow_started = time.monotonic()
+        timing = {
+            "recording_wait_ms": 0.0,
+            "frame_decode_ms": 0.0,
+            "detector_request_ms": 0.0,
+            "detection_enrichment_ms": 0.0,
+            "temporal_confirmation_wait_ms": 0.0,
+            "recording_batch_processes": 0.0,
+            "recording_fallback_samples": 0.0,
+            "recording_samples_requested": 0.0,
+            "recording_samples_decoded": 0.0,
+        }
+        provider = self.timestamped_live_frame_provider
+        sample = provider() if provider is not None else None
+        if sample is None:
+            return self._result(
+                None,
+                [{"status": "fast_frame_unavailable", "frame_source": "live_fast_path"}],
+                "",
+                timing,
+                workflow_started,
+                refinement_pending=True,
+            )
+        frame, captured_at = sample
+        frame_age = time.time() - float(captured_at)
+        if (
+            frame_age > FAST_LIVE_FRAME_MAX_AGE_SECONDS
+            or frame_age < -FAST_LIVE_FRAME_FUTURE_TOLERANCE_SECONDS
+        ):
+            return self._result(
+                None,
+                [{
+                    "status": "fast_frame_stale",
+                    "frame_source": "live_fast_path",
+                    "frame_age_ms": round(frame_age * 1000.0, 3),
+                }],
+                "",
+                timing,
+                workflow_started,
+                refinement_pending=True,
+            )
+        objects = self._detect_objects(frame, timing=timing, enrich_faces=False)
+        for detected in objects:
+            if isinstance(detected, dict):
+                detected.update({
+                    "frame_source": "live_fast_path",
+                    "provisional_detection": True,
+                    "frame_captured_at_epoch": round(float(captured_at), 6),
+                    "frame_age_ms": round(max(0.0, frame_age) * 1000.0, 3),
+                })
+        return self._result(
+            frame,
+            objects,
+            "",
+            timing,
+            workflow_started,
             refinement_pending=True,
         )
 
@@ -1224,6 +1281,7 @@ class RecordedMotionObjectDetector:
         frame: Frame,
         *,
         timing: dict[str, float] | None = None,
+        enrich_faces: bool = True,
     ) -> list[dict[str, Any]]:
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
@@ -1258,7 +1316,7 @@ class RecordedMotionObjectDetector:
             timing["detector_request_ms"] += detector_ms
         frame_height, frame_width = frame.shape[:2]
         detect_faces = getattr(self.detector, "detect_faces", None)
-        if callable(detect_faces):
+        if enrich_faces and callable(detect_faces):
             dedicated_faces = self._detect_faces_in_people(
                 frame,
                 objects,
@@ -1657,6 +1715,7 @@ class RecordedMotionObjectDetectorFactory:
         self,
         camera: CameraConfig,
         live_frame_provider: LiveFrameProvider,
+        timestamped_live_frame_provider: TimestampedLiveFrameProvider | None = None,
         stop_requested: StopRequested = lambda: False,
     ) -> RecordedMotionObjectDetector:
         return RecordedMotionObjectDetector(
@@ -1664,5 +1723,6 @@ class RecordedMotionObjectDetectorFactory:
             detector=self.detector,
             recorder=self.recorder,
             live_frame_provider=live_frame_provider,
+            timestamped_live_frame_provider=timestamped_live_frame_provider,
             stop_requested=stop_requested,
         )

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from survng.app.config import DetectorConfig
 from survng.app.inference import (
+    InferenceWorkload,
     InferenceSupervisor,
     InferenceUnavailable,
     IsolatedFaceRecognizer,
@@ -136,6 +137,28 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertEqual(result, [{"label": "person"}])
         first.request.assert_called_once()
         second.request.assert_called_once()
+
+    def test_tracking_uses_only_non_reserved_object_worker(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, object_worker_count=2)
+        )
+        self.addCleanup(supervisor.stop)
+        reserved, background = supervisor._object_workers
+        reserved.pending_requests = Mock(return_value=0)
+        background.pending_requests = Mock(return_value=0)
+        reserved.request = Mock(return_value=[{"worker": 1}])
+        background.request = Mock(return_value=[{"worker": 2}])
+
+        result = supervisor.detect_tracking(
+            np.zeros((24, 32, 3), dtype=np.uint8)
+        )
+
+        self.assertEqual(result, [{"worker": 2}])
+        reserved.request.assert_not_called()
+        self.assertEqual(
+            background.request.call_args.kwargs["workload"],
+            InferenceWorkload.TRACKING,
+        )
 
     def test_runtime_config_update_reaches_supervisor_and_future_worker_respawns(self) -> None:
         updated = DetectorConfig(
@@ -534,6 +557,83 @@ class InferenceSupervisorTest(unittest.TestCase):
             thread.join(timeout=1.0)
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertEqual(worker.isolation_status()["pending_requests"], 0)
+
+    def test_incident_request_runs_before_queued_tracking_request(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+        sent: list[str] = []
+
+        class Connection:
+            request_id = 0
+
+            def send(self, request):
+                self.request_id = int(request["id"])
+                sent.append(str(request["op"]))
+
+            @staticmethod
+            def poll(_timeout):
+                return True
+
+            def recv(self):
+                return {"id": self.request_id, "ok": True, "result": []}
+
+        worker._connection = Connection()
+        worker._ensure_worker_locked = Mock(return_value=True)
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def hold_worker_lock() -> None:
+            with worker._lock:
+                lock_held.set()
+                release_lock.wait(timeout=2.0)
+
+        holder = threading.Thread(target=hold_worker_lock)
+        holder.start()
+        self.assertTrue(lock_held.wait(timeout=1.0))
+
+        threads = [
+            threading.Thread(
+                target=worker.request,
+                args=("tracking-active",),
+                kwargs={"workload": InferenceWorkload.TRACKING},
+            )
+        ]
+        threads[0].start()
+        with worker._admission:
+            self.assertTrue(
+                worker._admission.wait_for(
+                    lambda: worker._admission_active,
+                    timeout=1.0,
+                )
+            )
+        threads.extend([
+            threading.Thread(
+                target=worker.request,
+                args=("tracking-queued",),
+                kwargs={"workload": InferenceWorkload.TRACKING},
+            ),
+            threading.Thread(
+                target=worker.request,
+                args=("incident",),
+                kwargs={"workload": InferenceWorkload.INCIDENT},
+            ),
+        ])
+        for thread in threads[1:]:
+            thread.start()
+        deadline = time.monotonic() + 1.0
+        while worker.pending_requests() < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        release_lock.set()
+        holder.join(timeout=1.0)
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+        self.assertEqual(sent, ["tracking-active", "incident", "tracking-queued"])
+        self.assertEqual(worker.pending_requests(), 0)
 
     def test_shared_frame_contract_rejects_non_bgr_and_non_uint8_arrays(self) -> None:
         worker = _InferenceWorker(DetectorConfig(enabled=False), "object", {})

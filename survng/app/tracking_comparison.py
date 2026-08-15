@@ -442,7 +442,8 @@ class TrackingComparisonRunner:
             last_epoch = captured_at
             frame_height, frame_width = frame.shape[:2]
             detector_started = time.perf_counter()
-            objects = self.detector.detect(
+            detect_offline = getattr(self.detector, "detect_enrichment", self.detector.detect)
+            objects = detect_offline(
                 frame,
                 confidence_threshold=self.config.low_confidence_threshold,
             )

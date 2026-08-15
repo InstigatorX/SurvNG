@@ -226,9 +226,19 @@ class MotionDecisionOrchestrator:
                 continue
             if first is None or stop_event.is_set():
                 return
+            mode, _sensitivity, _frame_width = self._qualification.settings()
+            immediate_camera_primary = bool(
+                mode == "camera_rescue"
+                and not first.topic.startswith("adaptive/")
+                and first.retry_batch is None
+            )
             triggers = self._events.coalesce(
                 first,
-                quiet_seconds=self._config.burst_quiet_seconds,
+                quiet_seconds=(
+                    0.0
+                    if immediate_camera_primary
+                    else self._config.burst_quiet_seconds
+                ),
                 stop_event=stop_event,
             )
             if triggers is None:
@@ -458,6 +468,18 @@ class MotionDecisionOrchestrator:
         )
         if mode == "off":
             result = MotionQualificationResult(True, 1.0, 0.0, "disabled", 0, {})
+        elif mode == "camera_rescue" and not adaptive_only:
+            # Camera + EMA Backup makes the camera notice authoritative. EMA
+            # remains an independent rescue source and must never delay or
+            # suppress the primary camera-triggered object check.
+            result = MotionQualificationResult(
+                True,
+                1.0,
+                0.0,
+                "camera_primary_fast_path",
+                0,
+                {"primary_motion_source": "camera"},
+            )
         elif priority:
             result = MotionQualificationResult(
                 True,

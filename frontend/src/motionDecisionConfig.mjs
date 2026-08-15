@@ -50,7 +50,7 @@ export const MOTION_BEHAVIOR_OPTIONS = Object.freeze([
     value: "camera_rescue",
     label: "Camera + EMA backup",
     status: "Camera primary · EMA backup",
-    description: "ONVIF remains primary and EMA validates it. Strong, persistent EMA motion may also rescue a missing camera notice using additional safeguards.",
+    description: "ONVIF starts object detection immediately. Strong, persistent EMA motion may independently rescue a missing camera notice using additional safeguards.",
     mode: "camera_rescue",
     adaptiveEnabled: true,
   }),

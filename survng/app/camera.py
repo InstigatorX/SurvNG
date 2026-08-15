@@ -100,6 +100,7 @@ class CameraWorker:
         self.motion_object_detector = motion_object_detector_factory.create(
             camera=camera,
             live_frame_provider=lambda: self._get_latest_frame(),
+            timestamped_live_frame_provider=self._get_latest_detection_frame,
             stop_requested=lambda: (
                 self._stop.is_set()
                 and self.runtime_state.phase is not CameraLifecyclePhase.STOPPED
@@ -468,6 +469,12 @@ class CameraWorker:
             return None
         frame = self.capture.request_frame(source)
         return frame.image if frame is not None else None
+
+    def _get_latest_detection_frame(self) -> tuple[np.ndarray, float] | None:
+        frame = self.capture.request_frame(self.camera.normalized_source("live"))
+        if frame is None:
+            return None
+        return frame.image, frame.captured_at_epoch
 
     def _get_latest_tracking_frame(
         self,

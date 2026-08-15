@@ -175,6 +175,18 @@ class ObjectDetectorBackend(Protocol):
         ...
 
 
+def _detect_tracking_objects(
+    detector: ObjectDetectorBackend,
+    frame: np.ndarray,
+    confidence_threshold: float,
+    *,
+    enrichment: bool = False,
+) -> list[dict[str, Any]]:
+    method_name = "detect_enrichment" if enrichment else "detect_tracking"
+    method = getattr(detector, method_name, detector.detect)
+    return list(method(frame, confidence_threshold=confidence_threshold))
+
+
 class AppearanceEncoder(Protocol):
     @property
     def enabled(self) -> bool:
@@ -1364,9 +1376,11 @@ class ObjectTrackingSession:
         )
         inference_started = time.monotonic()
         try:
-            detected_objects = self.detector.detect(
+            detected_objects = _detect_tracking_objects(
+                self.detector,
                 frame,
-                confidence_threshold=self.config.low_confidence_threshold,
+                self.config.low_confidence_threshold,
+                enrichment=True,
             )
         except Exception as error:
             self._cover_promotion.update({
@@ -1760,9 +1774,10 @@ class ObjectTrackingSession:
                 if self._frame_width <= 0 or self._frame_height <= 0:
                     self._frame_width = source_width
                     self._frame_height = source_height
-                objects = self.detector.detect(
+                objects = _detect_tracking_objects(
+                    self.detector,
                     frame,
-                    confidence_threshold=self.config.low_confidence_threshold,
+                    self.config.low_confidence_threshold,
                 )
                 failure = detection_failure(objects)
                 if failure:
@@ -1878,7 +1893,12 @@ class ObjectTrackingSession:
                 time.monotonic() + 5.0,
             )
             last_frame_token: float | None = None
-            while not stop.is_set():
+            # If recorded evidence already followed every confirmed track until
+            # it naturally expired, the event has complete useful coverage.
+            # Bridging to a much newer live frame would manufacture a timestamp
+            # gap after the object left and incorrectly suppress cover promotion.
+            live_bridge_required = tracker.has_live_tracks(captured_at)
+            while live_bridge_required and not stop.is_set():
                 with self._lock:
                     deadline = self._deadline
                 if time.monotonic() >= deadline:

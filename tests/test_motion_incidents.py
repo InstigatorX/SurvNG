@@ -85,6 +85,25 @@ def test_process_prewarms_and_seeds_tracking_from_persisted_snapshot() -> None:
     decision.handle.assert_called_once()
 
 
+def test_initial_detection_completes_before_tracking_prewarm() -> None:
+    outcome = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    service, decision, _tracking, prewarm, _image_reader = _service(outcome)
+    order: list[str] = []
+    decision.handle.side_effect = lambda *_args, **_kwargs: (
+        order.append("detect") or outcome
+    )
+    prewarm.side_effect = lambda: order.append("prewarm")
+
+    service.process("motion", "none", datetime.now(timezone.utc), {})
+
+    assert order[:2] == ["detect", "prewarm"]
+
+
 def test_process_does_not_track_rejected_or_objectless_outcome() -> None:
     outcome = MotionDecisionOutcome(
         event_id=None,

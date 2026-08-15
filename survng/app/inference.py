@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from enum import IntEnum
+import heapq
 import logging
 import math
 import multiprocessing
@@ -32,6 +34,16 @@ RESOURCE_TRACKER_STOP_TIMEOUT_SECONDS = 2.0
 
 class InferenceUnavailable(RuntimeError):
     pass
+
+
+class InferenceWorkload(IntEnum):
+    """Security work runs before optional enrichment on each worker."""
+
+    INCIDENT = 0
+    INTERACTIVE = 1
+    TRACKING = 2
+    ENRICHMENT = 3
+    OFFLINE = 4
 
 
 def stop_multiprocessing_resource_tracker(
@@ -287,6 +299,10 @@ class _InferenceWorker:
         self._lock = threading.RLock()
         self._pending_lock = threading.Lock()
         self._pending_requests = 0
+        self._admission = threading.Condition(threading.Lock())
+        self._admission_waiters: list[tuple[int, int, object]] = []
+        self._admission_sequence = 0
+        self._admission_active = False
         self._frame_buffer = None
         self._connection = None
         self._process = None
@@ -618,14 +634,36 @@ class _InferenceWorker:
         *,
         frame: np.ndarray | None = None,
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
+        workload: InferenceWorkload = InferenceWorkload.INTERACTIVE,
         **payload: Any,
     ) -> Any:
         if timeout <= 0:
             raise ValueError("inference timeout must be positive")
         deadline = time.monotonic() + timeout
+        token = object()
+        admitted = False
         with self._pending_lock:
             self._pending_requests += 1
         try:
+            with self._admission:
+                self._admission_sequence += 1
+                waiter = (int(workload), self._admission_sequence, token)
+                heapq.heappush(self._admission_waiters, waiter)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._admission_waiters.remove(waiter)
+                        heapq.heapify(self._admission_waiters)
+                        self._admission.notify_all()
+                        raise InferenceUnavailable(
+                            f"{self.role} {operation} timed out waiting for priority admission"
+                        )
+                    if not self._admission_active and self._admission_waiters[0] is waiter:
+                        heapq.heappop(self._admission_waiters)
+                        self._admission_active = True
+                        admitted = True
+                        break
+                    self._admission.wait(remaining)
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self._lock.acquire(timeout=remaining):
                 raise InferenceUnavailable(
@@ -677,6 +715,15 @@ class _InferenceWorker:
             finally:
                 self._lock.release()
         finally:
+            with self._admission:
+                if admitted:
+                    self._admission_active = False
+                else:
+                    retained = [item for item in self._admission_waiters if item[2] is not token]
+                    if len(retained) != len(self._admission_waiters):
+                        self._admission_waiters[:] = retained
+                        heapq.heapify(self._admission_waiters)
+                self._admission.notify_all()
             with self._pending_lock:
                 self._pending_requests = max(0, self._pending_requests - 1)
 
@@ -787,20 +834,29 @@ class InferenceSupervisor:
             for _index in range(self._effective_object_worker_count(config))
         ]
 
-    def _ordered_object_workers(self) -> list[_InferenceWorker]:
+    def _ordered_object_workers(
+        self,
+        workload: InferenceWorkload = InferenceWorkload.INCIDENT,
+    ) -> list[_InferenceWorker]:
         """Order workers by pressure while rotating equal-load workers fairly."""
         with self._object_route_lock:
-            count = len(self._object_workers)
+            workers = self._object_workers
+            if workload >= InferenceWorkload.TRACKING and len(workers) > 1:
+                # Worker zero is the protected incident lane. Lower-priority
+                # work remains on the rest of the pool and cannot queue ahead
+                # of a newly received security event.
+                workers = workers[1:]
+            count = len(workers)
             start = self._object_route_cursor % count
             ordered = [
                 (start + offset) % count
                 for offset in range(count)
             ]
             ordered.sort(
-                key=lambda index: self._object_workers[index].pending_requests()
+                key=lambda index: workers[index].pending_requests()
             )
             self._object_route_cursor = (ordered[0] + 1) % count
-            return [self._object_workers[index] for index in ordered]
+            return [workers[index] for index in ordered]
 
     def _select_object_worker(self) -> _InferenceWorker:
         return self._ordered_object_workers()[0]
@@ -1174,13 +1230,49 @@ class InferenceSupervisor:
         confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
         unavailable: list[str] = []
-        for worker in self._ordered_object_workers():
+        return self._detect_for_workload(
+            frame,
+            confidence_threshold,
+            InferenceWorkload.INCIDENT,
+        )
+
+    def detect_tracking(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._detect_for_workload(
+            frame,
+            confidence_threshold,
+            InferenceWorkload.TRACKING,
+        )
+
+    def detect_enrichment(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._detect_for_workload(
+            frame,
+            confidence_threshold,
+            InferenceWorkload.ENRICHMENT,
+        )
+
+    def _detect_for_workload(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None,
+        workload: InferenceWorkload,
+    ) -> list[dict[str, Any]]:
+        unavailable: list[str] = []
+        for worker in self._ordered_object_workers(workload):
             try:
                 return list(
                     worker.request(
                         "detect",
                         frame=frame,
                         confidence_threshold=confidence_threshold,
+                        workload=workload,
                     )
                     or []
                 )
