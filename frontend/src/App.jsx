@@ -84,6 +84,7 @@ import {
   tuneupRecommendationGroup,
   tuneupValue,
 } from "./detectionTuneup.mjs";
+import { formatServerUptime } from "./duration.mjs";
 import {
   clearWebRtcFailure,
   initialLiveTransport,
@@ -8245,7 +8246,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
           <article><span>GPU</span><strong>{gpu.available ? "Available" : "Unavailable"}</strong><small>{Number.isFinite(gpu.utilization_percent) ? `${gpu.utilization_percent}% busy now` : "Collecting activity"}</small></article>
           <article><span>Storage free</span><strong>{formatBytes(storage.free_bytes)}</strong><small>{storage.used_percent || 0}% used of {formatBytes(storage.total_bytes)}</small></article>
           <article><span>Tracking · 2h</span><strong>{capacityTotals.skipped ? `${capacityTotals.skipped} skipped` : "No skips"}</strong><small>{capacityTotals.waited} delayed · {Number(backfillCounts.completed || 0).toLocaleString()} recovered · {Number(backfillCounts.queued || 0).toLocaleString()} waiting</small></article>
-          <article><span>SurvNG uptime</span><strong>{formatDuration(data.system?.uptime_seconds || 0)}</strong><small>Since the last service start</small></article>
+          <article><span>SurvNG uptime</span><strong>{formatServerUptime(Number(data.system?.uptime_seconds || 0))}</strong><small>Since the last service start</small></article>
           <article><span>CPU demand</span><strong>{data.system?.load_average?.one ?? "--"}</strong><small>Across {data.system?.cpu_count || 1} cores</small></article>
           <article><span>Host memory</span><strong>{formatBytes(memory.available_bytes)}</strong><small>{memory.used_percent || 0}% currently used</small></article>
           <article><span>Application memory</span><strong>{formatBytes(serviceMemory.application_bytes)}</strong><small>SurvNG and AI workers</small></article>
