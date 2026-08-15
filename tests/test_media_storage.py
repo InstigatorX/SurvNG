@@ -41,6 +41,47 @@ def test_required_missing_mount_is_never_selected(tmp_path: Path) -> None:
         registry.choose("recordings", "gate")
 
 
+def test_required_mount_accepts_configured_directory_below_mountpoint(tmp_path: Path) -> None:
+    mountpoint = tmp_path / "media1"
+    path = mountpoint / "SurvNG"
+    path.mkdir(parents=True)
+    registry = MediaStorageRegistry(tmp_path, MediaStorageConfig(locations=[
+        MediaStorageLocationConfig(id="nfs", path=str(path), require_mount=True),
+    ]))
+
+    with patch(
+        "survng.app.media_storage.os.path.ismount",
+        side_effect=lambda candidate: Path(candidate) == mountpoint,
+    ):
+        assert registry.status("nfs").state == "online"
+
+
+def test_required_mount_rejects_path_backed_only_by_root_filesystem(tmp_path: Path) -> None:
+    path = tmp_path / "SurvNG"
+    path.mkdir()
+    registry = MediaStorageRegistry(tmp_path, MediaStorageConfig(locations=[
+        MediaStorageLocationConfig(id="nfs", path=str(path), require_mount=True),
+    ]))
+
+    with patch(
+        "survng.app.media_storage.os.path.ismount",
+        side_effect=lambda candidate: Path(candidate) == Path(candidate).anchor,
+    ):
+        assert registry.status("nfs").state == "not_mounted"
+
+
+def test_selection_error_explains_unwritable_location(tmp_path: Path) -> None:
+    path = tmp_path / "media1"
+    path.mkdir()
+    registry = MediaStorageRegistry(tmp_path, MediaStorageConfig(locations=[
+        MediaStorageLocationConfig(id="media1", name="Media 1", path=str(path)),
+    ]))
+
+    with patch("survng.app.media_storage.os.access", return_value=False):
+        with pytest.raises(OSError, match="Media 1: directory is not writable"):
+            registry.choose("snapshots", "gate")
+
+
 def test_configuration_rejects_duplicate_paths(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="paths must be unique"):
         MediaStorageConfig(locations=[

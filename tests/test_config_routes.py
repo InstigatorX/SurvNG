@@ -69,6 +69,17 @@ class ConfigRoutesTest(unittest.TestCase):
         self.assertNotIn("camera-secret", str(payload))
         self.assertNotIn("broker-secret", str(payload))
 
+    def test_config_update_reports_runtime_storage_validation_as_422(self) -> None:
+        self.apply.side_effect = OSError(
+            "no writable media location supports snapshots (Media 1: directory is not writable)"
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            self.endpoint("/api/config", "PUT")(self.config)
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("Media 1: directory is not writable", raised.exception.detail)
+
     def test_api_token_create_lists_metadata_and_returns_secret_once(self) -> None:
         self.apply.side_effect = lambda next_config, **_kwargs: (next_config, {
             "apply_mode": "hot", "camera_workers_restarted": False,

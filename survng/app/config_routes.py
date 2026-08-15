@@ -243,7 +243,10 @@ def create_config_router(deps: ConfigRouteDependencies) -> APIRouter:
                 deps.validate_config(next_config)
             except ValueError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
-            effective, result = deps.apply_config(next_config, assign_ids=True)
+            try:
+                effective, result = deps.apply_config(next_config, assign_ids=True)
+            except (OSError, ValueError) as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         return {"ok": True, "cameras": len(effective.cameras), **result}
 
     @router.get("/api/config/api-tokens")

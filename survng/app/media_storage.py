@@ -113,8 +113,12 @@ class MediaStorageRegistry:
         )
         if not location.enabled:
             return MediaLocationStatus(**base, state="unavailable", error="disabled")
-        if location.require_mount and not os.path.ismount(path):
-            return MediaLocationStatus(**base, state="not_mounted", error="required mount is absent")
+        if location.require_mount and not self._has_mounted_ancestor(path):
+            return MediaLocationStatus(
+                **base,
+                state="not_mounted",
+                error="required mount is absent",
+            )
         if not path.is_dir():
             return MediaLocationStatus(**base, state="unavailable", error="directory does not exist")
         if not os.access(path, os.W_OK | os.X_OK):
@@ -134,6 +138,25 @@ class MediaStorageRegistry:
             usable_bytes=usable,
             filesystem_id=filesystem_id,
         )
+
+    @staticmethod
+    def _has_mounted_ancestor(path: Path) -> bool:
+        """Return whether *path* resides below a non-root mountpoint.
+
+        Media roots are normally directories such as ``/mnt/media/SurvNG``
+        beneath the actual NFS or block-device mount. Requiring that exact
+        directory to be a mountpoint rejects that safe and common layout.
+        Walking parents also preserves the fail-closed behavior: if the
+        external mount disappears, only the filesystem root remains and the
+        configured location is rejected rather than written through.
+        """
+        current = path.resolve(strict=False)
+        filesystem_root = Path(current.anchor)
+        while current != filesystem_root:
+            if os.path.ismount(current):
+                return True
+            current = current.parent
+        return False
 
     def health_snapshot(self) -> MediaStorageSnapshot:
         """Sample each location once and report roots sharing one filesystem."""
@@ -202,7 +225,13 @@ class MediaStorageRegistry:
                 if role in item.roles and item.writable
             ]
             if not candidates:
-                raise OSError(f"no writable media location supports {role}")
+                details = "; ".join(
+                    f"{item.name}: {item.error or item.state}"
+                    for item in self.statuses(snapshot=snapshot)
+                    if role in item.roles
+                )
+                suffix = f" ({details})" if details else ""
+                raise OSError(f"no writable media location supports {role}{suffix}")
             if self.config.placement == "priority":
                 selected = max(candidates, key=lambda item: (item.priority, item.usable_bytes, item.id))
             else:
