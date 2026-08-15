@@ -61,6 +61,116 @@ class RecorderTest(unittest.TestCase):
             self.assertEqual({row["path"] for row in rows}, {str(path) for path in paths})
             self.assertEqual({row["location_id"] for row in rows}, {"one", "two"})
 
+    def test_recording_location_backfill_is_bounded_and_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
+                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
+            for index in range(5):
+                location = first if index % 2 == 0 else second
+                path = location / "recordings" / "gate" / "main" / f"clip-{index}.mp4"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"recording")
+                recorder._store_recording_rows(
+                    "gate",
+                    "main",
+                    [self._row(path, start_epoch=1_784_000_000.0 + index * 10)],
+                )
+            with recorder._index_connection() as connection:
+                connection.execute("UPDATE recordings SET location_id = 'default'")
+
+            with patch(
+                "survng.app.media_storage.shutil.disk_usage",
+                side_effect=AssertionError("location migration must not probe storage health"),
+            ):
+                self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 2)
+            with recorder._index_connection() as connection:
+                first_pass = connection.execute(
+                    "SELECT location_id FROM recordings ORDER BY rowid"
+                ).fetchall()
+            self.assertEqual(
+                [str(row["location_id"]) for row in first_pass],
+                ["one", "two", "default", "default", "default"],
+            )
+
+            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 2)
+            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 1)
+            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=2), 0)
+            with recorder._index_connection() as connection:
+                final_rows = connection.execute(
+                    "SELECT path, location_id FROM recordings ORDER BY rowid"
+                ).fetchall()
+                cursor = connection.execute(
+                    "SELECT value FROM recording_index_metadata "
+                    "WHERE key = 'recording_location_backfill_cursor'"
+                ).fetchone()["value"]
+            self.assertEqual(
+                [str(row["location_id"]) for row in final_rows],
+                ["one", "two", "one", "two", "one"],
+            )
+            self.assertEqual(cursor, "-1")
+
+    def test_recording_location_backfill_restarts_when_topology_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            later = root / "later"
+            first.mkdir()
+            later.mkdir()
+            initial_registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=initial_registry)
+            unmatched = later / "recordings" / "gate" / "main" / "clip.mp4"
+            unmatched.parent.mkdir(parents=True)
+            unmatched.write_bytes(b"recording")
+            recorder._store_recording_rows("gate", "main", [self._row(unmatched)])
+            with recorder._index_connection() as connection:
+                connection.execute("UPDATE recordings SET location_id = 'default'")
+            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=10), 1)
+            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=10), 0)
+
+            expanded_registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
+                MediaStorageLocationConfig(id="later", path=str(later), roles=["recordings"]),
+            ]))
+            recorder.media_storage = expanded_registry
+            self.assertEqual(recorder._backfill_recording_location_id_batch(limit=10), 1)
+            with recorder._index_connection() as connection:
+                location_id = connection.execute(
+                    "SELECT location_id FROM recordings WHERE path = ?",
+                    (str(unmatched),),
+                ).fetchone()["location_id"]
+            self.assertEqual(location_id, "later")
+
+    def test_multi_location_indexer_start_does_not_run_location_backfill_inline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            registry = MediaStorageRegistry(root / "metadata", MediaStorageConfig(locations=[
+                MediaStorageLocationConfig(id="one", path=str(first), roles=["recordings"]),
+                MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+            ]))
+            recorder = Recorder("ffmpeg", root / "metadata", media_storage=registry)
+            with (
+                patch.object(recorder, "_backfill_recording_location_id_batch") as backfill,
+                patch.object(recorder.retention, "start"),
+                patch("survng.app.recorder.threading.Thread.start"),
+            ):
+                recorder.start_indexer([])
+
+            backfill.assert_not_called()
+
     def test_rtsp_recording_generates_missing_pts_and_discards_large_regressions(self) -> None:
         camera = CameraConfig(
             id="upper-garage",
@@ -680,6 +790,21 @@ class RecorderTest(unittest.TestCase):
 
             self.assertEqual(recorder.retention.protected_paths_provider(), set())
 
+    def test_retention_delete_guard_is_atomic_with_playback_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
+            clip = Path(tmpdir) / "recordings" / "gate" / "main" / "clip.mp4"
+            clip.parent.mkdir(parents=True)
+            clip.write_bytes(b"recording")
+            recorder.lease_recordings_for_playback(
+                [{"path": str(clip)}], ttl_seconds=20
+            )
+
+            deleted = recorder._delete_recording_for_retention(clip)
+
+            self.assertFalse(deleted)
+            self.assertTrue(clip.exists())
+
     def test_manifest_validation_removes_missing_rows_from_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorder = Recorder("ffmpeg", Path(tmpdir), segment_seconds=10)
@@ -1233,12 +1358,14 @@ class RecorderTest(unittest.TestCase):
                     side_effect=lambda limit: recorder._index_stop.set(),
                 ) as validate,
                 patch.object(recorder, "_backfill_stream_fingerprints"),
+                patch.object(recorder, "_backfill_recording_location_id_batch") as location_backfill,
                 patch.object(recorder, "_reconcile_recording_source") as reconcile,
                 patch.object(recorder._index_stop, "wait", return_value=False),
             ):
                 recorder._recording_index_maintenance_loop({})
 
         prune.assert_not_called()
+        location_backfill.assert_called_once_with()
         validate.assert_called_once_with(limit=20)
         reconcile.assert_not_called()
 

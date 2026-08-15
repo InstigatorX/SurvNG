@@ -8783,7 +8783,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   }
 
   async function runRetention(apply = false) {
-    if (apply && !window.confirm("Delete the oldest continuous recordings identified by the current retention plan? Incident clips, snapshots, databases, and the newest five minutes are protected.")) return;
+    if (apply && !window.confirm("Apply the current retention plan? This deletes eligible continuous recordings and incident snapshots older than their configured retention. Pinned face references, databases, motion-audit evidence, and the newest five minutes of recordings remain protected.")) return;
     setRetentionError("");
     try {
       const response = await fetch("/api/retention/run", {

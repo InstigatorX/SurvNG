@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import math
@@ -231,20 +232,22 @@ class MediaExportStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM media_exports WHERE id = ?", (job_id,))
 
-    def expired(self, now_iso: str) -> list[dict[str, object]]:
+    def expired(self, now_iso: str, *, limit: int = 250) -> list[dict[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM media_exports WHERE status IN ('completed', 'failed', 'cancelled') "
-                "AND protected = 0 AND expires_at != '' AND expires_at < ?",
-                (now_iso,),
+                "AND protected = 0 AND expires_at != '' AND expires_at < ? "
+                "ORDER BY expires_at LIMIT ?",
+                (now_iso, max(1, int(limit))),
             ).fetchall()
         return [self._row(row) for row in rows]
 
-    def completed_oldest_first(self) -> list[dict[str, object]]:
+    def completed_oldest_first(self, *, limit: int = 250) -> list[dict[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM media_exports WHERE status = 'completed' "
-                "AND protected = 0 ORDER BY created_at"
+                "AND protected = 0 ORDER BY created_at LIMIT ?",
+                (max(1, int(limit)),),
             ).fetchall()
         return [self._row(row) for row in rows]
 
@@ -519,7 +522,11 @@ class MediaExportManager:
             raise FileNotFoundError(job_id)
         raw = str(job.get("output_path") or "")
         path = Path(raw).resolve(strict=True)
-        path.relative_to(self.exports_dir)
+        if self.media_storage is not None:
+            if not self.media_storage.contains(path, "exports"):
+                raise FileNotFoundError(job_id)
+        else:
+            path.relative_to(self.exports_dir)
         if not path.is_file():
             raise FileNotFoundError(job_id)
         return path, str(job.get("output_name") or path.name)
@@ -547,7 +554,7 @@ class MediaExportManager:
             self._delete_job_files(job)
             self.store.delete(str(job["id"]))
         cutoff = time.time() - 3600
-        for path in self.exports_dir.rglob("*.partial"):
+        for path in itertools.islice(self.exports_dir.rglob("*.partial"), 250):
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
@@ -1211,7 +1218,11 @@ class MediaExportManager:
         if raw:
             try:
                 path = Path(raw).resolve(strict=False)
-                path.relative_to(self.exports_dir)
+                if self.media_storage is not None:
+                    if not self.media_storage.contains(path, "exports"):
+                        raise ValueError("outside configured export roots")
+                else:
+                    path.relative_to(self.exports_dir)
                 path.unlink(missing_ok=True)
             except (OSError, ValueError):
                 LOGGER.warning("refused to delete export path outside export storage: %s", raw)

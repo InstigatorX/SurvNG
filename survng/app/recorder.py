@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
+import hashlib
 import json
 import logging
 import math
+import os
 import signal
 import sqlite3
 import subprocess
@@ -39,6 +40,10 @@ DTS_WARNING_RESTART_COUNT = 12
 TIMESTAMP_ROLLOVER_LIMIT = 3
 TIMESTAMP_ROLLOVER_LIMIT_WINDOW_SECONDS = 300.0
 RECORDING_PATH_REBASE_BATCH_SIZE = 1000
+RECORDING_LOCATION_BACKFILL_BATCH_SIZE = 250
+RECORDING_LOCATION_BACKFILL_VERSION = 1
+RECORDING_LOCATION_BACKFILL_TOKEN_KEY = "recording_location_backfill_token"
+RECORDING_LOCATION_BACKFILL_CURSOR_KEY = "recording_location_backfill_cursor"
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,7 @@ class Recorder:
         protected_recording_paths: Callable[[], set[str]] | None = None,
         snapshot_retention_plan: Callable[[float], Mapping[str, Any]] | None = None,
         apply_snapshot_retention: Callable[[float, int], Mapping[str, Any]] | None = None,
+        migrate_snapshot_sizes: Callable[..., int] | None = None,
         media_storage: MediaStorageRegistry | None = None,
     ) -> None:
         self.ffmpeg_path = ffmpeg_path
@@ -108,9 +114,12 @@ class Recorder:
         self._validation_pending: deque[str] = deque()
         self._validation_pending_set: set[str] = set()
         self._validation_lock = threading.Lock()
+        self._location_backfill_lock = threading.Lock()
         self._external_protected_recording_paths = protected_recording_paths or set
+        self._migrate_snapshot_sizes = migrate_snapshot_sizes
         self._playback_lease_lock = threading.Lock()
         self._playback_leases: dict[str, float] = {}
+        self._retention_deletions: set[str] = set()
         self._init_recording_index()
         self.retention = RecordingRetentionService(
             self.storage_dir,
@@ -121,6 +130,7 @@ class Recorder:
             snapshot_plan_provider=snapshot_retention_plan,
             snapshot_cleanup_provider=apply_snapshot_retention,
             media_storage=self.media_storage,
+            delete_recording_provider=self._delete_recording_for_retention,
         )
 
     def _index_connection(self) -> sqlite3.Connection:
@@ -202,7 +212,6 @@ class Recorder:
             # In a storage pool, absolute legacy paths remain valid and a root
             # change must be handled by an explicit drain/migration operation.
             # Rebasing every row onto the first root would corrupt placement.
-            self._backfill_recording_location_ids()
             return
         recordings_root = self.recordings_dir.resolve()
         root_value = str(recordings_root)
@@ -297,24 +306,99 @@ class Recorder:
                 self.storage_dir,
             )
 
-    def _backfill_recording_location_ids(self) -> None:
+    def _recording_location_backfill_token(self) -> str:
         if self.media_storage is None:
-            return
-        with self._index_connection() as connection:
-            rows = connection.execute(
-                "SELECT path FROM recordings WHERE location_id = 'default'"
-            ).fetchall()
-            updates = []
-            for row in rows:
-                path = Path(str(row["path"]))
-                location_id = self.media_storage.location_id_for(path, "recordings")
-                if location_id is not None:
-                    updates.append((location_id, str(path)))
-            if updates:
-                connection.executemany(
-                    "UPDATE recordings SET location_id = ? WHERE path = ?",
-                    updates,
+            return ""
+        topology = sorted(
+            (
+                str(location.id),
+                str(Path(location.path).expanduser().resolve(strict=False)),
+            )
+            for location in self.media_storage.config.locations
+            if "recordings" in location.roles
+        )
+        serialized = json.dumps(topology, separators=(",", ":"), ensure_ascii=True)
+        fingerprint = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return f"v{RECORDING_LOCATION_BACKFILL_VERSION}:{fingerprint}"
+
+    def _backfill_recording_location_id_batch(
+        self,
+        *,
+        limit: int = RECORDING_LOCATION_BACKFILL_BATCH_SIZE,
+    ) -> int:
+        """Classify one bounded legacy recording cohort by configured storage root."""
+        if self.media_storage is None or not self.media_storage.config.locations:
+            return 0
+        bounded_limit = max(1, min(5000, int(limit)))
+        expected_token = self._recording_location_backfill_token()
+        with self._location_backfill_lock:
+            with self._index_connection() as connection:
+                stored_token = connection.execute(
+                    "SELECT value FROM recording_index_metadata WHERE key = ?",
+                    (RECORDING_LOCATION_BACKFILL_TOKEN_KEY,),
+                ).fetchone()
+                cursor_row = connection.execute(
+                    "SELECT value FROM recording_index_metadata WHERE key = ?",
+                    (RECORDING_LOCATION_BACKFILL_CURSOR_KEY,),
+                ).fetchone()
+                token_matches = (
+                    stored_token is not None
+                    and str(stored_token["value"]) == expected_token
                 )
+                try:
+                    cursor = int(cursor_row["value"]) if token_matches and cursor_row is not None else 0
+                except (TypeError, ValueError):
+                    cursor = 0
+                if token_matches and cursor < 0:
+                    return 0
+                if not token_matches:
+                    connection.execute(
+                        """
+                        INSERT INTO recording_index_metadata(key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (RECORDING_LOCATION_BACKFILL_TOKEN_KEY, expected_token),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO recording_index_metadata(key, value) VALUES (?, '0')
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (RECORDING_LOCATION_BACKFILL_CURSOR_KEY,),
+                    )
+                rows = connection.execute(
+                    """
+                    SELECT rowid, path FROM recordings
+                    WHERE rowid > ? AND location_id = 'default'
+                    ORDER BY rowid LIMIT ?
+                    """,
+                    (cursor, bounded_limit),
+                ).fetchall()
+
+            updates: list[tuple[str, int]] = []
+            for row in rows:
+                location_id = self.media_storage.location_id_for(
+                    Path(str(row["path"])),
+                    "recordings",
+                )
+                if location_id is not None and location_id != "default":
+                    updates.append((location_id, int(row["rowid"])))
+            next_cursor = -1 if len(rows) < bounded_limit else int(rows[-1]["rowid"])
+            with self._index_connection() as connection:
+                if updates:
+                    connection.executemany(
+                        "UPDATE recordings SET location_id = ? "
+                        "WHERE rowid = ? AND location_id = 'default'",
+                        updates,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO recording_index_metadata(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (RECORDING_LOCATION_BACKFILL_CURSOR_KEY, str(next_cursor)),
+                )
+            return len(rows)
 
     @staticmethod
     def _rebased_recording_path(
@@ -1147,6 +1231,8 @@ class Recorder:
         with self._playback_lease_lock:
             self._discard_expired_playback_leases_locked()
             for path in leased:
+                if path in self._retention_deletions:
+                    continue
                 self._playback_leases[path] = max(
                     expires_at,
                     self._playback_leases.get(path, 0.0),
@@ -1180,6 +1266,21 @@ class Recorder:
         ]
         for path in expired:
             self._playback_leases.pop(path, None)
+
+    def _delete_recording_for_retention(self, path: Path) -> bool:
+        """Atomically recheck playback ownership immediately before unlink."""
+        resolved = str(path.resolve(strict=False))
+        with self._playback_lease_lock:
+            self._discard_expired_playback_leases_locked()
+            if resolved in self._playback_leases or resolved in self._retention_deletions:
+                return False
+            self._retention_deletions.add(resolved)
+        try:
+            path.unlink()
+            return True
+        finally:
+            with self._playback_lease_lock:
+                self._retention_deletions.discard(resolved)
 
     def recording_availability_between(
         self,
@@ -1549,8 +1650,17 @@ class Recorder:
     def _recording_index_maintenance_loop(self, camera_map: dict[str, CameraConfig]) -> None:
         if self._index_stop.wait(30):
             return
+        next_snapshot_size_migration = 0.0
         while not self._index_stop.is_set():
             try:
+                self._backfill_recording_location_id_batch()
+                now = time.monotonic()
+                if (
+                    self._migrate_snapshot_sizes is not None
+                    and now >= next_snapshot_size_migration
+                ):
+                    self._migrate_snapshot_sizes(limit=50, write_batch_size=25)
+                    next_snapshot_size_migration = now + 30.0
                 self._validate_index_batch(limit=20)
                 self._backfill_stream_fingerprints(limit=20)
             except Exception:

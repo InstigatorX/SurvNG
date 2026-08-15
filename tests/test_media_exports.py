@@ -62,6 +62,50 @@ class MediaExportTest(unittest.TestCase):
             self.assertTrue(manager.recording_dir.is_dir())
             self.assertTrue(manager.timelapse_dir.is_dir())
 
+    def test_historical_export_remains_accessible_across_configured_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            registry = MediaStorageRegistry(
+                root / "storage",
+                MediaStorageConfig(locations=[
+                    MediaStorageLocationConfig(
+                        id="first", path=str(first), roles=["exports"]
+                    ),
+                    MediaStorageLocationConfig(
+                        id="second", path=str(second), roles=["exports"]
+                    ),
+                ]),
+            )
+            manager = MediaExportManager(
+                root / "storage", root / "database",
+                recorder=lambda: FakeRecorder([]), ffmpeg_path=lambda: "ffmpeg",
+                hardware_backend=lambda: "cpu", media_storage=registry,
+            )
+            historical_root = (
+                second if manager.exports_dir == first / "exports" else first
+            )
+            output = historical_root / "exports" / "recording" / "old.mp4"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"historic")
+            job = manager.store.create({
+                "kind": "recording", "camera_id": "gate", "source": "main",
+                "start_epoch": 1.0, "end_epoch": 2.0, "options": {},
+            })
+            manager.store.update(
+                str(job["id"]), status="completed", output_path=str(output),
+                output_name=output.name,
+            )
+
+            resolved, _name = manager.output_path(str(job["id"]))
+            manager._delete_job_files(manager.store.get(str(job["id"])) or {})
+
+            self.assertEqual(resolved, output)
+            self.assertFalse(output.exists())
+
     def test_worker_can_restart_without_consuming_stale_shutdown_sentinel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

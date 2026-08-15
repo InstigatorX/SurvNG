@@ -195,11 +195,13 @@ adequate margin relative to, the placement reserve.
 
 ## Balanced placement
 
-Balanced placement chooses the eligible location with the highest weighted
-usable space:
+Balanced placement uses deterministic weighted rendezvous assignment. Each
+camera/workload key receives a stable hash score per eligible location, and
+usable bytes plus priority weight that score:
 
 ```text
-balanced score = usable bytes × priority ÷ 100
+weight = usable bytes × priority ÷ 100
+score  = weight ÷ -ln(stable_hash(workload, location))
 ```
 
 Example:
@@ -209,9 +211,10 @@ Example:
 | A | 5 TB | 1 TB | 4 TB | 100 | 4 TB |
 | B | 3 TB | 0.5 TB | 2.5 TB | 200 | 5 TB |
 
-Location B wins because its higher priority doubles its usable-space weight.
-Use the same priority on all disks when the goal is purely to favor the disk
-with the most usable capacity.
+The hash term prevents an equal cold-start pool from assigning every camera to
+the same disk, while the weight still favors locations with more usable space
+or a higher priority. Use the same priority when capacity should be the only
+weighting difference.
 
 Balanced placement does not alternate every file or every 10-second recording
 segment. Assignments are sticky for the life of the running manager generation.
@@ -219,10 +222,8 @@ Whenever a workload asks the registry for placement again, SurvNG reuses the
 selected location while it remains eligible. Similar free space on two disks
 therefore does not cause oscillation.
 
-If balanced scores are equal, SurvNG resolves the tie deterministically using
-priority and then location ID. Assignment choices are held in memory and are
-recalculated after a SurvNG restart, so an approximately equal pool may choose
-a different location after restart without affecting access to older media.
+Assignment is deterministic for the same configuration and workload key, so a
+restart does not randomly reshuffle an otherwise unchanged pool.
 
 ## Priority placement
 

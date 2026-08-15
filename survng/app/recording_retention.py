@@ -27,6 +27,8 @@ RETENTION_PLAN_INTERVAL_SECONDS = SECONDS_PER_DAY
 RETENTION_CLEANUP_INTERVAL_SECONDS = 15 * 60
 RETENTION_RETRY_SECONDS = 10
 RETENTION_INITIAL_DELAY_SECONDS = 5
+RETENTION_BATCH_TIME_BUDGET_SECONDS = 10.0
+RETENTION_FAILURE_RETRY_MAX_SECONDS = 15 * 60
 
 
 class RecordingRetentionService:
@@ -42,6 +44,7 @@ class RecordingRetentionService:
         snapshot_plan_provider: Callable[[float], Mapping[str, Any]] | None = None,
         snapshot_cleanup_provider: Callable[[float, int], Mapping[str, Any]] | None = None,
         media_storage: MediaStorageRegistry | None = None,
+        delete_recording_provider: Callable[[Path], bool] | None = None,
     ) -> None:
         self.storage_dir = storage_dir.resolve()
         self.recordings_dir = recordings_dir.resolve()
@@ -51,6 +54,7 @@ class RecordingRetentionService:
         self.snapshot_plan_provider = snapshot_plan_provider
         self.snapshot_cleanup_provider = snapshot_cleanup_provider
         self.media_storage = media_storage
+        self.delete_recording_provider = delete_recording_provider
         self._cameras: dict[str, CameraConfig] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -61,12 +65,15 @@ class RecordingRetentionService:
         self._cleanup_active = False
         self._force_plan = True
         self._last_plan_monotonic = 0.0
-        self._capacity_reclaim_remaining = 0
+        self._quota_reclaim_remaining = 0
+        self._free_reclaim_remaining: dict[str, int] = {}
         self._planned_reclaim_remaining = 0
         self._cleanup_started_epoch: float | None = None
         self._cleanup_initial_bytes = 0
         self._cleanup_reclaimed_bytes = 0
         self._cleanup_batches_completed = 0
+        self._delete_failure_attempts: dict[str, int] = {}
+        self._delete_retry_after: dict[str, float] = {}
         self._status: dict[str, Any] = {
             "state": "starting",
             "enabled": config.enabled,
@@ -174,7 +181,10 @@ class RecordingRetentionService:
 
     def plan(self, *, now_epoch: float | None = None) -> dict[str, Any]:
         now = time.time() if now_epoch is None else float(now_epoch)
-        snapshot_cutoff = now - self.config.snapshot_days * SECONDS_PER_DAY
+        with self._state_lock:
+            config = self.config.model_copy(deep=True)
+            cameras = dict(self._cameras)
+        snapshot_cutoff = now - config.snapshot_days * SECONDS_PER_DAY
         snapshot_plan = (
             dict(self.snapshot_plan_provider(snapshot_cutoff))
             if self.snapshot_plan_provider is not None
@@ -188,30 +198,90 @@ class RecordingRetentionService:
             }
         )
         location_usage = self._location_usage()
-        total_bytes = sum(item["total_bytes"] for item in location_usage)
-        free_bytes = sum(item["free_bytes"] for item in location_usage)
+        capacity_groups = self._capacity_groups(location_usage)
+        total_bytes = sum(item["total_bytes"] for item in capacity_groups)
+        free_bytes = sum(item["free_bytes"] for item in capacity_groups)
         used_bytes = max(0, total_bytes - free_bytes)
         protected_paths = self._normalized_protected_paths()
         with self.connection_factory() as connection:
-            self._register_protection_function(connection, protected_paths)
-            totals = connection.execute(
-                """
-                SELECT count(*) AS file_count, coalesce(sum(size_bytes), 0) AS bytes,
-                       min(start_epoch) AS oldest, max(end_epoch) AS newest
-                FROM recordings
-                """
-            ).fetchone()
+            connection.execute(
+                "CREATE TEMP TABLE retention_policy ("
+                "camera_id TEXT NOT NULL, source TEXT NOT NULL, cutoff REAL NOT NULL, "
+                "PRIMARY KEY (camera_id, source)) WITHOUT ROWID"
+            )
+            group_keys = connection.execute(
+                "SELECT DISTINCT camera_id, source FROM recordings"
+            ).fetchall()
+            policy_rows: list[tuple[str, str, float]] = []
+            retention_days_by_group: dict[tuple[str, str], int] = {}
+            for key in group_keys:
+                camera_id = str(key["camera_id"])
+                source = "main" if str(key["source"]) == "main" else "live"
+                camera = cameras.get(camera_id)
+                override = None
+                if camera is not None:
+                    override = (
+                        camera.retention.main_days
+                        if source == "main"
+                        else camera.retention.live_days
+                    )
+                days = int(
+                    override
+                    or (config.main_days if source == "main" else config.live_days)
+                )
+                retention_days_by_group[(camera_id, source)] = days
+                policy_rows.append((camera_id, source, now - days * SECONDS_PER_DAY))
+            connection.executemany(
+                "INSERT INTO retention_policy(camera_id, source, cutoff) VALUES (?, ?, ?)",
+                policy_rows,
+            )
+            connection.execute(
+                "CREATE TEMP TABLE retention_protected (path TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO retention_protected(path) VALUES (?)",
+                ((path,) for path in protected_paths),
+            )
+            connection.set_progress_handler(
+                lambda: int(self._stop.is_set()),
+                10_000,
+            )
             groups = connection.execute(
                 """
-                SELECT camera_id, source, count(*) AS file_count,
-                       coalesce(sum(size_bytes), 0) AS bytes,
-                       min(start_epoch) AS oldest, max(end_epoch) AS newest
-                FROM recordings
-                GROUP BY camera_id, source
-                ORDER BY camera_id, source
+                SELECT r.camera_id, r.source, count(*) AS file_count,
+                       coalesce(sum(r.size_bytes), 0) AS bytes,
+                       min(r.start_epoch) AS oldest, max(r.end_epoch) AS newest,
+                       coalesce(sum(CASE
+                           WHEN r.end_epoch < policy.cutoff
+                            AND protected.path IS NULL THEN 1 ELSE 0 END), 0)
+                           AS expired_file_count,
+                       coalesce(sum(CASE
+                           WHEN r.end_epoch < policy.cutoff
+                            AND protected.path IS NULL THEN r.size_bytes ELSE 0 END), 0)
+                           AS expired_bytes,
+                       coalesce(sum(CASE
+                           WHEN r.end_epoch < policy.cutoff
+                            AND protected.path IS NOT NULL THEN 1 ELSE 0 END), 0)
+                           AS protected_file_count,
+                       coalesce(sum(CASE
+                           WHEN r.end_epoch < policy.cutoff
+                            AND protected.path IS NOT NULL THEN r.size_bytes ELSE 0 END), 0)
+                           AS protected_bytes
+                FROM recordings AS r
+                JOIN retention_policy AS policy
+                  ON policy.camera_id = r.camera_id AND policy.source = r.source
+                LEFT JOIN retention_protected AS protected ON protected.path = r.path
+                GROUP BY r.camera_id, r.source
+                ORDER BY r.camera_id, r.source
                 """
             ).fetchall()
 
+            totals: dict[str, int | float | None] = {
+                "file_count": 0,
+                "bytes": 0,
+                "oldest": None,
+                "newest": None,
+            }
             per_camera: list[dict[str, Any]] = []
             expired_count = 0
             expired_bytes = 0
@@ -220,34 +290,28 @@ class RecordingRetentionService:
             for row in groups:
                 camera_id = str(row["camera_id"])
                 source = "main" if str(row["source"]) == "main" else "live"
-                retention_days = self._retention_days(camera_id, source)
-                cutoff = now - retention_days * SECONDS_PER_DAY
-                expired = connection.execute(
-                    """
-                    SELECT count(*) AS file_count,
-                           coalesce(sum(size_bytes), 0) AS bytes,
-                           coalesce(sum(CASE WHEN survng_path_protected(path) = 1 THEN 1 ELSE 0 END), 0)
-                               AS protected_file_count,
-                           coalesce(sum(CASE WHEN survng_path_protected(path) = 1 THEN size_bytes ELSE 0 END), 0)
-                               AS protected_bytes
-                    FROM recordings
-                    WHERE camera_id = ? AND source = ? AND end_epoch < ?
-                    """,
-                    (camera_id, source, cutoff),
-                ).fetchone()
-                group_protected_expired_files = int(
-                    expired["protected_file_count"] or 0
-                )
-                group_protected_expired_bytes = int(expired["protected_bytes"] or 0)
-                eligible_expired_files = max(
-                    0, int(expired["file_count"] or 0) - group_protected_expired_files
-                )
-                eligible_expired_bytes = max(
-                    0, int(expired["bytes"] or 0) - group_protected_expired_bytes
-                )
+                retention_days = retention_days_by_group[(camera_id, source)]
+                group_protected_expired_files = int(row["protected_file_count"] or 0)
+                group_protected_expired_bytes = int(row["protected_bytes"] or 0)
+                eligible_expired_files = int(row["expired_file_count"] or 0)
+                eligible_expired_bytes = int(row["expired_bytes"] or 0)
                 group_bytes = int(row["bytes"] or 0)
                 oldest = _optional_float(row["oldest"])
                 newest = _optional_float(row["newest"])
+                totals["file_count"] = int(totals["file_count"] or 0) + int(
+                    row["file_count"] or 0
+                )
+                totals["bytes"] = int(totals["bytes"] or 0) + group_bytes
+                totals["oldest"] = (
+                    oldest
+                    if totals["oldest"] is None
+                    else min(float(totals["oldest"]), oldest or float(totals["oldest"]))
+                )
+                totals["newest"] = (
+                    newest
+                    if totals["newest"] is None
+                    else max(float(totals["newest"]), newest or float(totals["newest"]))
+                )
                 span = max(1.0, (newest or now) - (oldest or now))
                 bytes_per_day = group_bytes / span * SECONDS_PER_DAY
                 item = {
@@ -270,20 +334,43 @@ class RecordingRetentionService:
                 per_camera.append(item)
 
         indexed_bytes = int(totals["bytes"] or 0)
-        storage_limit_bytes = round(self.config.storage_limit_tb * TIB)
+        storage_limit_bytes = round(config.storage_limit_tb * TIB)
         quota_reclaim = max(0, indexed_bytes - storage_limit_bytes)
         free_percent = free_bytes / total_bytes * 100 if total_bytes else 0.0
         pressured_locations: list[str] = []
+        pressure_location_ids: dict[str, list[str]] = {}
+        free_reclaim_by_location: dict[str, int] = {}
         free_reclaim = 0
-        for item in location_usage:
-            if item["free_percent"] < self.config.minimum_free_percent:
-                pressured_locations.append(str(item["id"]))
-                target_free = round(item["total_bytes"] * self.config.target_free_percent / 100)
+        locations_by_id = {str(item["id"]): item for item in location_usage}
+        for item in capacity_groups:
+            minimum_percent = max(
+                float(config.minimum_free_percent),
+                float(item.get("reserve_percent") or 0.0),
+            )
+            target_percent = max(
+                float(config.target_free_percent),
+                min(100.0, float(item.get("reserve_percent") or 0.0) + 1.0),
+            )
+            for location_id in item["location_ids"]:
+                location = locations_by_id[location_id]
+                location["effective_minimum_free_percent"] = minimum_percent
+                location["effective_target_free_percent"] = target_percent
+            if item["state"] == "full" or item["free_percent"] <= minimum_percent:
+                pressured_locations.extend(item["location_ids"])
+                target_free = round(item["total_bytes"] * target_percent / 100)
                 item["reclaim_bytes"] = max(0, target_free - item["free_bytes"])
+                pressure_key = str(item["id"])
+                pressure_location_ids[pressure_key] = list(item["location_ids"])
+                free_reclaim_by_location[pressure_key] = int(item["reclaim_bytes"])
+                for location_id in item["location_ids"]:
+                    locations_by_id[location_id]["reclaim_bytes"] = int(
+                        item["reclaim_bytes"]
+                    )
                 free_reclaim += int(item["reclaim_bytes"])
-        capacity_reclaim = max(quota_reclaim, free_reclaim)
         snapshot_expired_bytes = int(snapshot_plan.get("expired_bytes") or 0)
-        planned_reclaim = max(expired_bytes, capacity_reclaim) + snapshot_expired_bytes
+        # Policies may target disjoint files and filesystems. The executor
+        # de-duplicates candidates; the planner must not collapse their budgets.
+        planned_reclaim = max(expired_bytes, quota_reclaim, free_reclaim) + snapshot_expired_bytes
         total_span = max(
             1.0,
             (_optional_float(totals["newest"]) or now)
@@ -291,7 +378,7 @@ class RecordingRetentionService:
         )
         bytes_per_day = indexed_bytes / total_span * SECONDS_PER_DAY
         days_to_minimum = None
-        minimum_free_bytes = round(total_bytes * self.config.minimum_free_percent / 100)
+        minimum_free_bytes = round(total_bytes * config.minimum_free_percent / 100)
         if bytes_per_day > 0:
             days_to_minimum = max(0.0, (free_bytes - minimum_free_bytes) / bytes_per_day)
 
@@ -306,17 +393,25 @@ class RecordingRetentionService:
             reasons.append("free_space")
         return {
             "generated_at": _iso_time(now),
-            "enabled": self.config.enabled,
-            "automatic_cleanup": self.config.automatic_cleanup,
+                "enabled": config.enabled,
+                "automatic_cleanup": config.automatic_cleanup,
             "storage": {
                 "total_bytes": total_bytes,
                 "used_bytes": used_bytes,
                 "free_bytes": free_bytes,
                 "free_percent": round(free_percent, 1),
-                "minimum_free_percent": self.config.minimum_free_percent,
-                "target_free_percent": self.config.target_free_percent,
-                "emergency_free_percent": self.config.emergency_free_percent,
-                "emergency": free_percent < self.config.emergency_free_percent,
+                "minimum_free_percent": config.minimum_free_percent,
+                "target_free_percent": config.target_free_percent,
+                "emergency_free_percent": config.emergency_free_percent,
+                "emergency": any(
+                    int(item["total_bytes"]) > 0
+                    and item["free_percent"] < config.emergency_free_percent
+                    for item in location_usage
+                ),
+                "degraded": any(
+                    item["state"] not in {"online", "full"}
+                    for item in location_usage
+                ),
                 "locations": location_usage,
             },
             "indexed": {
@@ -329,9 +424,10 @@ class RecordingRetentionService:
             },
             "policy": {
                 "storage_limit_bytes": storage_limit_bytes,
-                "main_days": self.config.main_days,
-                "live_days": self.config.live_days,
-                "snapshot_days": self.config.snapshot_days,
+                "main_days": config.main_days,
+                "live_days": config.live_days,
+                "snapshot_days": config.snapshot_days,
+                "cleanup_batch_files": config.cleanup_batch_files,
                 "protected_recent_seconds": RECENT_RECORDING_PROTECTION_SECONDS,
             },
             "reclaim": {
@@ -343,6 +439,8 @@ class RecordingRetentionService:
                 "protected_expired_bytes": protected_expired_bytes,
                 "quota_bytes": quota_reclaim,
                 "free_space_bytes": free_reclaim,
+                "free_space_by_location": free_reclaim_by_location,
+                "pressure_location_ids": pressure_location_ids,
                 "pressured_location_ids": pressured_locations,
                 "planned_bytes": planned_reclaim,
                 "reasons": reasons,
@@ -358,15 +456,15 @@ class RecordingRetentionService:
         started = time.time()
         try:
             before = self.plan(now_epoch=started)
-            capacity_reclaim = max(
-                int(before["reclaim"]["quota_bytes"]),
-                int(before["reclaim"]["free_space_bytes"]),
-            )
             result = self._apply_plan(
                 before,
                 apply=apply,
                 now_epoch=started,
-                capacity_reclaim_bytes=capacity_reclaim,
+                capacity_reclaim_bytes=0,
+                quota_reclaim_bytes=int(before["reclaim"]["quota_bytes"]),
+                free_reclaim_by_location=dict(
+                    before["reclaim"].get("free_space_by_location") or {}
+                ),
                 planned_reclaim_bytes=int(before["reclaim"]["planned_bytes"]),
             )
             return {"plan": before, "result": result}
@@ -381,6 +479,8 @@ class RecordingRetentionService:
         now_epoch: float,
         capacity_reclaim_bytes: int,
         planned_reclaim_bytes: int,
+        quota_reclaim_bytes: int | None = None,
+        free_reclaim_by_location: Mapping[str, int] | None = None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "started_at": _iso_time(now_epoch),
@@ -391,8 +491,10 @@ class RecordingRetentionService:
             "missing_files": 0,
             "deleted_bytes": 0,
             "failed_files": 0,
+            "protected_files": 0,
             "recording_deleted_files": 0,
             "recording_deleted_bytes": 0,
+            "recording_deleted_bytes_by_location": {},
             "snapshot_selected_files": 0,
             "snapshot_deleted_files": 0,
             "snapshot_missing_files": 0,
@@ -403,10 +505,13 @@ class RecordingRetentionService:
             "remaining_planned_bytes": max(0, int(planned_reclaim_bytes)),
         }
         if apply:
+            batch_deadline = time.monotonic() + RETENTION_BATCH_TIME_BUDGET_SECONDS
             candidates = self._candidates(
                 plan,
                 now_epoch=now_epoch,
                 capacity_reclaim_bytes=max(0, int(capacity_reclaim_bytes)),
+                quota_reclaim_bytes=quota_reclaim_bytes,
+                free_reclaim_by_location=free_reclaim_by_location,
             )
             result["selected_files"] = len(candidates)
             removed_paths: list[str] = []
@@ -414,6 +519,9 @@ class RecordingRetentionService:
             for row in candidates:
                 if self._stop.is_set():
                     result["cancelled"] = True
+                    break
+                if time.monotonic() >= batch_deadline:
+                    result["batch_saturated"] = True
                     break
                 raw_path = str(row["path"])
                 try:
@@ -423,33 +531,69 @@ class RecordingRetentionService:
                     LOGGER.error("Retention rejected recording path outside storage: %s", raw_path)
                     continue
                 try:
-                    path.unlink()
+                    if self.delete_recording_provider is not None:
+                        if not self.delete_recording_provider(path):
+                            result["protected_files"] += 1
+                            continue
+                    else:
+                        path.unlink()
                     result["deleted_files"] += 1
                     result["deleted_bytes"] += int(row["size_bytes"] or 0)
+                    location_id = str(row["location_id"] or "default")
+                    if location_id == "default" and self.media_storage is not None:
+                        location_id = str(
+                            self.media_storage.location_id_for(path, "recordings")
+                            or "default"
+                        )
+                    deleted_by_location = result["recording_deleted_bytes_by_location"]
+                    deleted_by_location[location_id] = (
+                        int(deleted_by_location.get(location_id) or 0)
+                        + int(row["size_bytes"] or 0)
+                    )
                     empty_directory_candidates.add(path.parent)
                     removed_paths.append(raw_path)
+                    self._clear_delete_failure(raw_path)
                 except FileNotFoundError:
                     result["missing_files"] += 1
                     removed_paths.append(raw_path)
+                    self._clear_delete_failure(raw_path)
                 except OSError as error:
                     result["failed_files"] += 1
+                    self._record_delete_failure(raw_path)
                     LOGGER.warning("Retention could not delete %s: %s", path, error)
             if removed_paths:
-                with self.connection_factory() as connection:
-                    connection.executemany(
-                        "DELETE FROM recordings WHERE path = ?",
-                        ((path,) for path in removed_paths),
-                    )
+                for offset in range(0, len(removed_paths), 100):
+                    with self.connection_factory() as connection:
+                        connection.executemany(
+                            "DELETE FROM recordings WHERE path = ?",
+                            (
+                                (path,)
+                                for path in removed_paths[offset : offset + 100]
+                            ),
+                        )
             self._remove_empty_directories(empty_directory_candidates)
             result["recording_deleted_files"] = int(result["deleted_files"])
             result["recording_deleted_bytes"] = int(result["deleted_bytes"])
             if self.snapshot_cleanup_provider is not None and not self._stop.is_set():
-                snapshot_cutoff = now_epoch - self.config.snapshot_days * SECONDS_PER_DAY
-                snapshot_result = dict(
-                    self.snapshot_cleanup_provider(
-                        snapshot_cutoff,
-                        min(2000, self.config.cleanup_batch_files),
+                remaining_slots = max(
+                    0,
+                    min(
+                        250,
+                        int(plan.get("policy", {}).get("cleanup_batch_files") or 100)
+                        - int(result["selected_files"]),
+                    ),
+                )
+                snapshot_cutoff = now_epoch - int(
+                    plan.get("policy", {}).get("snapshot_days") or 1095
+                ) * SECONDS_PER_DAY
+                snapshot_result = (
+                    dict(
+                        self.snapshot_cleanup_provider(
+                            snapshot_cutoff, remaining_slots
+                        )
                     )
+                    if remaining_slots > 0
+                    else {}
                 )
                 result["snapshot_selected_files"] = int(
                     snapshot_result.get("selected_files") or 0
@@ -472,7 +616,8 @@ class RecordingRetentionService:
                 result["deleted_bytes"] += result["snapshot_deleted_bytes"]
                 result["failed_files"] += result["snapshot_failed_files"]
                 result["batch_saturated"] = bool(
-                    snapshot_result.get("batch_saturated")
+                    result["batch_saturated"]
+                    or snapshot_result.get("batch_saturated")
                 )
             result["remaining_planned_bytes"] = max(
                 0,
@@ -522,10 +667,7 @@ class RecordingRetentionService:
                 if plan_due:
                     plan = self.plan()
                     self._last_plan_monotonic = sampled_monotonic
-                    self._capacity_reclaim_remaining = max(
-                        int(plan["reclaim"]["quota_bytes"]),
-                        int(plan["reclaim"]["free_space_bytes"]),
-                    )
+                    self._set_reclaim_budgets(plan)
                     self._planned_reclaim_remaining = int(
                         plan["reclaim"]["planned_bytes"]
                     )
@@ -565,10 +707,7 @@ class RecordingRetentionService:
                     # already-pruned rows advertised as reclaimable for a day.
                     plan = self.plan()
                     self._last_plan_monotonic = time.monotonic()
-                    self._capacity_reclaim_remaining = max(
-                        int(plan["reclaim"]["quota_bytes"]),
-                        int(plan["reclaim"]["free_space_bytes"]),
-                    )
+                    self._set_reclaim_budgets(plan)
                     self._planned_reclaim_remaining = int(
                         plan["reclaim"]["planned_bytes"]
                     )
@@ -578,7 +717,8 @@ class RecordingRetentionService:
                 should_continue = bool(
                     apply
                     and (
-                        int(result["selected_files"]) >= self.config.cleanup_batch_files
+                        int(result["selected_files"])
+                        >= int(plan.get("policy", {}).get("cleanup_batch_files") or 100)
                         or bool(result.get("batch_saturated"))
                     )
                     and (result["deleted_files"] or result["missing_files"])
@@ -594,10 +734,7 @@ class RecordingRetentionService:
                     # bytes all describe the completed cleanup.
                     plan = self.plan()
                     self._last_plan_monotonic = time.monotonic()
-                    self._capacity_reclaim_remaining = max(
-                        int(plan["reclaim"]["quota_bytes"]),
-                        int(plan["reclaim"]["free_space_bytes"]),
-                    )
+                    self._set_reclaim_budgets(plan)
                     self._planned_reclaim_remaining = int(
                         plan["reclaim"]["planned_bytes"]
                     )
@@ -611,6 +748,9 @@ class RecordingRetentionService:
                         if self._cleanup_started_epoch is not None
                         else None
                     )
+                    if progress is not None and not should_continue:
+                        progress["active"] = False
+                        self._cleanup_started_epoch = None
                     self._status = {
                         **self._status,
                         "state": "waiting" if should_continue else "idle",
@@ -653,13 +793,28 @@ class RecordingRetentionService:
                 plan,
                 apply=apply,
                 now_epoch=time.time(),
-                capacity_reclaim_bytes=self._capacity_reclaim_remaining,
+                capacity_reclaim_bytes=0,
+                quota_reclaim_bytes=self._quota_reclaim_remaining,
+                free_reclaim_by_location=self._free_reclaim_remaining,
                 planned_reclaim_bytes=self._planned_reclaim_remaining,
             )
-            self._capacity_reclaim_remaining = max(
+            recording_deleted = int(result["recording_deleted_bytes"])
+            self._quota_reclaim_remaining = max(
                 0,
-                self._capacity_reclaim_remaining - int(result["deleted_bytes"]),
+                self._quota_reclaim_remaining - recording_deleted,
             )
+            for location_id, deleted_bytes in dict(
+                result.get("recording_deleted_bytes_by_location") or {}
+            ).items():
+                for pressure_key, member_ids in dict(
+                    plan.get("reclaim", {}).get("pressure_location_ids") or {}
+                ).items():
+                    if str(location_id) in member_ids:
+                        self._free_reclaim_remaining[str(pressure_key)] = max(
+                            0,
+                            int(self._free_reclaim_remaining.get(str(pressure_key), 0))
+                            - int(deleted_bytes),
+                        )
             self._planned_reclaim_remaining = int(
                 result["remaining_planned_bytes"]
             )
@@ -669,13 +824,10 @@ class RecordingRetentionService:
                 reclaim["quota_bytes"] = max(
                     0,
                     int(reclaim.get("quota_bytes") or 0)
-                    - int(result["deleted_bytes"]),
+                    - recording_deleted,
                 )
-                reclaim["free_space_bytes"] = max(
-                    0,
-                    int(reclaim.get("free_space_bytes") or 0)
-                    - int(result["deleted_bytes"]),
-                )
+                reclaim["free_space_by_location"] = dict(self._free_reclaim_remaining)
+                reclaim["free_space_bytes"] = sum(self._free_reclaim_remaining.values())
                 plan["reclaim"] = reclaim
             return result
         finally:
@@ -683,9 +835,47 @@ class RecordingRetentionService:
 
     def _storage_below_minimum(self) -> bool:
         return any(
-            item["free_percent"] < self.config.minimum_free_percent
+            int(item["total_bytes"]) > 0
+            and (
+                item["state"] == "full"
+                or item["free_percent"]
+                < max(
+                    float(self.config.minimum_free_percent),
+                    float(item.get("reserve_percent") or 0.0),
+                )
+            )
             for item in self._location_usage()
         )
+
+    def _set_reclaim_budgets(self, plan: Mapping[str, Any]) -> None:
+        reclaim = plan.get("reclaim") or {}
+        self._quota_reclaim_remaining = max(0, int(reclaim.get("quota_bytes") or 0))
+        self._free_reclaim_remaining = {
+            str(location_id): max(0, int(value or 0))
+            for location_id, value in dict(
+                reclaim.get("free_space_by_location") or {}
+            ).items()
+        }
+
+    def _record_delete_failure(self, path: str) -> None:
+        if path not in self._delete_failure_attempts and len(
+            self._delete_failure_attempts
+        ) >= 5_000:
+            oldest = next(iter(self._delete_failure_attempts))
+            self._clear_delete_failure(oldest)
+        attempts = min(10, self._delete_failure_attempts.get(path, 0) + 1)
+        self._delete_failure_attempts[path] = attempts
+        self._delete_retry_after[path] = time.monotonic() + min(
+            RETENTION_FAILURE_RETRY_MAX_SECONDS,
+            5 * (2 ** (attempts - 1)),
+        )
+
+    def _clear_delete_failure(self, path: str) -> None:
+        self._delete_failure_attempts.pop(path, None)
+        self._delete_retry_after.pop(path, None)
+
+    def _candidate_retry_ready(self, path: str) -> bool:
+        return self._delete_retry_after.get(path, 0.0) <= time.monotonic()
 
     def _location_usage(self) -> list[dict[str, Any]]:
         if self.media_storage is None:
@@ -701,11 +891,12 @@ class RecordingRetentionService:
                 "total_bytes": usage.total,
                 "free_bytes": usage.free,
                 "free_percent": round(usage.free / usage.total * 100, 1) if usage.total else 0.0,
+                "reserve_percent": 0.0,
                 "reclaim_bytes": 0,
             }]
         payload: list[dict[str, Any]] = []
         for status in self.media_storage.statuses():
-            if "recordings" not in status.roles or status.total_bytes <= 0:
+            if "recordings" not in status.roles:
                 continue
             payload.append({
                 "id": status.id,
@@ -714,14 +905,50 @@ class RecordingRetentionService:
                 "state": status.state,
                 "total_bytes": status.total_bytes,
                 "free_bytes": status.free_bytes,
-                "free_percent": round(status.free_bytes / status.total_bytes * 100, 1),
+                "free_percent": (
+                    round(status.free_bytes / status.total_bytes * 100, 1)
+                    if status.total_bytes > 0
+                    else 0.0
+                ),
+                "reserve_percent": status.reserve_percent,
+                "filesystem_id": status.filesystem_id,
+                "error": status.error,
                 "reclaim_bytes": 0,
             })
         return payload
 
     @staticmethod
-    def _path_is_protected(raw_path: str, protected_paths: set[str]) -> bool:
-        return raw_path in protected_paths
+    def _capacity_groups(
+        location_usage: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Collapse logical roots that share one physical filesystem."""
+        grouped: dict[str, dict[str, Any]] = {}
+        for location in location_usage:
+            if int(location.get("total_bytes") or 0) <= 0:
+                continue
+            filesystem_id = str(location.get("filesystem_id") or "")
+            key = filesystem_id or str(location["id"])
+            item = grouped.get(key)
+            if item is None:
+                grouped[key] = {
+                    "id": key,
+                    "location_ids": [str(location["id"])],
+                    "state": str(location.get("state") or "unavailable"),
+                    "total_bytes": int(location.get("total_bytes") or 0),
+                    "free_bytes": int(location.get("free_bytes") or 0),
+                    "free_percent": float(location.get("free_percent") or 0.0),
+                    "reserve_percent": float(location.get("reserve_percent") or 0.0),
+                    "reclaim_bytes": 0,
+                }
+                continue
+            item["location_ids"].append(str(location["id"]))
+            item["reserve_percent"] = max(
+                float(item["reserve_percent"]),
+                float(location.get("reserve_percent") or 0.0),
+            )
+            if str(location.get("state")) == "full":
+                item["state"] = "full"
+        return list(grouped.values())
 
     def _normalized_protected_paths(self) -> set[str]:
         """Normalize protection keys once without touching the media filesystem."""
@@ -776,6 +1003,9 @@ class RecordingRetentionService:
             placeholders = ",".join("?" for _ in location_ids)
             location_clause = f" AND location_id IN ({placeholders})"
             location_parameters = tuple(location_ids)
+        # The existing range index keeps upgrades non-blocking. A location-first
+        # index on millions of legacy rows would otherwise be built at startup.
+        index_name = "recordings_range"
         for group in groups:
             cutoff = protected_cutoff
             if age_limited:
@@ -786,8 +1016,8 @@ class RecordingRetentionService:
                 )
             rows = connection.execute(
                 f"""
-                SELECT path, size_bytes, start_epoch FROM recordings
-                INDEXED BY recordings_range
+                SELECT path, size_bytes, start_epoch, location_id FROM recordings
+                INDEXED BY {index_name}
                 WHERE camera_id = ? AND source = ? AND end_epoch < ?
                   AND survng_path_protected(path) = 0{location_clause}
                 ORDER BY start_epoch ASC LIMIT ?
@@ -855,8 +1085,13 @@ class RecordingRetentionService:
         *,
         now_epoch: float,
         capacity_reclaim_bytes: int | None = None,
+        quota_reclaim_bytes: int | None = None,
+        free_reclaim_by_location: Mapping[str, int] | None = None,
     ) -> list[sqlite3.Row]:
-        limit = self.config.cleanup_batch_files
+        limit = max(
+            1,
+            int(plan.get("policy", {}).get("cleanup_batch_files") or 100),
+        )
         protected_cutoff = now_epoch - RECENT_RECORDING_PROTECTION_SECONDS
         protected_paths = self._normalized_protected_paths()
         groups = plan.get("per_camera", [])
@@ -869,15 +1104,18 @@ class RecordingRetentionService:
                     connection,
                     expiring_groups,
                     protected_cutoff=protected_cutoff,
-                    limit_per_group=limit,
+                    limit_per_group=limit * 4,
                     age_limited=True,
                     now_epoch=now_epoch,
                 )
                 for row in self._merge_oldest_rows(row_groups):
-                    candidates[str(row["path"])] = row
+                    path_key = str(row["path"])
+                    if not self._candidate_retry_ready(path_key):
+                        continue
+                    candidates[path_key] = row
                     if len(candidates) >= limit:
                         break
-            capacity_reclaim = (
+            legacy_capacity_reclaim = (
                 max(
                     int(plan["reclaim"]["quota_bytes"]),
                     int(plan["reclaim"]["free_space_bytes"]),
@@ -885,9 +1123,50 @@ class RecordingRetentionService:
                 if capacity_reclaim_bytes is None
                 else max(0, int(capacity_reclaim_bytes))
             )
+            quota_remaining = (
+                legacy_capacity_reclaim
+                if quota_reclaim_bytes is None and free_reclaim_by_location is None
+                else max(0, int(quota_reclaim_bytes or 0))
+            )
+            location_budgets = {
+                str(key): max(0, int(value or 0))
+                for key, value in dict(
+                    free_reclaim_by_location
+                    if free_reclaim_by_location is not None
+                    else plan.get("reclaim", {}).get("free_space_by_location", {})
+                ).items()
+            }
             selected_bytes = sum(int(row["size_bytes"] or 0) for row in candidates.values())
-            if capacity_reclaim > selected_bytes and len(candidates) < limit:
-                pressured = list(plan.get("reclaim", {}).get("pressured_location_ids", []))
+            selected_by_location: dict[str, int] = {}
+            for row in candidates.values():
+                location_id = str(row["location_id"] or "default")
+                if location_id == "default" and self.media_storage is not None:
+                    location_id = str(
+                        self.media_storage.location_id_for(
+                            Path(str(row["path"])), "recordings"
+                        )
+                        or "default"
+                    )
+                selected_by_location[location_id] = (
+                    selected_by_location.get(location_id, 0)
+                    + int(row["size_bytes"] or 0)
+                )
+
+            pressure_members = dict(
+                plan.get("reclaim", {}).get("pressure_location_ids") or {}
+            )
+            for location_id, budget in location_budgets.items():
+                if budget <= selected_by_location.get(location_id, 0) or len(candidates) >= limit:
+                    continue
+                member_ids = [
+                    str(value)
+                    for value in pressure_members.get(location_id, [location_id])
+                ]
+                already_selected = sum(
+                    selected_by_location.get(member_id, 0) for member_id in member_ids
+                )
+                if budget <= already_selected:
+                    continue
                 row_groups = self._oldest_group_rows(
                     connection,
                     expiring_groups,
@@ -895,18 +1174,59 @@ class RecordingRetentionService:
                     limit_per_group=limit * 2,
                     age_limited=False,
                     now_epoch=now_epoch,
-                    location_ids=(
-                        pressured
-                        if pressured and self.media_storage is not None
-                        else ()
-                    ),
+                    location_ids=tuple(dict.fromkeys([*member_ids, "default"])),
                 )
                 for row in self._merge_oldest_rows(row_groups):
                     path_key = str(row["path"])
-                    if path_key not in candidates:
+                    row_location = str(row["location_id"] or "default")
+                    resolved_location = row_location
+                    if row_location == "default" and self.media_storage is not None:
+                        resolved_location = str(
+                            self.media_storage.location_id_for(
+                                Path(path_key), "recordings"
+                            )
+                            or "default"
+                        )
+                    if (
+                        row_location == "default"
+                        and self.media_storage is not None
+                        and resolved_location not in member_ids
+                    ):
+                        continue
+                    if (
+                        path_key not in candidates
+                        and self._candidate_retry_ready(path_key)
+                    ):
+                        candidates[path_key] = row
+                        row_bytes = int(row["size_bytes"] or 0)
+                        selected_bytes += row_bytes
+                        selected_by_location[resolved_location] = (
+                            selected_by_location.get(resolved_location, 0) + row_bytes
+                        )
+                    group_selected = sum(
+                        selected_by_location.get(member_id, 0)
+                        for member_id in member_ids
+                    )
+                    if len(candidates) >= limit or group_selected >= budget:
+                        break
+            if quota_remaining > selected_bytes and len(candidates) < limit:
+                row_groups = self._oldest_group_rows(
+                    connection,
+                    expiring_groups,
+                    protected_cutoff=protected_cutoff,
+                    limit_per_group=limit * 2,
+                    age_limited=False,
+                    now_epoch=now_epoch,
+                )
+                for row in self._merge_oldest_rows(row_groups):
+                    path_key = str(row["path"])
+                    if (
+                        path_key not in candidates
+                        and self._candidate_retry_ready(path_key)
+                    ):
                         candidates[path_key] = row
                         selected_bytes += int(row["size_bytes"] or 0)
-                    if len(candidates) >= limit or selected_bytes >= capacity_reclaim:
+                    if len(candidates) >= limit or selected_bytes >= quota_remaining:
                         break
         return sorted(candidates.values(), key=lambda row: float(row["start_epoch"] or 0))[:limit]
 
@@ -922,13 +1242,16 @@ class RecordingRetentionService:
         return path
 
     def _remove_empty_directories(self, directories: set[Path]) -> None:
+        roots = (
+            {
+                root.resolve(strict=False)
+                for root in self.media_storage.configured_roots_for("recordings")
+            }
+            if self.media_storage is not None
+            else {self.recordings_dir}
+        )
         for directory in directories:
             current = directory
-            roots = (
-                {root.resolve(strict=False) for root in self.media_storage.roots_for("recordings")}
-                if self.media_storage is not None
-                else {self.recordings_dir}
-            )
             while current not in roots:
                 try:
                     current.rmdir()

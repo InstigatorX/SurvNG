@@ -41,7 +41,8 @@ class RecordingRetentionServiceTest(unittest.TestCase):
                     path TEXT PRIMARY KEY, camera_id TEXT NOT NULL, source TEXT NOT NULL,
                     name TEXT NOT NULL, size_bytes INTEGER NOT NULL, modified_at REAL NOT NULL,
                     start_epoch REAL NOT NULL, duration_seconds REAL NOT NULL,
-                    end_epoch REAL NOT NULL
+                    end_epoch REAL NOT NULL,
+                    location_id TEXT NOT NULL DEFAULT 'default'
                 )
                 """
             )
@@ -50,6 +51,10 @@ class RecordingRetentionServiceTest(unittest.TestCase):
             )
             connection.execute(
                 "CREATE INDEX recordings_retention_expiry ON recordings(camera_id, source, end_epoch)"
+            )
+            connection.execute(
+                "CREATE INDEX recordings_location_retention "
+                "ON recordings(location_id, camera_id, source, start_epoch, end_epoch)"
             )
 
     def connection(self) -> sqlite3.Connection:
@@ -88,6 +93,7 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         size: int = 10 * GIB,
         path: Path | None = None,
         camera_id: str = "gate",
+        location_id: str = "default",
     ) -> Path:
         now = time.time()
         start = now - age_days * 86400
@@ -101,10 +107,13 @@ class RecordingRetentionServiceTest(unittest.TestCase):
                 """
                 INSERT INTO recordings
                     (path, camera_id, source, name, size_bytes, modified_at,
-                     start_epoch, duration_seconds, end_epoch)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 10, ?)
+                     start_epoch, duration_seconds, end_epoch, location_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 10, ?, ?)
                 """,
-                (str(target), camera_id, source, target.name, size, start, start, start + 10),
+                (
+                    str(target), camera_id, source, target.name, size, start,
+                    start, start + 10, location_id,
+                ),
             )
         return target
 
@@ -226,6 +235,162 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         self.assertEqual(plan["reclaim"]["pressured_location_ids"], ["two"])
         self.assertEqual(plan["reclaim"]["free_space_bytes"], 150)
         self.assertEqual(len(plan["storage"]["locations"]), 2)
+
+    def test_age_deletion_on_healthy_disk_does_not_satisfy_pressured_disk(self) -> None:
+        second = self.storage / "second"
+        second_recordings = second / "recordings"
+        second_recordings.mkdir(parents=True)
+        registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(id="one", path=str(self.storage), roles=["recordings"]),
+            MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+        ]))
+        healthy_expired = self.insert_recording(
+            age_days=8, size=200, location_id="one"
+        )
+        pressured_recent = self.insert_recording(
+            age_days=2,
+            size=200,
+            path=second_recordings / "gate/main/2026-01-01/00/recent.mp4",
+            location_id="two",
+        )
+        statuses = [
+            MediaLocationStatus(
+                id="one", name="One", path=self.storage,
+                roles=("recordings",), state="online", total_bytes=1000,
+                free_bytes=500, usable_bytes=500,
+            ),
+            MediaLocationStatus(
+                id="two", name="Two", path=second,
+                roles=("recordings",), state="online", total_bytes=1000,
+                free_bytes=50, usable_bytes=50,
+            ),
+        ]
+        service = RecordingRetentionService(
+            self.storage,
+            self.recordings,
+            self.connection,
+            RecordingRetentionConfig(
+                storage_limit_tb=1, main_days=7, cleanup_batch_files=100
+            ),
+            media_storage=registry,
+        )
+        service._cameras = {
+            "gate": CameraConfig(
+                id="gate", name="Gate", stream_url="rtsp://camera/main"
+            )
+        }
+        with patch.object(registry, "statuses", return_value=statuses):
+            outcome = service.run_once(apply=True)
+
+        self.assertFalse(healthy_expired.exists())
+        self.assertFalse(pressured_recent.exists())
+        self.assertEqual(
+            outcome["result"]["recording_deleted_bytes_by_location"],
+            {"one": 200, "two": 200},
+        )
+
+    def test_snapshot_deletion_never_satisfies_recording_disk_pressure(self) -> None:
+        service = self.service()
+        service.snapshot_cleanup_provider = lambda _cutoff, _limit: {
+            "selected_files": 1,
+            "deleted_files": 1,
+            "deleted_bytes": 500,
+        }
+        plan = service.plan()
+        plan["reclaim"]["free_space_by_location"] = {"disk-two": 1000}
+        plan["reclaim"]["free_space_bytes"] = 1000
+        plan["reclaim"]["planned_bytes"] = 1500
+        service._set_reclaim_budgets(plan)
+        service._planned_reclaim_remaining = 1500
+
+        result = service._run_cached_plan(plan, apply=True)
+
+        self.assertEqual(result["snapshot_deleted_bytes"], 500)
+        self.assertEqual(service._free_reclaim_remaining, {"disk-two": 1000})
+        self.assertEqual(plan["reclaim"]["free_space_bytes"], 1000)
+
+    def test_location_reserve_is_an_effective_cleanup_watermark(self) -> None:
+        registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(
+                id="one", path=str(self.storage), roles=["recordings"],
+                reserve_percent=30,
+            ),
+        ]))
+        service = RecordingRetentionService(
+            self.storage,
+            self.recordings,
+            self.connection,
+            RecordingRetentionConfig(
+                storage_limit_tb=1,
+                minimum_free_percent=15,
+                target_free_percent=20,
+            ),
+            media_storage=registry,
+        )
+        status = MediaLocationStatus(
+            id="one", name="One", path=self.storage,
+            roles=("recordings",), state="full", total_bytes=1000,
+            free_bytes=250, usable_bytes=0, reserve_percent=30,
+        )
+        with patch.object(registry, "statuses", return_value=[status]):
+            plan = service.plan()
+
+        self.assertEqual(plan["reclaim"]["pressured_location_ids"], ["one"])
+        self.assertEqual(plan["reclaim"]["free_space_by_location"], {"one": 60})
+        location = plan["storage"]["locations"][0]
+        self.assertEqual(location["effective_minimum_free_percent"], 30.0)
+        self.assertEqual(location["effective_target_free_percent"], 31.0)
+
+    def test_shared_filesystem_capacity_is_counted_once(self) -> None:
+        second = self.storage / "second"
+        second.mkdir()
+        registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(id="one", path=str(self.storage), roles=["recordings"]),
+            MediaStorageLocationConfig(id="two", path=str(second), roles=["recordings"]),
+        ]))
+        service = RecordingRetentionService(
+            self.storage, self.recordings, self.connection,
+            RecordingRetentionConfig(storage_limit_tb=1), media_storage=registry,
+        )
+        statuses = [
+            MediaLocationStatus(
+                id=location_id, name=location_id, path=path,
+                roles=("recordings",), state="online", total_bytes=1000,
+                free_bytes=50, usable_bytes=50, filesystem_id="device:7",
+            )
+            for location_id, path in (("one", self.storage), ("two", second))
+        ]
+        with patch.object(registry, "statuses", return_value=statuses):
+            plan = service.plan()
+
+        self.assertEqual(plan["storage"]["total_bytes"], 1000)
+        self.assertEqual(plan["storage"]["free_bytes"], 50)
+        self.assertEqual(plan["reclaim"]["free_space_bytes"], 150)
+        self.assertEqual(
+            plan["reclaim"]["pressure_location_ids"],
+            {"device:7": ["one", "two"]},
+        )
+
+    def test_unavailable_location_is_reported_without_forcing_pressure(self) -> None:
+        registry = MediaStorageRegistry(self.storage, MediaStorageConfig(locations=[
+            MediaStorageLocationConfig(id="offline", path=str(self.storage), roles=["recordings"]),
+        ]))
+        service = RecordingRetentionService(
+            self.storage, self.recordings, self.connection,
+            RecordingRetentionConfig(storage_limit_tb=1), media_storage=registry,
+        )
+        status = MediaLocationStatus(
+            id="offline", name="Offline", path=self.storage,
+            roles=("recordings",), state="unavailable", error="mount absent",
+        )
+        with patch.object(registry, "statuses", return_value=[status]):
+            plan = service.plan()
+            below_minimum = service._storage_below_minimum()
+
+        self.assertTrue(plan["storage"]["degraded"])
+        self.assertFalse(plan["storage"]["emergency"])
+        self.assertEqual(plan["reclaim"]["pressured_location_ids"], [])
+        self.assertFalse(below_minimum)
 
     @patch(
         "survng.app.recording_retention.shutil.disk_usage",
@@ -399,6 +564,37 @@ class RecordingRetentionServiceTest(unittest.TestCase):
         self.assertEqual(progress["average_bytes_per_second"], 5)
         self.assertEqual(progress["batches_completed"], 2)
         self.assertTrue(progress["active"])
+
+    def test_failed_oldest_candidate_is_temporarily_deferred(self) -> None:
+        oldest = self.insert_recording(age_days=30)
+        newer = self.insert_recording(age_days=20)
+        service = self.service()
+        plan = service.plan()
+        service._record_delete_failure(str(oldest))
+
+        candidates = service._candidates(
+            plan,
+            now_epoch=time.time(),
+            capacity_reclaim_bytes=0,
+        )
+
+        self.assertEqual([str(row["path"]) for row in candidates], [str(newer)])
+
+    @patch(
+        "survng.app.recording_retention.shutil.disk_usage",
+        return_value=DiskUsage(10 * 1024**4, 5 * 1024**4, 5 * 1024**4),
+    )
+    def test_delete_guard_rechecks_playback_ownership(self, _usage) -> None:
+        recording = self.insert_recording(age_days=30)
+        guarded: list[Path] = []
+        service = self.service()
+        service.delete_recording_provider = lambda path: guarded.append(path) or False
+
+        outcome = service.run_once(apply=True)
+
+        self.assertEqual(guarded, [recording.resolve()])
+        self.assertEqual(outcome["result"]["protected_files"], 1)
+        self.assertTrue(recording.exists())
 
     @patch("survng.app.recording_retention.shutil.disk_usage")
     def test_completed_cleanup_refreshes_the_operator_plan(self, disk_usage) -> None:

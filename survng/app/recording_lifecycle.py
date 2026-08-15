@@ -35,6 +35,7 @@ class RecordingLifecycle:
         protected_recording_paths: Callable[[], set[str]],
         snapshot_retention_plan: Callable[[float], Mapping[str, object]] | None = None,
         apply_snapshot_retention: Callable[[float, int], Mapping[str, object]] | None = None,
+        migrate_snapshot_sizes: Callable[..., int] | None = None,
         media_storage: MediaStorageRegistry | None = None,
         recorder: Recorder | None = None,
     ) -> None:
@@ -53,6 +54,7 @@ class RecordingLifecycle:
             protected_recording_paths=protected_recording_paths,
             snapshot_retention_plan=snapshot_retention_plan,
             apply_snapshot_retention=apply_snapshot_retention,
+            migrate_snapshot_sizes=migrate_snapshot_sizes,
             media_storage=media_storage,
         )
         self._lock = threading.RLock()

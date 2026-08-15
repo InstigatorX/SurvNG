@@ -186,6 +186,10 @@ class FaceStore:
             connection.execute("pragma journal_mode = wal")
             connection.execute("pragma synchronous = normal")
             connection.execute(
+                "create table if not exists media_deletion_claims ("
+                "path text primary key, role text not null, claimed_at text not null)"
+            )
+            connection.execute(
                 "create table if not exists survng_metadata (key text primary key, value text not null)"
             )
             connection.executescript(
@@ -1855,14 +1859,23 @@ class FaceStore:
         pinned: bool,
     ) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:
+            connection.execute("begin immediate")
             row = connection.execute(
-                "select person_id, review_status from face_observations where id = ?",
+                "select person_id, review_status, snapshot_path "
+                "from face_observations where id = ?",
                 (observation_id,),
             ).fetchone()
             if row is None:
                 return None
             if row["person_id"] is None or row["review_status"] != "confirmed":
                 raise ValueError("only manually confirmed faces can be pinned as references")
+            if pinned and row["snapshot_path"]:
+                deleting = connection.execute(
+                    "select 1 from media_deletion_claims where path = ?",
+                    (str(row["snapshot_path"]),),
+                ).fetchone()
+                if deleting is not None:
+                    raise RuntimeError("face snapshot is currently being removed")
             connection.execute(
                 "update face_observations set reference_pinned = ? where id = ?",
                 (1 if pinned else 0, observation_id),

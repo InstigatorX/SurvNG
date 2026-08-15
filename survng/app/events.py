@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import json
+import base64
 import copy
 import hashlib
+import json
 import math
 import os
 import sqlite3
 import threading
+import zlib
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -15,9 +18,27 @@ from .incident_utils import event_snapshot_path, portable_media_path
 from .media_storage import MediaStorageRegistry
 
 
+def _encode_telemetry_payload(payload: Mapping[str, Any]) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
+    compressed = zlib.compress(raw, level=6)
+    return "zlib:" + base64.b64encode(compressed).decode("ascii")
+
+
+def _decode_telemetry_payload(value: object) -> dict[str, Any]:
+    text = str(value or "{}")
+    if text.startswith("zlib:"):
+        raw = zlib.decompress(base64.b64decode(text[5:])).decode()
+        parsed = json.loads(raw)
+    else:
+        parsed = json.loads(text)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class EventStore:
     SNAPSHOT_SIZE_WRITE_BATCH = 50
+    SNAPSHOT_REFERENCE_WRITE_BATCH = 50
     SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
+    TELEMETRY_COMPRESSION_COMPLETE_KEY = "telemetry_compression_complete"
     COMPACT_COLUMNS = (
         "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at"
     )
@@ -51,7 +72,7 @@ class EventStore:
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._lock, self._connect() as conn:
             conn.execute("pragma journal_mode = wal")
             conn.execute("pragma synchronous = normal")
             conn.execute(
@@ -92,6 +113,14 @@ class EventStore:
                 "create table if not exists survng_metadata (key text primary key, value text not null)"
             )
             conn.execute(
+                "create table if not exists snapshot_size_migration ("
+                "snapshot_path text primary key, checked_at text not null)"
+            )
+            conn.execute(
+                "create table if not exists media_deletion_claims ("
+                "path text primary key, role text not null, claimed_at text not null)"
+            )
+            conn.execute(
                 """
                 create table if not exists runtime_telemetry_samples (
                     sampled_at text primary key,
@@ -99,9 +128,8 @@ class EventStore:
                 )
                 """
             )
-            conn.execute(
-                "create index if not exists idx_runtime_telemetry_sampled_at on runtime_telemetry_samples(sampled_at)"
-            )
+            # sampled_at is already the table's primary-key index.
+            conn.execute("drop index if exists idx_runtime_telemetry_sampled_at")
             conn.execute(
                 """
                 create table if not exists system_lifecycle_events (
@@ -1112,7 +1140,7 @@ class EventStore:
                 ),
                 "tracking_active": bool(tracking.get("active")),
             }
-        payload = json.dumps(
+        payload = _encode_telemetry_payload(
             {
                 "cameras": cameras,
                 "process_memory": process_memory or {},
@@ -1120,8 +1148,6 @@ class EventStore:
                 "memory_maintenance": memory_maintenance or {},
                 "system_runtime": system_runtime or {},
             },
-            separators=(",", ":"),
-            allow_nan=False,
         )
         cutoff = current - timedelta(days=8)
         with self._lock, self._connect() as conn:
@@ -1133,6 +1159,42 @@ class EventStore:
                 "delete from runtime_telemetry_samples where sampled_at < ?",
                 (cutoff.isoformat(),),
             )
+        self._compress_legacy_telemetry_batch(limit=100)
+
+    def _compress_legacy_telemetry_batch(self, *, limit: int) -> int:
+        with self._connect() as conn:
+            if self._metadata_value(
+                conn, self.TELEMETRY_COMPRESSION_COMPLETE_KEY
+            ) == "1":
+                return 0
+            rows = conn.execute(
+                "select sampled_at, payload_json from runtime_telemetry_samples "
+                "where payload_json not like 'zlib:%' limit ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        if not rows:
+            with self._lock, self._connect() as conn:
+                self._set_metadata_value(
+                    conn, self.TELEMETRY_COMPRESSION_COMPLETE_KEY, "1"
+                )
+            return 0
+        updates: list[tuple[str, str]] = []
+        for row in rows:
+            try:
+                decoded = json.loads(str(row["payload_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError, zlib.error):
+                decoded = {}
+            updates.append(
+                (_encode_telemetry_payload(decoded), str(row["sampled_at"]))
+            )
+        if updates:
+            with self._lock, self._connect() as conn:
+                conn.executemany(
+                    "update runtime_telemetry_samples set payload_json = ? "
+                    "where sampled_at = ? and payload_json not like 'zlib:%'",
+                    updates,
+                )
+        return len(updates)
 
     def record_lifecycle_event(
         self,
@@ -1249,8 +1311,8 @@ class EventStore:
                 sampled = datetime.fromisoformat(
                     str(row["sampled_at"]).replace("Z", "+00:00")
                 )
-                payload = json.loads(str(row["payload_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = _decode_telemetry_payload(row["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError, zlib.error):
                 continue
             memory = payload.get("process_memory") if isinstance(payload, dict) else None
             if not isinstance(memory, dict) or not memory:
@@ -1311,8 +1373,8 @@ class EventStore:
         for row in rows:
             try:
                 sampled = datetime.fromisoformat(str(row["sampled_at"]).replace("Z", "+00:00"))
-                payload = json.loads(str(row["payload_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = _decode_telemetry_payload(row["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError, zlib.error):
                 continue
             cameras = payload.get("cameras") if isinstance(payload, dict) else {}
             if not isinstance(cameras, dict):
@@ -2818,13 +2880,18 @@ class EventStore:
         except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
             return 0
 
-    def _backfill_snapshot_sizes(
+    def migrate_snapshot_sizes(
         self,
         *,
         limit: int = 250,
         write_batch_size: int | None = None,
     ) -> int:
-        """Index one bounded legacy cohort without monopolizing retention planning."""
+        """Index one bounded legacy cohort outside ordinary retention planning.
+
+        This is intentionally an explicit, low-priority migration operation:
+        retention status reads must never perform media filesystem I/O or take
+        an SQLite writer lock merely because an older row has no stored size.
+        """
         with self._lock, self._connect() as conn:
             try:
                 cursor_id = max(
@@ -2843,11 +2910,20 @@ class EventStore:
                 """
                 select min(id) as cursor_id, snapshot_path from events
                 where snapshot_path != '' and snapshot_size_bytes <= 0
+                  and not exists (
+                      select 1 from snapshot_size_migration
+                      where snapshot_size_migration.snapshot_path = events.snapshot_path
+                        and snapshot_size_migration.checked_at > ?
+                  )
                 group by snapshot_path
                 having min(id) > ?
                 order by cursor_id asc limit ?
                 """,
-                (cursor_id, max(1, int(limit))),
+                (
+                    (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+                    cursor_id,
+                    max(1, int(limit)),
+                ),
             ).fetchall()
         if not rows:
             if cursor_id > 0:
@@ -2884,8 +2960,17 @@ class EventStore:
                         self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
                         str(next_cursor_id),
                     )
-        if not updates:
+        checked_paths = [str(row["snapshot_path"]) for row in rows]
+        if checked_paths:
             with self._lock, self._connect() as conn:
+                conn.executemany(
+                    "insert or replace into snapshot_size_migration "
+                    "(snapshot_path, checked_at) values (?, ?)",
+                    (
+                        (path, datetime.now(timezone.utc).isoformat())
+                        for path in checked_paths
+                    ),
+                )
                 self._set_metadata_value(
                     conn,
                     self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
@@ -2894,8 +2979,11 @@ class EventStore:
         return len(updates)
 
     def snapshot_retention_plan(self, cutoff_epoch: float) -> dict[str, Any]:
-        """Report database-indexed incident snapshot use and age expiry."""
-        self._backfill_snapshot_sizes()
+        """Report database-indexed incident snapshot use and age expiry.
+
+        Planning is a pure database read.  In WAL mode it can safely run beside
+        incident writers, so it must not acquire the EventStore writer mutex.
+        """
         cutoff = datetime.fromtimestamp(float(cutoff_epoch), timezone.utc).isoformat()
         ranked = """
             with ranked as (
@@ -2906,52 +2994,55 @@ class EventStore:
                 from events where snapshot_path != ''
             )
         """
-        with self._lock, self._connect() as conn:
-            total = conn.execute(
-                ranked
-                + """
-                select count(*) as file_count,
-                       coalesce(sum(snapshot_size_bytes), 0) as bytes,
-                       coalesce(sum(case when snapshot_size_bytes <= 0 then 1 else 0 end), 0)
-                           as unindexed_files
-                from ranked where snapshot_rank = 1
-                """
-            ).fetchone()
-            cameras = conn.execute(
-                ranked
-                + """
-                select camera_id, count(*) as file_count,
-                       coalesce(sum(snapshot_size_bytes), 0) as bytes
-                from ranked where snapshot_rank = 1
-                group by camera_id order by camera_id
-                """
-            ).fetchall()
+        with self._connect() as conn:
             has_faces = conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
             ).fetchone() is not None
-            face_clause = (
-                "and not exists (select 1 from face_observations "
-                "where face_observations.snapshot_path = ranked.snapshot_path "
-                "and face_observations.reference_pinned = 1)"
+            protected_join = (
+                "left join (select distinct snapshot_path from face_observations "
+                "where reference_pinned = 1) as pinned "
+                "on pinned.snapshot_path = ranked.snapshot_path"
                 if has_faces
                 else ""
             )
-            expired = conn.execute(
+            unprotected_predicate = (
+                "and pinned.snapshot_path is null" if has_faces else ""
+            )
+            cameras = conn.execute(
                 ranked
                 + f"""
-                select count(*) as file_count,
-                       coalesce(sum(snapshot_size_bytes), 0) as bytes
+                select camera_id,
+                       count(*) as file_count,
+                       coalesce(sum(snapshot_size_bytes), 0) as bytes,
+                       coalesce(sum(case when snapshot_size_bytes <= 0
+                                         and sized.snapshot_path is null
+                                         then 1 else 0 end), 0)
+                           as unindexed_files,
+                       coalesce(sum(case when created_at < ? {unprotected_predicate}
+                                         then 1 else 0 end), 0) as expired_files,
+                       coalesce(sum(case when created_at < ? {unprotected_predicate}
+                                         then snapshot_size_bytes else 0 end), 0)
+                           as expired_bytes
                 from ranked
-                where snapshot_rank = 1 and created_at < ? {face_clause}
+                left join snapshot_size_migration as sized
+                  on sized.snapshot_path = ranked.snapshot_path
+                {protected_join}
+                where snapshot_rank = 1
+                group by camera_id order by camera_id
                 """,
-                (cutoff,),
-            ).fetchone()
+                (cutoff, cutoff),
+            ).fetchall()
+        file_count = sum(int(row["file_count"] or 0) for row in cameras)
+        total_bytes = sum(int(row["bytes"] or 0) for row in cameras)
+        unindexed_files = sum(int(row["unindexed_files"] or 0) for row in cameras)
+        expired_files = sum(int(row["expired_files"] or 0) for row in cameras)
+        expired_bytes = sum(int(row["expired_bytes"] or 0) for row in cameras)
         return {
-            "file_count": int(total["file_count"] or 0),
-            "bytes": int(total["bytes"] or 0),
-            "unindexed_files": int(total["unindexed_files"] or 0),
-            "expired_files": int(expired["file_count"] or 0),
-            "expired_bytes": int(expired["bytes"] or 0),
+            "file_count": file_count,
+            "bytes": total_bytes,
+            "unindexed_files": unindexed_files,
+            "expired_files": expired_files,
+            "expired_bytes": expired_bytes,
             "per_camera": [
                 {
                     "camera_id": str(row["camera_id"]),
@@ -2976,6 +3067,12 @@ class EventStore:
             )
         """
         with self._lock, self._connect() as conn:
+            conn.execute("begin immediate")
+            conn.execute(
+                "delete from media_deletion_claims "
+                "where role = 'snapshot' and claimed_at < ?",
+                ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),),
+            )
             has_faces = conn.execute(
                 "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
             ).fetchone() is not None
@@ -2995,6 +3092,17 @@ class EventStore:
                 """,
                 (cutoff, bounded_limit),
             ).fetchall()
+            claimed_at = datetime.now(timezone.utc).isoformat()
+            claimed_rows: list[sqlite3.Row] = []
+            for row in rows:
+                claimed = conn.execute(
+                    "insert or ignore into media_deletion_claims "
+                    "(path, role, claimed_at) values (?, 'snapshot', ?)",
+                    (str(row["snapshot_path"]), claimed_at),
+                )
+                if claimed.rowcount:
+                    claimed_rows.append(row)
+            rows = claimed_rows
         removed: list[str] = []
         deleted_files = 0
         missing_files = 0
@@ -3010,26 +3118,34 @@ class EventStore:
                 )
                 if self.media_storage is None:
                     path.relative_to((self.storage_dir / "snapshots").resolve())
-                elif self.media_storage.location_id_for(path, role="snapshots") is None:
-                    raise PermissionError("snapshot is outside configured snapshot storage")
+                elif self.media_storage.location_id_for(
+                    path, role="snapshots"
+                ) is None:
+                    raise PermissionError(
+                        "snapshot is outside configured snapshot storage"
+                    )
+                actual_size = max(
+                    int(row["snapshot_size_bytes"] or 0), int(path.stat().st_size)
+                )
                 path.unlink()
                 deleted_files += 1
-                deleted_bytes += int(row["snapshot_size_bytes"] or 0)
+                deleted_bytes += actual_size
                 removed.append(raw_path)
             except FileNotFoundError:
                 missing_files += 1
                 removed.append(raw_path)
             except (PermissionError, OSError, RuntimeError, ValueError):
                 failed_files += 1
-        if removed:
+        for offset in range(0, len(removed), self.SNAPSHOT_REFERENCE_WRITE_BATCH):
+            batch = removed[offset : offset + self.SNAPSHOT_REFERENCE_WRITE_BATCH]
             with self._lock, self._connect() as conn:
                 conn.executemany(
                     "update events set snapshot_path = '', snapshot_size_bytes = 0 where snapshot_path = ?",
-                    ((path,) for path in removed),
+                    ((path,) for path in batch),
                 )
                 conn.executemany(
                     "update motion_audits set snapshot_path = '' where snapshot_path = ?",
-                    ((path,) for path in removed),
+                    ((path,) for path in batch),
                 )
                 has_faces = conn.execute(
                     "select 1 from sqlite_master where type = 'table' and name = 'face_observations'"
@@ -3038,8 +3154,15 @@ class EventStore:
                     conn.executemany(
                         "update face_observations set snapshot_path = '' "
                         "where snapshot_path = ? and reference_pinned = 0",
-                        ((path,) for path in removed),
+                        ((path,) for path in batch),
                     )
+        if rows:
+            with self._lock, self._connect() as conn:
+                conn.executemany(
+                    "delete from media_deletion_claims "
+                    "where path = ? and role = 'snapshot'",
+                    ((str(row["snapshot_path"]),) for row in rows),
+                )
         return {
             "selected_files": len(rows),
             "deleted_files": deleted_files,

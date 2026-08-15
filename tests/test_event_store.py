@@ -39,12 +39,13 @@ class EventStoreTest(unittest.TestCase):
                 return original_connect()
 
             store._connect = counted_connect  # type: ignore[method-assign]
-            updated = store._backfill_snapshot_sizes(limit=5, write_batch_size=2)
+            updated = store.migrate_snapshot_sizes(limit=5, write_batch_size=2)
 
             self.assertEqual(updated, 5)
-            # One read transaction plus three independently committed write
-            # batches keeps ordinary incident writers from waiting on all five.
-            self.assertEqual(connection_count, 4)
+            # One read, three independently committed size batches, and one
+            # checked-path transaction keep ordinary writers from waiting on
+            # the filesystem migration.
+            self.assertEqual(connection_count, 5)
             with original_connect() as connection:
                 sizes = connection.execute(
                     "select snapshot_size_bytes from events order by id"
@@ -74,14 +75,112 @@ class EventStoreTest(unittest.TestCase):
             with store._connect() as connection:
                 connection.execute("update events set snapshot_size_bytes = 0")
 
-            self.assertEqual(store._backfill_snapshot_sizes(limit=3), 0)
-            self.assertEqual(store._backfill_snapshot_sizes(limit=3), 2)
+            self.assertEqual(store.migrate_snapshot_sizes(limit=3), 0)
+            self.assertEqual(store.migrate_snapshot_sizes(limit=3), 2)
             with store._connect() as connection:
                 rows = connection.execute(
                     "select snapshot_path, snapshot_size_bytes from events order by id"
                 ).fetchall()
             self.assertTrue(all(int(row["snapshot_size_bytes"]) == 0 for row in rows[:3]))
             self.assertTrue(all(int(row["snapshot_size_bytes"]) > 0 for row in rows[3:]))
+
+    def test_snapshot_retention_plan_is_read_only_and_does_not_stat_legacy_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot = root / "snapshots" / "gate" / "legacy.webp"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_bytes(b"legacy")
+            store = EventStore(root)
+            store.add_event(
+                camera_id="gate",
+                kind="object",
+                snapshot_path=str(snapshot),
+                created_at="2020-01-01T00:00:00+00:00",
+            )
+            with store._connect() as connection:
+                connection.execute("update events set snapshot_size_bytes = 0")
+
+            with patch.object(
+                store,
+                "_snapshot_file_size",
+                side_effect=AssertionError("retention planning must not stat media"),
+            ):
+                plan = store.snapshot_retention_plan(
+                    datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp()
+                )
+
+            self.assertEqual(plan["file_count"], 1)
+            self.assertEqual(plan["bytes"], 0)
+            self.assertEqual(plan["unindexed_files"], 1)
+            self.assertEqual(plan["expired_files"], 1)
+
+    def test_snapshot_retention_plan_does_not_acquire_writer_mutex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            store._lock.acquire()
+            try:
+                completed = threading.Event()
+                failures: list[BaseException] = []
+
+                def plan() -> None:
+                    try:
+                        store.snapshot_retention_plan(
+                            datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp()
+                        )
+                    except BaseException as error:
+                        failures.append(error)
+                    finally:
+                        completed.set()
+
+                worker = threading.Thread(target=plan)
+                worker.start()
+                self.assertTrue(completed.wait(1.0))
+                worker.join(timeout=1.0)
+                self.assertFalse(failures)
+            finally:
+                store._lock.release()
+
+    def test_snapshot_cleanup_yields_writer_between_reference_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            for index in range(5):
+                snapshot = root / "snapshots" / "gate" / f"old-{index}.webp"
+                snapshot.parent.mkdir(parents=True, exist_ok=True)
+                snapshot.write_bytes(f"old-{index}".encode())
+                store.add_event(
+                    camera_id="gate",
+                    kind="object",
+                    snapshot_path=str(snapshot),
+                    created_at="2020-01-01T00:00:00+00:00",
+                )
+
+            original_connect = store._connect
+            connection_count = 0
+
+            def counted_connect():
+                nonlocal connection_count
+                connection_count += 1
+                return original_connect()
+
+            store.SNAPSHOT_REFERENCE_WRITE_BATCH = 2
+            store._connect = counted_connect  # type: ignore[method-assign]
+            result = store.apply_snapshot_retention(
+                datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp(),
+                100,
+            )
+
+            self.assertEqual(result["deleted_files"], 5)
+            # One transactional claim, three independently committed reference
+            # cleanup batches, and one claim release transaction.
+            self.assertEqual(connection_count, 5)
+            with original_connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "select count(*) from events where snapshot_path != ''"
+                    ).fetchone()[0],
+                    0,
+                )
 
     def test_snapshot_retention_reports_usage_and_clears_expired_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -571,8 +670,15 @@ class EventStoreTest(unittest.TestCase):
                 bucket_minutes=1,
                 now=sampled_at + timedelta(minutes=1),
             )
+            with store._connect() as connection:
+                stored_payload = str(
+                    connection.execute(
+                        "select payload_json from runtime_telemetry_samples"
+                    ).fetchone()["payload_json"]
+                )
 
             self.assertEqual(len(history), 1)
+            self.assertTrue(stored_payload.startswith("zlib:"))
             self.assertEqual(history[0]["rss_bytes"], 100)
             self.assertEqual(history[0]["malloc_allocated_bytes"], 50)
             self.assertEqual(history[0]["malloc_free_bytes"], 10)
