@@ -16,6 +16,8 @@ from .media_storage import MediaStorageRegistry
 
 
 class EventStore:
+    SNAPSHOT_SIZE_WRITE_BATCH = 50
+    SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY = "snapshot_size_backfill_cursor"
     COMPACT_COLUMNS = (
         "id, camera_id, kind, snapshot_path, recording_path, objects_json, created_at"
     )
@@ -2816,27 +2818,78 @@ class EventStore:
         except (FileNotFoundError, PermissionError, OSError, RuntimeError, ValueError):
             return 0
 
-    def _backfill_snapshot_sizes(self, *, limit: int = 2000) -> int:
-        """Incrementally index legacy snapshot sizes off the API request path."""
+    def _backfill_snapshot_sizes(
+        self,
+        *,
+        limit: int = 250,
+        write_batch_size: int | None = None,
+    ) -> int:
+        """Index one bounded legacy cohort without monopolizing retention planning."""
         with self._lock, self._connect() as conn:
+            try:
+                cursor_id = max(
+                    0,
+                    int(
+                        self._metadata_value(
+                            conn,
+                            self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
+                        )
+                        or 0
+                    ),
+                )
+            except ValueError:
+                cursor_id = 0
             rows = conn.execute(
                 """
-                select snapshot_path from events
+                select min(id) as cursor_id, snapshot_path from events
                 where snapshot_path != '' and snapshot_size_bytes <= 0
-                group by snapshot_path order by min(id) asc limit ?
+                group by snapshot_path
+                having min(id) > ?
+                order by cursor_id asc limit ?
                 """,
-                (max(1, int(limit)),),
+                (cursor_id, max(1, int(limit))),
             ).fetchall()
+        if not rows:
+            if cursor_id > 0:
+                with self._lock, self._connect() as conn:
+                    self._set_metadata_value(
+                        conn,
+                        self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
+                        "0",
+                    )
+            return 0
+        next_cursor_id = max(int(row["cursor_id"]) for row in rows)
         updates = [
             (size, str(row["snapshot_path"]))
             for row in rows
             if (size := self._snapshot_file_size(str(row["snapshot_path"]))) > 0
         ]
-        if updates:
+        batch_size = max(
+            1,
+            min(
+                250,
+                int(write_batch_size or self.SNAPSHOT_SIZE_WRITE_BATCH),
+            ),
+        )
+        for offset in range(0, len(updates), batch_size):
+            batch = updates[offset : offset + batch_size]
             with self._lock, self._connect() as conn:
                 conn.executemany(
                     "update events set snapshot_size_bytes = ? where snapshot_path = ?",
-                    updates,
+                    batch,
+                )
+                if offset + batch_size >= len(updates):
+                    self._set_metadata_value(
+                        conn,
+                        self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
+                        str(next_cursor_id),
+                    )
+        if not updates:
+            with self._lock, self._connect() as conn:
+                self._set_metadata_value(
+                    conn,
+                    self.SNAPSHOT_SIZE_BACKFILL_CURSOR_KEY,
+                    str(next_cursor_id),
                 )
         return len(updates)
 

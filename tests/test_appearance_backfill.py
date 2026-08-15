@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -43,6 +44,72 @@ class _Encoder:
 
 
 class DeferredAppearanceBackfillTest(unittest.TestCase):
+    def test_empty_queue_does_not_reserve_or_wait_for_database_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "events.db"
+            with sqlite3.connect(database) as connection:
+                connection.execute("pragma journal_mode = wal")
+                connection.execute(
+                    "create table events (id integer primary key, created_at text not null)"
+                )
+            service = DeferredAppearanceBackfill(
+                database,
+                Path(tmp),
+                ObjectTrackingConfig(
+                    vehicle_reid_enabled=True,
+                    vehicle_reid_model_path="vehicle.xml",
+                ),
+                _Events({"id": 7}),
+                AppearanceIndex(database),
+                _Encoder(),
+            )
+            blocker = sqlite3.connect(database, timeout=0.1)
+            blocker.execute("begin immediate")
+            try:
+                started = time.monotonic()
+                self.assertIsNone(service._claim())
+                elapsed = time.monotonic() - started
+            finally:
+                blocker.rollback()
+                blocker.close()
+
+            self.assertLess(elapsed, 1.0)
+
+    def test_future_job_does_not_reserve_or_wait_for_database_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "events.db"
+            with sqlite3.connect(database) as connection:
+                connection.execute("pragma journal_mode = wal")
+                connection.execute(
+                    "create table events (id integer primary key, created_at text not null)"
+                )
+                connection.execute(
+                    "insert into events values (7, '2026-08-05T21:52:05+00:00')"
+                )
+            service = DeferredAppearanceBackfill(
+                database,
+                Path(tmp),
+                ObjectTrackingConfig(
+                    vehicle_reid_enabled=True,
+                    vehicle_reid_model_path="vehicle.xml",
+                ),
+                _Events({"id": 7}),
+                AppearanceIndex(database),
+                _Encoder(),
+            )
+            self.assertTrue(service.enqueue(7, "gate", delay_seconds=60))
+            blocker = sqlite3.connect(database, timeout=0.1)
+            blocker.execute("begin immediate")
+            try:
+                started = time.monotonic()
+                self.assertIsNone(service._claim())
+                elapsed = time.monotonic() - started
+            finally:
+                blocker.rollback()
+                blocker.close()
+
+            self.assertLess(elapsed, 1.0)
+
     def test_worker_retries_transient_database_lock_when_claiming(self) -> None:
         service = DeferredAppearanceBackfill.__new__(DeferredAppearanceBackfill)
         service.config = ObjectTrackingConfig(

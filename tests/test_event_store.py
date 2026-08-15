@@ -14,6 +14,75 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_snapshot_size_backfill_yields_writer_between_bounded_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            for index in range(5):
+                snapshot = root / "snapshots" / "gate" / f"legacy-{index}.webp"
+                snapshot.parent.mkdir(parents=True, exist_ok=True)
+                snapshot.write_bytes(f"snapshot-{index}".encode())
+                store.add_event(
+                    camera_id="gate",
+                    kind="object",
+                    snapshot_path=str(snapshot),
+                )
+            with store._connect() as connection:
+                connection.execute("update events set snapshot_size_bytes = 0")
+
+            original_connect = store._connect
+            connection_count = 0
+
+            def counted_connect():
+                nonlocal connection_count
+                connection_count += 1
+                return original_connect()
+
+            store._connect = counted_connect  # type: ignore[method-assign]
+            updated = store._backfill_snapshot_sizes(limit=5, write_batch_size=2)
+
+            self.assertEqual(updated, 5)
+            # One read transaction plus three independently committed write
+            # batches keeps ordinary incident writers from waiting on all five.
+            self.assertEqual(connection_count, 4)
+            with original_connect() as connection:
+                sizes = connection.execute(
+                    "select snapshot_size_bytes from events order by id"
+                ).fetchall()
+            self.assertTrue(all(int(row[0]) > 0 for row in sizes))
+
+    def test_missing_snapshot_cohort_does_not_starve_later_size_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            snapshots = root / "snapshots" / "gate"
+            snapshots.mkdir(parents=True)
+            for index in range(3):
+                store.add_event(
+                    camera_id="gate",
+                    kind="object",
+                    snapshot_path=str(snapshots / f"missing-{index}.webp"),
+                )
+            for index in range(2):
+                snapshot = snapshots / f"present-{index}.webp"
+                snapshot.write_bytes(f"present-{index}".encode())
+                store.add_event(
+                    camera_id="gate",
+                    kind="object",
+                    snapshot_path=str(snapshot),
+                )
+            with store._connect() as connection:
+                connection.execute("update events set snapshot_size_bytes = 0")
+
+            self.assertEqual(store._backfill_snapshot_sizes(limit=3), 0)
+            self.assertEqual(store._backfill_snapshot_sizes(limit=3), 2)
+            with store._connect() as connection:
+                rows = connection.execute(
+                    "select snapshot_path, snapshot_size_bytes from events order by id"
+                ).fetchall()
+            self.assertTrue(all(int(row["snapshot_size_bytes"]) == 0 for row in rows[:3]))
+            self.assertTrue(all(int(row["snapshot_size_bytes"]) > 0 for row in rows[3:]))
+
     def test_snapshot_retention_reports_usage_and_clears_expired_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

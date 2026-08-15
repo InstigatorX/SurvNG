@@ -50,6 +50,8 @@ class DeferredAppearanceBackfill:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        self._claim_lock_deferrals = 0
+        self._last_claim_lock_deferral_at = ""
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -144,6 +146,21 @@ class DeferredAppearanceBackfill:
         return True
 
     def _claim(self) -> sqlite3.Row | None:
+        # Do not reserve SQLite's single writer slot merely to discover that
+        # the durable queue is empty. This worker is normally idle, and a
+        # BEGIN IMMEDIATE here used to wait behind retention/telemetry writes
+        # on every poll even when there was no work to claim.
+        with self._connect() as connection:
+            ready = connection.execute(
+                """
+                select 1 from appearance_backfill_jobs
+                where state = 'queued' and available_at <= ? limit 1
+                """,
+                (time.time(),),
+            ).fetchone()
+        if ready is None:
+            return None
+
         with self._connect() as connection:
             connection.execute("begin immediate")
             row = connection.execute(
@@ -293,6 +310,12 @@ class DeferredAppearanceBackfill:
                 # retry queued work instead of permanently losing backfill.
                 message = str(exc).lower()
                 if "locked" in message or "busy" in message:
+                    self._claim_lock_deferrals = int(
+                        getattr(self, "_claim_lock_deferrals", 0)
+                    ) + 1
+                    self._last_claim_lock_deferral_at = datetime.now(
+                        timezone.utc
+                    ).isoformat()
                     LOGGER.info("deferred appearance backfill waiting for database writer")
                     self._stop.wait(0.5)
                     continue
@@ -336,4 +359,10 @@ class DeferredAppearanceBackfill:
             "running": bool(self._thread is not None and self._thread.is_alive()),
             "counts": counts,
             "latest": dict(latest) if latest is not None else None,
+            "writer_lock_deferrals": int(
+                getattr(self, "_claim_lock_deferrals", 0)
+            ),
+            "last_writer_lock_deferral_at": str(
+                getattr(self, "_last_claim_lock_deferral_at", "")
+            ),
         }
