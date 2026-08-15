@@ -802,7 +802,9 @@ class InferenceSupervisorTest(unittest.TestCase):
         with worker._admission:
             self.assertTrue(worker._admission.wait_for(
                 lambda: {
-                    priority for priority, _sequence, _token in worker._admission_waiters
+                    priority
+                    for priority, _sequence, _token, _queued_at
+                    in worker._admission_waiters
                 } == {
                     int(InferenceWorkload.INCIDENT_INITIAL),
                     int(InferenceWorkload.INCIDENT_REFINEMENT),

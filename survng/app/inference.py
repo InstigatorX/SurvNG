@@ -307,7 +307,7 @@ class _InferenceWorker:
         self._pending_lock = threading.Lock()
         self._pending_requests = 0
         self._admission = threading.Condition(threading.Lock())
-        self._admission_waiters: list[tuple[int, int, object]] = []
+        self._admission_waiters: list[tuple[int, int, object, float]] = []
         self._admission_sequence = 0
         self._admission_active = False
         # Preserve lazy-start behavior. Disabled roles still fail their normal
@@ -691,7 +691,7 @@ class _InferenceWorker:
         try:
             with self._admission:
                 self._admission_sequence += 1
-                waiter = (int(workload), self._admission_sequence, token)
+                waiter = (int(workload), self._admission_sequence, token, queued_at)
                 heapq.heappush(self._admission_waiters, waiter)
                 self._workload_stats[workload]["queued"] += 1
                 while True:
@@ -794,11 +794,18 @@ class _InferenceWorker:
             with self._pending_lock:
                 self._pending_requests = max(0, self._pending_requests - 1)
 
-    def status(self) -> dict[str, Any]:
+    def status(
+        self,
+        workload: InferenceWorkload = InferenceWorkload.OFFLINE,
+    ) -> dict[str, Any]:
         if self.start_enabled:
             try:
                 next_status = dict(
-                    self.request("status", timeout=INFERENCE_STATUS_TIMEOUT_SECONDS) or {}
+                    self.request(
+                        "status",
+                        timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
+                        workload=workload,
+                    ) or {}
                 )
                 with self._lock:
                     self._status = next_status
@@ -835,7 +842,9 @@ class _InferenceWorker:
         with self._admission:
             queued_by_workload = {
                 workload.name.lower(): sum(
-                    1 for priority, _sequence, _token in self._admission_waiters
+                    1
+                    for priority, _sequence, _token, _queued_at
+                    in self._admission_waiters
                     if priority == int(workload)
                 )
                 for workload in InferenceWorkload
@@ -855,6 +864,18 @@ class _InferenceWorker:
                         float(raw["wait_total_ms"]) / max(1, admitted), 3
                     ),
                     "max_wait_ms": round(float(raw["wait_max_ms"]), 3),
+                    "oldest_wait_ms": round(
+                        max(
+                            [
+                                max(0.0, (now - queued_at) * 1000.0)
+                                for priority, _sequence, _token, queued_at
+                                in self._admission_waiters
+                                if priority == int(workload)
+                            ]
+                            or [0.0]
+                        ),
+                        3,
+                    ),
                 }
             admission_open = self._admission_open
         with self._lock:
@@ -1154,6 +1175,23 @@ class InferenceSupervisor:
             self.enabled = next_enabled
 
     def reconfigure_roles(
+        self,
+        config: DetectorConfig,
+        roles: set[str],
+    ) -> None:
+        """Fence new inference while replacing process generations."""
+        with self._device_condition:
+            previously_accepting = self._device_accepting
+            self._device_accepting = False
+            self._device_condition.notify_all()
+        try:
+            self._reconfigure_roles_unfenced(config, roles)
+        finally:
+            with self._device_condition:
+                self._device_accepting = previously_accepting
+                self._device_condition.notify_all()
+
+    def _reconfigure_roles_unfenced(
         self,
         config: DetectorConfig,
         roles: set[str],
@@ -1846,23 +1884,32 @@ class InferenceSupervisor:
 
     def probe_devices(self) -> dict[str, Any]:
         try:
-            return dict(
-                self._select_object_worker().request(
-                    "probe_devices",
-                    timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
+            with self.offline_device_lease():
+                worker = self._ordered_object_workers(InferenceWorkload.OFFLINE)[0]
+                return dict(
+                    worker.request(
+                        "probe_devices",
+                        timeout=INFERENCE_STATUS_TIMEOUT_SECONDS,
+                        workload=InferenceWorkload.OFFLINE,
+                    )
+                    or {}
                 )
-                or {}
-            )
         except Exception as exc:
             return {"devices": [], "error": str(exc)}
 
     def inspect_model(self, path: str) -> dict[str, Any]:
         try:
-            return dict(
-                self._select_object_worker().request(
-                    "inspect_model", path=path, timeout=10.0
-                ) or {}
-            )
+            with self.offline_device_lease():
+                worker = self._ordered_object_workers(InferenceWorkload.OFFLINE)[0]
+                return dict(
+                    worker.request(
+                        "inspect_model",
+                        path=path,
+                        timeout=10.0,
+                        workload=InferenceWorkload.OFFLINE,
+                    )
+                    or {}
+                )
         except Exception as exc:
             return {"input_shape": [], "output_shapes": [], "error": str(exc)}
 
