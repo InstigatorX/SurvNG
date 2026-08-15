@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 import heapq
@@ -23,6 +24,8 @@ LOGGER = logging.getLogger("uvicorn.error")
 MAX_INFERENCE_FRAME_BYTES = 64 * 1024 * 1024
 INFERENCE_START_TIMEOUT_SECONDS = 30.0
 INFERENCE_REQUEST_TIMEOUT_SECONDS = 15.0
+INCIDENT_INITIAL_WORKER_TIMEOUT_SECONDS = 3.0
+INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS = 0.75
 PERSON_REID_REQUEST_TIMEOUT_SECONDS = 3.0
 INFERENCE_STATUS_TIMEOUT_SECONDS = 5.0
 INFERENCE_RESTART_DELAY_SECONDS = 1.0
@@ -39,11 +42,15 @@ class InferenceUnavailable(RuntimeError):
 class InferenceWorkload(IntEnum):
     """Security work runs before optional enrichment on each worker."""
 
-    INCIDENT = 0
-    INTERACTIVE = 1
-    TRACKING = 2
-    ENRICHMENT = 3
-    OFFLINE = 4
+    INCIDENT_INITIAL = 0
+    INCIDENT_REFINEMENT = 1
+    INTERACTIVE = 2
+    TRACKING = 3
+    ENRICHMENT = 4
+    OFFLINE = 5
+
+    # Compatibility for callers/tests that used the original coarse class.
+    INCIDENT = INCIDENT_INITIAL
 
 
 def stop_multiprocessing_resource_tracker(
@@ -303,6 +310,23 @@ class _InferenceWorker:
         self._admission_waiters: list[tuple[int, int, object]] = []
         self._admission_sequence = 0
         self._admission_active = False
+        # Preserve lazy-start behavior. Disabled roles still fail their normal
+        # start-enabled check in _ensure_worker_locked; only stop/reconfigure
+        # explicitly closes admission for an existing generation.
+        self._admission_open = True
+        self._active_workload: InferenceWorkload | None = None
+        self._workload_stats: dict[InferenceWorkload, dict[str, float | int]] = {
+            workload: {
+                "queued": 0,
+                "admitted": 0,
+                "completed": 0,
+                "failed": 0,
+                "timed_out": 0,
+                "wait_total_ms": 0.0,
+                "wait_max_ms": 0.0,
+            }
+            for workload in InferenceWorkload
+        }
         self._frame_buffer = None
         self._connection = None
         self._process = None
@@ -402,9 +426,19 @@ class _InferenceWorker:
             return True
         with self._lock:
             self._stopping = False
-            return self._ensure_worker_locked(force=True)
+            started = self._ensure_worker_locked(force=True)
+        with self._admission:
+            self._admission_open = bool(started)
+            self._admission.notify_all()
+        return started
 
     def stop(self) -> None:
+        # Close admission before waiting for the active IPC request. Queued
+        # callers wake immediately instead of unwinding one-by-one against a
+        # worker generation that is deliberately stopping.
+        with self._admission:
+            self._admission_open = False
+            self._admission.notify_all()
         stubborn_process = None
         with self._lock:
             self._stopping = True
@@ -634,14 +668,24 @@ class _InferenceWorker:
         *,
         frame: np.ndarray | None = None,
         timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
+        admission_timeout: float | None = None,
         workload: InferenceWorkload = InferenceWorkload.INTERACTIVE,
         **payload: Any,
     ) -> Any:
         if timeout <= 0:
             raise ValueError("inference timeout must be positive")
+        workload = InferenceWorkload(workload)
         deadline = time.monotonic() + timeout
+        admission_deadline = (
+            deadline
+            if admission_timeout is None
+            else min(deadline, time.monotonic() + max(0.0, admission_timeout))
+        )
+        queued_at = time.monotonic()
         token = object()
         admitted = False
+        completed = False
+        timed_out = False
         with self._pending_lock:
             self._pending_requests += 1
         try:
@@ -649,11 +693,21 @@ class _InferenceWorker:
                 self._admission_sequence += 1
                 waiter = (int(workload), self._admission_sequence, token)
                 heapq.heappush(self._admission_waiters, waiter)
+                self._workload_stats[workload]["queued"] += 1
                 while True:
-                    remaining = deadline - time.monotonic()
+                    if not self._admission_open:
+                        self._admission_waiters.remove(waiter)
+                        heapq.heapify(self._admission_waiters)
+                        self._admission.notify_all()
+                        raise InferenceUnavailable(
+                            f"{self.role} inference worker is stopping"
+                        )
+                    remaining = admission_deadline - time.monotonic()
                     if remaining <= 0:
                         self._admission_waiters.remove(waiter)
                         heapq.heapify(self._admission_waiters)
+                        self._workload_stats[workload]["timed_out"] += 1
+                        timed_out = True
                         self._admission.notify_all()
                         raise InferenceUnavailable(
                             f"{self.role} {operation} timed out waiting for priority admission"
@@ -661,7 +715,13 @@ class _InferenceWorker:
                     if not self._admission_active and self._admission_waiters[0] is waiter:
                         heapq.heappop(self._admission_waiters)
                         self._admission_active = True
+                        self._active_workload = workload
                         admitted = True
+                        wait_ms = max(0.0, (time.monotonic() - queued_at) * 1000.0)
+                        stats = self._workload_stats[workload]
+                        stats["admitted"] += 1
+                        stats["wait_total_ms"] += wait_ms
+                        stats["wait_max_ms"] = max(float(stats["wait_max_ms"]), wait_ms)
                         break
                     self._admission.wait(remaining)
             remaining = deadline - time.monotonic()
@@ -711,6 +771,7 @@ class _InferenceWorker:
                 if not response.get("ok"):
                     raise RuntimeError(str(response.get("error") or f"{operation} failed"))
                 self._last_error = ""
+                completed = True
                 return response.get("result")
             finally:
                 self._lock.release()
@@ -718,11 +779,17 @@ class _InferenceWorker:
             with self._admission:
                 if admitted:
                     self._admission_active = False
+                    self._active_workload = None
                 else:
                     retained = [item for item in self._admission_waiters if item[2] is not token]
                     if len(retained) != len(self._admission_waiters):
                         self._admission_waiters[:] = retained
                         heapq.heapify(self._admission_waiters)
+                stats = self._workload_stats[workload]
+                if completed:
+                    stats["completed"] += 1
+                elif not timed_out:
+                    stats["failed"] += 1
                 self._admission.notify_all()
             with self._pending_lock:
                 self._pending_requests = max(0, self._pending_requests - 1)
@@ -765,6 +832,31 @@ class _InferenceWorker:
 
     def isolation_status(self) -> dict[str, Any]:
         now = time.monotonic()
+        with self._admission:
+            queued_by_workload = {
+                workload.name.lower(): sum(
+                    1 for priority, _sequence, _token in self._admission_waiters
+                    if priority == int(workload)
+                )
+                for workload in InferenceWorkload
+            }
+            workload_status = {}
+            for workload, raw in self._workload_stats.items():
+                admitted = int(raw["admitted"])
+                workload_status[workload.name.lower()] = {
+                    "queued": queued_by_workload[workload.name.lower()],
+                    "active": int(self._active_workload is workload),
+                    "submitted": int(raw["queued"]),
+                    "admitted": admitted,
+                    "completed": int(raw["completed"]),
+                    "failed": int(raw["failed"]),
+                    "timed_out": int(raw["timed_out"]),
+                    "average_wait_ms": round(
+                        float(raw["wait_total_ms"]) / max(1, admitted), 3
+                    ),
+                    "max_wait_ms": round(float(raw["wait_max_ms"]), 3),
+                }
+            admission_open = self._admission_open
         with self._lock:
             while self._crash_times and now - self._crash_times[0] > INFERENCE_CRASH_WINDOW_SECONDS:
                 self._crash_times.popleft()
@@ -785,6 +877,8 @@ class _InferenceWorker:
                 "last_exit_at": self._last_exit_at,
                 "last_error": self._last_error,
                 "pending_requests": pending,
+                "admission_open": admission_open,
+                "workloads": workload_status,
                 "fallback_active": now < self._fallback_until,
                 "fallback_seconds_remaining": round(max(0.0, self._fallback_until - now), 1),
                 "request_timeout_seconds": (
@@ -807,6 +901,25 @@ class InferenceSupervisor:
         )
         self._object_route_lock = threading.Lock()
         self._object_route_cursor = 0
+        self._device_condition = threading.Condition(threading.Lock())
+        self._device_accepting = True
+        self._security_waiting = 0
+        self._security_active = 0
+        self._initial_waiting = 0
+        self._initial_active = 0
+        self._refinement_active = 0
+        self._optional_active = 0
+        self._device_workload_stats: dict[InferenceWorkload, dict[str, float | int]] = {
+            workload: {
+                "admitted": 0,
+                "completed": 0,
+                "shed": 0,
+                "timed_out": 0,
+                "wait_total_ms": 0.0,
+                "wait_max_ms": 0.0,
+            }
+            for workload in InferenceWorkload
+        }
         self._object_workers = self._build_object_workers(config)
         # Preserve the long-standing primary-worker handle for compatibility
         # with lifecycle diagnostics and focused tests.
@@ -836,11 +949,12 @@ class InferenceSupervisor:
 
     def _ordered_object_workers(
         self,
-        workload: InferenceWorkload = InferenceWorkload.INCIDENT,
+        workload: InferenceWorkload = InferenceWorkload.INCIDENT_INITIAL,
     ) -> list[_InferenceWorker]:
         """Order workers by pressure while rotating equal-load workers fairly."""
+        with self._config_lock:
+            workers = list(self._object_workers)
         with self._object_route_lock:
-            workers = self._object_workers
             if workload >= InferenceWorkload.TRACKING and len(workers) > 1:
                 # Worker zero is the protected incident lane. Lower-priority
                 # work remains on the rest of the pool and cannot queue ahead
@@ -857,6 +971,124 @@ class InferenceSupervisor:
             )
             self._object_route_cursor = (ordered[0] + 1) % count
             return [workers[index] for index in ordered]
+
+    @staticmethod
+    def _security_workload(workload: InferenceWorkload) -> bool:
+        return workload <= InferenceWorkload.INCIDENT_REFINEMENT
+
+    def _enter_device_workload(
+        self,
+        workload: InferenceWorkload,
+        *,
+        shed_optional: bool = True,
+        timeout: float = INFERENCE_REQUEST_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Cooperatively keep optional GPU work behind security inference."""
+        started = time.monotonic()
+        deadline = started + max(0.0, timeout)
+        security = self._security_workload(workload)
+        with self._device_condition:
+            if not self._device_accepting:
+                self._device_workload_stats[workload]["shed"] += 1
+                return False
+            if security:
+                self._security_waiting += 1
+                initial = workload is InferenceWorkload.INCIDENT_INITIAL
+                if initial:
+                    self._initial_waiting += 1
+                try:
+                    while self._optional_active or (
+                        initial and self._refinement_active
+                    ) or (
+                        not initial and (self._initial_waiting or self._initial_active)
+                    ):
+                        if not self._device_accepting:
+                            self._device_workload_stats[workload]["shed"] += 1
+                            return False
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            self._device_workload_stats[workload]["timed_out"] += 1
+                            return False
+                        self._device_condition.wait(remaining)
+                    self._security_active += 1
+                    if initial:
+                        self._initial_active += 1
+                    else:
+                        self._refinement_active += 1
+                finally:
+                    self._security_waiting = max(0, self._security_waiting - 1)
+                    if initial:
+                        self._initial_waiting = max(0, self._initial_waiting - 1)
+            else:
+                if shed_optional and (self._security_waiting or self._security_active):
+                    self._device_workload_stats[workload]["shed"] += 1
+                    return False
+                while self._security_waiting or self._security_active:
+                    if not self._device_accepting:
+                        self._device_workload_stats[workload]["shed"] += 1
+                        return False
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._device_workload_stats[workload]["timed_out"] += 1
+                        return False
+                    self._device_condition.wait(remaining)
+                self._optional_active += 1
+            wait_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+            stats = self._device_workload_stats[workload]
+            stats["admitted"] += 1
+            stats["wait_total_ms"] += wait_ms
+            stats["wait_max_ms"] = max(float(stats["wait_max_ms"]), wait_ms)
+            return True
+
+    def _leave_device_workload(self, workload: InferenceWorkload) -> None:
+        with self._device_condition:
+            if self._security_workload(workload):
+                self._security_active = max(0, self._security_active - 1)
+                if workload is InferenceWorkload.INCIDENT_INITIAL:
+                    self._initial_active = max(0, self._initial_active - 1)
+                else:
+                    self._refinement_active = max(0, self._refinement_active - 1)
+            else:
+                self._optional_active = max(0, self._optional_active - 1)
+            self._device_workload_stats[workload]["completed"] += 1
+            self._device_condition.notify_all()
+
+    @contextmanager
+    def offline_device_lease(self):
+        """Serialize unmanaged offline inference behind security workloads."""
+        workload = InferenceWorkload.OFFLINE
+        if not self._enter_device_workload(workload, shed_optional=False, timeout=60.0):
+            raise InferenceUnavailable("offline inference timed out waiting for production")
+        try:
+            yield
+        finally:
+            self._leave_device_workload(workload)
+
+    def workload_status(self) -> dict[str, Any]:
+        with self._device_condition:
+            result = {
+                "security_waiting": self._security_waiting,
+                "security_active": self._security_active,
+                "initial_waiting": self._initial_waiting,
+                "initial_active": self._initial_active,
+                "refinement_active": self._refinement_active,
+                "optional_active": self._optional_active,
+                "accepting": self._device_accepting,
+                "classes": {},
+            }
+            for workload, raw in self._device_workload_stats.items():
+                admitted = int(raw["admitted"])
+                result["classes"][workload.name.lower()] = {
+                    "admitted": admitted,
+                    "completed": int(raw["completed"]),
+                    "shed": int(raw["shed"]),
+                    "timed_out": int(raw["timed_out"]),
+                    "average_wait_ms": round(
+                        float(raw["wait_total_ms"]) / max(1, admitted), 3
+                    ),
+                    "max_wait_ms": round(float(raw["wait_max_ms"]), 3),
+                }
+            return result
 
     def _select_object_worker(self) -> _InferenceWorker:
         return self._ordered_object_workers()[0]
@@ -1185,9 +1417,16 @@ class InferenceSupervisor:
             object_ready = worker.start() and object_ready
         face_ready = self._face.start()
         reid_ready = self._reid.start()
-        return object_ready and face_ready and reid_ready
+        ready = object_ready and face_ready and reid_ready
+        with self._device_condition:
+            self._device_accepting = bool(ready)
+            self._device_condition.notify_all()
+        return ready
 
     def stop(self) -> None:
+        with self._device_condition:
+            self._device_accepting = False
+            self._device_condition.notify_all()
         failures: list[tuple[str, BaseException]] = []
         workers = [
             ("reid", self._reid),
@@ -1229,11 +1468,51 @@ class InferenceSupervisor:
         frame: np.ndarray,
         confidence_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
-        unavailable: list[str] = []
+        """Interactive compatibility boundary; security callers must be explicit."""
         return self._detect_for_workload(
             frame,
             confidence_threshold,
-            InferenceWorkload.INCIDENT,
+            InferenceWorkload.INTERACTIVE,
+        )
+
+    def detect_initial(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._detect_for_workload(
+            frame,
+            confidence_threshold,
+            InferenceWorkload.INCIDENT_INITIAL,
+        )
+
+    def detect_refinement(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._detect_for_workload(
+            frame,
+            confidence_threshold,
+            InferenceWorkload.INCIDENT_REFINEMENT,
+        )
+
+    def detect_interactive(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.detect(frame, confidence_threshold)
+
+    def detect_offline(
+        self,
+        frame: np.ndarray,
+        confidence_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._detect_for_workload(
+            frame,
+            confidence_threshold,
+            InferenceWorkload.OFFLINE,
         )
 
     def detect_tracking(
@@ -1264,31 +1543,72 @@ class InferenceSupervisor:
         confidence_threshold: float | None,
         workload: InferenceWorkload,
     ) -> list[dict[str, Any]]:
+        shed_optional = workload in {
+            InferenceWorkload.TRACKING,
+            InferenceWorkload.ENRICHMENT,
+        }
+        if not self._enter_device_workload(
+            workload,
+            shed_optional=shed_optional,
+        ):
+            # Optional consumers process timestamped samples. Once security
+            # work is pending, retaining that old sample is worse than
+            # dropping it and allowing the next fresh sample to recover.
+            if workload >= InferenceWorkload.TRACKING:
+                return []
+            return [{
+                "status": "detector_unavailable",
+                "error": f"{workload.name.lower()} inference admission timed out",
+            }]
         unavailable: list[str] = []
-        for worker in self._ordered_object_workers(workload):
-            try:
-                return list(
-                    worker.request(
-                        "detect",
-                        frame=frame,
-                        confidence_threshold=confidence_threshold,
-                        workload=workload,
+        try:
+            workers = self._ordered_object_workers(workload)
+            fast_failover = bool(
+                workload is InferenceWorkload.INCIDENT_INITIAL
+                and len(workers) > 1
+            )
+            for worker in workers:
+                try:
+                    return list(
+                        worker.request(
+                            "detect",
+                            frame=frame,
+                            confidence_threshold=confidence_threshold,
+                            workload=workload,
+                            timeout=(
+                                INCIDENT_INITIAL_WORKER_TIMEOUT_SECONDS
+                                if fast_failover
+                                else INFERENCE_REQUEST_TIMEOUT_SECONDS
+                            ),
+                            admission_timeout=(
+                                INCIDENT_INITIAL_ADMISSION_TIMEOUT_SECONDS
+                                if fast_failover
+                                else None
+                            ),
+                        )
+                        or []
                     )
-                    or []
-                )
-            except InferenceUnavailable as exc:
-                unavailable.append(str(exc))
-                continue
-            except Exception as exc:
-                LOGGER.error("Isolated object detection unavailable: %s", exc)
-                return [{"status": "detector_unavailable", "error": str(exc)}]
-        error = "; ".join(dict.fromkeys(unavailable)) or "all object inference workers unavailable"
-        LOGGER.error("Isolated object detection unavailable: %s", error)
-        return [{"status": "detector_unavailable", "error": error}]
+                except InferenceUnavailable as exc:
+                    unavailable.append(str(exc))
+                    continue
+                except Exception as exc:
+                    LOGGER.error("Isolated object detection unavailable: %s", exc)
+                    return [{"status": "detector_unavailable", "error": str(exc)}]
+            error = "; ".join(dict.fromkeys(unavailable)) or "all object inference workers unavailable"
+            LOGGER.error("Isolated object detection unavailable: %s", error)
+            return [{"status": "detector_unavailable", "error": error}]
+        finally:
+            self._leave_device_workload(workload)
 
     def embed(self, face: np.ndarray) -> np.ndarray:
-        result = self._face.request("embed", frame=face)
-        return np.asarray(result, dtype=np.float32)
+        workload = InferenceWorkload.ENRICHMENT
+        if not self._enter_device_workload(workload):
+            raise InferenceUnavailable("face embedding shed for incident inference")
+        try:
+            result = self._face.request("embed", frame=face, workload=workload)
+            return np.asarray(result, dtype=np.float32)
+        finally:
+            self._leave_device_workload(workload)
 
     def detect_faces(self, frame: np.ndarray) -> list[dict[str, Any]]:
         if (
@@ -1296,35 +1616,55 @@ class InferenceSupervisor:
             or not self.config.face_detection_model_path
         ):
             return []
+        workload = InferenceWorkload.ENRICHMENT
+        if not self._enter_device_workload(workload):
+            return []
         try:
             return list(
                 self._face.request(
                     "detect_faces",
                     frame=frame,
                     confidence_threshold=self.config.face_detection_threshold,
+                    workload=workload,
                 )
                 or []
             )
         except Exception as exc:
             LOGGER.warning("Dedicated face detection unavailable: %s", exc)
             return []
+        finally:
+            self._leave_device_workload(workload)
 
     def embed_person(self, person: np.ndarray) -> np.ndarray:
-        result = self._reid.request(
-            "embed_person",
-            frame=person,
-            timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
-        )
-        return np.asarray(result, dtype=np.float32)
+        workload = InferenceWorkload.ENRICHMENT
+        if not self._enter_device_workload(workload):
+            raise InferenceUnavailable("person ReID shed for incident inference")
+        try:
+            result = self._reid.request(
+                "embed_person",
+                frame=person,
+                timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
+                workload=workload,
+            )
+            return np.asarray(result, dtype=np.float32)
+        finally:
+            self._leave_device_workload(workload)
 
     def embed_reid(self, label: str, crop: np.ndarray) -> np.ndarray:
-        result = self._reid.request(
-            "embed_reid",
-            frame=crop,
-            label=str(label or "").strip().lower(),
-            timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
-        )
-        return np.asarray(result, dtype=np.float32)
+        workload = InferenceWorkload.ENRICHMENT
+        if not self._enter_device_workload(workload):
+            raise InferenceUnavailable("object ReID shed for incident inference")
+        try:
+            result = self._reid.request(
+                "embed_reid",
+                frame=crop,
+                label=str(label or "").strip().lower(),
+                timeout=PERSON_REID_REQUEST_TIMEOUT_SECONDS,
+                workload=workload,
+            )
+            return np.asarray(result, dtype=np.float32)
+        finally:
+            self._leave_device_workload(workload)
 
     @staticmethod
     def _aggregate_object_status(statuses: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1447,6 +1787,7 @@ class InferenceSupervisor:
         pending = isolation["pending_requests"]
         runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
         runtime["pending_frames"] = runtime["queue_depth"]
+        runtime["workloads"] = self.workload_status()
         status["runtime"] = runtime
         status["isolation"] = isolation
         status["configured_device"] = self.config.device
@@ -1462,6 +1803,7 @@ class InferenceSupervisor:
         pending = self.isolation_status()["pending_requests"]
         runtime["queue_depth"] = max(int(runtime.get("queue_depth") or 0), pending)
         runtime["pending_frames"] = runtime["queue_depth"]
+        runtime["workloads"] = self.workload_status()
         status["runtime"] = runtime
         return status
 

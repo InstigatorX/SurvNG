@@ -138,6 +138,29 @@ class InferenceSupervisorTest(unittest.TestCase):
         first.request.assert_called_once()
         second.request.assert_called_once()
 
+    def test_initial_detection_uses_bounded_per_worker_failover(self) -> None:
+        supervisor = InferenceSupervisor(
+            DetectorConfig(enabled=False, object_worker_count=2)
+        )
+        self.addCleanup(supervisor.stop)
+        first, second = supervisor._object_workers
+        first.pending_requests = Mock(return_value=0)
+        second.pending_requests = Mock(return_value=0)
+        first.request = Mock(side_effect=InferenceUnavailable("worker one wedged"))
+        second.request = Mock(return_value=[{"label": "person"}])
+
+        result = supervisor.detect_initial(
+            np.zeros((24, 32, 3), dtype=np.uint8)
+        )
+
+        self.assertEqual(result, [{"label": "person"}])
+        self.assertEqual(first.request.call_args.kwargs["timeout"], 3.0)
+        self.assertEqual(first.request.call_args.kwargs["admission_timeout"], 0.75)
+        self.assertEqual(
+            second.request.call_args.kwargs["workload"],
+            InferenceWorkload.INCIDENT_INITIAL,
+        )
+
     def test_tracking_uses_only_non_reserved_object_worker(self) -> None:
         supervisor = InferenceSupervisor(
             DetectorConfig(enabled=False, object_worker_count=2)
@@ -159,6 +182,82 @@ class InferenceSupervisorTest(unittest.TestCase):
             background.request.call_args.kwargs["workload"],
             InferenceWorkload.TRACKING,
         )
+
+    def test_security_workload_quiesces_and_sheds_optional_gpu_work(self) -> None:
+        self.assertTrue(
+            self.supervisor._enter_device_workload(InferenceWorkload.TRACKING)
+        )
+        incident_admitted = threading.Event()
+
+        def admit_incident() -> None:
+            if self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL
+            ):
+                incident_admitted.set()
+
+        thread = threading.Thread(target=admit_incident)
+        thread.start()
+        with self.supervisor._device_condition:
+            self.assertTrue(self.supervisor._device_condition.wait_for(
+                lambda: self.supervisor._security_waiting == 1,
+                timeout=1.0,
+            ))
+        self.assertFalse(
+            self.supervisor._enter_device_workload(InferenceWorkload.ENRICHMENT)
+        )
+        self.supervisor._leave_device_workload(InferenceWorkload.TRACKING)
+        self.assertTrue(incident_admitted.wait(1.0))
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        thread.join(timeout=1.0)
+
+        status = self.supervisor.workload_status()
+        self.assertEqual(status["classes"]["enrichment"]["shed"], 1)
+        self.assertEqual(status["classes"]["incident_initial"]["admitted"], 1)
+
+    def test_waiting_initial_runs_before_another_refinement(self) -> None:
+        self.assertTrue(self.supervisor._enter_device_workload(
+            InferenceWorkload.INCIDENT_REFINEMENT
+        ))
+        order: list[str] = []
+        initial_entered = threading.Event()
+        refinement_entered = threading.Event()
+
+        def enter_initial() -> None:
+            assert self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_INITIAL
+            )
+            order.append("initial")
+            initial_entered.set()
+
+        def enter_refinement() -> None:
+            assert self.supervisor._enter_device_workload(
+                InferenceWorkload.INCIDENT_REFINEMENT
+            )
+            order.append("refinement")
+            refinement_entered.set()
+
+        initial_thread = threading.Thread(target=enter_initial)
+        initial_thread.start()
+        with self.supervisor._device_condition:
+            self.assertTrue(self.supervisor._device_condition.wait_for(
+                lambda: self.supervisor._initial_waiting == 1,
+                timeout=1.0,
+            ))
+        refinement_thread = threading.Thread(target=enter_refinement)
+        refinement_thread.start()
+        self.supervisor._leave_device_workload(
+            InferenceWorkload.INCIDENT_REFINEMENT
+        )
+        self.assertTrue(initial_entered.wait(1.0))
+        self.assertFalse(refinement_entered.is_set())
+        self.supervisor._leave_device_workload(InferenceWorkload.INCIDENT_INITIAL)
+        self.assertTrue(refinement_entered.wait(1.0))
+        self.supervisor._leave_device_workload(
+            InferenceWorkload.INCIDENT_REFINEMENT
+        )
+        initial_thread.join(timeout=1.0)
+        refinement_thread.join(timeout=1.0)
+        self.assertEqual(order, ["initial", "refinement"])
 
     def test_runtime_config_update_reaches_supervisor_and_future_worker_respawns(self) -> None:
         updated = DetectorConfig(
@@ -558,6 +657,77 @@ class InferenceSupervisorTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertEqual(worker.isolation_status()["pending_requests"], 0)
 
+    def test_stop_wakes_queued_priority_admissions(self) -> None:
+        worker = _InferenceWorker(
+            DetectorConfig(enabled=False),
+            "object",
+            {},
+            start_enabled=False,
+        )
+
+        class Connection:
+            request_id = 0
+
+            def send(self, request):
+                self.request_id = int(request["id"])
+
+            @staticmethod
+            def poll(_timeout):
+                return True
+
+            def recv(self):
+                return {"id": self.request_id, "ok": True, "result": []}
+
+            @staticmethod
+            def close():
+                return None
+
+        worker._connection = Connection()
+        worker._ensure_worker_locked = Mock(return_value=True)
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+        queued_done = threading.Event()
+        errors: list[str] = []
+
+        def hold_worker_lock() -> None:
+            with worker._lock:
+                lock_held.set()
+                release_lock.wait(timeout=2.0)
+
+        def request(operation: str, done: threading.Event | None = None) -> None:
+            try:
+                worker.request(operation)
+            except InferenceUnavailable as error:
+                errors.append(str(error))
+            finally:
+                if done is not None:
+                    done.set()
+
+        holder = threading.Thread(target=hold_worker_lock)
+        holder.start()
+        self.assertTrue(lock_held.wait(1.0))
+        active = threading.Thread(target=request, args=("active",))
+        active.start()
+        with worker._admission:
+            self.assertTrue(worker._admission.wait_for(
+                lambda: worker._admission_active,
+                timeout=1.0,
+            ))
+        queued = threading.Thread(target=request, args=("queued", queued_done))
+        queued.start()
+        with worker._admission:
+            self.assertTrue(worker._admission.wait_for(
+                lambda: len(worker._admission_waiters) == 1,
+                timeout=1.0,
+            ))
+        stopper = threading.Thread(target=worker.stop)
+        stopper.start()
+        self.assertTrue(queued_done.wait(1.0))
+        self.assertIn("stopping", errors[0])
+        release_lock.set()
+        for thread in (holder, active, queued, stopper):
+            thread.join(timeout=1.0)
+
     def test_incident_request_runs_before_queued_tracking_request(self) -> None:
         worker = _InferenceWorker(
             DetectorConfig(enabled=False),
@@ -618,21 +788,37 @@ class InferenceSupervisorTest(unittest.TestCase):
             ),
             threading.Thread(
                 target=worker.request,
-                args=("incident",),
-                kwargs={"workload": InferenceWorkload.INCIDENT},
+                args=("refinement",),
+                kwargs={"workload": InferenceWorkload.INCIDENT_REFINEMENT},
+            ),
+            threading.Thread(
+                target=worker.request,
+                args=("incident-initial",),
+                kwargs={"workload": InferenceWorkload.INCIDENT_INITIAL},
             ),
         ])
         for thread in threads[1:]:
             thread.start()
-        deadline = time.monotonic() + 1.0
-        while worker.pending_requests() < 3 and time.monotonic() < deadline:
-            time.sleep(0.005)
+        with worker._admission:
+            self.assertTrue(worker._admission.wait_for(
+                lambda: {
+                    priority for priority, _sequence, _token in worker._admission_waiters
+                } == {
+                    int(InferenceWorkload.INCIDENT_INITIAL),
+                    int(InferenceWorkload.INCIDENT_REFINEMENT),
+                    int(InferenceWorkload.TRACKING),
+                },
+                timeout=1.0,
+            ))
         release_lock.set()
         holder.join(timeout=1.0)
         for thread in threads:
             thread.join(timeout=1.0)
 
-        self.assertEqual(sent, ["tracking-active", "incident", "tracking-queued"])
+        self.assertEqual(
+            sent,
+            ["tracking-active", "incident-initial", "refinement", "tracking-queued"],
+        )
         self.assertEqual(worker.pending_requests(), 0)
 
     def test_shared_frame_contract_rejects_non_bgr_and_non_uint8_arrays(self) -> None:

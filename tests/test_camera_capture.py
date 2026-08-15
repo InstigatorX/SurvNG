@@ -459,6 +459,10 @@ def test_repeated_start_stop_leaves_no_capture_generations() -> None:
             lambda: service.status()["capture_stats"]["live"]["starts"]
             >= cycle + 1
         )
+        _wait_until(lambda: service.latest("live") is not None)
+        frame = service.latest("live")
+        assert frame is not None
+        assert frame.generation == cycle + 1
         service.request_stop()
         assert service.wait_stopped(1.0) == {}
         with service._lock:

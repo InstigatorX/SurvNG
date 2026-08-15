@@ -170,6 +170,7 @@ class CapturedFrame:
     width: int
     height: int
     sequence: int
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +398,7 @@ class CameraCaptureService:
             for source in ("live", "main")
         }
         self._sequence = 0
+        self._generation = 0
 
     @staticmethod
     def _normalize_source(source: str) -> str:
@@ -407,7 +409,8 @@ class CameraCaptureService:
 
     def start(self) -> bool:
         with self._lock:
-            if self._stop.is_set():
+            starting_generation = self._stop.is_set()
+            if starting_generation:
                 lingering = [
                     source
                     for thread, (source, _stop_event) in self._all_threads.items()
@@ -427,6 +430,8 @@ class CameraCaptureService:
                         "observer is stopping"
                     )
             self._stop.clear()
+            if starting_generation:
+                self._generation += 1
         if self._observer_dispatch is not None:
             try:
                 self._observer_dispatch.start()
@@ -507,6 +512,7 @@ class CameraCaptureService:
             width=frame.width,
             height=frame.height,
             sequence=frame.sequence,
+            generation=frame.generation,
         )
 
     def request_stop(self) -> None:
@@ -859,6 +865,7 @@ class CameraCaptureService:
                 width=int(image.shape[1]),
                 height=int(image.shape[0]),
                 sequence=self._sequence,
+                generation=self._generation,
             )
             self._frames[source] = frame
             self._dimensions[source] = {

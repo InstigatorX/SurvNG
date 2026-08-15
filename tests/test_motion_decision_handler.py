@@ -28,6 +28,37 @@ class RecordingEventStore:
 
 
 class MotionDecisionHandlerTest(unittest.TestCase):
+    def test_failed_refinement_preserves_existing_provisional_evidence(self) -> None:
+        events = Mock()
+        snapshot_writer = Mock()
+        failed = RecordedDetectionResult(
+            frame=None,
+            objects=[{"status": "detector_unavailable", "error": "busy"}],
+            recording_path="",
+            timings_ms={"workflow_ms": 1.0},
+        )
+        handler = MotionDecisionHandler(
+            camera_id="gate",
+            events=events,
+            detection_provider=lambda _event_at: failed,
+            snapshot_writer=snapshot_writer,
+            object_serializer=json.dumps,
+        )
+
+        outcome = handler.refine(
+            "onvif/motion",
+            "motion",
+            datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
+            {},
+            existing_event_id=42,
+        )
+
+        self.assertEqual(outcome.event_id, 42)
+        self.assertIsNone(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "refinement_unavailable_preserved")
+        snapshot_writer.assert_not_called()
+        events.refine_event_evidence.assert_not_called()
+
     def test_handler_persists_cropped_temporal_face_candidates(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 160, 3), dtype=np.uint8)

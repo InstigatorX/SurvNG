@@ -79,6 +79,19 @@ class RecordedDetectionResult:
         yield self.recording_path
 
 
+@dataclass(frozen=True, slots=True)
+class TimestampedLiveFrame:
+    """Provenance required before live evidence can become provisional truth."""
+
+    frame: Frame
+    captured_at_epoch: float
+    captured_at_monotonic: float
+    sequence: int
+    camera_generation: int
+    capture_generation: int
+    source: str = "live"
+
+
 @dataclass(frozen=True)
 class _DecodedRecordedFrame:
     frame: Frame
@@ -736,7 +749,7 @@ class MotionRecordingProvider(Protocol):
 
 
 LiveFrameProvider = Callable[[], Frame | None]
-TimestampedLiveFrameProvider = Callable[[], tuple[Frame, float] | None]
+TimestampedLiveFrameProvider = Callable[[], TimestampedLiveFrame | tuple[Frame, float] | None]
 StopRequested = Callable[[], bool]
 
 
@@ -923,7 +936,44 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
-        frame, captured_at = sample
+        if isinstance(sample, TimestampedLiveFrame):
+            frame = sample.frame
+            captured_at = float(sample.captured_at_epoch)
+            sequence = int(sample.sequence)
+            generation = int(sample.camera_generation)
+            capture_generation = int(sample.capture_generation)
+            source = str(sample.source or "live")
+            provenance_valid = bool(
+                source == "live"
+                and sequence > 0
+                and generation > 0
+                and capture_generation > 0
+                and math.isfinite(float(sample.captured_at_monotonic))
+            )
+        else:
+            # Compatibility for external factories/tests. It remains fresh but
+            # cannot claim capture-generation provenance.
+            frame, captured_at = sample
+            sequence = 0
+            generation = 0
+            capture_generation = 0
+            source = "live"
+            provenance_valid = True
+        if not math.isfinite(float(captured_at)) or not provenance_valid:
+            return self._result(
+                None,
+                [{
+                    "status": "fast_frame_invalid_provenance",
+                    "frame_source": "live_fast_path",
+                    "frame_sequence": sequence,
+                    "camera_generation": generation,
+                    "capture_generation": capture_generation,
+                }],
+                "",
+                timing,
+                workflow_started,
+                refinement_pending=True,
+            )
         frame_age = time.time() - float(captured_at)
         if (
             frame_age > FAST_LIVE_FRAME_MAX_AGE_SECONDS
@@ -941,7 +991,12 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=True,
             )
-        objects = self._detect_objects(frame, timing=timing, enrich_faces=False)
+        objects = self._detect_objects(
+            frame,
+            timing=timing,
+            enrich_faces=False,
+            workload="initial",
+        )
         for detected in objects:
             if isinstance(detected, dict):
                 detected.update({
@@ -949,6 +1004,9 @@ class RecordedMotionObjectDetector:
                     "provisional_detection": True,
                     "frame_captured_at_epoch": round(float(captured_at), 6),
                     "frame_age_ms": round(max(0.0, frame_age) * 1000.0, 3),
+                    "frame_sequence": sequence,
+                    "camera_generation": generation,
+                    "capture_generation": capture_generation,
                 })
         return self._result(
             frame,
@@ -1100,7 +1158,11 @@ class RecordedMotionObjectDetector:
                         decoded = frames.get(frame_offset)
                         if decoded is None:
                             continue
-                        objects = self._detect_objects(decoded.frame, timing=timing)
+                        objects = self._detect_objects(
+                            decoded.frame,
+                            timing=timing,
+                            workload="refinement",
+                        )
                         row_start = float(row.get("start_epoch") or 0.0)
                         actual_offset = (
                             row_start + decoded.actual_offset - event_epoch
@@ -1216,7 +1278,11 @@ class RecordedMotionObjectDetector:
                 refinement_pending=refinement_pending,
                 face_candidates=(),
             )
-        objects = self._detect_objects(fallback, timing=timing)
+        objects = self._detect_objects(
+            fallback,
+            timing=timing,
+            workload="refinement",
+        )
         if objects:
             for detected in objects:
                 detected["frame_source"] = "live_fallback"
@@ -1282,6 +1348,7 @@ class RecordedMotionObjectDetector:
         *,
         timing: dict[str, float] | None = None,
         enrich_faces: bool = True,
+        workload: str = "refinement",
     ) -> list[dict[str, Any]]:
         enrichment_started = time.monotonic()
         configured_threshold = float(self.detector.config.confidence_threshold)
@@ -1307,7 +1374,12 @@ class RecordedMotionObjectDetector:
             )),
         )
         detector_started = time.monotonic()
-        objects = self.detector.detect(
+        detector_method = getattr(
+            self.detector,
+            "detect_initial" if workload == "initial" else "detect_refinement",
+            self.detector.detect,
+        )
+        objects = detector_method(
             frame,
             confidence_threshold=candidate_threshold,
         )

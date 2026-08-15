@@ -46,6 +46,7 @@ from .motion_pipeline import (
     MotionPipeline,
     RecordedMotionObjectDetectorFactory,
 )
+from .motion_pipeline.object_detection import TimestampedLiveFrame
 
 MOTION_QUEUE_SIZE = 32
 MOTION_ANALYSIS_QUEUE_SIZE = 1
@@ -470,11 +471,21 @@ class CameraWorker:
         frame = self.capture.request_frame(source)
         return frame.image if frame is not None else None
 
-    def _get_latest_detection_frame(self) -> tuple[np.ndarray, float] | None:
+    def _get_latest_detection_frame(self) -> TimestampedLiveFrame | None:
         frame = self.capture.request_frame(self.camera.normalized_source("live"))
         if frame is None:
             return None
-        return frame.image, frame.captured_at_epoch
+        with self.runtime_state.lock:
+            generation = self.runtime_state.generation
+        return TimestampedLiveFrame(
+            frame=frame.image,
+            captured_at_epoch=frame.captured_at_epoch,
+            captured_at_monotonic=frame.captured_at_monotonic,
+            sequence=frame.sequence,
+            camera_generation=generation,
+            capture_generation=frame.generation,
+            source=frame.source,
+        )
 
     def _get_latest_tracking_frame(
         self,

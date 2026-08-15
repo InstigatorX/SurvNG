@@ -143,7 +143,12 @@ def create_detection_router(deps: DetectionRouteDependencies) -> DetectionRouteB
         effective_confidence = (
             detection_threshold(camera, safe_confidence) if camera else safe_confidence
         )
-        objects = active_manager.detector.detect(
+        detect_interactive = getattr(
+            active_manager.detector,
+            "detect_interactive",
+            active_manager.detector.detect,
+        )
+        objects = detect_interactive(
             frame, confidence_threshold=effective_confidence
         )
         detector_error = detection_failure(objects)

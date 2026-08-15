@@ -52,8 +52,18 @@ def test_comparison_uses_identical_corpus_and_reports_disagreements(tmp_path: Pa
     # The minimum production corpus is ten. Repeat camera-balanced rows with
     # distinct IDs while sharing the same two harmless test images.
     events = [dict(events[index % 2], id=index + 1) for index in range(10)]
+    lease_entries: list[str] = []
+
+    class Lease:
+        def __enter__(self):
+            lease_entries.append("enter")
+
+        def __exit__(self, *_args):
+            lease_entries.append("exit")
+
     manager = SimpleNamespace(
         storage_dir=storage,
+        detector=SimpleNamespace(offline_device_lease=lambda: Lease()),
         events=SimpleNamespace(
             recent=lambda _limit: events,
             motion_audits=lambda **_kwargs: ([], 0),
@@ -87,3 +97,4 @@ def test_comparison_uses_identical_corpus_and_reports_disagreements(tmp_path: Pa
         "candidate": 0.0,
         "reference_labels": 10,
     }
+    assert lease_entries == ["enter", "exit"] * 22

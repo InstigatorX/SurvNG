@@ -302,6 +302,29 @@ def test_prewarm_failure_does_not_prevent_detection_or_persistence() -> None:
     assert status["handoff_failures"] == 0
 
 
+def test_mandatory_refinement_is_admitted_before_optional_prewarm() -> None:
+    initial = MotionDecisionOutcome(
+        event_id=42,
+        snapshot_path="initial.webp",
+        object_detected=False,
+        refinement_pending=True,
+    )
+    service, _decision, _tracking, prewarm, _image_reader = _service(initial)
+    stop = threading.Event()
+    service.start(stop)
+
+    prewarm.side_effect = lambda: (
+        service.status()["refinements_queued"] == 1
+        or (_ for _ in ()).throw(AssertionError("prewarm ran before refinement admission"))
+    )
+    service.process("motion", "person", datetime.now(timezone.utc), {})
+
+    prewarm.assert_called_once()
+    stop.set()
+    service.request_stop()
+    assert service.wait_stopped(1.0)
+
+
 def test_late_refinement_runs_off_decision_path_and_completes_before_shutdown() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,
@@ -432,7 +455,9 @@ def test_coalesced_refinement_does_not_duplicate_initial_tracking_handoff() -> N
     service.process("motion", "first", event_at, {"motion_episode_sequence": 9})
     assert entered.wait(1.0)
     service.process("motion", "duplicate", event_at, {"motion_episode_sequence": 9})
-    tracking.start.assert_not_called()
+    # Strong provisional evidence starts tracking immediately; the duplicate
+    # and later refinement must not start a second session.
+    tracking.start.assert_called_once()
 
     release.set()
     for _ in range(100):

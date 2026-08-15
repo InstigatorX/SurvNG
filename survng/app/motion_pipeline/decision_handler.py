@@ -502,6 +502,21 @@ class MotionDecisionHandler:
 
         detection_completed = frame is not None and not detection_failure(objects)
 
+        if existing_event_id is not None and not detection_completed:
+            # Refinement is additive. A transient decoder/detector failure must
+            # never replace a known-good provisional snapshot or its objects
+            # with empty/status-only evidence.
+            qualification["refinement_evidence_preserved"] = True
+            return MotionDecisionOutcome(
+                event_id=int(existing_event_id),
+                snapshot_path="",
+                object_detected=None,
+                detected_objects=(),
+                rejection_reason="refinement_unavailable_preserved",
+                refinement_pending=False,
+                processing_timing=processing_timing,
+            )
+
         activity_summary: dict[str, Any] | None = None
         if (
             self.activity_attributor is not None

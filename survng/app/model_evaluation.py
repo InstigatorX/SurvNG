@@ -8,6 +8,7 @@ import math
 import threading
 import time
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -185,8 +186,13 @@ class ModelEvaluationRunner:
         config.model_xml = ""
         config.labels_path = ""
         config.enabled = True
-        detector = OpenVinoDetector(config)
-        status = detector.status()
+        manager = self._get_manager()
+        production_detector = getattr(manager, "detector", None)
+        lease_factory = getattr(production_detector, "offline_device_lease", None)
+        load_lease = lease_factory() if callable(lease_factory) else nullcontext()
+        with load_lease:
+            detector = OpenVinoDetector(config)
+            status = detector.status()
         if not status.get("openvino_loaded") and not status.get("opencv_loaded"):
             raise RuntimeError(f"could not load model {path}")
         rows: list[dict[str, Any]] = []
@@ -202,7 +208,9 @@ class ModelEvaluationRunner:
                 error = "image_unreadable"
             else:
                 started = time.perf_counter()
-                objects = detector.detect(frame, confidence_threshold=confidence)
+                lease = lease_factory() if callable(lease_factory) else nullcontext()
+                with lease:
+                    objects = detector.detect(frame, confidence_threshold=confidence)
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 error = detection_failure(objects)
             labels = sorted(_labels(objects))

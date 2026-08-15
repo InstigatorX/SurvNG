@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from dataclasses import dataclass
 import copy
+from collections import deque
 import logging
 import queue
 import threading
@@ -123,6 +124,9 @@ class MotionIncidentService:
         self._last_prewarm_failure: dict[str, Any] | None = None
         self._handoff_failures = 0
         self._last_handoff_failure: dict[str, Any] | None = None
+        self._handoff_lock = threading.Lock()
+        self._handed_off_event_ids: set[int] = set()
+        self._handoff_event_order: deque[int] = deque()
         self._refinement_queue: queue.Queue[_RefinementJob | None] = queue.Queue(maxsize=3)
         self._pending_refinement_keys: set[tuple[str, int | float]] = set()
         self._refinement_thread: threading.Thread | None = None
@@ -293,6 +297,27 @@ class MotionIncidentService:
             require_motion_correlation=require_motion_correlation,
         )
         self._record_timing(outcome)
+        refinement_admission = "not_needed"
+        if outcome.refinement_pending:
+            # Mandatory delayed discovery is admitted before any optional
+            # capture prewarm or tracking handoff can consume time/resources.
+            refinement_admission = self._queue_refinement(
+                _RefinementJob(
+                    topic=topic,
+                    message=message,
+                    event_at=event_at,
+                    qualification=_compact_refinement_qualification(qualification),
+                    existing_event_id=outcome.event_id,
+                    require_eligible_object=require_eligible_object,
+                    require_motion_correlation=require_motion_correlation,
+                    callback=refinement_callback,
+                    initial_outcome=outcome,
+                )
+            )
+        # Strong provisional evidence can begin tracking immediately. Handoff
+        # is idempotent per event, so later refined evidence cannot duplicate it.
+        if not outcome.refinement_pending or outcome.object_detected is True:
+            self._handoff(outcome, event_at)
         try:
             if self.tracking_enabled():
                 # Main-stream startup is optional enrichment. It must happen
@@ -307,71 +332,67 @@ class MotionIncidentService:
                 type(error).__name__,
                 redact_secret_text(error)[:500],
             )
-        if outcome.refinement_pending:
-            refinement_admission = self._queue_refinement(
-                _RefinementJob(
-                    topic=topic,
-                    message=message,
-                    event_at=event_at,
-                    qualification=_compact_refinement_qualification(qualification),
-                    existing_event_id=outcome.event_id,
-                    require_eligible_object=require_eligible_object,
-                    require_motion_correlation=require_motion_correlation,
-                    callback=refinement_callback,
-                    initial_outcome=outcome,
-                )
-            )
-            if refinement_admission == "dropped":
-                # Initial detection is already valid evidence. Capacity loss
-                # must not also discard its tracking handoff.
-                self._handoff(outcome, event_at)
-        else:
+        if outcome.refinement_pending and refinement_admission == "dropped":
+            # Initial detection is already valid evidence. Capacity loss must
+            # not also discard its tracking handoff.
             self._handoff(outcome, event_at)
         return outcome
 
-    def _handoff(self, outcome: MotionDecisionOutcome, event_at: datetime) -> None:
+    def _handoff(self, outcome: MotionDecisionOutcome, event_at: datetime) -> bool:
         if outcome.event_id is None or not outcome.object_detected:
-            return
+            return False
 
-        try:
-            detected_objects = list(outcome.detected_objects)
-            if not self.has_trackable_objects(detected_objects):
-                return
-            initial_frame = None
-            if outcome.snapshot_path:
-                initial_frame = self.image_reader(outcome.snapshot_path)
-            started = self.start_tracking(
-                outcome.event_id,
-                event_at,
-                detected_objects,
-                initial_frame,
-            )
-            if started is None:
-                return
-            if not started:
+        with self._handoff_lock:
+            event_id = int(outcome.event_id)
+            if event_id in self._handed_off_event_ids:
+                return True
+            try:
+                detected_objects = list(outcome.detected_objects)
+                if not self.has_trackable_objects(detected_objects):
+                    return False
+                initial_frame = None
+                if outcome.snapshot_path:
+                    initial_frame = self.image_reader(outcome.snapshot_path)
+                started = self.start_tracking(
+                    event_id,
+                    event_at,
+                    detected_objects,
+                    initial_frame,
+                )
+                if started is None:
+                    return False
+                if started:
+                    self._handed_off_event_ids.add(event_id)
+                    self._handoff_event_order.append(event_id)
+                    while len(self._handoff_event_order) > 256:
+                        expired = self._handoff_event_order.popleft()
+                        self._handed_off_event_ids.discard(expired)
+                    return True
                 self._record_handoff_failure(
-                    outcome.event_id,
+                    event_id,
                     "TrackingDeclined",
                     "tracking session declined the incident",
                 )
                 LOGGER.warning(
                     "post-persistence tracking handoff was declined for %s event %d",
                     self.camera_id,
-                    outcome.event_id,
+                    event_id,
                 )
-        except Exception as error:
-            self._record_handoff_failure(
-                outcome.event_id,
-                type(error).__name__,
-                error,
-            )
-            LOGGER.error(
-                "post-persistence tracking handoff failed for %s event %d: %s: %s",
-                self.camera_id,
-                outcome.event_id,
-                type(error).__name__,
-                redact_secret_text(error)[:500],
-            )
+                return False
+            except Exception as error:
+                self._record_handoff_failure(
+                    event_id,
+                    type(error).__name__,
+                    error,
+                )
+                LOGGER.error(
+                    "post-persistence tracking handoff failed for %s event %d: %s: %s",
+                    self.camera_id,
+                    event_id,
+                    type(error).__name__,
+                    redact_secret_text(error)[:500],
+                )
+                return False
 
     def _queue_refinement(self, job: _RefinementJob) -> str:
         superseded: _RefinementJob | None = None
@@ -480,7 +501,12 @@ class MotionIncidentService:
                     continue
 
                 self._record_timing(outcome)
-                self._handoff(outcome, job.event_at)
+                self._handoff(
+                    job.initial_outcome
+                    if outcome.object_detected is None
+                    else outcome,
+                    job.event_at,
+                )
                 if job.callback is not None and not stop.is_set():
                     try:
                         job.callback(outcome)
