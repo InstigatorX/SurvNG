@@ -677,6 +677,7 @@ class SystemTelemetryService:
             "interruptions": persisted["interruptions"],
             "interruption_summary": persisted["interruption_summary"],
             "diagnostics": manager.runtime_monitor.diagnostic_status(),
+            "operational_events": manager.telemetry.operational_event_history(hours=24),
             "tracking_capacity": {
                 "limit": int(config.detector.tracking.max_active_cameras),
                 "burst_limit": int(config.detector.tracking.burst_max_active_cameras),

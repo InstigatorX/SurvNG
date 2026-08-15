@@ -31,3 +31,23 @@ def test_diagnostic_scope_and_duration_are_strict(tmp_path) -> None:
         controller.start(scope="system", duration_seconds=120)
     with pytest.raises(ValueError, match="camera id"):
         controller.start(scope="camera", duration_seconds=900)
+
+
+def test_sustained_camera_outage_creates_one_automatic_session(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    controller = DiagnosticTelemetryController(store)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    status = [{"id": "gate", "expected_enabled": True, "connected": False}]
+    for index in range(5):
+        controller.observe(
+            status,
+            detector_runtime={},
+            now_monotonic=10 + index * 5,
+            sampled_at=started,
+        )
+
+    sessions = store.diagnostic_sessions(active_only=True, now=started)
+    assert len(sessions) == 1
+    assert sessions[0]["trigger_kind"] == "camera_unavailable"
+    events = store.operational_event_history(hours=1, now=started)
+    assert [event["kind"] for event in events] == ["camera_unavailable"]

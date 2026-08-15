@@ -413,6 +413,7 @@ class EventApiSerializationTest(unittest.TestCase):
                     operational_history=Mock(return_value=[]),
                     memory_history=Mock(return_value=[]),
                     sample_times=Mock(return_value=[]),
+                    operational_event_history=Mock(return_value=[]),
                 ),
                 detector_status=Mock(return_value={"runtime": {"total_inferences": 8}}),
                 semantic_search_status=Mock(return_value={

@@ -9400,6 +9400,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
               <button type="button" onClick={() => void startTelemetryDiagnostics()} disabled={diagnosticScope === "camera" && !telemetryCamera}>Start diagnostics</button>
             </div>
             {(telemetry?.diagnostics?.active || []).length ? <div className="notice-list">{telemetry.diagnostics.active.map((session) => <div className="notice" key={session.id}><span>{session.scope === "camera" ? `${session.camera_id} camera` : session.scope} diagnostics · until {formatDateTime(session.expires_at, timeZone)}</span><div className="button-row"><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}>Download</a><button type="button" onClick={() => void stopTelemetryDiagnostics(session.id)}>Stop</button></div></div>)}</div> : <p className="muted">No diagnostic capture is active.</p>}
+            {(telemetry?.operational_events || []).length ? <details className="telemetry-technical"><summary>Recent health events</summary><div className="notice-list">{telemetry.operational_events.slice(0, 10).map((event) => <div className="notice" key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details> : null}
           </section>
           <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
         </section>

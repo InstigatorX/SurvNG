@@ -26,6 +26,11 @@ class DiagnosticTelemetryController:
         )
         self._last_sample_monotonic = 0.0
         self._samples_since_budget_check = 0
+        self._camera_unavailable_samples: dict[str, int] = {}
+        self._camera_anomaly_active: set[str] = set()
+        self._detector_failure_count: int | None = None
+        self._detector_saturated_samples = 0
+        self._storage_anomaly_active = False
 
     @staticmethod
     def _camera_payload(status: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +92,7 @@ class DiagnosticTelemetryController:
                     self._samples_since_budget_check = 0
             if check_budget:
                 self._store.enforce_diagnostic_budget()
+        self._detect_anomalies(payload, current)
 
     @staticmethod
     def _scoped_payload(
@@ -104,7 +110,13 @@ class DiagnosticTelemetryController:
         return payload
 
     def start(
-        self, *, scope: str, duration_seconds: int, camera_id: str = ""
+        self,
+        *,
+        scope: str,
+        duration_seconds: int,
+        camera_id: str = "",
+        trigger_kind: str = "manual",
+        started_at: datetime | None = None,
     ) -> dict[str, Any]:
         if scope not in DIAGNOSTIC_SCOPES:
             raise ValueError("unsupported diagnostic scope")
@@ -116,6 +128,8 @@ class DiagnosticTelemetryController:
             scope=scope,
             camera_id=camera_id if scope == "camera" else "",
             duration_seconds=duration_seconds,
+            trigger_kind=trigger_kind,
+            started_at=started_at,
         )
         with self._lock:
             buffered = list(self._ring)
@@ -126,6 +140,108 @@ class DiagnosticTelemetryController:
                 payload=self._scoped_payload(payload, session),
             )
         return session
+
+    def _start_automatic_session(
+        self, *, kind: str, scope: str, camera_id: str, summary: str, current: datetime
+    ) -> None:
+        self._store.record_or_coalesce_operational_event(
+            occurred_at=current,
+            kind=kind,
+            scope=scope,
+            camera_id=camera_id,
+            summary=summary,
+        )
+        matching = [
+            session
+            for session in self._store.diagnostic_sessions(active_only=True, now=current)
+            if session.get("trigger_kind") == kind
+            and session.get("scope") == scope
+            and str(session.get("camera_id") or "") == camera_id
+        ]
+        if not matching:
+            self.start(
+                scope=scope,
+                camera_id=camera_id,
+                duration_seconds=900,
+                trigger_kind=kind,
+                started_at=current,
+            )
+
+    def _detect_anomalies(self, payload: dict[str, Any], current: datetime) -> None:
+        cameras = dict(payload.get("cameras") or {})
+        present: set[str] = set()
+        for camera_id, camera in cameras.items():
+            if not isinstance(camera, dict):
+                continue
+            present.add(str(camera_id))
+            unhealthy = bool(camera.get("expected_enabled", True)) and not bool(
+                camera.get("connected")
+            )
+            count = self._camera_unavailable_samples.get(str(camera_id), 0)
+            count = count + 1 if unhealthy else 0
+            self._camera_unavailable_samples[str(camera_id)] = count
+            if count >= 3 and str(camera_id) not in self._camera_anomaly_active:
+                self._camera_anomaly_active.add(str(camera_id))
+                self._start_automatic_session(
+                    kind="camera_unavailable",
+                    scope="camera",
+                    camera_id=str(camera_id),
+                    summary=f"{camera_id} stopped delivering live video",
+                    current=current,
+                )
+            elif not unhealthy and str(camera_id) in self._camera_anomaly_active:
+                self._camera_anomaly_active.remove(str(camera_id))
+                self._store.record_or_coalesce_operational_event(
+                    occurred_at=current,
+                    kind="camera_recovered",
+                    scope="camera",
+                    camera_id=str(camera_id),
+                    summary=f"{camera_id} resumed live video",
+                )
+        self._camera_unavailable_samples = {
+            camera_id: count
+            for camera_id, count in self._camera_unavailable_samples.items()
+            if camera_id in present
+        }
+        self._camera_anomaly_active.intersection_update(present)
+
+        detector = dict(payload.get("detector_runtime") or {})
+        failures = int(detector.get("failed_inferences") or detector.get("failures") or 0)
+        if self._detector_failure_count is not None and failures > self._detector_failure_count:
+            self._start_automatic_session(
+                kind="detector_failure",
+                scope="detector",
+                camera_id="",
+                summary="Object detector reported a failed inference",
+                current=current,
+            )
+        self._detector_failure_count = failures
+        depth = int(detector.get("queue_depth") or 0)
+        capacity = int(detector.get("queue_capacity") or 0)
+        saturated = capacity > 0 and depth >= capacity
+        self._detector_saturated_samples = self._detector_saturated_samples + 1 if saturated else 0
+        if self._detector_saturated_samples == 3:
+            self._start_automatic_session(
+                kind="detector_saturated",
+                scope="detector",
+                camera_id="",
+                summary="Object detector queue remained at capacity",
+                current=current,
+            )
+
+        storage = dict(payload.get("storage") or {})
+        storage_failed = str(storage.get("state") or "").lower() in {"error", "failed"}
+        if storage_failed and not self._storage_anomaly_active:
+            self._storage_anomaly_active = True
+            self._start_automatic_session(
+                kind="retention_failure",
+                scope="storage",
+                camera_id="",
+                summary="Recording retention reported a failure",
+                current=current,
+            )
+        elif not storage_failed:
+            self._storage_anomaly_active = False
 
     def stop(self, session_id: str) -> bool:
         return self._store.stop_diagnostic_session(session_id)

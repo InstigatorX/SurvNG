@@ -429,6 +429,59 @@ class TelemetryStore:
                 ),
             )
 
+    def record_or_coalesce_operational_event(
+        self,
+        *,
+        occurred_at: datetime,
+        kind: str,
+        summary: str,
+        scope: str = "system",
+        camera_id: str = "",
+        details: Mapping[str, Any] | None = None,
+        coalesce_seconds: int = 600,
+    ) -> dict[str, Any]:
+        current = _utc(occurred_at)
+        cutoff = current - timedelta(seconds=max(0, int(coalesce_seconds)))
+        encoded = json.dumps(dict(details or {}), separators=(",", ":"))
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select id,count from operational_events where kind=? and scope=? "
+                "and camera_id=? and occurred_at>=? order by occurred_at desc limit 1",
+                (kind, scope, camera_id, cutoff.isoformat()),
+            ).fetchone()
+            if row is not None:
+                count = int(row["count"] or 0) + 1
+                conn.execute(
+                    "update operational_events set occurred_at=?,summary=?,count=?,details_json=? where id=?",
+                    (current.isoformat(), summary, count, encoded, int(row["id"])),
+                )
+                event_id = int(row["id"])
+            else:
+                cursor = conn.execute(
+                    "insert into operational_events "
+                    "(occurred_at,kind,scope,camera_id,summary,details_json) values (?,?,?,?,?,?)",
+                    (current.isoformat(), kind, scope, camera_id, summary, encoded),
+                )
+                event_id = int(cursor.lastrowid)
+                count = 1
+        return {"id": event_id, "count": count, "coalesced": count > 1}
+
+    def operational_event_history(
+        self, *, hours: int = 24, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        current = _utc(now or datetime.now(timezone.utc))
+        cutoff = current - timedelta(hours=max(1, min(int(hours), 24 * 365)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select id,occurred_at,kind,scope,camera_id,summary,count,details_json "
+                "from operational_events where occurred_at>=? order by occurred_at desc",
+                (cutoff.isoformat(),),
+            ).fetchall()
+        return [
+            {**dict(row), "details": json.loads(str(row["details_json"] or "{}"))}
+            for row in rows
+        ]
+
     def create_diagnostic_session(
         self,
         *,

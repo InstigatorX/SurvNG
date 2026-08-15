@@ -180,3 +180,26 @@ def test_diagnostic_payload_budget_removes_oldest_samples(tmp_path) -> None:
     exported = store.diagnostic_export(session["id"])
     assert exported is not None
     assert sum(len(str(row["payload"])) for row in exported["samples"]) <= 40
+
+
+def test_operational_events_coalesce_within_window(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    first = store.record_or_coalesce_operational_event(
+        occurred_at=now,
+        kind="camera_unavailable",
+        scope="camera",
+        camera_id="gate",
+        summary="Gate unavailable",
+    )
+    second = store.record_or_coalesce_operational_event(
+        occurred_at=now + timedelta(minutes=1),
+        kind="camera_unavailable",
+        scope="camera",
+        camera_id="gate",
+        summary="Gate still unavailable",
+    )
+
+    assert first["id"] == second["id"]
+    assert second == {"id": first["id"], "count": 2, "coalesced": True}
+    assert store.operational_event_history(hours=2, now=now + timedelta(minutes=1))[0]["count"] == 2
