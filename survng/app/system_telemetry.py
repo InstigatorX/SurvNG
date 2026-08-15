@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from .config import AppConfig
 from .manager import AppManager
@@ -24,6 +25,12 @@ from .telemetry_interruptions import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+class DiagnosticSessionRequest(BaseModel):
+    scope: str = Field(default="system", max_length=32)
+    camera_id: str = Field(default="", max_length=128)
+    duration_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,6 +676,7 @@ class SystemTelemetryService:
             "process_memory_history": persisted["memory"],
             "interruptions": persisted["interruptions"],
             "interruption_summary": persisted["interruption_summary"],
+            "diagnostics": manager.runtime_monitor.diagnostic_status(),
             "tracking_capacity": {
                 "limit": int(config.detector.tracking.max_active_cameras),
                 "burst_limit": int(config.detector.tracking.burst_max_active_cameras),
@@ -720,5 +728,32 @@ def create_system_telemetry_router(
         return service.telemetry(
             active_manager, active_config, hours=hours, camera_id=camera_id
         )
+
+    @router.post("/api/telemetry/diagnostics")
+    def start_diagnostics(request: DiagnosticSessionRequest) -> dict[str, Any]:
+        active_manager = dependencies.get_manager()
+        try:
+            return active_manager.runtime_monitor.start_diagnostics(
+                scope=request.scope,
+                camera_id=request.camera_id,
+                duration_seconds=request.duration_seconds,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @router.delete("/api/telemetry/diagnostics/{session_id}")
+    def stop_diagnostics(session_id: str) -> dict[str, bool]:
+        active_manager = dependencies.get_manager()
+        if not active_manager.runtime_monitor.stop_diagnostics(session_id):
+            raise HTTPException(status_code=404, detail="diagnostic session not found")
+        return {"stopped": True}
+
+    @router.get("/api/telemetry/diagnostics/{session_id}")
+    def export_diagnostics(session_id: str) -> dict[str, Any]:
+        active_manager = dependencies.get_manager()
+        payload = active_manager.runtime_monitor.export_diagnostics(session_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="diagnostic session not found")
+        return payload
 
     return router

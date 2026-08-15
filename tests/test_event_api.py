@@ -402,6 +402,9 @@ class EventApiSerializationTest(unittest.TestCase):
             fake_manager = SimpleNamespace(
                 storage_dir=root,
                 database_dir=root,
+                runtime_monitor=SimpleNamespace(
+                    diagnostic_status=Mock(return_value={"active": []})
+                ),
                 events=SimpleNamespace(
                     telemetry_activity=Mock(return_value=activity),
                     tracking_capacity_activity=Mock(return_value=[]),

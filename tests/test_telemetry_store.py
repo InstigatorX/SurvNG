@@ -139,3 +139,44 @@ def test_operational_history_combines_camera_and_system_metrics(tmp_path) -> Non
     assert row["cpu_load_percent"] == 25.0
     assert row["ema_credible_episodes"] == 2
     assert store.sample_times(hours=2, now=sampled_at) == [sampled_at.isoformat()]
+
+
+def test_diagnostic_sessions_expire_and_export_bounded_samples(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    session = store.create_diagnostic_session(
+        scope="camera", camera_id="gate", duration_seconds=900, started_at=started
+    )
+    store.write_diagnostic_samples(
+        [session["id"]], sampled_at=started, payload={"cameras": {"gate": {"fps": 10}}}
+    )
+
+    exported = store.diagnostic_export(session["id"])
+    assert exported is not None
+    assert exported["samples"][0]["payload"]["cameras"]["gate"]["fps"] == 10
+    assert store.diagnostic_sessions(active_only=True, now=started)
+
+    store.enforce_retention(now=started + timedelta(minutes=16))
+    assert store.diagnostic_export(session["id"]) is None
+
+
+def test_diagnostic_payload_budget_removes_oldest_samples(tmp_path) -> None:
+    store = TelemetryStore(
+        tmp_path,
+        retention=TelemetryRetentionPolicy(diagnostic_budget_bytes=40),
+    )
+    started = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    session = store.create_diagnostic_session(
+        scope="system", duration_seconds=900, started_at=started
+    )
+    for second in range(3):
+        store.write_diagnostic_samples(
+            [session["id"]],
+            sampled_at=started + timedelta(seconds=second),
+            payload={"detail": "x" * 30},
+        )
+
+    assert store.enforce_diagnostic_budget() > 0
+    exported = store.diagnostic_export(session["id"])
+    assert exported is not None
+    assert sum(len(str(row["payload"])) for row in exported["samples"]) <= 40

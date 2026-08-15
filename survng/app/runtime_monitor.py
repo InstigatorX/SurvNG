@@ -21,6 +21,7 @@ from .telemetry_store import (
     SystemTelemetryBucket,
     TelemetryStore,
 )
+from .telemetry_diagnostics import DiagnosticTelemetryController
 
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -178,6 +179,7 @@ class ApplicationRuntimeMonitor:
         telemetry_store: TelemetryStore | None = None,
         state_events: StateEventBroker,
         camera_statuses: Callable[[], list[dict[str, Any]]],
+        storage_status: Callable[[], dict[str, Any]] | None = None,
         sample_interval_seconds: float = 60.0,
         poll_interval_seconds: float = 1.0,
         memory_trimmer: AllocatorMemoryTrimmer | None = None,
@@ -186,8 +188,14 @@ class ApplicationRuntimeMonitor:
         self._events = events
         self._telemetry_store = telemetry_store
         self._telemetry_collector = OperationalTelemetryCollector()
+        self._diagnostics = (
+            DiagnosticTelemetryController(telemetry_store)
+            if telemetry_store is not None
+            else None
+        )
         self._state_events = state_events
         self._camera_statuses = camera_statuses
+        self._storage_status = storage_status or (lambda: {})
         self._sample_interval_seconds = max(0.01, float(sample_interval_seconds))
         self._poll_interval_seconds = max(0.01, float(poll_interval_seconds))
         self._memory_trimmer = memory_trimmer or AllocatorMemoryTrimmer()
@@ -302,6 +310,13 @@ class ApplicationRuntimeMonitor:
                 now = time.monotonic()
                 detector_status = self._detector_status()
                 detector_runtime = dict(detector_status.get("runtime") or {})
+                if self._diagnostics is not None:
+                    self._diagnostics.observe(
+                        statuses,
+                        detector_runtime=detector_runtime,
+                        storage_status=self._storage_status(),
+                        now_monotonic=now,
+                    )
                 allocator_idle = self.allocator_trim_safe(statuses, detector_runtime)
                 self._memory_trimmer.observe_idle(allocator_idle, now=now)
                 if now - telemetry_sample_at >= self._sample_interval_seconds:
@@ -348,6 +363,29 @@ class ApplicationRuntimeMonitor:
             except Exception:
                 LOGGER.exception("application runtime monitor failed")
             self._stop.wait(self._poll_interval_seconds)
+
+    def diagnostic_status(self) -> dict[str, Any]:
+        return self._diagnostics.status() if self._diagnostics is not None else {
+            "active": [],
+            "supported_scopes": [],
+            "supported_durations_seconds": [],
+            "prebuffer_seconds": 0,
+        }
+
+    def start_diagnostics(
+        self, *, scope: str, duration_seconds: int, camera_id: str = ""
+    ) -> dict[str, Any]:
+        if self._diagnostics is None:
+            raise RuntimeError("diagnostic telemetry is unavailable")
+        return self._diagnostics.start(
+            scope=scope, duration_seconds=duration_seconds, camera_id=camera_id
+        )
+
+    def stop_diagnostics(self, session_id: str) -> bool:
+        return bool(self._diagnostics and self._diagnostics.stop(session_id))
+
+    def export_diagnostics(self, session_id: str) -> dict[str, Any] | None:
+        return self._diagnostics.export(session_id) if self._diagnostics else None
 
     @staticmethod
     def allocator_trim_safe(

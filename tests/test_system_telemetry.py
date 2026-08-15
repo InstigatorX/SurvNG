@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from survng.app.system_telemetry import (
+    DiagnosticSessionRequest,
     SystemTelemetryDependencies,
     SystemTelemetryService,
     create_system_telemetry_router,
@@ -96,6 +97,25 @@ class SystemTelemetryRouterTest(unittest.TestCase):
         self.assertEqual(endpoint(), {"instance_id": "test"})
         get_manager.assert_called_once_with()
         service.system_status.assert_called_once_with(active_manager)
+
+    def test_diagnostic_routes_delegate_to_runtime_monitor(self) -> None:
+        runtime_monitor = Mock()
+        runtime_monitor.start_diagnostics.return_value = {"id": "session-1"}
+        runtime_monitor.stop_diagnostics.return_value = True
+        manager = SimpleNamespace(runtime_monitor=runtime_monitor)
+        router = create_system_telemetry_router(
+            SystemTelemetryDependencies(get_manager=lambda: manager, get_config=Mock()),
+            Mock(),
+        )
+        routes = {(route.path, tuple(route.methods)): route.endpoint for route in router.routes}
+
+        created = routes[("/api/telemetry/diagnostics", ("POST",))](
+            DiagnosticSessionRequest(
+                scope="camera", camera_id="gate", duration_seconds=900
+            )
+        )
+        assert created == {"id": "session-1"}
+        assert routes[("/api/telemetry/diagnostics/{session_id}", ("DELETE",))]("session-1") == {"stopped": True}
 
     def test_system_status_includes_lightweight_cpu_and_application_memory(self) -> None:
         manager = SimpleNamespace(

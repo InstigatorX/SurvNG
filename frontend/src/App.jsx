@@ -8675,6 +8675,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
   const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", "");
+  const [diagnosticScope, setDiagnosticScope] = useState("system");
+  const [diagnosticDuration, setDiagnosticDuration] = useState("3600");
   const [maintenance, setMaintenance] = useState(null);
   const [maintenanceError, setMaintenanceError] = useState("");
   const configLoadSequence = useRef(0);
@@ -8890,6 +8892,33 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     } finally {
       setTelemetryLoading(false);
     }
+  }
+
+  async function startTelemetryDiagnostics() {
+    const response = await fetch("/api/telemetry/diagnostics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope: diagnosticScope,
+        camera_id: diagnosticScope === "camera" ? telemetryCamera : "",
+        duration_seconds: Number(diagnosticDuration),
+      }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setTelemetryError(payload.detail || `Unable to start diagnostics (${response.status})`);
+      return;
+    }
+    await loadTelemetry();
+  }
+
+  async function stopTelemetryDiagnostics(sessionId) {
+    const response = await fetch(`/api/telemetry/diagnostics/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    if (!response.ok) {
+      setTelemetryError(`Unable to stop diagnostics (${response.status})`);
+      return;
+    }
+    await loadTelemetry();
   }
 
   useEffect(() => {
@@ -9363,6 +9392,15 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
             <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
           </div>
           {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
+          <section className="telemetry-section">
+            <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Diagnostics turn off automatically and never include images, video, or credentials.</p></div></div>
+            <div className="field-grid compact-grid">
+              <label><span>Scope</span><select value={diagnosticScope} onChange={(event) => setDiagnosticScope(event.target.value)}><option value="system">Entire system</option><option value="detector">Object detector</option><option value="storage">Storage</option><option value="camera">Selected camera</option></select></label>
+              <label><span>Duration</span><select value={diagnosticDuration} onChange={(event) => setDiagnosticDuration(event.target.value)}><option value="900">15 minutes</option><option value="3600">1 hour</option><option value="21600">6 hours</option><option value="86400">24 hours</option></select></label>
+              <button type="button" onClick={() => void startTelemetryDiagnostics()} disabled={diagnosticScope === "camera" && !telemetryCamera}>Start diagnostics</button>
+            </div>
+            {(telemetry?.diagnostics?.active || []).length ? <div className="notice-list">{telemetry.diagnostics.active.map((session) => <div className="notice" key={session.id}><span>{session.scope === "camera" ? `${session.camera_id} camera` : session.scope} diagnostics · until {formatDateTime(session.expires_at, timeZone)}</span><div className="button-row"><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}>Download</a><button type="button" onClick={() => void stopTelemetryDiagnostics(session.id)}>Stop</button></div></div>)}</div> : <p className="muted">No diagnostic capture is active.</p>}
+          </section>
           <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
         </section>
         </>

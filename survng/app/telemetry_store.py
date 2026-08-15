@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -427,6 +428,127 @@ class TelemetryStore:
                     json.dumps(dict(details or {}), separators=(",", ":")),
                 ),
             )
+
+    def create_diagnostic_session(
+        self,
+        *,
+        scope: str,
+        duration_seconds: int,
+        camera_id: str = "",
+        trigger_kind: str = "manual",
+        started_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        started = _utc(started_at or datetime.now(timezone.utc))
+        session_id = uuid.uuid4().hex
+        expires = started + timedelta(seconds=max(1, int(duration_seconds)))
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "insert into diagnostic_sessions "
+                "(id,scope,camera_id,started_at,expires_at,trigger_kind) values (?,?,?,?,?,?)",
+                (session_id, scope, camera_id, started.isoformat(), expires.isoformat(), trigger_kind),
+            )
+        return {
+            "id": session_id,
+            "scope": scope,
+            "camera_id": camera_id,
+            "started_at": started.isoformat(),
+            "expires_at": expires.isoformat(),
+            "stopped_at": None,
+            "trigger_kind": trigger_kind,
+        }
+
+    def diagnostic_sessions(
+        self, *, active_only: bool = False, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        current = _utc(now or datetime.now(timezone.utc)).isoformat()
+        where = " where stopped_at is null and expires_at>?" if active_only else ""
+        parameters: tuple[Any, ...] = (current,) if active_only else ()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select id,scope,camera_id,started_at,expires_at,stopped_at,trigger_kind "
+                f"from diagnostic_sessions{where} order by started_at desc",
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def stop_diagnostic_session(
+        self, session_id: str, *, stopped_at: datetime | None = None
+    ) -> bool:
+        stopped = _utc(stopped_at or datetime.now(timezone.utc)).isoformat()
+        with self._lock, self._connect() as conn:
+            changed = conn.execute(
+                "update diagnostic_sessions set stopped_at=? "
+                "where id=? and stopped_at is null",
+                (stopped, session_id),
+            ).rowcount
+        return bool(changed)
+
+    def write_diagnostic_samples(
+        self,
+        session_ids: Iterable[str],
+        *,
+        sampled_at: datetime,
+        payload: Mapping[str, Any],
+    ) -> int:
+        identifiers = tuple(dict.fromkeys(str(value) for value in session_ids if value))
+        if not identifiers:
+            return 0
+        encoded = json.dumps(dict(payload), separators=(",", ":"), allow_nan=False)
+        timestamp = _utc(sampled_at).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "insert or replace into diagnostic_samples "
+                "(session_id,sampled_at,payload_json) values (?,?,?)",
+                [(session_id, timestamp, encoded) for session_id in identifiers],
+            )
+        return len(identifiers)
+
+    def diagnostic_export(self, session_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            session = conn.execute(
+                "select * from diagnostic_sessions where id=?", (session_id,)
+            ).fetchone()
+            if session is None:
+                return None
+            rows = conn.execute(
+                "select sampled_at,payload_json from diagnostic_samples "
+                "where session_id=? order by sampled_at",
+                (session_id,),
+            ).fetchall()
+        return {
+            "session": dict(session),
+            "samples": [
+                {"sampled_at": row["sampled_at"], "payload": json.loads(row["payload_json"])}
+                for row in rows
+            ],
+        }
+
+    def enforce_diagnostic_budget(self) -> int:
+        """Bound logical diagnostic payload storage, oldest samples first."""
+        budget = max(0, int(self.retention.diagnostic_budget_bytes))
+        removed = 0
+        with self._lock, self._connect() as conn:
+            total = int(
+                conn.execute(
+                    "select coalesce(sum(length(payload_json)),0) from diagnostic_samples"
+                ).fetchone()[0]
+                or 0
+            )
+            while total > budget:
+                rows = conn.execute(
+                    "select session_id,sampled_at,length(payload_json) as bytes "
+                    "from diagnostic_samples order by sampled_at limit 500"
+                ).fetchall()
+                if not rows:
+                    break
+                reclaimed = sum(int(row["bytes"] or 0) for row in rows)
+                conn.executemany(
+                    "delete from diagnostic_samples where session_id=? and sampled_at=?",
+                    [(row["session_id"], row["sampled_at"]) for row in rows],
+                )
+                removed += len(rows)
+                total = max(0, total - reclaimed)
+        return removed
 
     def enforce_retention(self, *, now: datetime | None = None) -> None:
         current = _utc(now or datetime.now(timezone.utc))
