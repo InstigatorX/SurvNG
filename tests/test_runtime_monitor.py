@@ -32,6 +32,54 @@ def runtime_monitor(
     return monitor, inference, events, state_events
 
 
+def test_operational_collector_persists_interval_deltas(tmp_path) -> None:
+    from datetime import datetime, timezone
+
+    from survng.app.runtime_monitor import OperationalTelemetryCollector
+
+    collector = OperationalTelemetryCollector()
+    sampled_at = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    status = {
+        "id": "gate",
+        "expected_enabled": True,
+        "connected": True,
+        "last_frame_age_seconds": 0.1,
+        "capture_stats": {
+            "live": {"fps": 10.0, "read_failures": 4},
+            "main": {"fps": 20.0, "open_failures": 1},
+        },
+        "motion_qualification": {
+            "analysis_frames_dropped": 2,
+            "analysis_runtime": {"frames_sampled": 100},
+            "event_runtime": {"episode": {"decision_counts": {"request_admitted": 3}}},
+        },
+    }
+    _, first = collector.collect(
+        [status],
+        sampled_at=sampled_at,
+        process_memory={},
+        worker_memory={},
+        system_runtime={},
+        detector_runtime={},
+    )
+    status["capture_stats"]["live"]["read_failures"] = 6
+    status["motion_qualification"]["analysis_runtime"]["frames_sampled"] = 125
+    status["motion_qualification"]["event_runtime"]["episode"]["decision_counts"]["request_admitted"] = 4
+    _, second = collector.collect(
+        [status],
+        sampled_at=sampled_at,
+        process_memory={},
+        worker_memory={},
+        system_runtime={},
+        detector_runtime={},
+    )
+
+    assert first[0].capture_interruptions == 0
+    assert second[0].capture_interruptions == 2
+    assert second[0].ema_frames_sampled == 25
+    assert second[0].object_checks_admitted == 1
+
+
 class ApplicationRuntimeMonitorTest(unittest.TestCase):
     def test_monitor_owns_periodic_telemetry_and_stops_cleanly(self) -> None:
         status = {

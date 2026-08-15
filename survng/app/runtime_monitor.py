@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 import os
 import threading
 import time
@@ -15,9 +16,125 @@ from .process_memory import (
     process_memory_status_for_pid,
 )
 from .state_events import StateEventBroker
+from .telemetry_store import (
+    CameraTelemetryBucket,
+    SystemTelemetryBucket,
+    TelemetryStore,
+)
 
 
 LOGGER = logging.getLogger("uvicorn.error")
+
+
+class OperationalTelemetryCollector:
+    """Convert cumulative runtime status into compact interval metrics."""
+
+    def __init__(self) -> None:
+        self._camera_counters: dict[str, dict[str, int]] = {}
+        self._system_counters: dict[str, int] = {}
+
+    @staticmethod
+    def _delta(current: int, previous: int | None) -> int:
+        if previous is None:
+            return 0
+        return max(0, current - previous) if current >= previous else max(0, current)
+
+    def collect(
+        self,
+        statuses: list[dict[str, Any]],
+        *,
+        sampled_at: datetime,
+        process_memory: dict[str, Any],
+        worker_memory: dict[str, Any],
+        system_runtime: dict[str, Any],
+        detector_runtime: dict[str, Any],
+    ) -> tuple[SystemTelemetryBucket, list[CameraTelemetryBucket]]:
+        system_current = {
+            "detector_requests": int(detector_runtime.get("requests") or detector_runtime.get("frames_processed") or 0),
+            "detector_failures": int(detector_runtime.get("failures") or 0),
+            "detector_capacity_delays": int(detector_runtime.get("capacity_delays") or 0),
+            "database_write_contention": 0,
+        }
+        system_deltas = {
+            key: self._delta(value, self._system_counters.get(key))
+            for key, value in system_current.items()
+        }
+        self._system_counters = system_current
+        system = SystemTelemetryBucket(
+            sampled_at=sampled_at,
+            cpu_load_percent=_finite_float(system_runtime.get("cpu_load_percent")),
+            memory_used_percent=_finite_float(system_runtime.get("memory_used_percent")),
+            application_rss_bytes=int(process_memory.get("rss_bytes") or 0),
+            worker_rss_bytes=int(worker_memory.get("total_rss_bytes") or 0),
+            inference_ms=_finite_float(system_runtime.get("inference_ms")),
+            gpu_utilization_percent=_finite_float(system_runtime.get("gpu_utilization_percent")),
+            **system_deltas,
+        )
+        cameras: list[CameraTelemetryBucket] = []
+        current_ids: set[str] = set()
+        for status in statuses:
+            camera_id = str(status.get("id") or "")
+            if not camera_id:
+                continue
+            current_ids.add(camera_id)
+            lifecycle = status.get("lifecycle") or {}
+            capture = status.get("capture_stats") or {}
+            live = capture.get("live") or {}
+            main = capture.get("main") or {}
+            motion = status.get("motion_qualification") or {}
+            analysis = motion.get("analysis_runtime") or {}
+            event_runtime = motion.get("event_runtime") or {}
+            episode = event_runtime.get("episode") or {}
+            decisions = episode.get("decision_counts") or {}
+            tracking = status.get("object_tracking") or {}
+            counters = {
+                "capture_interruptions": int(live.get("read_failures") or 0)
+                + int(live.get("open_failures") or 0)
+                + int(main.get("read_failures") or 0)
+                + int(main.get("open_failures") or 0),
+                "ema_frames_sampled": int(analysis.get("frames_sampled") or 0),
+                "ema_frames_superseded": int(motion.get("analysis_frames_dropped") or 0),
+                "ema_credible_episodes": int(decisions.get("request_reserved") or 0),
+                "object_checks_admitted": int(decisions.get("request_admitted") or 0),
+                "object_checks_completed": int(decisions.get("request_completed") or 0),
+                "object_check_failures": int(decisions.get("detector_failed") or 0),
+                "tracking_requested": int(tracking.get("attempts") or tracking.get("requested") or 0),
+                "tracking_completed": int(tracking.get("completed") or 0),
+                "tracking_delayed": int(tracking.get("waited") or tracking.get("delayed") or 0),
+                "tracking_skipped": int(tracking.get("skipped") or 0),
+                "incidents_created": int(status.get("incidents_created") or 0),
+            }
+            previous = self._camera_counters.get(camera_id, {})
+            deltas = {
+                key: self._delta(value, previous.get(key))
+                for key, value in counters.items()
+            }
+            self._camera_counters[camera_id] = counters
+            expected = bool(status.get("expected_enabled", lifecycle.get("enabled", True)))
+            frame_age = status.get("last_frame_age_seconds")
+            fresh = frame_age is None or float(frame_age) <= 5.0
+            cameras.append(
+                CameraTelemetryBucket(
+                    sampled_at=sampled_at,
+                    camera_id=camera_id,
+                    available=float(not expected or (bool(status.get("connected")) and fresh)),
+                    live_fps=float(live.get("fps") or 0.0),
+                    main_fps=float(main.get("fps") or 0.0),
+                    **deltas,
+                )
+            )
+        self._camera_counters = {
+            key: value for key, value in self._camera_counters.items() if key in current_ids
+        }
+        return system, cameras
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric == numeric and abs(numeric) != float("inf") else None
 
 
 def system_memory_usage() -> tuple[int, int, float]:
@@ -58,6 +175,7 @@ class ApplicationRuntimeMonitor:
         *,
         inference: InferenceLifecycle,
         events: EventStore,
+        telemetry_store: TelemetryStore | None = None,
         state_events: StateEventBroker,
         camera_statuses: Callable[[], list[dict[str, Any]]],
         sample_interval_seconds: float = 60.0,
@@ -66,6 +184,8 @@ class ApplicationRuntimeMonitor:
     ) -> None:
         self._inference = inference
         self._events = events
+        self._telemetry_store = telemetry_store
+        self._telemetry_collector = OperationalTelemetryCollector()
         self._state_events = state_events
         self._camera_statuses = camera_statuses
         self._sample_interval_seconds = max(0.01, float(sample_interval_seconds))
@@ -193,22 +313,37 @@ class ApplicationRuntimeMonitor:
                         load_1m = os.getloadavg()[0]
                     except OSError:
                         load_1m = 0.0
+                    worker_memory = self.worker_memory_status(
+                        detector_status=detector_status,
+                    )
+                    system_runtime = {
+                        "cpu_load_percent": round(
+                            min(100.0, (load_1m / max(1, os.cpu_count() or 1)) * 100.0),
+                            2,
+                        ),
+                        "memory_used_percent": memory_used_percent,
+                        "inference_ms": detector_runtime.get("average_inference_ms"),
+                    }
                     self._events.record_runtime_telemetry(
                         statuses,
                         process_memory=process_memory,
-                        worker_memory=self.worker_memory_status(
-                            detector_status=detector_status,
-                        ),
+                        worker_memory=worker_memory,
                         memory_maintenance=self.memory_maintenance_status(),
-                        system_runtime={
-                            "cpu_load_percent": round(
-                                min(100.0, (load_1m / max(1, os.cpu_count() or 1)) * 100.0),
-                                2,
-                            ),
-                            "memory_used_percent": memory_used_percent,
-                            "inference_ms": detector_runtime.get("average_inference_ms"),
-                        },
+                        system_runtime=system_runtime,
                     )
+                    if self._telemetry_store is not None:
+                        sampled_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+                        system_bucket, camera_buckets = self._telemetry_collector.collect(
+                            statuses,
+                            sampled_at=sampled_at,
+                            process_memory=process_memory,
+                            worker_memory=worker_memory,
+                            system_runtime=system_runtime,
+                            detector_runtime=detector_runtime,
+                        )
+                        self._telemetry_store.write_buckets(system_bucket, camera_buckets)
+                        self._telemetry_store.refresh_rollups(sampled_at=sampled_at)
+                        self._telemetry_store.enforce_retention(now=sampled_at)
                     telemetry_sample_at = now
             except Exception:
                 LOGGER.exception("application runtime monitor failed")

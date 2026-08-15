@@ -79,3 +79,30 @@ def test_operational_event_details_are_compact_and_database_is_measurable(tmp_pa
 
     assert store.database_bytes() > 0
 
+
+def test_rollups_average_gauges_and_sum_interval_counters(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    start = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    for minute, fps, interruptions in ((0, 10.0, 1), (1, 20.0, 2)):
+        sampled_at = start + timedelta(minutes=minute)
+        store.write_buckets(
+            SystemTelemetryBucket(sampled_at=sampled_at, cpu_load_percent=fps),
+            [
+                CameraTelemetryBucket(
+                    sampled_at=sampled_at,
+                    camera_id="gate",
+                    available=1.0,
+                    live_fps=fps,
+                    capture_interruptions=interruptions,
+                )
+            ],
+        )
+    store.refresh_rollups(sampled_at=start + timedelta(minutes=1))
+
+    system = store.system_history(since=start, resolution_minutes=15)[0]
+    camera = store.camera_history(
+        since=start, resolution_minutes=15, camera_id="gate"
+    )[0]
+    assert system["cpu_load_percent"] == 15.0
+    assert camera["live_fps"] == 15.0
+    assert camera["capture_interruptions"] == 3

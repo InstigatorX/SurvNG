@@ -197,6 +197,91 @@ class TelemetryStore:
                     camera_values,
                 )
 
+    @staticmethod
+    def _bucket_start(value: datetime, resolution_minutes: int) -> datetime:
+        seconds = max(1, int(resolution_minutes)) * 60
+        epoch = int(_utc(value).timestamp())
+        return datetime.fromtimestamp((epoch // seconds) * seconds, timezone.utc)
+
+    def refresh_rollups(self, *, sampled_at: datetime) -> None:
+        """Refresh the current 15-minute and hourly buckets from minute rows."""
+        for resolution in (15, 60):
+            start = self._bucket_start(sampled_at, resolution)
+            end = start + timedelta(minutes=resolution)
+            self._refresh_system_rollup(start=start, end=end, resolution=resolution)
+            self._refresh_camera_rollup(start=start, end=end, resolution=resolution)
+
+    def _refresh_system_rollup(
+        self, *, start: datetime, end: datetime, resolution: int
+    ) -> None:
+        gauge_columns = (
+            "cpu_load_percent",
+            "memory_used_percent",
+            "application_rss_bytes",
+            "worker_rss_bytes",
+            "inference_ms",
+            "gpu_utilization_percent",
+        )
+        counter_columns = tuple(name for name in SYSTEM_COLUMNS if name not in gauge_columns)
+        expressions = [f"avg({name}) as {name}" for name in gauge_columns]
+        expressions.extend(f"sum({name}) as {name}" for name in counter_columns)
+        with self._connect() as conn:
+            row = conn.execute(
+                "select " + ",".join(expressions) + " from system_metric_buckets "
+                "where resolution_minutes=1 and sampled_at>=? and sampled_at<?",
+                (start.isoformat(), end.isoformat()),
+            ).fetchone()
+        if row is None or all(row[name] is None for name in SYSTEM_COLUMNS):
+            return
+        values = {
+            name: (0 if row[name] is None and name in counter_columns else row[name])
+            for name in SYSTEM_COLUMNS
+        }
+        self.write_buckets(
+            SystemTelemetryBucket(
+                sampled_at=start,
+                resolution_minutes=resolution,
+                **values,
+            ),
+            [],
+        )
+
+    def _refresh_camera_rollup(
+        self, *, start: datetime, end: datetime, resolution: int
+    ) -> None:
+        gauge_columns = ("available", "live_fps", "main_fps")
+        counter_columns = tuple(name for name in CAMERA_COLUMNS if name not in gauge_columns)
+        expressions = [f"avg({name}) as {name}" for name in gauge_columns]
+        expressions.extend(f"sum({name}) as {name}" for name in counter_columns)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select camera_id," + ",".join(expressions) + " from camera_metric_buckets "
+                "where resolution_minutes=1 and sampled_at>=? and sampled_at<? group by camera_id",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        cameras = [
+            CameraTelemetryBucket(
+                sampled_at=start,
+                camera_id=str(row["camera_id"]),
+                resolution_minutes=resolution,
+                **{
+                    name: (0 if row[name] is None and name in counter_columns else row[name])
+                    for name in CAMERA_COLUMNS
+                },
+            )
+            for row in rows
+        ]
+        if not cameras:
+            return
+        # Preserve the system rollup written above while replacing camera rows.
+        with self._lock, self._connect() as conn:
+            names = "sampled_at,camera_id,resolution_minutes," + ",".join(CAMERA_COLUMNS)
+            placeholders = ",".join("?" for _ in range(3 + len(CAMERA_COLUMNS)))
+            conn.executemany(
+                f"insert or replace into camera_metric_buckets ({names}) values ({placeholders})",
+                [self._camera_values(sample) for sample in cameras],
+            )
+
     def system_history(
         self, *, since: datetime, resolution_minutes: int
     ) -> list[dict[str, Any]]:
@@ -295,4 +380,3 @@ class TelemetryStore:
             except OSError:
                 continue
         return total
-
