@@ -1,0 +1,81 @@
+from datetime import datetime, timedelta, timezone
+
+from survng.app.telemetry_contract import TelemetryRetentionPolicy
+from survng.app.telemetry_store import (
+    CameraTelemetryBucket,
+    SystemTelemetryBucket,
+    TelemetryStore,
+)
+
+
+def test_store_persists_typed_system_and_camera_buckets(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    sampled_at = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+
+    store.write_buckets(
+        SystemTelemetryBucket(
+            sampled_at=sampled_at,
+            cpu_load_percent=12.5,
+            application_rss_bytes=1234,
+        ),
+        [
+            CameraTelemetryBucket(
+                sampled_at=sampled_at,
+                camera_id="gate",
+                available=1.0,
+                live_fps=9.8,
+                ema_frames_sampled=120,
+            )
+        ],
+    )
+
+    assert store.system_history(
+        since=sampled_at - timedelta(minutes=1), resolution_minutes=1
+    )[0]["application_rss_bytes"] == 1234
+    camera = store.camera_history(
+        since=sampled_at - timedelta(minutes=1),
+        resolution_minutes=1,
+        camera_id="gate",
+    )[0]
+    assert camera["live_fps"] == 9.8
+    assert camera["ema_frames_sampled"] == 120
+
+
+def test_store_is_independent_and_retention_is_resolution_aware(tmp_path) -> None:
+    policy = TelemetryRetentionPolicy(raw_days=2, quarter_hour_days=30, hourly_days=365)
+    store = TelemetryStore(tmp_path, retention=policy)
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=3)
+
+    for resolution in (1, 15, 60):
+        store.write_buckets(
+            SystemTelemetryBucket(sampled_at=old, resolution_minutes=resolution),
+            [CameraTelemetryBucket(sampled_at=old, camera_id="gate", resolution_minutes=resolution)],
+        )
+    store.enforce_retention(now=now)
+
+    assert not store.system_history(
+        since=now - timedelta(days=10), resolution_minutes=1
+    )
+    assert store.system_history(
+        since=now - timedelta(days=10), resolution_minutes=15
+    )
+    assert store.system_history(
+        since=now - timedelta(days=10), resolution_minutes=60
+    )
+    assert store.path.name == "telemetry.sqlite3"
+
+
+def test_operational_event_details_are_compact_and_database_is_measurable(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    store.record_operational_event(
+        occurred_at=datetime.now(timezone.utc),
+        kind="camera_unavailable",
+        scope="camera",
+        camera_id="gate",
+        summary="Gate stream unavailable",
+        details={"attempt": 2},
+    )
+
+    assert store.database_bytes() > 0
+
