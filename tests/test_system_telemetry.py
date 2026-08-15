@@ -16,22 +16,32 @@ class SystemTelemetryRouterTest(unittest.TestCase):
     @staticmethod
     def _event_store(marker: str) -> SimpleNamespace:
         return SimpleNamespace(
-            runtime_telemetry_history=Mock(return_value=[{"marker": marker}]),
             tracking_capacity_activity=Mock(return_value=[]),
+            lifecycle_events=Mock(return_value=[]),
+        )
+
+    @staticmethod
+    def _telemetry_store(marker: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            operational_history=Mock(return_value=[{"marker": marker}]),
+            memory_history=Mock(return_value=[]),
+            sample_times=Mock(return_value=[]),
         )
 
     def test_persisted_history_cache_is_invalidated_for_new_event_store(self) -> None:
         service = SystemTelemetryService()
         first_store = self._event_store("first")
         second_store = self._event_store("second")
+        first_telemetry = self._telemetry_store("first")
+        second_telemetry = self._telemetry_store("second")
 
-        first = service.persisted_history(SimpleNamespace(events=first_store), "gate")
-        second = service.persisted_history(SimpleNamespace(events=second_store), "gate")
+        first = service.persisted_history(SimpleNamespace(events=first_store, telemetry=first_telemetry), "gate")
+        second = service.persisted_history(SimpleNamespace(events=second_store, telemetry=second_telemetry), "gate")
 
         self.assertEqual(first["runtime"]["short"], [{"marker": "first"}])
         self.assertEqual(second["runtime"]["short"], [{"marker": "second"}])
-        self.assertEqual(first_store.runtime_telemetry_history.call_count, 2)
-        self.assertEqual(second_store.runtime_telemetry_history.call_count, 2)
+        self.assertEqual(first_telemetry.operational_history.call_count, 2)
+        self.assertEqual(second_telemetry.operational_history.call_count, 2)
 
     def test_telemetry_request_uses_one_manager_generation_and_its_config(self) -> None:
         first_config = object()

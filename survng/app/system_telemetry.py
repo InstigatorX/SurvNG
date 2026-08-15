@@ -357,21 +357,21 @@ class SystemTelemetryService:
 
     def persisted_history(self, manager: AppManager, camera_id: str) -> dict[str, Any]:
         event_store = manager.events
+        telemetry_store = manager.telemetry
         now = time.monotonic()
         with self._persisted_cache_lock:
-            if self._persisted_source is not event_store:
-                self._persisted_source = event_store
+            if self._persisted_source is not telemetry_store:
+                self._persisted_source = telemetry_store
                 self._persisted_cache.clear()
             cached = self._persisted_cache.get(camera_id)
             if cached is not None and now - float(cached["at"]) < 55.0:
                 return cached["value"]
         interruptions: list[dict[str, Any]] = []
         if not camera_id:
-            sample_times_reader = getattr(event_store, "runtime_telemetry_sample_times", None)
             lifecycle_reader = getattr(event_store, "lifecycle_events", None)
             try:
                 interruptions = classify_telemetry_interruptions(
-                    sample_times_reader(hours=168) if callable(sample_times_reader) else [],
+                    telemetry_store.sample_times(hours=168),
                     lifecycle_reader(hours=168) if callable(lifecycle_reader) else [],
                     observed_at=datetime.now(timezone.utc),
                 )
@@ -379,10 +379,10 @@ class SystemTelemetryService:
                 LOGGER.exception("could not load telemetry interruption annotations")
         value = {
             "runtime": {
-                "short": event_store.runtime_telemetry_history(
+                "short": telemetry_store.operational_history(
                     hours=2, bucket_minutes=1, camera_id=camera_id
                 ),
-                "long": event_store.runtime_telemetry_history(
+                "long": telemetry_store.operational_history(
                     hours=168, bucket_minutes=15, camera_id=camera_id
                 ),
             },
@@ -396,10 +396,10 @@ class SystemTelemetryService:
             },
             "memory": (
                 {
-                    "short": event_store.process_memory_history(
+                    "short": telemetry_store.memory_history(
                         hours=24, bucket_minutes=5
                     ),
-                    "long": event_store.process_memory_history(
+                    "long": telemetry_store.memory_history(
                         hours=168, bucket_minutes=15
                     ),
                 }
@@ -410,7 +410,7 @@ class SystemTelemetryService:
             "interruption_summary": summarize_interruptions(interruptions, hours=24),
         }
         with self._persisted_cache_lock:
-            if self._persisted_source is event_store:
+            if self._persisted_source is telemetry_store:
                 if len(self._persisted_cache) >= 32:
                     self._persisted_cache.clear()
                 self._persisted_cache[camera_id] = {"at": now, "value": value}

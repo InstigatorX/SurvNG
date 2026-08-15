@@ -106,3 +106,36 @@ def test_rollups_average_gauges_and_sum_interval_counters(tmp_path) -> None:
     assert system["cpu_load_percent"] == 15.0
     assert camera["live_fps"] == 15.0
     assert camera["capture_interruptions"] == 3
+
+
+def test_operational_history_combines_camera_and_system_metrics(tmp_path) -> None:
+    store = TelemetryStore(tmp_path)
+    sampled_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    store.write_buckets(
+        SystemTelemetryBucket(
+            sampled_at=sampled_at,
+            cpu_load_percent=25.0,
+            inference_ms=18.0,
+        ),
+        [
+            CameraTelemetryBucket(
+                sampled_at=sampled_at,
+                camera_id="gate",
+                available=1.0,
+                ema_frames_sampled=98,
+                ema_frames_superseded=2,
+                ema_credible_episodes=2,
+                object_checks_admitted=1,
+                object_checks_completed=1,
+            )
+        ],
+    )
+
+    row = store.operational_history(
+        hours=2, bucket_minutes=1, camera_id="gate", now=sampled_at
+    )[0]
+    assert row["camera_availability_percent"] == 100.0
+    assert row["analysis_coverage_percent"] == 98.0
+    assert row["cpu_load_percent"] == 25.0
+    assert row["ema_credible_episodes"] == 2
+    assert store.sample_times(hours=2, now=sampled_at) == [sampled_at.isoformat()]

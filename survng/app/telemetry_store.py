@@ -313,6 +313,97 @@ class TelemetryStore:
             rows = conn.execute(sql, parameters).fetchall()
         return [dict(row) for row in rows]
 
+    def sample_times(self, *, hours: int, now: datetime | None = None) -> list[str]:
+        current = _utc(now or datetime.now(timezone.utc))
+        start = current - timedelta(hours=max(1, min(int(hours), 24 * 365)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select sampled_at from system_metric_buckets "
+                "where resolution_minutes=1 and sampled_at>=? order by sampled_at",
+                (start.isoformat(),),
+            ).fetchall()
+        return [str(row["sampled_at"]) for row in rows]
+
+    def operational_history(
+        self,
+        *,
+        hours: int,
+        bucket_minutes: int,
+        camera_id: str = "",
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return compact history in the stable operator-facing API shape."""
+        current = _utc(now or datetime.now(timezone.utc))
+        resolution = 1 if int(bucket_minutes) < 15 else 15 if int(bucket_minutes) < 60 else 60
+        start = current - timedelta(hours=max(1, min(int(hours), 24 * 365)))
+        systems = {
+            str(row["sampled_at"]): row
+            for row in self.system_history(since=start, resolution_minutes=resolution)
+        }
+        cameras = self.camera_history(
+            since=start,
+            resolution_minutes=resolution,
+            camera_id=camera_id,
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in cameras:
+            grouped.setdefault(str(row["sampled_at"]), []).append(row)
+        timestamps = sorted(set(systems) | set(grouped))
+        result: list[dict[str, Any]] = []
+        for sampled_at in timestamps:
+            system = systems.get(sampled_at, {})
+            selected = grouped.get(sampled_at, [])
+            analyzed = sum(int(row.get("ema_frames_sampled") or 0) for row in selected)
+            superseded = sum(int(row.get("ema_frames_superseded") or 0) for row in selected)
+            analysis_total = analyzed + superseded
+            live = [float(row.get("live_fps") or 0.0) for row in selected if float(row.get("live_fps") or 0.0) > 0]
+            main = [float(row.get("main_fps") or 0.0) for row in selected if float(row.get("main_fps") or 0.0) > 0]
+            availability = [float(row.get("available") or 0.0) for row in selected]
+            result.append(
+                {
+                    "sampled_at": sampled_at,
+                    "live_fps": round(sum(live) / len(live), 2) if live else 0.0,
+                    "main_fps": round(sum(main) / len(main), 2) if main else 0.0,
+                    "capture_interruptions": sum(int(row.get("capture_interruptions") or 0) for row in selected),
+                    "analysis_frames_sampled": analyzed,
+                    "analysis_frames_dropped": superseded,
+                    "analysis_coverage_percent": round((analyzed / analysis_total) * 100.0, 3) if analysis_total else None,
+                    "camera_availability_percent": round((sum(availability) / len(availability)) * 100.0, 2) if availability else None,
+                    "expected_cameras": len(availability),
+                    "unavailable_cameras": sum(1 for value in availability if value < 0.5),
+                    "ema_credible_episodes": sum(int(row.get("ema_credible_episodes") or 0) for row in selected),
+                    "object_checks_admitted": sum(int(row.get("object_checks_admitted") or 0) for row in selected),
+                    "object_checks_completed": sum(int(row.get("object_checks_completed") or 0) for row in selected),
+                    "object_check_failures": sum(int(row.get("object_check_failures") or 0) for row in selected),
+                    "cpu_load_percent": system.get("cpu_load_percent"),
+                    "memory_used_percent": system.get("memory_used_percent"),
+                    "inference_ms": system.get("inference_ms"),
+                }
+            )
+        return result
+
+    def memory_history(
+        self,
+        *,
+        hours: int,
+        bucket_minutes: int,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        current = _utc(now or datetime.now(timezone.utc))
+        resolution = 1 if int(bucket_minutes) < 15 else 15 if int(bucket_minutes) < 60 else 60
+        rows = self.system_history(
+            since=current - timedelta(hours=max(1, min(int(hours), 24 * 365))),
+            resolution_minutes=resolution,
+        )
+        return [
+            {
+                "sampled_at": row["sampled_at"],
+                "rss_bytes": int(row.get("application_rss_bytes") or 0),
+                "worker_rss_bytes": int(row.get("worker_rss_bytes") or 0),
+            }
+            for row in rows
+        ]
+
     def record_operational_event(
         self,
         *,

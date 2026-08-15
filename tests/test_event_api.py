@@ -404,8 +404,12 @@ class EventApiSerializationTest(unittest.TestCase):
                 database_dir=root,
                 events=SimpleNamespace(
                     telemetry_activity=Mock(return_value=activity),
-                    runtime_telemetry_history=Mock(return_value=[]),
                     tracking_capacity_activity=Mock(return_value=[]),
+                ),
+                telemetry=SimpleNamespace(
+                    operational_history=Mock(return_value=[]),
+                    memory_history=Mock(return_value=[]),
+                    sample_times=Mock(return_value=[]),
                 ),
                 detector_status=Mock(return_value={"runtime": {"total_inferences": 8}}),
                 semantic_search_status=Mock(return_value={
@@ -526,22 +530,24 @@ class EventApiSerializationTest(unittest.TestCase):
                 41,
             )
             fake_manager.events.telemetry_activity.assert_called_once_with(hours=24)
-            self.assertEqual(fake_manager.events.runtime_telemetry_history.call_count, 2)
+            self.assertEqual(fake_manager.telemetry.operational_history.call_count, 2)
             self.assertEqual(fake_manager.events.tracking_capacity_activity.call_count, 2)
-            for call in fake_manager.events.runtime_telemetry_history.call_args_list:
+            for call in fake_manager.telemetry.operational_history.call_args_list:
                 self.assertEqual(call.kwargs["camera_id"], "gate")
             for call in fake_manager.events.tracking_capacity_activity.call_args_list:
                 self.assertEqual(call.kwargs["camera_id"], "gate")
 
     def test_telemetry_history_survives_interruption_annotation_failure(self) -> None:
         events = SimpleNamespace(
-            runtime_telemetry_sample_times=Mock(side_effect=RuntimeError("database busy")),
             lifecycle_events=Mock(return_value=[]),
-            runtime_telemetry_history=Mock(return_value=[{"sampled_at": "2026-08-07T10:00:00+00:00"}]),
             tracking_capacity_activity=Mock(return_value=[]),
-            process_memory_history=Mock(return_value=[]),
         )
-        fake_manager = SimpleNamespace(events=events)
+        telemetry = SimpleNamespace(
+            sample_times=Mock(side_effect=RuntimeError("database busy")),
+            operational_history=Mock(return_value=[{"sampled_at": "2026-08-07T10:00:00+00:00"}]),
+            memory_history=Mock(return_value=[]),
+        )
+        fake_manager = SimpleNamespace(events=events, telemetry=telemetry)
 
         service = SystemTelemetryService()
         with patch("survng.app.system_telemetry.time.monotonic", return_value=1234.0):
@@ -550,16 +556,19 @@ class EventApiSerializationTest(unittest.TestCase):
         self.assertEqual(history["interruptions"], [])
         self.assertEqual(history["interruption_summary"]["total"], 0)
         self.assertEqual(len(history["runtime"]["short"]), 1)
-        self.assertEqual(events.runtime_telemetry_history.call_count, 2)
+        self.assertEqual(telemetry.operational_history.call_count, 2)
 
     def test_camera_telemetry_omits_system_interruption_annotations(self) -> None:
         events = SimpleNamespace(
-            runtime_telemetry_sample_times=Mock(return_value=["2026-08-07T10:00:00+00:00"]),
             lifecycle_events=Mock(return_value=[]),
-            runtime_telemetry_history=Mock(return_value=[]),
             tracking_capacity_activity=Mock(return_value=[]),
         )
-        fake_manager = SimpleNamespace(events=events)
+        telemetry = SimpleNamespace(
+            sample_times=Mock(return_value=["2026-08-07T10:00:00+00:00"]),
+            operational_history=Mock(return_value=[]),
+            memory_history=Mock(return_value=[]),
+        )
+        fake_manager = SimpleNamespace(events=events, telemetry=telemetry)
 
         service = SystemTelemetryService()
         with patch("survng.app.system_telemetry.time.monotonic", return_value=2345.0):
@@ -567,7 +576,7 @@ class EventApiSerializationTest(unittest.TestCase):
 
         self.assertEqual(history["interruptions"], [])
         self.assertEqual(history["interruption_summary"]["total"], 0)
-        events.runtime_telemetry_sample_times.assert_not_called()
+        telemetry.sample_times.assert_not_called()
         events.lifecycle_events.assert_not_called()
 
     def test_object_tracking_catalog_exposes_only_safe_production_backend(self) -> None:
