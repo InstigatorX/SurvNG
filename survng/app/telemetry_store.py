@@ -198,6 +198,86 @@ class TelemetryStore:
                     camera_values,
                 )
 
+    def write_bucket_batch(
+        self,
+        systems: Iterable[SystemTelemetryBucket],
+        cameras: Iterable[CameraTelemetryBucket],
+    ) -> None:
+        system_values = [self._system_values(sample) for sample in systems]
+        camera_values = [self._camera_values(sample) for sample in cameras]
+        if not system_values and not camera_values:
+            return
+        system_names = "sampled_at,resolution_minutes," + ",".join(SYSTEM_COLUMNS)
+        camera_names = "sampled_at,camera_id,resolution_minutes," + ",".join(CAMERA_COLUMNS)
+        with self._lock, self._connect() as conn:
+            if system_values:
+                conn.executemany(
+                    f"insert or replace into system_metric_buckets ({system_names}) values ({','.join('?' for _ in range(2 + len(SYSTEM_COLUMNS)))})",
+                    system_values,
+                )
+            if camera_values:
+                conn.executemany(
+                    f"insert or replace into camera_metric_buckets ({camera_names}) values ({','.join('?' for _ in range(3 + len(CAMERA_COLUMNS)))})",
+                    camera_values,
+                )
+
+    def rebuild_rollups(self) -> None:
+        """Rebuild compact 15-minute and hourly summaries in set-based SQL."""
+        system_gauges = {
+            "cpu_load_percent",
+            "memory_used_percent",
+            "application_rss_bytes",
+            "worker_rss_bytes",
+            "inference_ms",
+            "gpu_utilization_percent",
+        }
+        camera_gauges = {"available", "live_fps", "main_fps"}
+        with self._lock, self._connect() as conn:
+            conn.execute("delete from system_metric_buckets where resolution_minutes in (15,60)")
+            conn.execute("delete from camera_metric_buckets where resolution_minutes in (15,60)")
+            for resolution in (15, 60):
+                seconds = resolution * 60
+                bucket = (
+                    f"strftime('%Y-%m-%dT%H:%M:00+00:00',"
+                    f"(unixepoch(sampled_at)/{seconds})*{seconds},'unixepoch')"
+                )
+                system_select = ",".join(
+                    f"avg({name})" if name in system_gauges else f"sum({name})"
+                    for name in SYSTEM_COLUMNS
+                )
+                conn.execute(
+                    f"insert into system_metric_buckets "
+                    f"(sampled_at,resolution_minutes,{','.join(SYSTEM_COLUMNS)}) "
+                    f"select {bucket},?,{system_select} from system_metric_buckets "
+                    "where resolution_minutes=1 group by 1",
+                    (resolution,),
+                )
+                camera_select = ",".join(
+                    f"avg({name})" if name in camera_gauges else f"sum({name})"
+                    for name in CAMERA_COLUMNS
+                )
+                conn.execute(
+                    f"insert into camera_metric_buckets "
+                    f"(sampled_at,camera_id,resolution_minutes,{','.join(CAMERA_COLUMNS)}) "
+                    f"select {bucket},camera_id,?,{camera_select} from camera_metric_buckets "
+                    "where resolution_minutes=1 group by 1,camera_id",
+                    (resolution,),
+                )
+
+    def metadata_value(self, key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select value from telemetry_metadata where key=?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row is not None else None
+
+    def set_metadata_value(self, key: str, value: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "insert or replace into telemetry_metadata (key,value) values (?,?)",
+                (key, value),
+            )
+
     @staticmethod
     def _bucket_start(value: datetime, resolution_minutes: int) -> datetime:
         seconds = max(1, int(resolution_minutes)) * 60

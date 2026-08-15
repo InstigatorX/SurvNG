@@ -61,6 +61,7 @@ from .recording_lifecycle import RecordingLifecycle
 from .state_events import StateEventBroker
 from .security import redact_secret_text
 from .telemetry_store import TelemetryStore
+from .telemetry_migration import migrate_legacy_runtime_telemetry
 
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -168,6 +169,7 @@ class AppManager:
             media_storage=self.media_storage,
         )
         self.telemetry = TelemetryStore(self.database_dir)
+        migrate_legacy_runtime_telemetry(self.events.db_path, self.telemetry)
         self.appearance_index = AppearanceIndex(self.events.db_path)
         self.semantic_index = SemanticIndex(self.events.db_path)
         self.recording = RecordingLifecycle(
@@ -312,7 +314,6 @@ class AppManager:
         )
         self.runtime_monitor = ApplicationRuntimeMonitor(
             inference=self.inference,
-            events=self.events,
             telemetry_store=self.telemetry,
             state_events=self.state_events,
             camera_statuses=self.statuses,

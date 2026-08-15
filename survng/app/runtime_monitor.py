@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .events import EventStore
 from .inference_lifecycle import InferenceLifecycle
 from .process_memory import (
     AllocatorMemoryTrimmer,
@@ -175,7 +174,6 @@ class ApplicationRuntimeMonitor:
         self,
         *,
         inference: InferenceLifecycle,
-        events: EventStore,
         telemetry_store: TelemetryStore | None = None,
         state_events: StateEventBroker,
         camera_statuses: Callable[[], list[dict[str, Any]]],
@@ -185,7 +183,6 @@ class ApplicationRuntimeMonitor:
         memory_trimmer: AllocatorMemoryTrimmer | None = None,
     ) -> None:
         self._inference = inference
-        self._events = events
         self._telemetry_store = telemetry_store
         self._telemetry_collector = OperationalTelemetryCollector()
         self._diagnostics = (
@@ -339,13 +336,6 @@ class ApplicationRuntimeMonitor:
                         "memory_used_percent": memory_used_percent,
                         "inference_ms": detector_runtime.get("average_inference_ms"),
                     }
-                    self._events.record_runtime_telemetry(
-                        statuses,
-                        process_memory=process_memory,
-                        worker_memory=worker_memory,
-                        memory_maintenance=self.memory_maintenance_status(),
-                        system_runtime=system_runtime,
-                    )
                     if self._telemetry_store is not None:
                         sampled_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
                         system_bucket, camera_buckets = self._telemetry_collector.collect(

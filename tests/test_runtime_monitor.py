@@ -23,7 +23,6 @@ def runtime_monitor(
     state_events = Mock()
     monitor = ApplicationRuntimeMonitor(
         inference=inference,
-        events=events,
         state_events=state_events,
         camera_statuses=Mock(return_value=statuses or []),
         sample_interval_seconds=sample_interval_seconds,
@@ -91,13 +90,12 @@ class ApplicationRuntimeMonitorTest(unittest.TestCase):
 
         monitor.start()
         deadline = time.monotonic() + 1.0
-        while not events.record_runtime_telemetry.called and time.monotonic() < deadline:
+        while not inference.maintain.called and time.monotonic() < deadline:
             time.sleep(0.01)
         monitor.stop()
 
         self.assertFalse(monitor.running)
         inference.maintain.assert_called()
-        events.record_runtime_telemetry.assert_called()
         state_events.publish.assert_any_call("camera_state", status)
 
     def test_start_and_stop_are_idempotent(self) -> None:
