@@ -8333,7 +8333,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
         </section>
       </div>
 
-      <section className="telemetry-section">
+      {selected ? <section className="telemetry-section">
         <div className="telemetry-section-head"><div><h3>{selected ? selected.name : "Camera status"}</h3><p>What each camera is delivering and whether its detection path is keeping up. Counters reset when SurvNG restarts.</p></div></div>
         <div className="telemetry-camera-grid">
           {shownCameras.map((camera) => {
@@ -8402,7 +8402,7 @@ function TelemetryViewer({ data, cameraId, timeZone }) {
             </article>
           })}
         </div>
-      </section>
+      </section> : null}
       <p className="telemetry-footnote">Availability, interruptions, EMA coverage, event delivery, and tracking capacity are the primary health signals. “Stale skipped” means a newer frame replaced an older pending sample so analysis stayed current; it matters only when coverage drops persistently. One-minute detail is retained for 48 hours, with compact summaries retained longer.</p>
     </div>
     </TelemetryInterruptionsContext.Provider>
@@ -8674,6 +8674,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   const [telemetry, setTelemetry] = useState(null);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
   const [telemetryError, setTelemetryError] = useState("");
+  const [telemetrySection, setTelemetrySection] = useStoredState("survng.telemetrySection.v1", "overview");
   const [telemetryCamera, setTelemetryCamera] = useStoredState("survng.telemetryCamera.v1", "");
   const [diagnosticScope, setDiagnosticScope] = useState("system");
   const [diagnosticDuration, setDiagnosticDuration] = useState("3600");
@@ -8883,7 +8884,8 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     setTelemetryError("");
     try {
       const params = new URLSearchParams({ hours: "24" });
-      if (telemetryCamera) params.set("camera_id", telemetryCamera);
+      const cameraId = telemetryCamera || config?.cameras?.[0]?.id || "";
+      if (telemetrySection === "cameras" && cameraId) params.set("camera_id", cameraId);
       const response = await fetch(`/api/telemetry?${params.toString()}`);
       if (!response.ok) throw new Error(`Telemetry failed to load (${response.status})`);
       setTelemetry(await response.json());
@@ -8895,12 +8897,13 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   }
 
   async function startTelemetryDiagnostics() {
+    const cameraId = telemetryCamera || config?.cameras?.[0]?.id || "";
     const response = await fetch("/api/telemetry/diagnostics", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         scope: diagnosticScope,
-        camera_id: diagnosticScope === "camera" ? telemetryCamera : "",
+        camera_id: diagnosticScope === "camera" ? cameraId : "",
         duration_seconds: Number(diagnosticDuration),
       }),
     });
@@ -8926,7 +8929,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
     void loadTelemetry();
     const timer = window.setInterval(() => void loadTelemetry(), 10000);
     return () => window.clearInterval(timer);
-  }, [settingsTab, telemetryCamera]);
+  }, [settingsTab, telemetryCamera, telemetrySection]);
 
   async function loadMaintenance() {
     try {
@@ -8980,6 +8983,9 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
   }, [settingsTab, maintenance?.status]);
 
   const cameras = config?.cameras || [];
+  const selectedTelemetryCamera = cameras.some((camera) => camera.id === telemetryCamera)
+    ? telemetryCamera
+    : cameras[0]?.id || "";
   const selectedCamera = cameras.find((camera) => camera.id === selectedId) || cameras[0] || null;
   const selectedRuntimeStatus = runtimeStatus.find((camera) => camera.id === selectedCamera?.id);
   const selectedAudit = auditItems.find((item) => item.id === selectedAuditId)
@@ -9379,31 +9385,40 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
       ) : settingsTab === "telemetry" ? (
         <>
         <section className="bento-card camera-tree config-tree settings-section-tree telemetry-camera-filter">
-          <div className="section-head compact"><div><h2>Telemetry</h2><p>Updates every 10 seconds</p></div></div>
+          <div className="section-head compact"><div><h2>Cameras</h2><p>Select for camera statistics</p></div></div>
           <div className="tree-list">
-            <button type="button" className={!telemetryCamera ? "active" : ""} onClick={() => setTelemetryCamera("")}><Gauge size={16} /><span>All cameras</span></button>
-            {cameras.map((camera) => <button type="button" className={telemetryCamera === camera.id ? "active" : ""} key={camera.id} onClick={() => setTelemetryCamera(camera.id)}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
+            {cameras.map((camera) => <button type="button" className={telemetrySection === "cameras" && selectedTelemetryCamera === camera.id ? "active" : ""} key={camera.id} onClick={() => { setTelemetryCamera(camera.id); setTelemetrySection("cameras"); }}><Camera size={16} /><span>{camera.name || camera.id}</span></button>)}
           </div>
         </section>
         <section className="bento-card config-editor settings-panel telemetry-panel">
           <div className="section-head telemetry-panel-head">
             <div><h2>Telemetry</h2><p>System, detection, event, and camera health</p></div>
-            {!telemetryCamera ? <TelemetryContinuity data={telemetry} /> : null}
+            {telemetrySection === "overview" ? <TelemetryContinuity data={telemetry} /> : null}
             <button onClick={() => void loadTelemetry()} disabled={telemetryLoading}><RefreshCcw className={telemetryLoading ? "spin" : ""} size={16} /> Refresh</button>
           </div>
           {telemetryError ? <div className="error-banner telemetry-error">{telemetryError}</div> : null}
-          <section className="telemetry-section">
-            <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Diagnostics turn off automatically and never include images, video, or credentials.</p></div></div>
-            <div className="field-grid compact-grid">
-              <label><span>Scope</span><select value={diagnosticScope} onChange={(event) => setDiagnosticScope(event.target.value)}><option value="system">Entire system</option><option value="detector">Object detector</option><option value="storage">Storage</option><option value="camera">Selected camera</option></select></label>
-              <label><span>Duration</span><select value={diagnosticDuration} onChange={(event) => setDiagnosticDuration(event.target.value)}><option value="900">15 minutes</option><option value="3600">1 hour</option><option value="21600">6 hours</option><option value="86400">24 hours</option></select></label>
-              <button type="button" onClick={() => void startTelemetryDiagnostics()} disabled={diagnosticScope === "camera" && !telemetryCamera}>Start diagnostics</button>
-            </div>
-            {(telemetry?.diagnostics?.active || []).length ? <div className="notice-list">{telemetry.diagnostics.active.map((session) => <div className="notice" key={session.id}><span>{session.scope === "camera" ? `${session.camera_id} camera` : session.scope} diagnostics · until {formatDateTime(session.expires_at, timeZone)}</span><div className="button-row"><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}>Download</a><button type="button" onClick={() => void stopTelemetryDiagnostics(session.id)}>Stop</button></div></div>)}</div> : <p className="muted">No diagnostic capture is active.</p>}
-            {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="notice-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <div className="notice" key={session.id}><span>{session.scope === "camera" ? `${session.camera_id} camera` : session.scope} · {formatDateTime(session.started_at, timeZone)}</span><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}>Download</a></div>)}</div></details> : null}
-            {(telemetry?.operational_events || []).length ? <details className="telemetry-technical"><summary>Recent health events</summary><div className="notice-list">{telemetry.operational_events.slice(0, 10).map((event) => <div className="notice" key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details> : null}
-          </section>
-          <TelemetryViewer data={telemetry} cameraId={telemetryCamera} timeZone={timeZone} />
+          <div className="camera-section-tabs telemetry-section-tabs" role="tablist" aria-label="Telemetry sections">
+            <button type="button" className={telemetrySection === "overview" ? "active" : ""} onClick={() => setTelemetrySection("overview")} role="tab" aria-selected={telemetrySection === "overview"}><Gauge size={15} />Overview</button>
+            <button type="button" className={telemetrySection === "cameras" ? "active" : ""} onClick={() => setTelemetrySection("cameras")} role="tab" aria-selected={telemetrySection === "cameras"}><Camera size={15} />Per-camera</button>
+            <button type="button" className={telemetrySection === "diagnostics" ? "active" : ""} onClick={() => setTelemetrySection("diagnostics")} role="tab" aria-selected={telemetrySection === "diagnostics"}><Wrench size={15} />Diagnostics</button>
+          </div>
+          {telemetrySection === "diagnostics" ? <div className="telemetry-diagnostics">
+            <section className="telemetry-section">
+              <div className="telemetry-section-head"><div><h3>Temporary diagnostics</h3><p>Capture detailed troubleshooting data for a limited time. Sessions stop automatically and never include images, video, or credentials.</p></div></div>
+              <div className="telemetry-diagnostic-controls">
+                <label><span>Scope</span><select value={diagnosticScope} onChange={(event) => setDiagnosticScope(event.target.value)}><option value="system">Entire system</option><option value="detector">Object detector</option><option value="storage">Storage</option><option value="camera">One camera</option></select></label>
+                {diagnosticScope === "camera" ? <label><span>Camera</span><select value={selectedTelemetryCamera} onChange={(event) => setTelemetryCamera(event.target.value)}>{cameras.map((camera) => <option value={camera.id} key={camera.id}>{camera.name || camera.id}</option>)}</select></label> : null}
+                <label><span>Duration</span><select value={diagnosticDuration} onChange={(event) => setDiagnosticDuration(event.target.value)}><option value="900">15 minutes</option><option value="3600">1 hour</option><option value="21600">6 hours</option><option value="86400">24 hours</option></select></label>
+                <button type="button" className="primary" onClick={() => void startTelemetryDiagnostics()} disabled={diagnosticScope === "camera" && !selectedTelemetryCamera}>Start diagnostics</button>
+              </div>
+              {(telemetry?.diagnostics?.active || []).length ? <div className="telemetry-diagnostic-list">{telemetry.diagnostics.active.map((session) => {
+                const camera = cameras.find((item) => item.id === session.camera_id);
+                return <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? camera?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>Active until {formatDateTime(session.expires_at, timeZone)}</span></div><div className="button-row"><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a><button type="button" onClick={() => void stopTelemetryDiagnostics(session.id)}>Stop</button></div></article>;
+              })}</div> : <p className="telemetry-diagnostic-empty">No diagnostic capture is active.</p>}
+            </section>
+            {(telemetry?.diagnostics?.recent || []).some((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()) ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent diagnostic reports</summary><div className="telemetry-diagnostic-list">{telemetry.diagnostics.recent.filter((session) => session.stopped_at || new Date(session.expires_at).getTime() <= Date.now()).map((session) => <article className="telemetry-diagnostic-card" key={session.id}><div><strong>{session.scope === "camera" ? cameras.find((camera) => camera.id === session.camera_id)?.name || session.camera_id : String(session.scope).replaceAll("_", " ")} diagnostics</strong><span>{formatDateTime(session.started_at, timeZone)}</span></div><a className="button" href={`/api/telemetry/diagnostics/${encodeURIComponent(session.id)}`} download={`survng-diagnostics-${session.id}.json`}><Download size={14} />Download</a></article>)}</div></details></section> : null}
+            {(telemetry?.operational_events || []).length ? <section className="telemetry-section"><details className="telemetry-technical"><summary>Recent health events</summary><div className="telemetry-health-event-list">{telemetry.operational_events.slice(0, 10).map((event) => <div key={event.id}><span>{event.summary}{Number(event.count || 1) > 1 ? ` · ${event.count} occurrences` : ""}</span><time>{formatDateTime(event.occurred_at, timeZone)}</time></div>)}</div></details></section> : null}
+          </div> : <TelemetryViewer data={telemetry} cameraId={telemetrySection === "cameras" ? selectedTelemetryCamera : ""} timeZone={timeZone} />}
         </section>
         </>
       ) : settingsTab === "maintenance" ? (

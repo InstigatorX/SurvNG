@@ -6420,6 +6420,10 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   flex: 0 0 auto;
 }
 
+.telemetry-section-tabs {
+  margin: 14px 14px 0;
+}
+
 .telemetry-header-continuity {
   min-width: 0;
   max-width: min(720px, 64%);
@@ -6446,6 +6450,114 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: grid;
   gap: 12px;
   padding: 14px;
+}
+
+.telemetry-diagnostics {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.telemetry-diagnostic-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 13px;
+}
+
+.telemetry-diagnostic-controls label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.telemetry-diagnostic-controls select,
+.telemetry-diagnostic-controls button {
+  min-height: 36px;
+}
+
+.telemetry-diagnostic-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 12px;
+}
+
+.telemetry-diagnostic-card {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--control);
+  padding: 10px;
+}
+
+.telemetry-diagnostic-card > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.telemetry-diagnostic-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.telemetry-diagnostic-card span,
+.telemetry-health-event-list time,
+.telemetry-diagnostic-empty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.telemetry-diagnostic-card .button-row {
+  flex: 0 0 auto;
+}
+
+.telemetry-diagnostic-card .button,
+.telemetry-diagnostic-card button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.telemetry-diagnostic-empty {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  padding: 14px;
+}
+
+.telemetry-health-event-list {
+  display: grid;
+}
+
+.telemetry-health-event-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-top: 1px solid var(--line);
+  padding: 10px 13px;
+}
+
+.telemetry-health-event-list > div:first-child {
+  border-top: 0;
+}
+
+.telemetry-health-event-list time {
+  flex: 0 0 auto;
 }
 
 .telemetry-summary-grid,
@@ -7208,6 +7320,28 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .telemetry-viewer {
     padding: 9px;
+  }
+
+  .telemetry-section-tabs {
+    margin: 9px 9px 0;
+  }
+
+  .telemetry-diagnostics {
+    padding: 9px;
+  }
+
+  .telemetry-diagnostic-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .telemetry-diagnostic-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .telemetry-diagnostic-card,
+  .telemetry-health-event-list > div {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .telemetry-panel-head .telemetry-header-continuity {
