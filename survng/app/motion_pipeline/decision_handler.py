@@ -305,6 +305,7 @@ class MotionEventStore(Protocol):
         recording_path: str = "",
         objects_json: str = "[]",
         created_at: str | None = None,
+        detection_intent_id: str | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -672,10 +673,15 @@ class MotionDecisionHandler:
                 recording_path=recording_path,
                 objects_json=self.object_serializer(stored_objects),
                 created_at=event_at.isoformat(),
+                detection_intent_id=(
+                    str(qualification.get("detection_intent_id") or "") or None
+                ),
             )
             event_id = int(event["id"])
+            event_created = bool(event.get("created", True))
         else:
             event_id = int(existing_event_id)
+            event_created = False
             self.events.refine_event_evidence(
                 event_id,
                 snapshot_path=snapshot_path,
@@ -687,7 +693,7 @@ class MotionDecisionHandler:
             event_at,
             tuple(getattr(provider_result, "face_candidates", ()) or ()),
         )
-        if self.event_callback and existing_event_id is None:
+        if self.event_callback and event_created:
             self._publish(
                 "incident",
                 IncidentCreated(
@@ -698,7 +704,9 @@ class MotionDecisionHandler:
             )
 
         detected_objects = [detected for detected in stored_objects if detected.get("label")]
-        if self.event_callback and detected_objects:
+        if self.event_callback and detected_objects and (
+            existing_event_id is not None or event_created
+        ):
             self._publish(
                 "object",
                 ObjectDetected(

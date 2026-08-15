@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 import copy
 from collections import deque
+import hashlib
+import json
 import logging
 import queue
 import threading
+import time
 from typing import Any, Callable, Protocol
 
 import numpy as np
@@ -31,6 +34,22 @@ class MotionDecisionProcessor(Protocol):
         require_eligible_object: bool = False,
         require_motion_correlation: bool = False,
     ) -> MotionDecisionOutcome: ...
+
+
+class DetectionJobStore(Protocol):
+    def enqueue_detection_job(
+        self, *, job_id: str, camera_id: str, dedupe_key: str,
+        payload: dict[str, Any],
+    ) -> str: ...
+    def claim_detection_job(
+        self, camera_id: str, *, lease_seconds: float = 60.0,
+    ) -> dict[str, Any] | None: ...
+    def complete_detection_job(self, job_id: str, event_id: int | None) -> None: ...
+    def retry_detection_job(
+        self, job_id: str, error: str, *, retry_delay_seconds: float = 2.0,
+        maximum_attempts: int = 5,
+    ) -> bool: ...
+    def detection_job_status(self, camera_id: str) -> dict[str, int]: ...
 
     def refine(
         self,
@@ -92,6 +111,119 @@ class _RefinementJob:
             return ("episode", sequence)
         return ("time", round(self.event_at.timestamp(), 3))
 
+    def dedupe_key(self) -> str:
+        kind, value = self.key()
+        return f"{kind}:{value}"
+
+    def job_id(self, camera_id: str) -> str:
+        return hashlib.sha256(
+            f"{camera_id}\0{self.dedupe_key()}".encode("utf-8")
+        ).hexdigest()
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "topic": self.topic,
+            "message": self.message,
+            "event_at": self.event_at.isoformat(),
+            "qualification": json.loads(json.dumps(self.qualification, default=str)),
+            "existing_event_id": self.existing_event_id,
+            "require_eligible_object": self.require_eligible_object,
+            "require_motion_correlation": self.require_motion_correlation,
+            "initial_outcome": {
+                **self.initial_outcome.as_dict(),
+                "detected_objects": list(self.initial_outcome.detected_objects),
+            },
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        callback: RefinementCallback | None,
+    ) -> "_RefinementJob":
+        initial = dict(payload.get("initial_outcome") or {})
+        return cls(
+            topic=str(payload.get("topic") or ""),
+            message=str(payload.get("message") or ""),
+            event_at=datetime.fromisoformat(str(payload["event_at"])),
+            qualification=dict(payload.get("qualification") or {}),
+            existing_event_id=(
+                int(payload["existing_event_id"])
+                if payload.get("existing_event_id") is not None else None
+            ),
+            require_eligible_object=bool(payload.get("require_eligible_object")),
+            require_motion_correlation=bool(payload.get("require_motion_correlation")),
+            callback=callback,
+            initial_outcome=MotionDecisionOutcome(
+                event_id=(int(initial["event_id"]) if initial.get("event_id") is not None else None),
+                snapshot_path=str(initial.get("snapshot_path") or ""),
+                object_detected=initial.get("object_detected"),
+                detected_objects=tuple(initial.get("detected_objects") or ()),
+                rejection_reason=str(initial.get("rejection_reason") or ""),
+                motion_correlation=initial.get("motion_correlation"),
+                refinement_pending=bool(initial.get("refinement_pending")),
+                processing_timing=initial.get("processing_timing"),
+                object_activity=initial.get("object_activity"),
+            ),
+        )
+
+
+class _MemoryDetectionJobStore:
+    """Test/local fallback with the same no-capacity-drop semantics."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    def enqueue_detection_job(self, *, job_id, camera_id, dedupe_key, payload):
+        with self._lock:
+            if job_id in self._jobs:
+                return "coalesced"
+            self._jobs[job_id] = {
+                "id": job_id, "camera_id": camera_id, "dedupe_key": dedupe_key,
+                "payload": copy.deepcopy(payload), "state": "queued", "attempts": 0,
+                "available_at": time.monotonic(),
+            }
+            return "queued"
+
+    def claim_detection_job(self, camera_id, *, lease_seconds=60.0):
+        del lease_seconds
+        with self._lock:
+            for job in self._jobs.values():
+                if (
+                    job["camera_id"] == camera_id
+                    and job["state"] == "queued"
+                    and job["available_at"] <= time.monotonic()
+                ):
+                    job["state"] = "running"
+                    job["attempts"] += 1
+                    return copy.deepcopy(job)
+        return None
+
+    def complete_detection_job(self, job_id, event_id):
+        with self._lock:
+            self._jobs[job_id]["state"] = "completed"
+            self._jobs[job_id]["event_id"] = event_id
+
+    def retry_detection_job(
+        self, job_id, error, *, retry_delay_seconds=2.0, maximum_attempts=5,
+    ):
+        del error
+        with self._lock:
+            job = self._jobs[job_id]
+            retry = job["attempts"] < maximum_attempts
+            job["state"] = "queued" if retry else "failed"
+            job["available_at"] = time.monotonic() + retry_delay_seconds
+            return retry
+
+    def detection_job_status(self, camera_id):
+        with self._lock:
+            result: dict[str, int] = {}
+            for job in self._jobs.values():
+                if job["camera_id"] == camera_id:
+                    result[job["state"]] = result.get(job["state"], 0) + 1
+            return result
+
 
 class MotionIncidentService:
     """Persists a qualified incident and hands durable results to tracking.
@@ -111,6 +243,7 @@ class MotionIncidentService:
         start_tracking: TrackingStarter,
         prewarm_tracking: TrackingPrewarmer,
         image_reader: ImageReader,
+        refinement_store: DetectionJobStore | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.decision_processor = decision_processor
@@ -119,6 +252,7 @@ class MotionIncidentService:
         self.start_tracking = start_tracking
         self.prewarm_tracking = prewarm_tracking
         self.image_reader = image_reader
+        self.refinement_store = refinement_store or _MemoryDetectionJobStore()
         self._status_lock = threading.Lock()
         self._prewarm_failures = 0
         self._last_prewarm_failure: dict[str, Any] | None = None
@@ -127,16 +261,14 @@ class MotionIncidentService:
         self._handoff_lock = threading.Lock()
         self._handed_off_event_ids: set[int] = set()
         self._handoff_event_order: deque[int] = deque()
-        self._refinement_queue: queue.Queue[_RefinementJob | None] = queue.Queue(maxsize=3)
-        self._pending_refinement_keys: set[tuple[str, int | float]] = set()
+        self._refinement_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
+        self._refinement_callbacks: dict[str, RefinementCallback] = {}
         self._refinement_thread: threading.Thread | None = None
         self._refinement_stop: threading.Event | None = None
         self._refinement_accepting = False
         self._refinements_queued = 0
         self._refinements_completed = 0
-        self._refinements_dropped = 0
         self._refinements_coalesced = 0
-        self._refinements_superseded = 0
         self._refinement_failures = 0
         self._last_refinement_failure: dict[str, Any] | None = None
         self._refinement_callback_failures = 0
@@ -147,6 +279,7 @@ class MotionIncidentService:
         self._last_timing_ms: dict[str, float] = {}
 
     def status(self) -> dict[str, Any]:
+        durable = self.refinement_store.detection_job_status(self.camera_id)
         with self._status_lock:
             return {
                 "prewarm_failures": self._prewarm_failures,
@@ -163,9 +296,7 @@ class MotionIncidentService:
                 ),
                 "refinements_queued": self._refinements_queued,
                 "refinements_completed": self._refinements_completed,
-                "refinements_dropped": self._refinements_dropped,
                 "refinements_coalesced": self._refinements_coalesced,
-                "refinements_superseded": self._refinements_superseded,
                 "refinement_failures": self._refinement_failures,
                 "last_refinement_failure": (
                     dict(self._last_refinement_failure)
@@ -178,8 +309,11 @@ class MotionIncidentService:
                     if self._last_refinement_callback_failure is not None
                     else None
                 ),
-                "refinement_queue_depth": self._refinement_queue.qsize(),
-                "refinement_pending_episodes": len(self._pending_refinement_keys),
+                "refinement_queue_depth": int(durable.get("queued", 0)),
+                "refinement_pending_episodes": int(durable.get("queued", 0))
+                + int(durable.get("running", 0)),
+                "refinement_durable": True,
+                "refinement_jobs": durable,
                 "refinement_worker_alive": bool(
                     self._refinement_thread and self._refinement_thread.is_alive()
                 ),
@@ -223,16 +357,9 @@ class MotionIncidentService:
         with self._status_lock:
             self._refinement_accepting = False
         try:
-            self._refinement_queue.put_nowait(None)
+            self._refinement_queue.put_nowait(True)
         except queue.Full:
-            try:
-                self._refinement_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._refinement_queue.put_nowait(None)
-            except queue.Full:
-                pass
+            pass
 
     def wait_stopped(self, timeout: float) -> bool:
         thread = self._refinement_thread
@@ -395,67 +522,33 @@ class MotionIncidentService:
                 return False
 
     def _queue_refinement(self, job: _RefinementJob) -> str:
-        superseded: _RefinementJob | None = None
         with self._status_lock:
             stop = self._refinement_stop
-            if (
-                not self._refinement_accepting
-                or stop is None
-                or stop.is_set()
-                or self._refinement_thread is None
-                or not self._refinement_thread.is_alive()
-            ):
-                self._refinements_dropped += 1
-                LOGGER.warning("motion refinement worker unavailable for %s", self.camera_id)
-                return "dropped"
-            key = job.key()
-            if key in self._pending_refinement_keys:
-                self._refinements_coalesced += 1
-                LOGGER.debug(
-                    "coalesced duplicate motion refinement for %s %s",
-                    self.camera_id,
-                    key,
-                )
-                return "coalesced"
-            try:
-                self._refinement_queue.put_nowait(job)
-            except queue.Full:
-                removed = False
-                try:
-                    candidate = self._refinement_queue.get_nowait()
-                    removed = True
-                except queue.Empty:
-                    candidate = None
-                if removed and candidate is None:
-                    # Preserve a shutdown sentinel; admission is already closed.
-                    try:
-                        self._refinement_queue.put_nowait(None)
-                    except queue.Full:
-                        pass
-                    self._refinements_dropped += 1
-                    return "dropped"
-                if candidate is not None:
-                    superseded = candidate
-                    self._pending_refinement_keys.discard(candidate.key())
-                try:
-                    self._refinement_queue.put_nowait(job)
-                except queue.Full:
-                    self._refinements_dropped += 1
-                    return "dropped"
-                if superseded is not None:
-                    self._refinements_superseded += 1
-            self._pending_refinement_keys.add(key)
-            self._refinements_queued += 1
-        if superseded is not None:
-            # Refinement is optional enrichment. Preserve the displaced
-            # decision's already-valid tracking handoff.
-            self._handoff(superseded.initial_outcome, superseded.event_at)
-            LOGGER.info(
-                "superseded stale motion refinement for %s %s with %s",
-                self.camera_id,
-                superseded.key(),
-                job.key(),
+            worker_available = bool(
+                self._refinement_accepting
+                and stop is not None
+                and not stop.is_set()
+                and self._refinement_thread is not None
+                and self._refinement_thread.is_alive()
             )
+            job_id = job.job_id(self.camera_id)
+            admission = self.refinement_store.enqueue_detection_job(
+                job_id=job_id,
+                camera_id=self.camera_id,
+                dedupe_key=job.dedupe_key(),
+                payload=job.payload(),
+            )
+            if admission == "coalesced":
+                self._refinements_coalesced += 1
+                return admission
+            if job.callback is not None:
+                self._refinement_callbacks[job_id] = job.callback
+            self._refinements_queued += 1
+        if worker_available:
+            try:
+                self._refinement_queue.put_nowait(True)
+            except queue.Full:
+                pass
         return "queued"
 
     def _run_refinements(self) -> None:
@@ -463,12 +556,19 @@ class MotionIncidentService:
             stop = self._refinement_stop
             if stop is None or stop.is_set():
                 return
-            try:
-                job = self._refinement_queue.get(timeout=0.5)
-            except queue.Empty:
+            claimed = self.refinement_store.claim_detection_job(self.camera_id)
+            if claimed is None:
+                try:
+                    self._refinement_queue.get(timeout=0.5)
+                except queue.Empty:
+                    pass
                 continue
-            if job is None or stop.is_set():
-                return
+            job_id = str(claimed["id"])
+            with self._status_lock:
+                callback = self._refinement_callbacks.get(job_id)
+            job = _RefinementJob.from_payload(dict(claimed["payload"]), callback)
+            job.qualification["detection_intent_id"] = job_id
+            completed = False
             try:
                 try:
                     outcome = self.decision_processor.refine(
@@ -491,20 +591,45 @@ class MotionIncidentService:
                     with self._status_lock:
                         self._refinement_failures += 1
                         self._last_refinement_failure = failure
+                    retrying = self.refinement_store.retry_detection_job(
+                        job_id,
+                        failure["error"],
+                    )
                     self._handoff(job.initial_outcome, job.event_at)
                     LOGGER.exception(
-                        "motion refinement failed for %s: %s: %s",
+                        "motion refinement failed for %s (%s): %s: %s",
                         self.camera_id,
+                        "retrying" if retrying else "terminal",
                         type(error).__name__,
                         redact_secret_text(error)[:500],
                     )
+                    if retrying:
+                        try:
+                            self._refinement_queue.put_nowait(True)
+                        except queue.Full:
+                            pass
+                    else:
+                        with self._status_lock:
+                            self._refinement_callbacks.pop(job_id, None)
                     continue
 
                 self._record_timing(outcome)
+                if outcome.object_detected is None:
+                    retrying = self.refinement_store.retry_detection_job(
+                        job_id,
+                        outcome.rejection_reason or "refinement returned no terminal evidence",
+                    )
+                    if retrying:
+                        try:
+                            self._refinement_queue.put_nowait(True)
+                        except queue.Full:
+                            pass
+                    else:
+                        with self._status_lock:
+                            self._refinement_callbacks.pop(job_id, None)
+                    continue
                 self._handoff(
-                    job.initial_outcome
-                    if outcome.object_detected is None
-                    else outcome,
+                    outcome,
                     job.event_at,
                 )
                 if job.callback is not None and not stop.is_set():
@@ -529,9 +654,12 @@ class MotionIncidentService:
                         )
                 with self._status_lock:
                     self._refinements_completed += 1
+                self.refinement_store.complete_detection_job(job_id, outcome.event_id)
+                completed = True
             finally:
                 with self._status_lock:
-                    self._pending_refinement_keys.discard(job.key())
+                    if completed:
+                        self._refinement_callbacks.pop(job_id, None)
 
     def _record_timing(self, outcome: MotionDecisionOutcome) -> None:
         timing = outcome.processing_timing
@@ -561,6 +689,4 @@ class MotionIncidentService:
             try:
                 self._refinement_queue.get_nowait()
             except queue.Empty:
-                with self._status_lock:
-                    self._pending_refinement_keys.clear()
                 return

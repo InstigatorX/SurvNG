@@ -7,6 +7,7 @@ import math
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,12 @@ class EventStore:
                 conn.execute(
                     "alter table events add column snapshot_size_bytes integer not null default 0"
                 )
+            if "detection_intent_id" not in event_columns:
+                conn.execute("alter table events add column detection_intent_id text")
+            conn.execute(
+                "create unique index if not exists idx_events_detection_intent "
+                "on events(detection_intent_id) where detection_intent_id is not null"
+            )
             conn.execute(
                 "create index if not exists idx_events_created_at on events(created_at desc)"
             )
@@ -99,6 +106,29 @@ class EventStore:
             conn.execute(
                 "create table if not exists media_deletion_claims ("
                 "path text primary key, role text not null, claimed_at text not null)"
+            )
+            conn.execute(
+                """
+                create table if not exists detection_jobs (
+                    id text primary key,
+                    camera_id text not null,
+                    dedupe_key text not null,
+                    payload_json text not null,
+                    state text not null,
+                    attempts integer not null default 0,
+                    available_at real not null,
+                    lease_expires_at real,
+                    event_id integer,
+                    last_error text not null default '',
+                    created_at text not null,
+                    updated_at text not null,
+                    unique(camera_id, dedupe_key)
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists idx_detection_jobs_claim "
+                "on detection_jobs(camera_id, state, available_at, created_at)"
             )
             conn.execute(
                 """
@@ -339,6 +369,112 @@ class EventStore:
                     "motion_audit_backfill_event_id",
                     str(latest_event_id),
                 )
+
+    def enqueue_detection_job(
+        self,
+        *,
+        job_id: str,
+        camera_id: str,
+        dedupe_key: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """Durably admit mandatory delayed object discovery."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "insert or ignore into detection_jobs "
+                "(id, camera_id, dedupe_key, payload_json, state, available_at, "
+                "created_at, updated_at) values (?, ?, ?, ?, 'queued', ?, ?, ?)",
+                (
+                    job_id,
+                    camera_id,
+                    dedupe_key,
+                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    time.time(),
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        return "queued" if cursor.rowcount else "coalesced"
+
+    def claim_detection_job(
+        self,
+        camera_id: str,
+        *,
+        lease_seconds: float = 60.0,
+    ) -> dict[str, Any] | None:
+        """Claim one due job, reclaiming an expired worker lease atomically."""
+        now = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                "select * from detection_jobs where camera_id = ? and "
+                "((state = 'queued' and available_at <= ?) or "
+                "(state = 'running' and lease_expires_at <= ?)) "
+                "order by created_at, id limit 1",
+                (camera_id, now, now),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "update detection_jobs set state = 'running', attempts = attempts + 1, "
+                "lease_expires_at = ?, updated_at = ? where id = ?",
+                (now + max(1.0, lease_seconds), now_iso, str(row["id"])),
+            )
+            result = dict(row)
+            result["attempts"] = int(row["attempts"]) + 1
+            result["payload"] = json.loads(str(row["payload_json"]))
+            return result
+
+    def complete_detection_job(self, job_id: str, event_id: int | None) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "update detection_jobs set state = 'completed', event_id = ?, "
+                "lease_expires_at = null, last_error = '', updated_at = ? where id = ?",
+                (event_id, now_iso, job_id),
+            )
+
+    def retry_detection_job(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        retry_delay_seconds: float = 2.0,
+        maximum_attempts: int = 5,
+    ) -> bool:
+        """Release a failed lease for retry; return False once terminal."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "select attempts from detection_jobs where id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            retry = int(row["attempts"]) < maximum_attempts
+            conn.execute(
+                "update detection_jobs set state = ?, available_at = ?, "
+                "lease_expires_at = null, last_error = ?, updated_at = ? where id = ?",
+                (
+                    "queued" if retry else "failed",
+                    time.time() + max(0.0, retry_delay_seconds),
+                    str(error)[:1000],
+                    now_iso,
+                    job_id,
+                ),
+            )
+            return retry
+
+    def detection_job_status(self, camera_id: str) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select state, count(*) as count from detection_jobs "
+                "where camera_id = ? group by state",
+                (camera_id,),
+            ).fetchall()
+        return {str(row["state"]): int(row["count"]) for row in rows}
 
     @staticmethod
     def _calibration_run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -909,6 +1045,7 @@ class EventStore:
         recording_path: str = "",
         objects_json: str = "[]",
         created_at: str | None = None,
+        detection_intent_id: str | None = None,
     ) -> dict[str, Any]:
         if created_at is None:
             created_at = datetime.now(timezone.utc).isoformat()
@@ -918,11 +1055,11 @@ class EventStore:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
-                insert into events (
+                insert or ignore into events (
                     camera_id, kind, topic, message, snapshot_path, snapshot_size_bytes,
-                    recording_path, objects_json, created_at
+                    recording_path, objects_json, created_at, detection_intent_id
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     camera_id,
@@ -934,9 +1071,22 @@ class EventStore:
                     recording_path,
                     objects_json,
                     created_at,
+                    detection_intent_id,
                 ),
             )
-            event_id = cursor.lastrowid
+            created = bool(cursor.rowcount)
+            if created:
+                event_id = cursor.lastrowid
+            elif detection_intent_id:
+                row = conn.execute(
+                    "select id from events where detection_intent_id = ?",
+                    (detection_intent_id,),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("detection intent event insert was not recoverable")
+                event_id = int(row["id"])
+            else:
+                raise RuntimeError("event insert failed")
         return {
             "id": event_id,
             "camera_id": camera_id,
@@ -948,6 +1098,8 @@ class EventStore:
             "recording_path": recording_path,
             "objects_json": objects_json,
             "created_at": created_at,
+            "detection_intent_id": detection_intent_id,
+            "created": created,
         }
 
     def telemetry_activity(

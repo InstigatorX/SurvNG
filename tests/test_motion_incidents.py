@@ -470,7 +470,7 @@ def test_coalesced_refinement_does_not_duplicate_initial_tracking_handoff() -> N
     assert service.wait_stopped(1.0)
 
 
-def test_full_refinement_queue_supersedes_oldest_optional_episode() -> None:
+def test_refinement_burst_is_durable_and_does_not_supersede_episodes() -> None:
     initial = MotionDecisionOutcome(
         event_id=None,
         snapshot_path="",
@@ -509,13 +509,13 @@ def test_full_refinement_queue_supersedes_oldest_optional_episode() -> None:
             {"motion_episode_sequence": sequence},
         )
 
-    assert service.status()["refinements_superseded"] == 1
+    assert service.status()["refinement_pending_episodes"] == 5
     release.set()
     for _ in range(100):
-        if service.status()["refinements_completed"] == 4:
+        if service.status()["refinements_completed"] == 5:
             break
         threading.Event().wait(0.01)
-    assert refined_sequences == [1, 3, 4, 5]
+    assert refined_sequences == [1, 2, 3, 4, 5]
     stop.set()
     service.request_stop()
     assert service.wait_stopped(1.0)
@@ -567,10 +567,9 @@ def test_refinement_admission_closes_before_shutdown_sentinel() -> None:
     )
 
     tracking.start.assert_called_once()
-    assert service.status()["refinements_dropped"] == 1
+    assert service.status()["refinement_pending_episodes"] == 1
     stop.set()
     assert service.wait_stopped(1.0)
-    assert service.status()["refinements_dropped"] == 1
 
 
 def test_refinement_thread_start_failure_restores_stopped_state() -> None:

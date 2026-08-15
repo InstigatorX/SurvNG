@@ -14,6 +14,59 @@ from survng.app.events import EventStore
 
 
 class EventStoreTest(unittest.TestCase):
+    def test_detection_job_survives_store_recreation_and_expired_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = EventStore(root)
+            self.assertEqual(
+                store.enqueue_detection_job(
+                    job_id="job-1",
+                    camera_id="gate",
+                    dedupe_key="episode:7",
+                    payload={"event_at": "2026-08-15T12:00:00+00:00"},
+                ),
+                "queued",
+            )
+            self.assertEqual(store.enqueue_detection_job(
+                job_id="job-1",
+                camera_id="gate",
+                dedupe_key="episode:7",
+                payload={},
+            ), "coalesced")
+            claimed = store.claim_detection_job("gate", lease_seconds=1.0)
+            self.assertEqual(claimed["payload"]["event_at"], "2026-08-15T12:00:00+00:00")
+
+            recreated = EventStore(root)
+            with recreated._connect() as connection:
+                connection.execute(
+                    "update detection_jobs set lease_expires_at = 0 where id = 'job-1'"
+                )
+            reclaimed = recreated.claim_detection_job("gate")
+            self.assertEqual(reclaimed["id"], "job-1")
+            self.assertEqual(reclaimed["attempts"], 2)
+            recreated.complete_detection_job("job-1", 42)
+            self.assertEqual(recreated.detection_job_status("gate"), {"completed": 1})
+
+    def test_detection_intent_idempotently_links_one_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EventStore(Path(tmpdir))
+            first = store.add_event(
+                "gate",
+                "motion",
+                detection_intent_id="intent-1",
+            )
+            replay = store.add_event(
+                "gate",
+                "motion",
+                detection_intent_id="intent-1",
+            )
+            self.assertTrue(first["created"])
+            self.assertFalse(replay["created"])
+            self.assertEqual(first["id"], replay["id"])
+            with store._connect() as connection:
+                count = connection.execute("select count(*) from events").fetchone()[0]
+            self.assertEqual(count, 1)
+
     def test_snapshot_size_backfill_yields_writer_between_bounded_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

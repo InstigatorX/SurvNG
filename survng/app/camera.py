@@ -176,6 +176,14 @@ class CameraWorker:
             start_tracking=self.tracking_lifecycle.start_incident,
             prewarm_tracking=self.tracking_lifecycle.prewarm,
             image_reader=self.media.read_image,
+            refinement_store=(
+                motion_decision_handler_factory.events
+                if hasattr(
+                    motion_decision_handler_factory.events,
+                    "enqueue_detection_job",
+                )
+                else None
+            ),
         )
         ring_size = max(
             12,
