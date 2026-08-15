@@ -794,7 +794,7 @@ class EventStore:
         error: str = "",
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
-        completed_at = now if status in {"completed", "failed", "interrupted"} else None
+        completed_at = now if status in {"completed", "failed", "interrupted", "cancelled"} else None
         with self._lock, self._connect() as conn:
             conn.execute(
                 """

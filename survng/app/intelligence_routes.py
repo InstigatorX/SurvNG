@@ -80,6 +80,10 @@ class CalibrationApplyRequest(BaseModel):
     configuration_fingerprint: str = Field(min_length=64, max_length=64)
     evaluation_hours: float = Field(default=24.0, ge=24.0, le=168.0)
 
+class CalibrationPreviewRequest(BaseModel):
+    recommendation_ids: list[str] = Field(min_length=1, max_length=256)
+    configuration_fingerprint: str = Field(min_length=64, max_length=64)
+
 class CalibrationRollbackRequest(BaseModel):
     change_ids: list[str] = Field(default_factory=list, max_length=256)
     camera_ids: list[str] = Field(default_factory=list, max_length=128)
@@ -113,6 +117,8 @@ class IntelligenceService:
 
     def __init__(self, deps: IntelligenceDependencies) -> None:
         self.deps = deps
+        self._calibration_cancel_lock = threading.Lock()
+        self._calibration_cancel_events: dict[int, threading.Event] = {}
 
     def _run_registered_ai_worker(
         self,
@@ -704,12 +710,14 @@ class IntelligenceService:
             raise
         return active_manager.events.get_camera_intelligence_evaluation(evaluation_id) or {}
 
-    def _calibration_camera_review(self, camera: CameraConfig, *, hours: float, record_limit: int, image_limit: int, active_config: AppConfig, active_manager: AppManager) -> dict[str, Any]:
+    def _calibration_camera_review(self, camera: CameraConfig, *, hours: float, record_limit: int, image_limit: int, active_config: AppConfig, active_manager: AppManager, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         samples, records_considered = self._camera_intelligence_candidates(camera, active_manager, hours=hours, record_limit=record_limit, image_limit=image_limit)
         if not samples:
             return {'review_type': 'camera_intelligence', 'summary': 'No retained incidents or motion decisions were available.', 'analyzed': 0, 'failed': 0, 'recommendations': [], 'samples': []}
         wait_started = time.monotonic()
         while not self.deps.get_audit_ai_limiter().acquire(timeout=5):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError('camera review cancelled by the operator')
             if self.deps.application_stopping.is_set():
                 raise RuntimeError('camera review stopped because SurvNG is shutting down')
             if time.monotonic() - wait_started >= 300:
@@ -727,13 +735,16 @@ class IntelligenceService:
             raise RuntimeError(str(completed.get('error') or 'camera review failed'))
         return {**(completed.get('result') or {}), 'source_review_id': int(review['id'])}
 
-    def _run_system_calibration(self, run_id: int, camera_ids: list[str], mode: str, active_config: AppConfig, active_manager: AppManager) -> None:
+    def _run_system_calibration(self, run_id: int, camera_ids: list[str], mode: str, active_config: AppConfig, active_manager: AppManager, cancel_event: threading.Event | None = None) -> None:
         hours, record_limit, image_limit = CALIBRATION_MODE_LIMITS[mode]
         reports: dict[str, dict[str, Any]] = {}
         errors: dict[str, str] = {}
         try:
             active_manager.events.update_calibration_run(run_id, status='running')
             for camera_id in camera_ids:
+                if cancel_event is not None and cancel_event.is_set():
+                    active_manager.events.update_calibration_run(run_id, status='cancelled', result={'camera_reports': reports, 'camera_errors': errors, 'progress': {'completed': len(reports) + len(errors), 'total': len(camera_ids)}}, error='Analysis cancelled by the operator')
+                    return
                 if self.deps.application_stopping.is_set():
                     raise RuntimeError('system calibration stopped because SurvNG is shutting down')
                 camera = camera_by_id(active_config, camera_id)
@@ -741,10 +752,13 @@ class IntelligenceService:
                     errors[camera_id] = 'camera is no longer configured'
                     continue
                 try:
-                    reports[camera_id] = self._calibration_camera_review(camera, hours=hours, record_limit=record_limit, image_limit=image_limit, active_config=active_config, active_manager=active_manager)
+                    reports[camera_id] = self._calibration_camera_review(camera, hours=hours, record_limit=record_limit, image_limit=image_limit, active_config=active_config, active_manager=active_manager, cancel_event=cancel_event)
                 except Exception as exc:
                     LOGGER.warning('calibration review failed for %s', camera_id, exc_info=True)
                     errors[camera_id] = redact_secret_text(exc)
+                if cancel_event is not None and cancel_event.is_set():
+                    active_manager.events.update_calibration_run(run_id, status='cancelled', result={'camera_reports': reports, 'camera_errors': errors, 'progress': {'completed': len(reports) + len(errors), 'total': len(camera_ids)}}, error='Analysis cancelled by the operator')
+                    return
                 active_manager.events.update_calibration_run(run_id, status='running', result={'progress': {'completed': len(reports) + len(errors), 'total': len(camera_ids)}, 'camera_errors': errors})
             if not reports:
                 raise RuntimeError('no selected camera could be analyzed')
@@ -757,6 +771,9 @@ class IntelligenceService:
         except Exception as exc:
             LOGGER.exception('system calibration run %s failed', run_id)
             active_manager.events.update_calibration_run(run_id, status='interrupted' if self.deps.application_stopping.is_set() else 'failed', result={'camera_reports': reports, 'camera_errors': errors}, error=redact_secret_text(exc))
+        finally:
+            with self._calibration_cancel_lock:
+                self._calibration_cancel_events.pop(run_id, None)
 
     def start_calibration_run(self, request: CalibrationRunRequest) -> dict:
         with self.deps.manager_lock:
@@ -764,7 +781,7 @@ class IntelligenceService:
             active_config = self.deps.get_config().model_copy(deep=True)
             if not active_config.audit_ai.enabled or not ai_provider_configured(active_config.audit_ai):
                 raise HTTPException(status_code=400, detail='AI analysis is not configured')
-            active_runs = [item for item in active_manager.events.calibration_runs(20) if item.get('status') in {'queued', 'running'}]
+            active_runs = [item for item in active_manager.events.calibration_runs(20) if item.get('status') in {'queued', 'running', 'cancelling'}]
             if active_runs:
                 raise HTTPException(status_code=409, detail='a system calibration analysis is already running')
             if not request.override_active_evaluation:
@@ -779,17 +796,45 @@ class IntelligenceService:
             if not camera_ids:
                 raise HTTPException(status_code=400, detail='no cameras are configured')
             run = active_manager.events.create_calibration_run(mode=request.mode, camera_ids=camera_ids, configuration_fingerprint=calibration_configuration_fingerprint(active_config))
+            cancel_event = threading.Event()
+            with self._calibration_cancel_lock:
+                self._calibration_cancel_events[int(run['id'])] = cancel_event
         try:
             self._start_registered_ai_thread(
                 'calibration',
                 self._run_system_calibration,
-                (int(run['id']), camera_ids, request.mode, active_config, active_manager),
+                (int(run['id']), camera_ids, request.mode, active_config, active_manager, cancel_event),
                 name=f'survng-calibration-{run['id']}',
             )
         except BaseException as exc:
+            with self._calibration_cancel_lock:
+                self._calibration_cancel_events.pop(int(run['id']), None)
             active_manager.events.update_calibration_run(int(run['id']), status='failed', error=f'Calibration worker could not start: {redact_secret_text(exc)}')
             raise HTTPException(status_code=503, detail='calibration worker could not start') from exc
         return run
+
+    def cancel_calibration_run(self, run_id: int) -> dict:
+        run = self.deps.get_manager().events.get_calibration_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail='calibration run not found')
+        if run.get('status') not in {'queued', 'running', 'cancelling'}:
+            raise HTTPException(status_code=409, detail='calibration analysis is no longer running')
+        with self._calibration_cancel_lock:
+            cancel_event = self._calibration_cancel_events.get(run_id)
+            if cancel_event is None:
+                raise HTTPException(status_code=409, detail='calibration worker is no longer available')
+            cancel_event.set()
+        return self.deps.get_manager().events.update_calibration_run(run_id, status='cancelling', error='Cancellation requested')
+
+    def retry_calibration_run(self, run_id: int) -> dict:
+        run = self.deps.get_manager().events.get_calibration_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail='calibration run not found')
+        errors = (run.get('result') or {}).get('camera_errors') or {}
+        camera_ids = [str(camera_id) for camera_id in errors if str(camera_id)]
+        if not camera_ids:
+            raise HTTPException(status_code=409, detail='this analysis has no failed cameras to retry')
+        return self.start_calibration_run(CalibrationRunRequest(camera_ids=camera_ids, mode=str(run.get('mode') or 'standard')))
 
     def calibration_runs(self, limit: int=20) -> dict:
         return {'runs': self.deps.get_manager().events.calibration_runs(limit, include_result=False)}
@@ -843,6 +888,31 @@ class IntelligenceService:
                 raise
         return {'ok': True, 'change_set': change_set}
 
+    def calibration_preview(self, run_id: int, request: CalibrationPreviewRequest) -> dict:
+        """Validate selected recommendations without mutating configuration."""
+        with self.deps.manager_lock:
+            active_config = self.deps.get_config()
+            run = self.deps.get_manager().events.get_calibration_run(run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail='calibration run not found')
+            if run.get('status') != 'completed':
+                raise HTTPException(status_code=409, detail='calibration analysis is not complete')
+            fingerprint = calibration_configuration_fingerprint(active_config)
+            if request.configuration_fingerprint != fingerprint or run.get('configuration_fingerprint') != fingerprint:
+                raise HTTPException(status_code=409, detail='calibration settings changed after analysis; run calibration again')
+            recommendations = {str(item.get('id') or ''): item for item in (run.get('result') or {}).get('recommendations') or []}
+            selected_ids = list(dict.fromkeys(request.recommendation_ids))
+            if any(item not in recommendations for item in selected_ids):
+                raise HTTPException(status_code=400, detail='one or more recommendations changed or expired')
+            try:
+                _candidate, changes = apply_calibration_changes(active_config, [recommendations[item] for item in selected_ids])
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not changes:
+            raise HTTPException(status_code=409, detail='selected recommendations no longer change configuration')
+        camera_ids = sorted({str(change.get('camera_id') or '') for change in changes if change.get('camera_id')})
+        return {'ready': True, 'configuration_fingerprint': fingerprint, 'changes': changes, 'change_count': len(changes), 'camera_ids': camera_ids, 'global_change': any(change.get('scope') == 'global' for change in changes), 'reversible': True}
+
     def calibration_change_sets(self, limit: int=50) -> dict:
         with self.deps.manager_lock:
             active_events = self.deps.get_manager().events
@@ -862,6 +932,18 @@ class IntelligenceService:
                 row['ready_at'] = ''
                 row['seconds_until_ready'] = 0
         return {'change_sets': rows}
+
+    def keep_calibration_changes(self, change_set_id: int) -> dict:
+        with self.deps.manager_lock:
+            events = self.deps.get_manager().events
+            change_set = events.get_calibration_change_set(change_set_id)
+            if change_set is None:
+                raise HTTPException(status_code=404, detail='calibration change set not found')
+            if change_set.get('action') != 'apply':
+                raise HTTPException(status_code=400, detail='only applied tune-up changes can be kept')
+            if change_set.get('status') != 'evaluated':
+                raise HTTPException(status_code=409, detail='results must finish before changes can be kept')
+            return events.update_calibration_change_set_status(change_set_id, 'kept')
 
     def _run_calibration_evaluation(self, change_set_id: int, active_config: AppConfig, active_manager: AppManager) -> None:
         change_set = active_manager.events.get_calibration_change_set(change_set_id) or {}
@@ -1705,9 +1787,13 @@ def create_intelligence_router(deps: IntelligenceDependencies) -> IntelligenceRo
     router.add_api_route('/api/calibration/runs', service.start_calibration_run, methods=['POST'], status_code=202)
     router.add_api_route('/api/calibration/runs', service.calibration_runs, methods=['GET'])
     router.add_api_route('/api/calibration/runs/{run_id}', service.calibration_run, methods=['GET'])
+    router.add_api_route('/api/calibration/runs/{run_id}/cancel', service.cancel_calibration_run, methods=['POST'])
+    router.add_api_route('/api/calibration/runs/{run_id}/retry', service.retry_calibration_run, methods=['POST'], status_code=202)
+    router.add_api_route('/api/calibration/runs/{run_id}/preview', service.calibration_preview, methods=['POST'])
     router.add_api_route('/api/calibration/runs/{run_id}/apply', service.calibration_apply, methods=['POST'])
     router.add_api_route('/api/calibration/change-sets', service.calibration_change_sets, methods=['GET'])
     router.add_api_route('/api/calibration/change-sets/{change_set_id}/evaluate', service.start_calibration_evaluation, methods=['POST'], status_code=202)
+    router.add_api_route('/api/calibration/change-sets/{change_set_id}/keep', service.keep_calibration_changes, methods=['POST'])
     router.add_api_route('/api/calibration/change-sets/{change_set_id}/rollback', service.calibration_rollback, methods=['POST'])
     router.add_api_route('/api/assistant/status', service.assistant_status, methods=['GET'])
     router.add_api_route('/api/assistant/chat', service.assistant_chat, methods=['POST'])

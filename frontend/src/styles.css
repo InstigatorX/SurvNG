@@ -11170,3 +11170,119 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .calibration-change-details section > div { grid-template-columns: 1fr auto; }
   .calibration-change-details section > div span { grid-column: 1 / -1; }
 }
+
+/* Detection Tune-Up keeps long-running review, apply, and observation work in one resumable workflow. */
+.tuneup-section-list { margin-top: 0.45rem; }
+.tuneup-section-list button span { display: flex; align-items: center; gap: 0.45rem; width: 100%; }
+.tuneup-section-list em { margin-left: auto; min-width: 1.4rem; padding: 0.08rem 0.35rem; border-radius: 999px; background: var(--accent); color: var(--accent-contrast, #071413); text-align: center; font-size: 0.72rem; font-style: normal; }
+.tuneup-resume-card { margin: 0.75rem; display: flex; align-items: center; gap: 0.65rem; padding: 0.75rem; text-align: left; border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 9%, var(--subtle)); }
+.tuneup-resume-card span { display: grid; gap: 0.15rem; }
+.tuneup-resume-card small { color: var(--muted); }
+.tuneup-workflow, .tuneup-monitoring, .tuneup-history { display: grid; gap: 1rem; min-width: 0; }
+.tuneup-steps { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.35rem; padding: 0.2rem 0 0.8rem; border-bottom: 1px solid var(--line); }
+.tuneup-steps span { display: grid; justify-items: center; gap: 0.3rem; min-width: 0; color: var(--muted); text-align: center; font-size: 0.72rem; }
+.tuneup-steps b { display: grid; place-items: center; width: 1.65rem; height: 1.65rem; border: 1px solid var(--line); border-radius: 50%; background: var(--subtle); color: var(--muted); }
+.tuneup-steps .active { color: var(--text); font-weight: 750; }
+.tuneup-steps .active b { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast, #071413); }
+.tuneup-steps .done b { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); color: var(--accent); }
+.tuneup-stage { display: grid; gap: 1rem; max-width: 76rem; width: 100%; margin-inline: auto; }
+.tuneup-stage > header { display: grid; gap: 0.3rem; }
+.tuneup-stage > header > span { color: var(--accent); font-size: 0.76rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
+.tuneup-stage > header h3, .tuneup-stage > header p { margin: 0; }
+.tuneup-stage > header p { color: var(--muted); }
+.tuneup-stage > footer, .tuneup-monitor-card > footer { display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem; padding-top: 0.8rem; border-top: 1px solid var(--line); }
+.tuneup-stage > footer > span { margin-right: auto; color: var(--muted); }
+.tuneup-choice-grid, .tuneup-period-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
+.tuneup-choice-grid > button, .tuneup-period-grid > button { position: relative; display: grid; justify-items: start; align-content: start; gap: 0.45rem; min-height: 9rem; padding: 1rem; border: 1px solid var(--line); border-radius: 0.75rem; background: var(--subtle); text-align: left; }
+.tuneup-choice-grid > button:hover, .tuneup-period-grid > button:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.tuneup-choice-grid > button.selected, .tuneup-period-grid > button.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 8%, var(--subtle)); }
+.tuneup-choice-grid strong, .tuneup-period-grid strong { font-size: 0.98rem; }
+.tuneup-choice-grid small, .tuneup-period-grid small { color: var(--muted); line-height: 1.4; }
+.tuneup-choice-grid em, .tuneup-period-grid em { position: absolute; top: 0.75rem; right: 0.75rem; padding: 0.15rem 0.45rem; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, var(--control-muted)); color: var(--accent); font-size: 0.7rem; font-style: normal; font-weight: 800; }
+.tuneup-camera-list { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); max-height: 20rem; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.7rem; background: var(--subtle); }
+.tuneup-camera-list label { min-height: 2.5rem; padding: 0.4rem 0.55rem; border-radius: 0.45rem; background: var(--control-muted); }
+.tuneup-progress-track { height: 0.55rem; overflow: hidden; border-radius: 999px; background: var(--control-muted); }
+.tuneup-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 220ms ease; }
+.tuneup-camera-progress { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.55rem; }
+.tuneup-camera-progress > div { display: flex; align-items: center; gap: 0.55rem; min-height: 3rem; padding: 0.65rem; border: 1px solid var(--line); border-radius: 0.55rem; background: var(--subtle); }
+.tuneup-camera-progress span { display: grid; min-width: 0; }
+.tuneup-camera-progress small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.tuneup-camera-progress .complete svg { color: var(--good); }
+.tuneup-camera-progress .active { border-color: var(--accent); }
+.tuneup-camera-progress .active svg { color: var(--accent); }
+.tuneup-camera-progress .failed { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+.tuneup-camera-progress .failed svg { color: var(--danger); }
+.tuneup-summary-line, .tuneup-readiness, .tuneup-warning, .tuneup-countdown { display: flex; align-items: center; gap: 0.7rem; padding: 0.85rem; border: 1px solid var(--line); border-radius: 0.65rem; background: var(--subtle); }
+.tuneup-summary-line > span, .tuneup-readiness > span, .tuneup-warning > span, .tuneup-countdown > span { display: grid; gap: 0.15rem; }
+.tuneup-summary-line small, .tuneup-readiness small, .tuneup-warning small, .tuneup-countdown small { color: var(--muted); }
+.tuneup-readiness { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); background: color-mix(in srgb, var(--good) 8%, var(--subtle)); }
+.tuneup-readiness svg { color: var(--good); }
+.tuneup-warning { align-items: flex-start; }
+.tuneup-warning svg { flex: 0 0 auto; color: var(--warn); }
+.tuneup-recommendation-group { display: grid; gap: 0.55rem; }
+.tuneup-recommendation-group > h4 { margin: 0.4rem 0 0; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.045em; }
+.tuneup-recommendation-group > article { display: grid; grid-template-columns: minmax(12rem, 0.8fr) minmax(16rem, 1fr); gap: 0.7rem 1rem; padding: 0.85rem; border: 1px solid var(--line); border-radius: 0.7rem; background: var(--subtle); }
+.tuneup-recommendation-group > article.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--subtle)); }
+.tuneup-recommendation-group article > label { display: flex; align-items: center; gap: 0.6rem; }
+.tuneup-recommendation-group article > label span { display: grid; }
+.tuneup-recommendation-group article > label small, .tuneup-tradeoff { color: var(--muted); }
+.tuneup-recommendation-group article > p { grid-column: 1 / -1; margin: 0; }
+.tuneup-recommendation-group article > .tuneup-tradeoff, .tuneup-recommendation-group article > .calibration-evidence, .tuneup-recommendation-group article > details { grid-column: 1 / -1; }
+.tuneup-recommendation-group details dl { display: grid; gap: 0.35rem; margin: 0.6rem 0 0; }
+.tuneup-recommendation-group details dl > div { display: grid; grid-template-columns: 9rem minmax(0, 1fr); gap: 0.6rem; }
+.tuneup-recommendation-group dt { color: var(--muted); }
+.tuneup-recommendation-group dd { margin: 0; }
+.tuneup-before-after { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0.55rem; }
+.tuneup-before-after > span { display: grid; gap: 0.15rem; padding: 0.55rem 0.65rem; border-radius: 0.5rem; background: var(--control-muted); }
+.tuneup-before-after small { color: var(--muted); }
+.calibration-evidence a { position: relative; display: block; width: 8.5rem; overflow: hidden; border: 1px solid var(--line); border-radius: 0.5rem; background: var(--control-muted); color: var(--text); text-decoration: none; }
+.calibration-evidence img { display: block; width: 100%; height: 5.2rem; object-fit: cover; }
+.calibration-evidence a span { display: block; padding: 0.32rem 0.45rem; font-size: 0.72rem; }
+.tuneup-confirm-list { display: grid; gap: 0.45rem; }
+.tuneup-confirm-list > div, .tuneup-change-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.7rem 0.8rem; border: 1px solid var(--line); border-radius: 0.55rem; background: var(--subtle); }
+.tuneup-confirm-list span { display: grid; }
+.tuneup-confirm-list small { color: var(--muted); }
+.tuneup-confirm-list b { display: flex; align-items: center; gap: 0.4rem; text-align: right; }
+.tuneup-monitor-duration { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.85rem; border: 1px solid var(--line); border-radius: 0.65rem; }
+.tuneup-monitor-duration > span { display: grid; }
+.tuneup-monitor-duration small { color: var(--muted); }
+.tuneup-monitor-card { display: grid; gap: 0.8rem; padding: 1rem; border: 1px solid var(--line); border-radius: 0.75rem; background: var(--subtle); }
+.tuneup-monitor-card > header { display: flex; justify-content: space-between; align-items: start; gap: 0.75rem; }
+.tuneup-monitor-card > header > span { display: grid; }
+.tuneup-monitor-card > header small, .tuneup-monitor-card > p { color: var(--muted); }
+.tuneup-monitor-card > header em { padding: 0.2rem 0.5rem; border-radius: 999px; background: var(--control-muted); color: var(--muted); font-size: 0.72rem; font-style: normal; text-transform: capitalize; }
+.tuneup-monitor-card > header em.good { color: var(--good); }
+.tuneup-monitor-card > header em.warn { color: var(--warn); }
+.tuneup-monitor-card > header em.bad { color: var(--danger); }
+.tuneup-health-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.tuneup-health-list span { display: flex; align-items: center; gap: 0.3rem; padding: 0.25rem 0.5rem; border-radius: 999px; background: var(--control-muted); font-size: 0.76rem; }
+.tuneup-health-list .healthy svg { color: var(--good); }
+.tuneup-health-list .unhealthy svg { color: var(--danger); }
+.tuneup-history-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; }
+.tuneup-history > article { display: grid; gap: 0.5rem; padding: 0.7rem; border: 1px solid var(--line); border-radius: 0.65rem; background: var(--subtle); }
+.tuneup-history > article > button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; }
+.tuneup-history > article > button span { display: grid; }
+.tuneup-history > article small, .tuneup-history > article > div { color: var(--muted); }
+.tuneup-history > article > div { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; font-size: 0.78rem; }
+.tuneup-history > article em { font-style: normal; }
+
+@media (max-width: 900px) {
+  .tuneup-steps { grid-template-columns: repeat(4, 1fr); }
+  .tuneup-choice-grid, .tuneup-period-grid { grid-template-columns: 1fr; }
+  .tuneup-choice-grid > button, .tuneup-period-grid > button { min-height: 7.5rem; }
+  .tuneup-recommendation-group > article { grid-template-columns: 1fr; }
+  .tuneup-before-after { grid-column: 1; }
+}
+
+@media (max-width: 600px) {
+  .tuneup-steps { display: flex; overflow-x: auto; justify-content: start; padding-bottom: 0.65rem; }
+  .tuneup-steps span { flex: 0 0 5.4rem; }
+  .tuneup-stage > footer, .tuneup-monitor-card > footer { align-items: stretch; flex-direction: column-reverse; }
+  .tuneup-stage > footer > span { margin: 0; text-align: center; }
+  .tuneup-stage > footer button, .tuneup-monitor-card > footer button { width: 100%; justify-content: center; }
+  .tuneup-before-after { grid-template-columns: 1fr; }
+  .tuneup-before-after > svg { transform: rotate(90deg); justify-self: center; }
+  .tuneup-monitor-duration, .tuneup-confirm-list > div, .tuneup-change-row, .tuneup-history-actions { align-items: stretch; flex-direction: column; }
+  .tuneup-confirm-list b { text-align: left; }
+  .calibration-evidence a { width: calc(50% - 0.25rem); }
+}

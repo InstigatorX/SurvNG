@@ -19,6 +19,7 @@ from survng.app.config import AppConfig, CameraConfig
 from survng.app.events import EventStore
 from survng.app.intelligence_routes import (
     CalibrationApplyRequest,
+    CalibrationPreviewRequest,
     CalibrationRollbackRequest,
     CalibrationRunRequest,
 )
@@ -344,6 +345,89 @@ def test_calibration_apply_accepts_only_persisted_recommendation_ids() -> None:
     persisted = events.create_calibration_change_set.call_args.kwargs["changes"]
     assert persisted[0]["before"] is None
     assert persisted[0]["after"] == 0.76
+
+
+def test_calibration_preview_validates_without_applying() -> None:
+    config = AppConfig(cameras=[CameraConfig(
+        id="gate",
+        name="Gate",
+        stream_url="rtsp://192.0.2.2/stream",
+    )])
+    fingerprint = calibration_configuration_fingerprint(config)
+    recommendation = {
+        "id": "approved",
+        "scope": "camera",
+        "camera_id": "gate",
+        "setting": "motion.visual_backup_min_score",
+        "current": None,
+        "current_effective": 0.70,
+        "proposed": 0.76,
+    }
+    events = SimpleNamespace(get_calibration_run=lambda _run_id: {
+        "id": 3,
+        "status": "completed",
+        "configuration_fingerprint": fingerprint,
+        "result": {"recommendations": [recommendation]},
+    })
+
+    with (
+        patch.object(main, "config", config),
+        patch.object(main, "manager", SimpleNamespace(events=events)),
+        patch.object(main, "apply_config_update") as apply,
+    ):
+        result = main._intelligence_route_bundle.service.calibration_preview(
+            3,
+            CalibrationPreviewRequest(
+                recommendation_ids=["approved"],
+                configuration_fingerprint=fingerprint,
+            ),
+        )
+
+    assert result["ready"] is True
+    assert result["camera_ids"] == ["gate"]
+    assert result["changes"][0]["after"] == 0.76
+    apply.assert_not_called()
+
+
+def test_calibration_run_can_be_cancelled_between_cameras() -> None:
+    with TemporaryDirectory() as tmpdir:
+        store = EventStore(Path(tmpdir))
+        run = store.create_calibration_run(
+            mode="standard",
+            camera_ids=["gate"],
+            configuration_fingerprint="a" * 64,
+        )
+        cancel = main._intelligence_route_bundle.service._calibration_cancel_events
+        event = main.threading.Event()
+        cancel[int(run["id"])] = event
+        event.set()
+        manager = SimpleNamespace(events=store)
+
+        main._intelligence_route_bundle.service._run_system_calibration(
+            int(run["id"]),
+            ["gate"],
+            "standard",
+            AppConfig(cameras=[CameraConfig(id="gate", name="Gate", stream_url="rtsp://192.0.2.2/a")]),
+            manager,
+            event,
+        )
+
+        cancelled = store.get_calibration_run(int(run["id"]))
+        assert cancelled is not None
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["completed_at"]
+
+
+def test_calibration_keep_requires_completed_evaluation() -> None:
+    events = SimpleNamespace(
+        get_calibration_change_set=lambda _change_set_id: {"id": 8, "action": "apply", "status": "evaluated"},
+        update_calibration_change_set_status=Mock(return_value={"id": 8, "status": "kept"}),
+    )
+    with patch.object(main, "manager", SimpleNamespace(events=events)):
+        result = main._intelligence_route_bundle.service.keep_calibration_changes(8)
+
+    assert result["status"] == "kept"
+    events.update_calibration_change_set_status.assert_called_once_with(8, "kept")
 
 
 def test_calibration_run_records_worker_start_failure() -> None:

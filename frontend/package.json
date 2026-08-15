@@ -24,7 +24,8 @@
     "test:incident-navigation": "node tests/incident-navigation.mjs",
     "test:semantic-search": "node tests/semantic-search-state.mjs",
     "test:incident-semantic-search": "node tests/incident-semantic-search.mjs",
-    "test:zone-geometry": "node tests/zone-geometry.mjs"
+    "test:zone-geometry": "node tests/zone-geometry.mjs",
+    "test:detection-tuneup": "node tests/detection-tuneup.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
