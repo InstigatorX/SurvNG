@@ -850,6 +850,10 @@ class MotionDecisionOrchestrator:
                 "motion_correlation": correlation,
                 "object_detection_timing": outcome.get("processing_timing"),
                 "object_activity_attribution": outcome.get("object_activity"),
+                "cover_promotion": {
+                    "promoted": bool(outcome.get("cover_promoted")),
+                    "reason": str(outcome.get("cover_promotion_reason") or ""),
+                },
             },
             category="visual_backup",
         )

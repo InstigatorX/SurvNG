@@ -796,14 +796,20 @@ class RecordedObjectConsensusTest(unittest.TestCase):
                 return_value=np.zeros((20, 20, 3), dtype=np.uint8),
             ),
         ):
-            _frame, objects, _path = backend.detect(
+            result = backend.detect(
                 datetime.fromtimestamp(event_epoch, timezone.utc)
             )
+            _frame, objects, _path = result
 
         self.assertEqual(detector.calls, 2)
         self.assertGreaterEqual(calls_by_offset[-0.5], 2)
         self.assertTrue(objects[0]["incident_eligible"])
         self.assertEqual(objects[0]["temporal_observations"], 2)
+        self.assertEqual(result.frame_source, "recorded_main")
+        self.assertEqual(
+            result.frame_captured_at_epoch,
+            event_epoch + objects[0]["temporal_sample_offset_seconds"],
+        )
 
     def test_detector_retries_when_sample_count_is_met_without_object_consensus(self) -> None:
         event_epoch = 1_800_000_000.0

@@ -84,6 +84,33 @@ def manager_with_mocks() -> AppManager:
 
 
 class ManagerLifecycleTest(unittest.TestCase):
+    def test_presentation_update_refreshes_clients_without_reopening_mqtt_incident(self) -> None:
+        manager = manager_with_mocks()
+        manager.events = Mock()
+        event = {"id": 42, "camera_id": "gate", "created_at": "2026-08-15T12:00:00+00:00"}
+        manager.events.get.return_value = event
+
+        manager.publish_event("incident_update", {
+            "event_id": 42,
+            "camera_id": "gate",
+            "updated": True,
+            "reason": "cover_promoted",
+        })
+
+        manager.semantic_search.index.delete_event.assert_called_once_with(42)
+        manager.semantic_search.queue_event.assert_called_once_with(event)
+        manager.state_events.publish.assert_called_once_with(
+            "incident",
+            {
+                "event_id": 42,
+                "camera_id": "gate",
+                "updated": True,
+                "reason": "cover_promoted",
+            },
+        )
+        manager.mqtt.track_incident.assert_not_called()
+        manager.mqtt.publish.assert_not_called()
+
     def test_allocator_trim_ignores_ordinary_main_capture(self) -> None:
         statuses = [{
             "main_running": True,

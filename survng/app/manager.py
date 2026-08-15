@@ -1092,6 +1092,17 @@ class AppManager:
         camera_id = str(payload.get("camera_id") or "")
         if not camera_id:
             return
+        if event_type == "incident_update":
+            event_id = int(payload.get("event_id") or 0)
+            event = self.events.get(event_id) if event_id else None
+            if event is not None:
+                # Presentation-only cover changes must refresh image-derived
+                # indexes, but must not reopen an MQTT incident or emit a
+                # second object notification.
+                self.semantic_search.index.delete_event(event_id)
+                self.semantic_search.queue_event(event)
+            self.state_events.publish("incident", payload)
+            return
         if event_type == "incident" or (event_type == "object" and payload.get("source") == "manual_openvino"):
             event_id = int(payload.get("event_id") or 0)
             event = self.events.get(event_id) if event_id else None

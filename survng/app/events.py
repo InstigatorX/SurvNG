@@ -2741,6 +2741,224 @@ class EventStore:
             self._delete_snapshot_if_unreferenced(replaced_snapshot)
         return dict(updated) if updated is not None else None
 
+    def promote_refinement_cover(
+        self,
+        event_id: int,
+        *,
+        snapshot_path: str,
+        recording_path: str,
+        captured_at: float,
+        frame_width: int,
+        frame_height: int,
+        cover_objects: list[dict[str, Any]],
+        source: str,
+        timestamp_exact: bool,
+    ) -> dict[str, Any] | None:
+        """Promote verified main evidence without changing admission facts.
+
+        Fast detection, causal motion correlation, and cover selection answer
+        different questions.  A main-stream object may fail to *explain* an
+        EMA region (notably when main/sub geometry is untrusted) while still
+        being a materially better view of the already admitted provisional
+        subject.  This transaction updates presentation coordinates only.
+
+        Matching is deliberately conservative: one provisional subject and
+        one temporally confirmed same-label subject, close in time, with
+        materially more subject pixels. This is compatibility evidence, not
+        identity proof. Ambiguous same-label scenes remain on the original
+        cover and can later be promoted by tracked identity.
+        """
+        if (
+            frame_width <= 0
+            or frame_height <= 0
+            or not math.isfinite(float(captured_at))
+        ):
+            return None
+        portable_snapshot = portable_media_path(self.storage_dir, snapshot_path)
+        if not portable_snapshot:
+            return None
+        portable_recording = portable_media_path(self.storage_dir, recording_path)
+
+        def valid_box(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
+            box = item.get("box")
+            if not isinstance(box, dict):
+                return None
+            try:
+                x1 = float(box["x1"])
+                y1 = float(box["y1"])
+                x2 = float(box["x2"])
+                y2 = float(box["y2"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return None
+            if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+                return None
+            if x2 <= x1 or y2 <= y1:
+                return None
+            return x1, y1, x2, y2
+
+        candidates = [
+            item
+            for item in cover_objects
+            if isinstance(item, dict)
+            and item.get("label")
+            and not item.get("auxiliary_detection")
+            and item.get("temporal_consensus") is True
+            and item.get("confidence_eligible") is not False
+            and item.get("zone_eligible") is not False
+            and valid_box(item) is not None
+        ]
+        if not candidates:
+            return None
+
+        replaced_snapshot = ""
+        snapshot_size_bytes = self._snapshot_file_size(portable_snapshot)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "select objects_json, snapshot_path, recording_path from events where id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                objects = json.loads(str(row["objects_json"] or "[]"))
+            except (TypeError, ValueError):
+                objects = []
+            if not isinstance(objects, list):
+                return None
+            provisional = [
+                item
+                for item in objects
+                if isinstance(item, dict)
+                and item.get("label")
+                and item.get("incident_eligible") is not False
+                and item.get("provisional_detection") is True
+            ]
+            if len(provisional) != 1:
+                return None
+            existing = provisional[0]
+            existing_label = str(existing.get("label") or "").strip().lower()
+            compatible = [
+                item
+                for item in candidates
+                if str(item.get("label") or "").strip().lower() == existing_label
+            ]
+            if not existing_label or len(compatible) != 1:
+                return None
+            candidate = compatible[0]
+            existing_box = valid_box(existing)
+            candidate_box = valid_box(candidate)
+            if existing_box is None or candidate_box is None:
+                return None
+            try:
+                existing_width = int(existing.get("detection_frame_width") or 0)
+                existing_height = int(existing.get("detection_frame_height") or 0)
+                existing_captured_at = float(existing.get("frame_captured_at_epoch"))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                existing_width <= 0
+                or existing_height <= 0
+                or not math.isfinite(existing_captured_at)
+                or abs(float(captured_at) - existing_captured_at) > 15.0
+            ):
+                return None
+            existing_subject_pixels = (
+                (existing_box[2] - existing_box[0])
+                * (existing_box[3] - existing_box[1])
+            )
+            candidate_subject_pixels = (
+                (candidate_box[2] - candidate_box[0])
+                * (candidate_box[3] - candidate_box[1])
+            )
+            candidate_clearance = min(
+                candidate_box[0] / frame_width,
+                candidate_box[1] / frame_height,
+                (frame_width - candidate_box[2]) / frame_width,
+                (frame_height - candidate_box[3]) / frame_height,
+            )
+            if (
+                frame_width * frame_height <= existing_width * existing_height
+                or candidate_subject_pixels < max(64.0, existing_subject_pixels * 1.5)
+                or candidate_clearance < 0.005
+            ):
+                return None
+
+            for item in objects:
+                if not isinstance(item, dict) or not item.get("label"):
+                    continue
+                if item is not existing:
+                    item["snapshot_visible"] = False
+                    continue
+                item["box"] = dict(candidate["box"])
+                item["detection_frame_width"] = int(frame_width)
+                item["detection_frame_height"] = int(frame_height)
+                item["snapshot_visible"] = True
+                item["snapshot_source"] = str(source or "recorded_refinement")
+                item["snapshot_captured_at"] = datetime.fromtimestamp(
+                    float(captured_at),
+                    timezone.utc,
+                ).isoformat()
+                item["snapshot_detection_confidence"] = float(
+                    candidate.get("confidence") or 0.0
+                )
+                item["snapshot_presentation_only"] = True
+                item["snapshot_timestamp_exact"] = bool(timestamp_exact)
+                for key in (
+                    "snapshot_quality_score",
+                    "snapshot_sharpness_score",
+                    "snapshot_exposure_score",
+                    "snapshot_contrast_score",
+                    "snapshot_edge_detail_score",
+                    "snapshot_primary_subject",
+                    "snapshot_edge_clearance_ratio",
+                    "snapshot_subject_area_ratio",
+                ):
+                    if key in candidate:
+                        item[key] = candidate[key]
+            objects = [
+                item
+                for item in objects
+                if not (
+                    isinstance(item, dict)
+                    and item.get("status") == "cover_promotion"
+                )
+            ]
+            objects.append({
+                "status": "cover_promotion",
+                "cover_promotion": {
+                    "source": str(source or "recorded_refinement"),
+                    "captured_at": datetime.fromtimestamp(
+                        float(captured_at),
+                        timezone.utc,
+                    ).isoformat(),
+                    "timestamp_exact": bool(timestamp_exact),
+                    "reason": "compatible_recorded_refinement",
+                    "admission_preserved": True,
+                },
+            })
+            replaced_snapshot = str(row["snapshot_path"] or "")
+            conn.execute(
+                """
+                update events
+                set snapshot_path = ?, snapshot_size_bytes = ?, recording_path = ?, objects_json = ?
+                where id = ?
+                """,
+                (
+                    portable_snapshot,
+                    snapshot_size_bytes,
+                    portable_recording or str(row["recording_path"] or ""),
+                    json.dumps(objects, separators=(",", ":")),
+                    event_id,
+                ),
+            )
+            updated = conn.execute(
+                "select * from events where id = ?",
+                (event_id,),
+            ).fetchone()
+        if replaced_snapshot and replaced_snapshot != portable_snapshot:
+            self._delete_snapshot_if_unreferenced(replaced_snapshot)
+        return dict(updated) if updated is not None else None
+
     def _snapshot_file_size(self, raw_path: str) -> int:
         """Return an incident snapshot's size without allowing arbitrary paths."""
         if not raw_path:

@@ -70,6 +70,9 @@ class RecordedDetectionResult:
     timings_ms: dict[str, float]
     refinement_pending: bool = False
     face_candidates: tuple[FaceCandidate, ...] = ()
+    frame_captured_at_epoch: float | None = None
+    frame_source: str = ""
+    frame_timestamp_exact: bool = False
 
     def __iter__(self):
         # Preserve the historical three-value provider contract for callers
@@ -1037,6 +1040,11 @@ class RecordedMotionObjectDetector:
             timing,
             workflow_started,
             refinement_pending=True,
+            frame_captured_at_epoch=float(captured_at),
+            frame_source="live_fast_path",
+            # Capture receipt time is bounded and fresh, but it is not a
+            # source-PTS timestamp from the camera stream.
+            frame_timestamp_exact=False,
         )
 
     def _detect(
@@ -1246,6 +1254,9 @@ class RecordedMotionObjectDetector:
                                 refinement_pending and representative_needs_refinement
                             ),
                             face_candidates=self._face_candidates(samples),
+                            frame_captured_at_epoch=event_epoch + selected.offset,
+                            frame_source="recorded_main",
+                            frame_timestamp_exact=selected.exact_timestamp,
                         )
                 if all(offset in samples_by_offset for offset in stage_offsets):
                     break
@@ -1287,6 +1298,9 @@ class RecordedMotionObjectDetector:
                 workflow_started,
                 refinement_pending=refinement_pending,
                 face_candidates=self._face_candidates(samples),
+                frame_captured_at_epoch=event_epoch + selected.offset,
+                frame_source="recorded_main",
+                frame_timestamp_exact=selected.exact_timestamp,
             )
 
         fallback = self.live_frame_provider()
@@ -1349,6 +1363,9 @@ class RecordedMotionObjectDetector:
         *,
         refinement_pending: bool,
         face_candidates: tuple[FaceCandidate, ...] = (),
+        frame_captured_at_epoch: float | None = None,
+        frame_source: str = "",
+        frame_timestamp_exact: bool = False,
     ) -> RecordedDetectionResult:
         normalized = {key: round(max(0.0, value), 3) for key, value in timing.items()}
         normalized["workflow_ms"] = round(
@@ -1362,6 +1379,9 @@ class RecordedMotionObjectDetector:
             timings_ms=normalized,
             refinement_pending=refinement_pending,
             face_candidates=face_candidates,
+            frame_captured_at_epoch=frame_captured_at_epoch,
+            frame_source=frame_source,
+            frame_timestamp_exact=frame_timestamp_exact,
         )
 
     def _detect_objects(

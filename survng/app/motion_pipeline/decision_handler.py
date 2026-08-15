@@ -24,6 +24,7 @@ MotionSnapshotWriter = Callable[[Frame, datetime], str]
 MotionEventCallback = Callable[[str, dict[str, Any]], None]
 MotionObjectSerializer = Callable[[list[dict[str, Any]]], str]
 FaceCandidateSink = Callable[[int, str, str, list[dict[str, Any]]], int]
+RefinementCoverPromoter = Callable[..., dict[str, Any] | None]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -351,6 +352,8 @@ class MotionDecisionOutcome:
     refinement_pending: bool = False
     processing_timing: dict[str, Any] | None = None
     object_activity: dict[str, Any] | None = None
+    cover_promoted: bool = False
+    cover_promotion_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -362,6 +365,8 @@ class MotionDecisionOutcome:
             "refinement_pending": self.refinement_pending,
             "processing_timing": self.processing_timing,
             "object_activity": self.object_activity,
+            "cover_promoted": self.cover_promoted,
+            "cover_promotion_reason": self.cover_promotion_reason,
         }
 
 
@@ -380,6 +385,7 @@ class MotionDecisionHandler:
         activity_attributor: ObjectActivityAttributor | None = None,
         face_candidate_sink: FaceCandidateSink | None = None,
         spatial_alignment: dict[str, Any] | None = None,
+        refinement_cover_promoter: RefinementCoverPromoter | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.events = events
@@ -391,6 +397,7 @@ class MotionDecisionHandler:
         self.activity_attributor = activity_attributor
         self.face_candidate_sink = face_candidate_sink
         self.spatial_alignment = dict(spatial_alignment or {"reliable": True})
+        self.refinement_cover_promoter = refinement_cover_promoter
 
     def activity_status(self) -> dict[str, Any]:
         if self.activity_attributor is None:
@@ -464,6 +471,30 @@ class MotionDecisionHandler:
         detection_started_epoch = time.time()
         provider_result = provider(event_at)
         frame, objects, recording_path = provider_result
+        frame_captured_at_epoch = getattr(
+            provider_result,
+            "frame_captured_at_epoch",
+            None,
+        )
+        if not isinstance(frame_captured_at_epoch, (int, float)) or not math.isfinite(
+            float(frame_captured_at_epoch)
+        ):
+            frame_captured_at_epoch = None
+        frame_source = str(getattr(provider_result, "frame_source", "") or "")
+        frame_timestamp_exact = bool(
+            getattr(provider_result, "frame_timestamp_exact", False)
+        )
+        if frame_captured_at_epoch is not None:
+            for detected in objects:
+                if not isinstance(detected, dict) or not detected.get("label"):
+                    continue
+                detected.setdefault(
+                    "frame_captured_at_epoch",
+                    round(float(frame_captured_at_epoch), 6),
+                )
+                if frame_source:
+                    detected.setdefault("frame_source", frame_source)
+                detected.setdefault("frame_timestamp_exact", frame_timestamp_exact)
         processed_at = datetime.now(timezone.utc)
         normalized_event_at = (
             event_at.replace(tzinfo=timezone.utc)
@@ -635,7 +666,12 @@ class MotionDecisionHandler:
 
         snapshot_path = ""
         if frame is not None:
-            snapshot_path = self.snapshot_writer(frame, event_at)
+            snapshot_at = (
+                datetime.fromtimestamp(float(frame_captured_at_epoch), timezone.utc)
+                if frame_captured_at_epoch is not None
+                else event_at
+            )
+            snapshot_path = self.snapshot_writer(frame, snapshot_at)
 
         if require_eligible_object and not eligible_objects:
             rejection_reason = (
@@ -643,6 +679,60 @@ class MotionDecisionHandler:
                 if require_motion_correlation and uncorrelated_eligible_objects > 0
                 else "no_eligible_object"
             )
+            cover_promoted = False
+            cover_promotion_reason = ""
+            if (
+                rejection_reason == "object_not_motion_correlated"
+                and existing_event_id is not None
+                and snapshot_path
+                and frame is not None
+                and frame_source == "recorded_main"
+                and self.refinement_cover_promoter is not None
+            ):
+                frame_height, frame_width = frame.shape[:2]
+                try:
+                    promoted = self.refinement_cover_promoter(
+                        int(existing_event_id),
+                        snapshot_path=snapshot_path,
+                        recording_path=recording_path,
+                        captured_at=(
+                            float(frame_captured_at_epoch)
+                            if frame_captured_at_epoch is not None
+                            else normalized_event_at.timestamp()
+                        ),
+                        frame_width=int(frame_width),
+                        frame_height=int(frame_height),
+                        cover_objects=[
+                            dict(item)
+                            for item in objects
+                            if isinstance(item, dict) and item.get("label")
+                        ],
+                        source=frame_source,
+                        timestamp_exact=frame_timestamp_exact,
+                    )
+                    cover_promoted = promoted is not None
+                    cover_promotion_reason = (
+                        "compatible_recorded_refinement"
+                        if cover_promoted
+                        else "refinement_cover_not_eligible"
+                    )
+                except Exception:
+                    # Presentation enrichment is never allowed to make a
+                    # completed security decision retry or fail terminally.
+                    cover_promotion_reason = "refinement_cover_promotion_failed"
+                    LOGGER.exception(
+                        "refinement cover promotion failed for %s event %d",
+                        self.camera_id,
+                        int(existing_event_id),
+                    )
+                if cover_promoted:
+                    self._publish("incident_update", {
+                        "event_id": int(existing_event_id),
+                        "camera_id": self.camera_id,
+                        "timestamp": normalized_event_at.isoformat(),
+                        "updated": True,
+                        "reason": "cover_promoted",
+                    })
             return MotionDecisionOutcome(
                 event_id=existing_event_id,
                 snapshot_path=snapshot_path,
@@ -655,6 +745,8 @@ class MotionDecisionHandler:
                 ),
                 processing_timing=processing_timing,
                 object_activity=activity_summary,
+                cover_promoted=cover_promoted,
+                cover_promotion_reason=cover_promotion_reason,
             )
 
         stored_objects = [
@@ -866,4 +958,9 @@ class MotionDecisionHandlerFactory:
             activity_attributor=activity_attributor,
             face_candidate_sink=self.face_candidate_sink,
             spatial_alignment=spatial_alignment,
+            refinement_cover_promoter=getattr(
+                self.events,
+                "promote_refinement_cover",
+                None,
+            ),
         )

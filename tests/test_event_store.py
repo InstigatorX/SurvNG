@@ -551,6 +551,128 @@ class EventStoreTest(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertTrue(new.exists())
 
+    def test_refinement_cover_promotes_better_unique_subject_without_changing_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshots = root / "snapshots" / "back-right"
+            snapshots.mkdir(parents=True)
+            old = snapshots / "live.webp"
+            new = snapshots / "main.webp"
+            old.write_bytes(b"live")
+            new.write_bytes(b"main-frame")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="back-right",
+                kind="motion",
+                snapshot_path=str(old),
+                objects_json=json.dumps([{
+                    "label": "person",
+                    "confidence": 0.7759,
+                    "incident_eligible": True,
+                    "provisional_detection": True,
+                    "frame_captured_at_epoch": 1000.0,
+                    "detection_frame_width": 896,
+                    "detection_frame_height": 512,
+                    "box": {"x1": 524, "y1": 257, "x2": 591, "y2": 347},
+                }]),
+            )
+
+            promoted = store.promote_refinement_cover(
+                int(event["id"]),
+                snapshot_path=str(new),
+                recording_path="recordings/back-right/main.mp4",
+                captured_at=1004.0,
+                frame_width=4512,
+                frame_height=2512,
+                cover_objects=[
+                    {
+                        "label": "person",
+                        "confidence": 0.91,
+                        "confidence_eligible": True,
+                        "zone_eligible": True,
+                        "temporal_consensus": True,
+                        "incident_eligible": False,
+                        "box": {"x1": 3900, "y1": 1500, "x2": 4300, "y2": 2200},
+                    },
+                    {
+                        "label": "car",
+                        "confidence": 0.94,
+                        "temporal_consensus": True,
+                        "box": {"x1": 400, "y1": 700, "x2": 1100, "y2": 1300},
+                    },
+                ],
+                source="recorded_main",
+                timestamp_exact=True,
+            )
+
+            self.assertIsNotNone(promoted)
+            updated = store.get(int(event["id"]))
+            self.assertEqual(updated["snapshot_path"], "snapshots/back-right/main.webp")
+            objects = json.loads(updated["objects_json"])
+            person = next(item for item in objects if item.get("label") == "person")
+            self.assertTrue(person["incident_eligible"])
+            self.assertEqual(person["confidence"], 0.7759)
+            self.assertEqual(person["box"], {"x1": 3900, "y1": 1500, "x2": 4300, "y2": 2200})
+            self.assertEqual(person["detection_frame_width"], 4512)
+            self.assertEqual(person["snapshot_source"], "recorded_main")
+            self.assertTrue(person["snapshot_presentation_only"])
+            promotion = next(
+                item["cover_promotion"]
+                for item in objects
+                if item.get("status") == "cover_promotion"
+            )
+            self.assertTrue(promotion["admission_preserved"])
+            self.assertFalse(old.exists())
+
+    def test_refinement_cover_declines_ambiguous_same_label_subjects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshots = root / "snapshots" / "gate"
+            snapshots.mkdir(parents=True)
+            old = snapshots / "live.webp"
+            new = snapshots / "main.webp"
+            old.write_bytes(b"live")
+            new.write_bytes(b"main")
+            store = EventStore(root)
+            event = store.add_event(
+                camera_id="gate",
+                kind="motion",
+                snapshot_path=str(old),
+                objects_json=json.dumps([{
+                    "label": "person",
+                    "confidence": 0.9,
+                    "incident_eligible": True,
+                    "provisional_detection": True,
+                    "frame_captured_at_epoch": 1000.0,
+                    "detection_frame_width": 640,
+                    "detection_frame_height": 360,
+                    "box": {"x1": 20, "y1": 20, "x2": 80, "y2": 180},
+                }]),
+            )
+            candidates = [
+                {
+                    "label": "person",
+                    "confidence": 0.9,
+                    "temporal_consensus": True,
+                    "box": {"x1": x, "y1": 100, "x2": x + 200, "y2": 700},
+                }
+                for x in (200, 900)
+            ]
+
+            self.assertIsNone(store.promote_refinement_cover(
+                int(event["id"]),
+                snapshot_path=str(new),
+                recording_path="",
+                captured_at=1002.0,
+                frame_width=1920,
+                frame_height=1080,
+                cover_objects=candidates,
+                source="recorded_main",
+                timestamp_exact=True,
+            ))
+            self.assertEqual(store.get(int(event["id"]))["snapshot_path"], "snapshots/gate/live.webp")
+            self.assertTrue(old.exists())
+
     def test_camera_intelligence_effectiveness_lifecycle_is_durable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EventStore(Path(tmpdir))

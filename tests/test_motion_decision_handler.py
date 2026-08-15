@@ -59,6 +59,110 @@ class MotionDecisionHandlerTest(unittest.TestCase):
         snapshot_writer.assert_not_called()
         events.refine_event_evidence.assert_not_called()
 
+    def test_uncorrelated_refinement_can_promote_compatible_cover_without_changing_decision(self) -> None:
+        events = Mock()
+        promoter = Mock(return_value={"id": 42})
+        published = []
+        writes = []
+        captured_at = datetime(2026, 8, 15, 19, 8, 42, tzinfo=timezone.utc)
+        result = RecordedDetectionResult(
+            frame=np.zeros((1080, 1920, 3), dtype=np.uint8),
+            objects=[{
+                "label": "person",
+                "confidence": 0.91,
+                "confidence_eligible": True,
+                "zone_eligible": True,
+                "incident_eligible": True,
+                "temporal_consensus": True,
+                "temporal_track_observations": 3,
+                "temporal_center_displacement_ratio": 0.001,
+                "temporal_center_path_ratio": 0.002,
+                "box": {"x1": 1400, "y1": 200, "x2": 1700, "y2": 900},
+            }],
+            recording_path="main.mp4",
+            timings_ms={},
+            frame_captured_at_epoch=captured_at.timestamp(),
+            frame_source="recorded_main",
+            frame_timestamp_exact=True,
+        )
+        handler = MotionDecisionHandler(
+            camera_id="back-right",
+            events=events,
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda _frame, at: writes.append(at) or "main.webp",
+            object_serializer=json.dumps,
+            event_callback=lambda kind, payload: published.append((kind, payload)),
+            spatial_alignment={"mode": "auto", "reliable": False, "confidence": 0.0},
+            refinement_cover_promoter=promoter,
+        )
+
+        outcome = handler.refine(
+            "adaptive/visual_backup",
+            "backup",
+            datetime(2026, 8, 15, 19, 8, 37, tzinfo=timezone.utc),
+            {"features": {"motion_regions": [[0.5, 0.4, 0.8, 0.8]]}},
+            existing_event_id=42,
+            require_eligible_object=True,
+            require_motion_correlation=True,
+        )
+
+        self.assertFalse(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertTrue(outcome.cover_promoted)
+        self.assertEqual(writes, [captured_at])
+        kwargs = promoter.call_args.kwargs
+        self.assertEqual(kwargs["frame_width"], 1920)
+        self.assertEqual(kwargs["captured_at"], captured_at.timestamp())
+        self.assertFalse(kwargs["cover_objects"][0]["incident_eligible"])
+        self.assertEqual(published[0][0], "incident_update")
+        events.refine_event_evidence.assert_not_called()
+
+    def test_cover_promotion_failure_does_not_retry_completed_security_decision(self) -> None:
+        result = RecordedDetectionResult(
+            frame=np.zeros((1080, 1920, 3), dtype=np.uint8),
+            objects=[{
+                "label": "person",
+                "confidence": 0.9,
+                "incident_eligible": True,
+                "temporal_consensus": True,
+                "temporal_track_observations": 3,
+                "temporal_center_displacement_ratio": 0.0,
+                "temporal_center_path_ratio": 0.0,
+                "box": {"x1": 200, "y1": 100, "x2": 500, "y2": 900},
+            }],
+            recording_path="main.mp4",
+            timings_ms={},
+            frame_captured_at_epoch=1004.0,
+            frame_source="recorded_main",
+        )
+        handler = MotionDecisionHandler(
+            camera_id="back-right",
+            events=Mock(),
+            detection_provider=lambda _event_at: result,
+            snapshot_writer=lambda _frame, _at: "main.webp",
+            object_serializer=json.dumps,
+            spatial_alignment={"mode": "auto", "reliable": False},
+            refinement_cover_promoter=Mock(side_effect=OSError("storage busy")),
+        )
+
+        with self.assertLogs("survng.app.motion_pipeline.decision_handler", level="ERROR"):
+            outcome = handler.refine(
+                "adaptive/visual_backup",
+                "backup",
+                datetime.fromtimestamp(1000.0, timezone.utc),
+                {"features": {"motion_regions": []}},
+                existing_event_id=42,
+                require_eligible_object=True,
+                require_motion_correlation=True,
+            )
+
+        self.assertFalse(outcome.object_detected)
+        self.assertEqual(outcome.rejection_reason, "object_not_motion_correlated")
+        self.assertEqual(
+            outcome.cover_promotion_reason,
+            "refinement_cover_promotion_failed",
+        )
+
     def test_handler_persists_cropped_temporal_face_candidates(self) -> None:
         events = RecordingEventStore()
         frame = np.zeros((100, 160, 3), dtype=np.uint8)
