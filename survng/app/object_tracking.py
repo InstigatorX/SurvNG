@@ -1089,6 +1089,7 @@ class ObjectTrackingSession:
         self._catchup_frames_processed = 0
         self._coverage_gap_count = 0
         self._maximum_coverage_gap_seconds = 0.0
+        self._completion_reason = ""
         self._cover_baseline: _TrackingCoverCandidate | None = None
         self._cover_candidate: _TrackingCoverCandidate | None = None
         self._cover_promotion: dict[str, Any] | None = None
@@ -1106,6 +1107,7 @@ class ObjectTrackingSession:
             "coverage_gap_count": 0,
             "maximum_coverage_gap_seconds": 0.0,
             "coverage_incomplete": False,
+            "completion_reason": "",
             "last_error": "",
             "reid_failures": 0,
             "reid_attempts": 0,
@@ -1690,6 +1692,7 @@ class ObjectTrackingSession:
             self._catchup_frames_processed = 0
             self._coverage_gap_count = 0
             self._maximum_coverage_gap_seconds = 0.0
+            self._completion_reason = ""
             self._cover_baseline = None
             self._cover_candidate = None
             self._cover_promotion = None
@@ -1898,6 +1901,8 @@ class ObjectTrackingSession:
             # Bridging to a much newer live frame would manufacture a timestamp
             # gap after the object left and incorrectly suppress cover promotion.
             live_bridge_required = tracker.has_live_tracks(captured_at)
+            if not live_bridge_required:
+                self._completion_reason = "object_exited_recorded_window"
             while live_bridge_required and not stop.is_set():
                 with self._lock:
                     deadline = self._deadline
@@ -1958,7 +1963,10 @@ class ObjectTrackingSession:
                         if wait_for <= 0.0 or stop.wait(wait_for):
                             break
                     coverage_gap = sample_epoch - captured_at
-                    if coverage_gap > self.config.lost_timeout_seconds:
+                    if (
+                        coverage_gap > self.config.lost_timeout_seconds
+                        and tracker.has_live_tracks(captured_at)
+                    ):
                         self._coverage_gap_count += 1
                         self._maximum_coverage_gap_seconds = max(
                             self._maximum_coverage_gap_seconds,
@@ -1970,6 +1978,10 @@ class ObjectTrackingSession:
                             event_id,
                             coverage_gap,
                         )
+                        self._completion_reason = "missing_media_while_object_active"
+                    elif not tracker.has_live_tracks(captured_at):
+                        self._completion_reason = "object_exited_during_catchup"
+                        break
                 if gap_backfilled and sample_epoch <= captured_at + interval * 0.5:
                     last_frame_token = frame_token
                     next_sample = time.monotonic() + interval
@@ -1985,10 +1997,15 @@ class ObjectTrackingSession:
                     continue
                 captured_at = sample_epoch
                 if not tracker.has_live_tracks(sample_epoch):
+                    self._completion_reason = "object_exited_live_window"
                     break
                 next_sample = max(next_sample + interval, time.monotonic())
             final_epoch = time.time()
             final_state = "interrupted" if self._coverage_gap_count else "complete"
+            if not self._completion_reason:
+                self._completion_reason = (
+                    "session_stopped" if stop.is_set() else "tracking_window_complete"
+                )
             if final_state == "complete" and not stop.is_set():
                 try:
                     self._promote_cover_candidate(event_id)
@@ -2069,6 +2086,7 @@ class ObjectTrackingSession:
                 3,
             ),
             "coverage_incomplete": self._coverage_gap_count > 0,
+            "completion_reason": self._completion_reason,
             "updated_at": datetime.fromtimestamp(captured_at, timezone.utc).isoformat(),
             "tracks": tracks,
             "reid_diagnostics": {
@@ -2116,6 +2134,7 @@ class ObjectTrackingSession:
                 3,
             ),
             coverage_incomplete=self._coverage_gap_count > 0,
+            completion_reason=self._completion_reason,
             reid_recoveries=(
                 self._reid_recovery_base + sum(recoveries_by_label.values())
             ),

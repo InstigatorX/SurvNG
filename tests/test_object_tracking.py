@@ -1412,6 +1412,10 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertTrue(updates[-1]["coverage_incomplete"])
         self.assertEqual(updates[-1]["coverage_gap_count"], 1)
         self.assertGreater(updates[-1]["maximum_coverage_gap_seconds"], 3.0)
+        self.assertEqual(
+            updates[-1]["completion_reason"],
+            "missing_media_while_object_active",
+        )
 
     def test_expired_track_after_recorded_catchup_does_not_bridge_to_live(self) -> None:
         terminal = threading.Event()
@@ -1471,6 +1475,10 @@ class ObjectTrackingSessionTest(unittest.TestCase):
         self.assertEqual(updates[-1]["state"], "complete")
         self.assertEqual(updates[-1]["coverage_gap_count"], 0)
         self.assertFalse(updates[-1]["coverage_incomplete"])
+        self.assertEqual(
+            updates[-1]["completion_reason"],
+            "object_exited_recorded_window",
+        )
 
     def test_detector_failures_persist_terminal_failure_state(self) -> None:
         terminal = threading.Event()
