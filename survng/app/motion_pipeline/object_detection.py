@@ -90,6 +90,9 @@ class TimestampedLiveFrame:
     camera_generation: int
     capture_generation: int
     source: str = "live"
+    geometry_trusted: bool = True
+    width: int = 0
+    height: int = 0
 
 
 @dataclass(frozen=True)
@@ -943,6 +946,7 @@ class RecordedMotionObjectDetector:
             generation = int(sample.camera_generation)
             capture_generation = int(sample.capture_generation)
             source = str(sample.source or "live")
+            geometry_trusted = bool(sample.geometry_trusted)
             provenance_valid = bool(
                 source == "live"
                 and sequence > 0
@@ -958,6 +962,7 @@ class RecordedMotionObjectDetector:
             generation = 0
             capture_generation = 0
             source = "live"
+            geometry_trusted = True
             provenance_valid = True
         if not math.isfinite(float(captured_at)) or not provenance_valid:
             return self._result(
@@ -1007,6 +1012,7 @@ class RecordedMotionObjectDetector:
                     "frame_sequence": sequence,
                     "camera_generation": generation,
                     "capture_generation": capture_generation,
+                    "frame_geometry_trusted": geometry_trusted,
                 })
         return self._result(
             frame,

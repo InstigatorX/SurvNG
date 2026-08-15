@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from survng.app.config import CameraConfig
-from survng.app.tracking_frames import TrackingFrameService
+from survng.app.tracking_frames import CameraFrameTimeline
 from survng.app.video_frames import DecodedVideoFrame, VideoFrameReference
 
 
@@ -19,12 +19,12 @@ def _service(
     capture: Mock | None = None,
     recorder: Mock | None = None,
     sample_fps: float = 2.0,
-) -> TrackingFrameService:
+) -> CameraFrameTimeline:
     effective_recorder = recorder if recorder is not None else Mock()
     effective_recorder.ffmpeg_path = "/usr/bin/ffmpeg"
     if recorder is None:
         effective_recorder.recording_rows_between.return_value = []
-    return TrackingFrameService(
+    return CameraFrameTimeline(
         camera=CameraConfig(
             id="gate",
             name="Gate",

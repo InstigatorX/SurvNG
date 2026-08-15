@@ -37,7 +37,7 @@ from .motion_runtime import CameraMotionState, MotionRuntimeService
 from .object_tracking import ObjectTrackingSession, ObjectTrackingSessionFactory
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .object_activity import AttributionMode, ObjectActivityAttributor
-from .tracking_frames import TrackingFrameService
+from .tracking_frames import CameraFrameTimeline
 from .video_frames import DecodedVideoFrame
 from .motion_pipeline import (
     MotionDecisionHandlerFactory,
@@ -265,7 +265,7 @@ class CameraWorker:
             source_started_observer=self._capture_source_started,
             source_stopped_observer=self._capture_source_stopped,
         )
-        self.tracking_frames = TrackingFrameService(
+        self.tracking_frames = CameraFrameTimeline(
             camera=camera,
             capture=self.capture,
             recorder=self.motion_object_detector.recorder,
@@ -480,11 +480,13 @@ class CameraWorker:
         return frame.image if frame is not None else None
 
     def _get_latest_detection_frame(self) -> TimestampedLiveFrame | None:
-        frame = self.capture.request_frame(self.camera.normalized_source("live"))
+        frame = self.tracking_frames.captured("live")
         if frame is None:
             return None
         with self.runtime_state.lock:
             generation = self.runtime_state.generation
+        alignment = self._motion_spatial_alignment(self.camera)
+        height, width = frame.image.shape[:2]
         return TimestampedLiveFrame(
             frame=frame.image,
             captured_at_epoch=frame.captured_at_epoch,
@@ -493,6 +495,9 @@ class CameraWorker:
             camera_generation=generation,
             capture_generation=frame.generation,
             source=frame.source,
+            geometry_trusted=bool(alignment.get("reliable", False)),
+            width=width,
+            height=height,
         )
 
     def _get_latest_tracking_frame(

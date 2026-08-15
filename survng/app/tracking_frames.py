@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterator, Protocol
 import cv2
 import numpy as np
 
-from .camera_capture import CameraCaptureService
+from .camera_capture import CameraCaptureService, CapturedFrame
 from .config import CameraConfig
 from .security import redact_secret_text
 from .tracking_comparison import sampled_video_frames, video_frame_at_reference
@@ -36,8 +36,8 @@ class TrackingRecorder(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
-class TrackingFrameService:
-    """Own timestamped live fallback and bounded recorded-frame catch-up."""
+class CameraFrameTimeline:
+    """Authoritative timestamped live and finalized-recording frame timeline."""
 
     def __init__(
         self,
@@ -83,13 +83,17 @@ class TrackingFrameService:
         self,
         source: str = "main",
     ) -> tuple[np.ndarray, float, float] | None:
-        normalized = self.camera.normalized_source(source)
-        if self.stop_event.is_set():
-            return None
-        frame = self.capture.request_frame(normalized)
+        frame = self.captured(source)
         if frame is None:
             return None
         return frame.image, frame.captured_at_epoch, frame.captured_at_monotonic
+
+    def captured(self, source: str = "main") -> CapturedFrame | None:
+        """Return the latest frame with complete capture-generation identity."""
+        normalized = self.camera.normalized_source(source)
+        if self.stop_event.is_set():
+            return None
+        return self.capture.request_frame(normalized)
 
     def latest_with_fallback(self) -> tuple[np.ndarray, float, float] | None:
         """Prefer main detail while using the continuously warm live stream."""

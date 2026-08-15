@@ -17,7 +17,7 @@ from .motion_runtime import MotionRuntimeService
 from .object_tracking_lifecycle import ObjectTrackingLifecycle
 from .onvif_events import OnvifEventListener, OnvifStopTicket
 from .security import redact_secret_text
-from .tracking_frames import TrackingFrameService
+from .tracking_frames import CameraFrameTimeline
 
 LOGGER = logging.getLogger(__name__)
 MOTION_THREAD_STOP_TIMEOUT_SECONDS = 22.0
@@ -90,7 +90,7 @@ class CameraLifecycleService:
         onvif: OnvifEventListener,
         tracking: ObjectTrackingLifecycle,
         motion_runtime: MotionRuntimeService,
-        tracking_frames: TrackingFrameService,
+        tracking_frames: CameraFrameTimeline,
     ) -> None:
         self.camera_id = camera_id
         self.state = state
