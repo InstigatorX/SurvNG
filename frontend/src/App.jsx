@@ -3080,7 +3080,7 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
   );
 }
 
-function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay }) {
+function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect, onOpenOverlay, showOpenAction = false }) {
   const labels = incidentLabels(incident);
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
@@ -3097,7 +3097,7 @@ function IncidentListItem({ incident, cameraName, timeZone, selected, thumbnailA
         </span>
       </button>
       <IncidentSourceDot trigger={trigger} className="live-activity-trigger" onClick={() => onOpenOverlay(incident)} ariaLabel={`Preview exact ${trigger} event`} title={`${trigger} trigger`} />
-      {selected ? (
+      {selected && showOpenAction ? (
         <div className="live-activity-actions">
           <a href={appUrl(liveActivityIncidentHref(incident))}>Open incident <ChevronRight size={14} /></a>
         </div>
@@ -6003,6 +6003,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
                 thumbnailAnnotations={thumbnailAnnotations}
                 onSelect={toggleIncident}
                 onOpenOverlay={openIncidentOverlay}
+                showOpenAction
               />
             ))
             : null}
