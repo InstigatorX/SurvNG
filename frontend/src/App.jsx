@@ -4587,8 +4587,6 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
-  const activityQuickFilter = liveActivityQuickFilter(eventFilter, incidentObjectFilter);
-
   useEffect(() => {
     if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
   }, [displayedIncident, tabletInspectorOpen]);
@@ -5172,6 +5170,7 @@ function LiveCommandBar({ cameraCount, totalCameraCount, density, densityPage, d
     <header className="live-command-bar">
       <div className="live-command-context">
         <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} of {totalCameraCount}</small></span>
+        <strong className="live-command-mobile-title">Command Center</strong>
       </div>
       <div className="live-density-control" role="group" aria-label="Visible camera density">
         {LIVE_DENSITY_OPTIONS.map((option) => <button type="button" key={option} className={density === option ? "active" : ""} aria-pressed={density === option} onClick={() => onDensityChange(option)}>{option === "fit" ? <Grid2X2 size={15} /> : option === "4" ? <><Grid2X2 size={13} /> 4</> : option}</button>)}
@@ -5401,6 +5400,9 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   const incidentPageCount = incidentPage + (incidentHasMore ? 2 : 1);
   const clampedIncidentPage = incidentPage;
   const pagedIncidents = galleryIncidents;
+  const activityQuickFilter = liveActivityQuickFilter(eventFilter, incidentObjectFilter);
+  const advancedActivityFilterCount = [incidentCameraFilter, incidentZoneFilter].filter((value) => value !== "all").length
+    + (activityQuickFilter === "custom" && incidentObjectFilter !== "all" ? 1 : 0);
 
   useEffect(() => {
     const contextualIncident = selectedEvent || focusedIncident;
@@ -5467,7 +5469,11 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
   async function openLiveFullscreen() {
     const workspace = liveWorkspaceRef.current;
     if (!workspace?.requestFullscreen) return;
-    await workspace.requestFullscreen();
+    try {
+      await workspace.requestFullscreen();
+    } catch {
+      setLayoutAnnouncement("Fullscreen could not be opened by this browser.");
+    }
   }
 
   function handleCustomLayoutKey(event, cameraId, actionType) {
@@ -5558,7 +5564,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       const poster = sourceTile.querySelector(".camera-tile-poster")?.cloneNode(true);
       if (poster) ghost.appendChild(poster);
       const label = document.createElement("strong");
-      label.textContent = sourceTile.querySelector(".tile-header h2")?.textContent || source;
+      label.textContent = sourceTile.querySelector(".camera-tile-name strong")?.textContent || source;
       ghost.appendChild(label);
       ghost.style.width = `${sourceRect.width}px`;
       ghost.style.height = `${sourceRect.height}px`;
@@ -5921,7 +5927,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
           </div>
         </div>
         <details className="live-activity-filters">
-          <summary><SlidersHorizontal size={14} /> Advanced filters{[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length ? ` (${[incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length})` : ""}</summary>
+          <summary><SlidersHorizontal size={14} /> Advanced filters{advancedActivityFilterCount ? ` (${advancedActivityFilterCount})` : ""}</summary>
           <div className="event-filter incident-filter-panel" aria-label="Incident filters">
           <div className="incident-filter-selects">
             <label>
