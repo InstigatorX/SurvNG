@@ -1269,20 +1269,20 @@ function LiveViewFramingEditor({ camera, onChange }) {
         <span>{sourceName} preview</span>
       </div>
       <div className="live-framing-controls">
-        <label>Tile fill
+        <label><span>Tile fill</span>
           <select value={framing.fit} onChange={(event) => update("fit", event.target.value)}>
             <option value="cover">Fill frame (crop edges)</option>
             <option value="contain">Fit entire image</option>
           </select>
         </label>
-        <label>Horizontal focus <output>{Math.round(framing.focalX)}%</output>
-          <input type="range" min="0" max="100" step="1" value={framing.focalX} onChange={(event) => update("focal_x", Number(event.target.value))} />
+        <label><span>Horizontal focus (%)</span>
+          <input type="number" min="0" max="100" step="1" value={Math.round(framing.focalX)} onChange={(event) => update("focal_x", Number(event.target.value))} />
         </label>
-        <label>Vertical focus <output>{Math.round(framing.focalY)}%</output>
-          <input type="range" min="0" max="100" step="1" value={framing.focalY} onChange={(event) => update("focal_y", Number(event.target.value))} />
+        <label><span>Vertical focus (%)</span>
+          <input type="number" min="0" max="100" step="1" value={Math.round(framing.focalY)} onChange={(event) => update("focal_y", Number(event.target.value))} />
         </label>
-        <label>Display zoom <output>{framing.zoom.toFixed(2)}×</output>
-          <input type="range" min="1" max="3" step="0.05" value={framing.zoom} onChange={(event) => update("zoom", Number(event.target.value))} />
+        <label><span>Display zoom (×)</span>
+          <input type="number" min="1" max="3" step="0.05" value={framing.zoom.toFixed(2)} onChange={(event) => update("zoom", Number(event.target.value))} />
         </label>
         <div className="live-framing-actions">
           <button type="button" onClick={() => setPreviewRevision(Date.now())}><RefreshCcw size={15} /> Refresh preview</button>

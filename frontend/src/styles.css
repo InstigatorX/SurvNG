@@ -4339,7 +4339,7 @@ button.status-pill.hud-toggle:disabled {
 
 .live-framing-workspace {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 320px) minmax(260px, 1fr);
   align-items: stretch;
   gap: 10px;
 }
@@ -4378,38 +4378,32 @@ button.status-pill.hud-toggle:disabled {
 
 .live-framing-controls {
   display: grid;
-  grid-template-columns: repeat(4, minmax(90px, 1fr)) auto auto;
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
   gap: 6px 8px;
 }
 
 .live-framing-controls label {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(130px, 1fr) minmax(110px, 180px);
   align-items: center;
-  gap: 2px 6px;
+  gap: 6px 10px;
   font-size: 10px;
 }
 
 .live-framing-controls label select,
 .live-framing-controls label input {
-  grid-column: 1 / -1;
-}
-
-.live-framing-controls output {
-  color: var(--accent);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.live-framing-controls input[type="range"] {
-  min-height: 28px;
+  grid-column: 2;
+  min-height: 32px;
   margin: 0;
   padding-block: 4px;
 }
 
 .live-framing-actions {
-  display: contents;
+  display: flex;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .live-framing-actions button {
@@ -4430,19 +4424,11 @@ button.status-pill.hud-toggle:disabled {
   }
 
   .live-framing-workspace {
-    grid-template-columns: 160px minmax(0, 1fr);
+    grid-template-columns: minmax(240px, 300px) minmax(240px, 1fr);
   }
 
   .live-framing-controls {
-    grid-template-columns: repeat(2, minmax(100px, 1fr));
-  }
-
-  .live-framing-actions {
-    display: flex;
-    grid-column: 1 / -1;
-    justify-content: flex-start;
-    flex-wrap: wrap;
-    gap: 6px;
+    grid-template-columns: 1fr;
   }
 }
 
@@ -4453,7 +4439,7 @@ button.status-pill.hud-toggle:disabled {
   }
 
   .live-framing-preview {
-    width: min(160px, 100%);
+    width: min(320px, 100%);
   }
 }
 
@@ -4477,9 +4463,13 @@ button.status-pill.hud-toggle:disabled {
     min-height: 44px;
   }
 
-  .live-framing-controls input[type="range"] {
+  .live-framing-controls label {
+    grid-template-columns: minmax(0, 1fr) minmax(96px, 42%);
+  }
+
+  .live-framing-controls label select,
+  .live-framing-controls label input {
     min-height: 44px;
-    padding-block: 10px;
   }
 }
 
