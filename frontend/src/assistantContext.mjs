@@ -34,6 +34,7 @@ export function snapshotAssistantContext(value = {}, timeZone = "America/New_Yor
     camera_id: String(value?.camera_id || "").trim().slice(0, 128),
     incident_event_id: Number.isInteger(incidentId) && incidentId > 0 ? incidentId : null,
     recording_epoch: Number.isFinite(epoch) && epoch >= 0 ? epoch : null,
+    export_id: String(value?.export_id || "").trim().slice(0, 128),
     filters,
     time_zone: String(timeZone || value?.time_zone || "America/New_York").slice(0, 128),
   });
@@ -49,6 +50,7 @@ export function assistantContextLabel(value = {}, formatter = null) {
   const camera = cameraLabel(context);
   if (camera) pieces.push(camera);
   if (context.incident_event_id) pieces.push(`Event #${context.incident_event_id}`);
+  else if (context.export_id) pieces.push(`Export ${context.export_id}`);
   else if (context.recording_epoch != null) {
     const formatted = typeof formatter === "function" ? formatter(context.recording_epoch) : "Selected time";
     pieces.push(formatted || "Selected time");

@@ -50,6 +50,19 @@ class AssistantModelsTest(unittest.TestCase):
         self.assertEqual(len(request.context.filters), 16)
         self.assertTrue(all(len(value) == 256 for value in request.context.filters.values()))
 
+        contextual = AssistantChatRequest.model_validate({
+            "message": "what about that one?",
+            "history": [{
+                "role": "user",
+                "content": "analyze this",
+                "context": {"page": "incidents", "incident_event_id": 42, "camera_id": "front-door"},
+            }],
+            "context": {"page": "exports", "export_id": " job-9 "},
+        })
+        self.assertEqual(contextual.history[0].context.incident_event_id, 42)
+        self.assertEqual(contextual.history[0].context.camera_id, "front-door")
+        self.assertEqual(contextual.context.export_id, "job-9")
+
         with self.assertRaisesRegex(ValidationError, "safe size limit"):
             AssistantChatRequest(
                 message="x" * 8_000,

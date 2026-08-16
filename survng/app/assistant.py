@@ -89,16 +89,6 @@ AssistantToolName = Literal[
 ]
 
 
-class AssistantHistoryMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=8_000)
-
-    @field_validator("content", mode="before")
-    @classmethod
-    def normalize_content(cls, value: object) -> str:
-        return str(value or "").strip()
-
-
 class AssistantPageContext(BaseModel):
     page: Literal[
         "live", "incidents", "timeline", "search", "people", "admin", "exports",
@@ -107,12 +97,13 @@ class AssistantPageContext(BaseModel):
     camera_id: str = Field(default="", max_length=128)
     incident_event_id: int | None = Field(default=None, gt=0)
     recording_epoch: float | None = Field(default=None, ge=0)
+    export_id: str = Field(default="", max_length=128)
     filters: dict[str, str] = Field(default_factory=dict)
     time_zone: str = Field(default="America/New_York", max_length=128)
 
-    @field_validator("camera_id", mode="before")
+    @field_validator("camera_id", "export_id", mode="before")
     @classmethod
-    def normalize_camera_id(cls, value: object) -> str:
+    def normalize_identifier(cls, value: object) -> str:
         return str(value or "").strip()
 
     @field_validator("filters", mode="before")
@@ -125,6 +116,17 @@ class AssistantPageContext(BaseModel):
             for key, item in list(value.items())[:16]
             if str(key).strip() and item is not None
         }
+
+
+class AssistantHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8_000)
+    context: AssistantPageContext | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def normalize_content(cls, value: object) -> str:
+        return str(value or "").strip()
 
 
 class AssistantChatRequest(BaseModel):

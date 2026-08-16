@@ -5,6 +5,10 @@ export function liveSnapshotRefreshMs({ running, visible, documentVisible, strea
   return primary ? 2000 : 12000;
 }
 
+export function liveMediaShouldRun({ running, streamReady, mediaActive, transport }) {
+  return Boolean(running && streamReady && mediaActive && ["webrtc", "mjpeg"].includes(transport));
+}
+
 export function logPayloadSignature(lines = []) {
   const values = Array.isArray(lines) ? lines : [];
   return JSON.stringify(values);

@@ -106,7 +106,7 @@ import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } 
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "./assistantContext.mjs";
 import { safeMediaUrl } from "./mediaUrl.mjs";
-import { liveSnapshotRefreshMs, logPayloadSignature } from "./pollingPolicy.mjs";
+import { liveMediaShouldRun, liveSnapshotRefreshMs, logPayloadSignature } from "./pollingPolicy.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
@@ -1486,7 +1486,11 @@ function AssistantPanel({ pageContext, timeZone }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: content,
-          history: prior.map(({ role, content: historyContent }) => ({ role, content: historyContent })),
+          history: prior.map(({ role, content: historyContent, context: historyContext }) => ({
+            role,
+            content: historyContent,
+            ...(historyContext ? { context: snapshotAssistantContext(historyContext, historyContext.time_zone || timeZone) } : {}),
+          })),
           context: submittedContext,
         }),
       });
@@ -2013,6 +2017,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   const tileWasVisibleRef = useRef(true);
   const [tileVisible, setTileVisible] = useState(true);
   const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
+  const [mediaActive, setMediaActive] = useState(true);
   const [streamMode, setStreamMode] = useStoredState(`survng.streamMode.v3.${camera.id}`, "motion");
   const [sourceMode, setSourceMode] = useStoredState(`survng.sourceMode.${camera.id}`, "live");
   const [motionWindowNow, setMotionWindowNow] = useState(() => Date.now());
@@ -2031,8 +2036,9 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
   const [detectionError, setDetectionError] = useState("");
   const [cameraActionBusy, setCameraActionBusy] = useState(false);
   const [cameraActionError, setCameraActionError] = useState("");
-  const shouldUseWebRtc = camera.running && streamReady && activeTransport === "webrtc";
-  const shouldUseMjpegStream = camera.running && streamReady && activeTransport === "mjpeg";
+  const shouldUseLiveMedia = liveMediaShouldRun({ running: camera.running, streamReady, mediaActive, transport: activeTransport });
+  const shouldUseWebRtc = shouldUseLiveMedia && activeTransport === "webrtc";
+  const shouldUseMjpegStream = shouldUseLiveMedia && activeTransport === "mjpeg";
   const cameraConnected = camera.connected ?? camera.running;
 
   useEffect(() => {
@@ -2075,6 +2081,15 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [tileVisible]);
+
+  useEffect(() => {
+    if (tileVisible && documentVisible) {
+      setMediaActive(true);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setMediaActive(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [documentVisible, tileVisible]);
 
   useEffect(() => {
     setMjpegToken(String(Date.now()));
