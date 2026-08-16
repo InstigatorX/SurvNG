@@ -26,6 +26,7 @@
     "test:incident-semantic-search": "node tests/incident-semantic-search.mjs",
     "test:zone-geometry": "node tests/zone-geometry.mjs",
     "test:detection-tuneup": "node tests/detection-tuneup.mjs",
+    "test:workspace-navigation": "node tests/workspace-navigation.mjs",
     "test:duration": "node tests/duration.mjs"
   },
   "dependencies": {
