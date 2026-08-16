@@ -1,10 +1,10 @@
 export const WORKSPACES = Object.freeze([
-  Object.freeze({ id: "live", label: "Live", path: "/", legacyPaths: ["/live"] }),
-  Object.freeze({ id: "incidents", label: "Incidents", path: "/incidents", legacyPaths: [] }),
-  Object.freeze({ id: "timeline", label: "Timeline", path: "/timeline", legacyPaths: ["/recordings"] }),
-  Object.freeze({ id: "search", label: "Search", path: "/search", legacyPaths: ["/recordings/search"] }),
-  Object.freeze({ id: "people", label: "People", path: "/people", legacyPaths: ["/faces"] }),
-  Object.freeze({ id: "admin", label: "Admin", path: "/admin", legacyPaths: ["/config"] }),
+  Object.freeze({ id: "live", label: "Live", path: "/", paths: ["/"], legacyRoutes: { "/live": "/" } }),
+  Object.freeze({ id: "incidents", label: "Incidents", path: "/incidents", paths: ["/incidents"], legacyRoutes: {} }),
+  Object.freeze({ id: "timeline", label: "Timeline", path: "/timeline", paths: ["/timeline", "/timeline/exports"], legacyRoutes: { "/recordings": "/timeline", "/recordings/exports": "/timeline/exports" } }),
+  Object.freeze({ id: "search", label: "Search", path: "/search", paths: ["/search"], legacyRoutes: { "/recordings/search": "/search" } }),
+  Object.freeze({ id: "people", label: "People", path: "/people", paths: ["/people"], legacyRoutes: { "/faces": "/people" } }),
+  Object.freeze({ id: "admin", label: "Admin", path: "/admin", paths: ["/admin"], legacyRoutes: { "/config": "/admin" } }),
 ]);
 
 export const DESKTOP_PRIMARY_WORKSPACES = Object.freeze([
@@ -32,34 +32,23 @@ function normalizedPath(pathname) {
   return withoutTrailingSlash || "/";
 }
 
-function pathMatches(candidate, root) {
-  return candidate === root || (root !== "/" && candidate.startsWith(`${root}/`));
-}
-
 export function workspaceDefinition(workspaceId) {
   return WORKSPACE_BY_ID.get(workspaceId) || null;
 }
 
 export function resolveWorkspace(pathname) {
   const path = normalizedPath(pathname);
-  const candidates = WORKSPACES.flatMap((workspace) => [workspace.path, ...workspace.legacyPaths]
-    .filter((root) => root !== "/")
-    .map((root) => ({ workspace, root })))
-    .sort((left, right) => right.root.length - left.root.length);
-  const matched = candidates.find(({ root }) => pathMatches(path, root));
-  if (matched) return matched.workspace;
-  return path === "/" ? WORKSPACE_BY_ID.get("live") : null;
+  const matched = WORKSPACES.find((workspace) => (
+    workspace.paths.includes(path) || Object.hasOwn(workspace.legacyRoutes, path)
+  ));
+  if (matched) return matched;
+  return null;
 }
 
 export function canonicalWorkspacePath(pathname) {
   const path = normalizedPath(pathname);
-  const aliases = WORKSPACES.flatMap((workspace) => workspace.legacyPaths
-    .map((legacyRoot) => ({ workspace, legacyRoot })))
-    .sort((left, right) => right.legacyRoot.length - left.legacyRoot.length);
-  const matched = aliases.find(({ legacyRoot }) => pathMatches(path, legacyRoot));
-  if (matched) {
-    const suffix = path.slice(matched.legacyRoot.length);
-    return `${matched.workspace.path}${suffix}` || "/";
+  for (const workspace of WORKSPACES) {
+    if (Object.hasOwn(workspace.legacyRoutes, path)) return workspace.legacyRoutes[path];
   }
   return path;
 }
@@ -88,4 +77,14 @@ export function timelineHref({ cameraId, epoch, source, date } = {}) {
   if (source) params.source = source;
   if (date) params.date = date;
   return workspaceHref("timeline", params);
+}
+
+export function systemHealthState({ lifecycle, storage, detector } = {}) {
+  const healthy = lifecycle === "running"
+    && storage?.available !== false
+    && (detector?.enabled === false || Boolean(detector?.loaded_backend));
+  const label = lifecycle && lifecycle !== "running"
+    ? String(lifecycle).replaceAll("_", " ")
+    : healthy ? "Healthy" : "Checking";
+  return { healthy, label };
 }

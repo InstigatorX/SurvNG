@@ -5,6 +5,7 @@ import {
   DESKTOP_PRIMARY_WORKSPACES,
   MOBILE_PRIMARY_WORKSPACES,
   resolveWorkspace,
+  systemHealthState,
   timelineHref,
   workspaceDefinition,
   workspaceHref,
@@ -19,6 +20,10 @@ assert.equal(resolveWorkspace("/search").id, "search");
 assert.equal(resolveWorkspace("/faces").id, "people");
 assert.equal(resolveWorkspace("/config").id, "admin");
 assert.equal(resolveWorkspace("/unknown"), null);
+assert.equal(resolveWorkspace("/live/unknown"), null);
+assert.equal(resolveWorkspace("/people/unknown"), null);
+assert.equal(resolveWorkspace("/timeline/unknown"), null);
+assert.equal(resolveWorkspace("/recordings/unknown"), null);
 
 assert.equal(canonicalWorkspacePath("/recordings"), "/timeline");
 assert.equal(canonicalWorkspacePath("/recordings/exports"), "/timeline/exports");
@@ -26,6 +31,10 @@ assert.equal(canonicalWorkspacePath("/recordings/search"), "/search");
 assert.equal(canonicalWorkspacePath("/faces"), "/people");
 assert.equal(canonicalWorkspacePath("/config"), "/admin");
 assert.equal(canonicalWorkspacePath("/live"), "/");
+assert.equal(canonicalWorkspacePath("/live/unknown"), "/live/unknown");
+assert.equal(canonicalWorkspacePath("/people/unknown"), "/people/unknown");
+assert.equal(canonicalWorkspacePath("/timeline/unknown"), "/timeline/unknown");
+assert.equal(canonicalWorkspacePath("/recordings/unknown"), "/recordings/unknown");
 assert.equal(canonicalWorkspacePath("/incidents"), "/incidents");
 assert.equal(
   canonicalWorkspaceUrl("/recordings", "?camera=gate&at=123.5", "#player"),
@@ -45,5 +54,14 @@ assert.equal(timelineHref({ epoch: Number.NaN }), "/timeline");
 
 assert.deepEqual(DESKTOP_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "search", "people"]);
 assert.deepEqual(MOBILE_PRIMARY_WORKSPACES, ["live", "incidents", "timeline", "search", "more"]);
+
+assert.deepEqual(
+  systemHealthState({ lifecycle: "running", storage: { available: true }, detector: { enabled: true, loaded_backend: "openvino" } }),
+  { healthy: true, label: "Healthy" },
+);
+assert.deepEqual(
+  systemHealthState({ lifecycle: "starting", storage: { available: true }, detector: { enabled: false } }),
+  { healthy: false, label: "starting" },
+);
 
 console.log("workspace navigation contract tests passed");

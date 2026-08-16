@@ -45,9 +45,15 @@ def create_frontend_router(
         "recordings_page": ("/recordings", "recordings.html"),
         "recording_search_page": ("/recordings/search", "recordings.html"),
         "recording_exports_page": ("/recordings/exports", "recordings.html"),
+        "timeline_page": ("/timeline", "recordings.html"),
+        "timeline_exports_page": ("/timeline/exports", "recordings.html"),
+        "search_page": ("/search", "recordings.html"),
         "config_page": ("/config", "config.html"),
+        "admin_page": ("/admin", "config.html"),
         "incidents_page": ("/incidents", "index.html"),
         "faces_page": ("/faces", "index.html"),
+        "people_page": ("/people", "index.html"),
+        "live_page": ("/live", "index.html"),
     }
     handlers: dict[str, Callable[..., Any]] = {
         "health": health,

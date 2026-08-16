@@ -800,9 +800,15 @@ index = _frontend_route_bundle.handlers["index"]
 recordings_page = _frontend_route_bundle.handlers["recordings_page"]
 recording_search_page = _frontend_route_bundle.handlers["recording_search_page"]
 recording_exports_page = _frontend_route_bundle.handlers["recording_exports_page"]
+timeline_page = _frontend_route_bundle.handlers["timeline_page"]
+timeline_exports_page = _frontend_route_bundle.handlers["timeline_exports_page"]
+search_page = _frontend_route_bundle.handlers["search_page"]
 config_page = _frontend_route_bundle.handlers["config_page"]
+admin_page = _frontend_route_bundle.handlers["admin_page"]
 incidents_page = _frontend_route_bundle.handlers["incidents_page"]
 faces_page = _frontend_route_bundle.handlers["faces_page"]
+people_page = _frontend_route_bundle.handlers["people_page"]
+live_page = _frontend_route_bundle.handlers["live_page"]
 
 _semantic_route_bundle = create_semantic_router(
     SemanticRouteDependencies(

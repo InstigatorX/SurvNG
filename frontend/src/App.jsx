@@ -115,6 +115,16 @@ import { mapWithConcurrency, rankSemanticIncidentDetails, semanticIncidentReques
 import { insertZonePointWithIndex } from "./zoneGeometry.mjs";
 import { relatedEvidenceLabel, relatedIncidentThumbnailPath, relatedIncidentsPath, visibleRelatedAppearances } from "./relatedIncidents.mjs";
 import { nextFaceReviewObservation } from "./faceReview.mjs";
+import {
+  canonicalWorkspaceUrl,
+  DESKTOP_PRIMARY_WORKSPACES,
+  MOBILE_PRIMARY_WORKSPACES,
+  resolveWorkspace,
+  systemHealthState,
+  timelineHref as timelineWorkspaceHref,
+  workspaceDefinition,
+  workspaceHref,
+} from "./workspaceNavigation.mjs";
 
 const DEFAULT_TIME_ZONE = "America/New_York";
 const MEDIA_STORAGE_ROLES = [
@@ -173,12 +183,12 @@ function incidentRecordingContext(item) {
 }
 
 function recordingsHref(context) {
-  if (!context?.cameraId || !Number.isFinite(context?.epoch)) return appUrl("/recordings");
-  const params = new URLSearchParams({
-    camera: context.cameraId,
-    at: String(Math.round(context.epoch * 1000) / 1000),
-  });
-  return appUrl(`/recordings?${params.toString()}`);
+  if (!context?.cameraId || !Number.isFinite(context?.epoch)) return appUrl(workspaceHref("timeline"));
+  return appUrl(timelineWorkspaceHref({
+    cameraId: context.cameraId,
+    epoch: Math.round(context.epoch * 1000) / 1000,
+    source: context.source,
+  }));
 }
 
 const fetch = (resource, options) => window.fetch(
@@ -1470,14 +1480,65 @@ function AssistantPanel({ pageContext, timeZone }) {
   );
 }
 
+const WORKSPACE_ICONS = Object.freeze({
+  live: Video,
+  incidents: Siren,
+  timeline: Clock3,
+  search: Search,
+  people: Users,
+  admin: Cog,
+});
+
 function Shell({ page, theme, recordingContext, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
-  const isLive = page === "live";
-  const isRecordings = page === "recordings";
-  const isConfig = page === "config";
-  const isIncidents = page === "incidents";
-  const isFaces = page === "faces";
+  const mobileMoreButtonRef = useRef(null);
+  const mobileMorePanelRef = useRef(null);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const workspaceLink = (id) => {
+    const definition = workspaceDefinition(id);
+    return [
+      id,
+      definition.label,
+      id === "timeline" ? recordingsHref(recordingContext) : appUrl(workspaceHref(id)),
+      WORKSPACE_ICONS[id],
+    ];
+  };
+  const workspaceLinks = [...DESKTOP_PRIMARY_WORKSPACES, "admin"].map(workspaceLink);
+  const mobileLinks = MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more").map(workspaceLink);
+
+  useEffect(() => {
+    if (!mobileMoreOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const panel = mobileMorePanelRef.current;
+    document.body.style.overflow = "hidden";
+    panel?.querySelector("a, button")?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileMoreOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !panel) return;
+      const focusable = [...panel.querySelectorAll("a, button:not([disabled])")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      mobileMoreButtonRef.current?.focus();
+    };
+  }, [mobileMoreOpen]);
   useLayoutEffect(() => {
     const shell = shellRef.current;
     const topbar = topbarRef.current;
@@ -1501,29 +1562,38 @@ function Shell({ page, theme, recordingContext, children }) {
   }, []);
   return (
     <div ref={shellRef} className={`app-shell page-${page}`}>
+      <aside className="workspace-sidebar" aria-label="SurvNG navigation">
+        <a className="workspace-brand" href={appUrl("/")} aria-label="SurvNG Live">
+          <span className="brand-mark"><img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" /></span>
+          <strong>SurvNG</strong>
+        </a>
+        <nav className="workspace-navigation" aria-label="Primary">
+          {workspaceLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} title={label} href={href} key={id}><Icon size={19} /><span>{label}</span></a>)}
+        </nav>
+      </aside>
       <header ref={topbarRef} className="topbar">
-        <div className="brand-block">
+        <a className="brand-block mobile-brand-block" href={appUrl("/")} aria-label="SurvNG Live">
           <div className="brand-mark">
             <img src={appUrl("/static/favicon.svg")} alt="" aria-hidden="true" />
           </div>
           <div className="brand-title">
             <h1>SurvNG</h1>
           </div>
-          {!isConfig && !isRecordings && !isIncidents && !isFaces ? <LiveHeaderStats /> : null}
-        </div>
-        <div className="top-actions">
-          <nav className="topnav primary-nav" aria-label="Primary">
-            <a className={`nav-button ${isLive ? "active" : ""}`} aria-current={isLive ? "page" : undefined} href={appUrl("/")}><Video size={16} /> Live</a>
-            <a className={`nav-button incidents-nav ${isIncidents ? "active" : ""}`} aria-current={isIncidents ? "page" : undefined} href={appUrl("/incidents")}><Siren size={16} /> Incidents</a>
-            <a className={`nav-button ${isRecordings ? "active" : ""}`} aria-current={isRecordings ? "page" : undefined} href={recordingsHref(recordingContext)}><Film size={16} /> Recordings</a>
-          </nav>
-          <nav className="topnav utility-nav" aria-label="Additional">
-            <a className={`nav-button ${isFaces ? "active" : ""}`} aria-current={isFaces ? "page" : undefined} href={appUrl("/faces")} aria-label="Faces"><ScanFace size={16} /><span>Faces</span></a>
-            <a className={`nav-button ${isConfig ? "active" : ""}`} aria-current={isConfig ? "page" : undefined} href={appUrl("/config")} aria-label="Admin"><Cog size={16} /><span>Admin</span></a>
-          </nav>
-        </div>
+        </a>
+        <div className="workspace-system-bar" aria-label="System status"><LiveHeaderStats /></div>
       </header>
-      {children}
+      <div className="workspace-content">{children}</div>
+      <nav className="mobile-workspace-nav" aria-label="Primary">
+        {mobileLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} href={href} key={id}><Icon size={21} /><span>{label}</span></a>)}
+        <button ref={mobileMoreButtonRef} type="button" className={page === "people" || page === "admin" || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
+      </nav>
+      {mobileMoreOpen ? <div className="mobile-more-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-more-title">
+        <button type="button" className="mobile-more-backdrop" onClick={() => setMobileMoreOpen(false)} aria-label="Close more menu" />
+        <div ref={mobileMorePanelRef} id="mobile-more-panel" className="mobile-more-panel" tabIndex={-1}>
+          <header><h2 id="mobile-more-title">More</h2><button type="button" onClick={() => setMobileMoreOpen(false)} aria-label="Close more menu"><X size={20} /></button></header>
+          {workspaceLinks.slice(4).map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
+        </div>
+      </div> : null}
     </div>
   );
 }
@@ -1575,6 +1645,7 @@ function useAppEvents(handler) {
 
 function LiveHeaderStats() {
   const [stats, setStats] = useState({
+    lifecycle: "",
     resources: null,
     storage: null,
     detector: null,
@@ -1588,6 +1659,7 @@ function LiveHeaderStats() {
       const system = await systemResponse.json();
       setStats((current) => ({
         ...current,
+        lifecycle: system.lifecycle || "",
         resources: system.resources || null,
         storage: system.storage || null,
         detector: system.detector || null,
@@ -1602,6 +1674,7 @@ function LiveHeaderStats() {
     if (type === "system_state") {
       setStats((current) => ({
         ...current,
+        lifecycle: data.lifecycle || current.lifecycle,
         resources: data.resources || null,
         storage: data.storage || null,
         detector: data.detector || null,
@@ -1631,9 +1704,15 @@ function LiveHeaderStats() {
   const memoryLabel = stats.resources ? formatBytes(stats.resources.application_memory_bytes) : "--";
   const cpuLabel = Number.isFinite(stats.resources?.cpu_load_percent) ? `${stats.resources.cpu_load_percent.toFixed(1)}%` : "--";
   const cameraLabel = stats.cameras ? `${stats.cameras.recording}/${stats.cameras.total} rec` : "--";
+  const { healthy: systemHealthy, label: healthLabel } = systemHealthState({
+    lifecycle: stats.lifecycle,
+    storage: stats.storage,
+    detector,
+  });
 
   return (
     <div className="header-stats" aria-label="System summary">
+      <span className={`header-stat header-health ${systemHealthy ? "ok" : "warn"}`}><ShieldCheck size={15} /><small>System</small><strong>{healthLabel}</strong></span>
       <span className="header-stat"><HardDrive size={15} /><small>Storage</small><strong>{storageLabel}</strong></span>
       <span className="header-stat"><Monitor size={15} /><small>Memory</small><strong>{memoryLabel}</strong></span>
       <span className="header-stat"><Activity size={15} /><small>CPU</small><strong>{cpuLabel}</strong></span>
@@ -5882,9 +5961,9 @@ function RecordingSectionSwitcher({ mode, cameraId = "" }) {
   const query = cameraId ? `?camera=${encodeURIComponent(cameraId)}` : "";
   return (
     <div className="recordings-section-switcher" aria-label="Recording section">
-      <a className={mode === "history" ? "active" : ""} href={appUrl(`/recordings${query}`)}><Film size={14} />History</a>
-      <a className={mode === "search" ? "active" : ""} href={appUrl("/recordings/search")}><Search size={14} />Smart Search</a>
-      <a className={mode === "exports" ? "active" : ""} href={appUrl("/recordings/exports")}><Download size={14} />Exports</a>
+      <a className={mode === "history" ? "active" : ""} href={appUrl(`/timeline${query}`)}><Clock3 size={14} />Timeline</a>
+      <a className={mode === "search" ? "active" : ""} href={appUrl("/search")}><Search size={14} />Search</a>
+      <a className={mode === "exports" ? "active" : ""} href={appUrl("/timeline/exports")}><Download size={14} />Exports</a>
     </div>
   );
 }
@@ -5974,7 +6053,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
       });
       const params = new URLSearchParams({ q: searchQuery });
       if (searchCameraId) params.set("camera", searchCameraId);
-      window.history.replaceState(null, "", appUrl(`/recordings/search?${params.toString()}`));
+      window.history.replaceState(null, "", appUrl(`/search?${params.toString()}`));
     } catch (reason) {
       if (reason?.name !== "AbortError") setError(reason.message || "Smart Search failed.");
     } finally {
@@ -5994,7 +6073,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     setResults([]);
     setError("");
     clearSemanticSearchSession(sessionStorage);
-    window.history.replaceState(null, "", appUrl("/recordings/search"));
+    window.history.replaceState(null, "", appUrl("/search"));
   }
 
   function selectCamera(nextCameraId) {
@@ -6005,7 +6084,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
     writeSemanticSearchSession(sessionStorage, { query: query.trim(), cameraId: selectedCameraId, results });
     const params = new URLSearchParams({ q: query.trim() });
     if (selectedCameraId) params.set("camera", selectedCameraId);
-    window.history.replaceState(null, "", appUrl(`/recordings/search?${params.toString()}`));
+    window.history.replaceState(null, "", appUrl(`/search?${params.toString()}`));
   }
 
   return <main className="recordings-v2-page semantic-search-page">
@@ -6581,7 +6660,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
     if (Number.isFinite(retainedEpoch) && retainedEpoch >= dayStart && retainedEpoch < dayEnd) {
       params.set("at", String(Math.round(retainedEpoch * 1000) / 1000));
     }
-    window.history.replaceState(null, "", appUrl(`/recordings?${params.toString()}`));
+    window.history.replaceState(null, "", appUrl(`/timeline?${params.toString()}`));
   }, [activeCameraId, date, source, dayStart, dayEnd]);
 
   function handleRecordingReady(_player, video) {
@@ -6885,7 +6964,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
               <div className="recordings-v2-export-actions">
                 {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={exportJob.download_url}><Download size={15} />Download</a> : null}
-                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/recordings/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Export Center</a> : null}
+                {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/timeline/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Export Center</a> : null}
                 {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
                 {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
                 {exportJob && ["completed", "failed", "cancelled"].includes(exportJob.status) ? <button type="button" onClick={() => { setExportJob(null); setExportError(""); setExportLabel(""); }}>New export</button> : null}
@@ -7076,7 +7155,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
   useEffect(() => {
     const params = new URLSearchParams();
     if (cameraId) params.set("camera", cameraId);
-    window.history.replaceState(null, "", appUrl(`/recordings/exports${params.size ? `?${params.toString()}` : ""}`));
+    window.history.replaceState(null, "", appUrl(`/timeline/exports${params.size ? `?${params.toString()}` : ""}`));
   }, [cameraId]);
 
   useEffect(() => {
@@ -12299,18 +12378,17 @@ function App() {
   const [theme, setTheme] = useStoredState("survng.theme", "auto");
   const [recordingContext, setRecordingContext] = useState(null);
   const pathname = appPathname();
-  const isExportCenter = pathname.startsWith("/recordings/exports");
-  const isSemanticSearch = pathname.startsWith("/recordings/search");
-  const page = pathname.startsWith("/config")
-    ? "config"
-    : pathname.startsWith("/recordings")
-      ? "recordings"
-      : pathname.startsWith("/incidents")
-        ? "incidents"
-        : pathname.startsWith("/faces")
-          ? "faces"
-        : "live";
+  const workspace = resolveWorkspace(pathname);
+  const page = workspace?.id || "not-found";
+  const canonicalPath = canonicalWorkspaceUrl(pathname, window.location.search, window.location.hash);
+  const isExportCenter = pathname.startsWith("/recordings/exports") || pathname.startsWith("/timeline/exports");
+  const isSemanticSearch = page === "search";
   const [assistantContext, setAssistantContext] = useState({ page });
+  useEffect(() => {
+    const nextUrl = appUrl(canonicalPath);
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl !== currentUrl) window.history.replaceState(window.history.state, "", nextUrl);
+  }, [canonicalPath]);
   useEffect(() => {
     setAssistantContext({ page });
   }, [page]);
@@ -12319,19 +12397,21 @@ function App() {
   }, [theme]);
   return (
     <Shell page={page} theme={theme} recordingContext={recordingContext}>
-      {page === "config"
+      {page === "admin"
         ? <ConfigPage timeZone={timeZone} setTimeZone={setTimeZone} theme={theme} setTheme={setTheme} onAssistantContextChange={setAssistantContext} />
-        : page === "recordings"
+        : page === "timeline"
           ? isExportCenter
             ? <ExportCenterPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-            : isSemanticSearch
-              ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
             : <RecordingsPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
+          : isSemanticSearch
+            ? <SemanticSearchPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
           : page === "incidents"
             ? <IncidentsPage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
-            : page === "faces"
+            : page === "people"
               ? <FacesPage timeZone={timeZone} onAssistantContextChange={setAssistantContext} />
-            : <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />}
+            : page === "live"
+              ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
+              : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
       <AssistantPanel pageContext={{ page, ...assistantContext }} timeZone={timeZone} />
     </Shell>
   );
