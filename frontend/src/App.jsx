@@ -2833,6 +2833,35 @@ function IncidentClipLayer({ event, trackingEvent, active, analysisMode = "clean
   );
 }
 
+function IncidentRailItem({ incident, cameraName, timeZone, selected, thumbnailAnnotations, onSelect }) {
+  const labels = incidentLabels(incident);
+  const trigger = incidentTriggerLabel(incident);
+  const time = incident.start_at || incident.created_at;
+  const semanticScore = Number(incident.semantic_search?.rank_score ?? incident.semantic_search?.score);
+  const accessibleLabels = labels.length ? labels.join(", ") : "motion only";
+  return (
+    <button
+      type="button"
+      className={`incident-rail-item${selected ? " selected" : ""}`}
+      onClick={() => onSelect(incident.id)}
+      aria-current={selected ? "true" : undefined}
+      aria-label={`${cameraName}, ${formatDateTime(time, timeZone)}, ${accessibleLabels}, ${trigger} trigger`}
+    >
+      <span className="incident-rail-thumb">
+        <SnapshotImage event={incident} alt="" className="incident-rail-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} />
+        <span className={`incident-trigger-source trigger-${trigger.toLowerCase()}`}>{trigger}</span>
+      </span>
+      <span className="incident-rail-copy">
+        <strong>{cameraName}</strong>
+        <time>{formatDateTime(time, timeZone)}</time>
+        <span className="pill-row compact"><IncidentObjectBadges labels={labels} />{!labels.length ? <span className="pill quiet">Motion only</span> : null}</span>
+        {Number.isFinite(semanticScore) ? <small>{Math.round(semanticScore * 100)}% visual match</small> : null}
+      </span>
+      {selected ? <Check size={16} className="incident-rail-selected-mark" aria-hidden="true" /> : null}
+    </button>
+  );
+}
+
 function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnailAnnotations = true, desktopWorkspace = false, analysisMode = "clean", replayRequest = 0, onAnalysisStats, onToggle, onSelect, onPreviewChange, onImageSize }) {
   const rawEvents = incident.events || [];
   const motionObservations = incident.motion_observations || [];
@@ -2944,13 +2973,6 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
 
   function toggle() {
     onToggle(incident.id);
-  }
-
-  function onKey(keyEvent) {
-    if (keyEvent.key === "Enter" || keyEvent.key === " ") {
-      keyEvent.preventDefault();
-      toggle();
-    }
   }
 
   function openPreview(pointerEvent) {
@@ -3075,17 +3097,12 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
   return (
     <article
       className={`incident-card ${hasDetectedObjects(incident) ? "has-objects" : ""} ${expanded ? "expanded" : ""} ${selected ? "selected" : ""}`}
-      role="button"
-      tabIndex={0}
       aria-current={selected ? "true" : undefined}
-      onClick={toggle}
-      onKeyDown={onKey}
       title={`${incident.camera_id} ${timeText}`}
     >
       <div
         ref={previewRef}
         className={`incident-preview ${activeWorkspaceView !== "focus" ? "mosaic-view" : ""} ${desktopWorkspace && expanded && activeWorkspaceView === "focus" ? "zoomable" : ""} ${snapshotZoom.scale > 1 ? "zoomed" : ""}`}
-        onClick={activeWorkspaceView === "focus" ? openPreview : (event) => event.stopPropagation()}
         onDoubleClick={(pointerEvent) => {
           if (!desktopWorkspace || !expanded) return;
           pointerEvent.preventDefault();
@@ -3097,7 +3114,6 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
         onPointerMove={activeWorkspaceView === "focus" ? onPreviewPointerMove : undefined}
         onPointerUp={activeWorkspaceView === "focus" ? onPreviewPointerUp : undefined}
         onPointerCancel={activeWorkspaceView === "focus" ? onPreviewPointerUp : undefined}
-        aria-label={activeWorkspaceView === "mosaic" ? "Incident event mosaic" : expanded ? "Play selected event video" : "Expand incident"}
         title={desktopWorkspace && expanded && activeWorkspaceView === "focus" ? (snapshotZoom.scale > 1 ? "Drag to pan. Double-click to reset zoom." : "Scroll to zoom. Click to play event video.") : undefined}
       >
         {activeWorkspaceView === "mosaic" ? (
@@ -3184,6 +3200,10 @@ function IncidentCard({ incident, timeZone, expanded, selected = false, thumbnai
               : <button type="button" className={`event-count incident-trigger-source trigger-${triggerLabel.toLowerCase()}`} onClick={openOverlay} onKeyDown={(event) => event.stopPropagation()} aria-label={`Open ${triggerTitle.toLowerCase()} incident`} title={`${triggerTitle} · Open incident`}>{triggerLabel}</button>}
           </SnapshotImage>
         )}
+        {!expanded ? <button type="button" className="incident-card-open" onClick={toggle} aria-label={`Open ${incident.camera_id} incident at ${timeText}`} /> : null}
+        {expanded && activeWorkspaceView === "focus" && !inlineVideoActive && snapshotZoom.scale <= 1 ? (
+          <button type="button" className="incident-preview-play" onClick={openPreview} aria-label="Play selected event video"><Play size={25} aria-hidden="true" /></button>
+        ) : null}
         {canShowMosaic || canShowEvidence ? (
           <div className="incident-workspace-view-toggle" role="group" aria-label="Incident image layout" onClick={(event) => event.stopPropagation()}>
             <button type="button" className={activeWorkspaceView === "focus" ? "active" : ""} onClick={() => selectWorkspaceView("focus")} aria-pressed={activeWorkspaceView === "focus"} title="Focus selected event"><Crop size={14} /><span>Focus</span></button>
@@ -3296,8 +3316,32 @@ function RelatedAppearanceIncidents({ anchorEventId, selectedEventId, loadingEve
   );
 }
 
-function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn }) {
-  if (!incident) return <aside className="incident-inspector"><div className="empty-state">Select an incident.</div></aside>;
+function IncidentInspector({ open = false, incident, faceEvent, anchorEventId, selectedRelatedEventId, relatedLoadingEventId, cameraNameById, appConfig, timeZone, imageSize, analysisMode = "clean", analysisStats, onAnalysisModeChange, onFaceOpen, onRelatedSelect, onRelatedReturn, onClose }) {
+  const inspectorRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const inspector = inspectorRef.current;
+    const focusable = () => [...(inspector?.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])') || [])]
+      .filter((element) => element.offsetParent !== null);
+    window.requestAnimationFrame(() => focusable()[0]?.focus());
+    function containFocus(event) {
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    inspector?.addEventListener("keydown", containFocus);
+    return () => inspector?.removeEventListener("keydown", containFocus);
+  }, [open]);
+  if (!incident) return <aside id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`}><div className="empty-state">Select an incident.</div></aside>;
   const inspectedEvent = faceEvent || incident;
   const objects = eventObjects(inspectedEvent).filter((object) => object.label && object.incident_eligible !== false);
   const incidentTracking = incidentTrackingSource(inspectedEvent, incident)?.object_tracking;
@@ -3311,33 +3355,31 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
   const clipUrl = Number.isFinite(eventId) ? eventClipUrl(eventId, window.before, window.after) : "";
 
   return (
-    <aside className="incident-inspector">
+    <aside ref={inspectorRef} id="incident-inspector" className={`incident-inspector${open ? " open" : ""}`} role={open ? "dialog" : undefined} aria-modal={open ? "true" : undefined} aria-labelledby={open ? "incident-inspector-title" : undefined}>
       <div className="incident-inspector-head">
-        <div><strong>{incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
+        <div><strong id="incident-inspector-title">{cameraNameById.get(incident.camera_id) || incident.camera_id}</strong><time>{formatDateTime(inspectedEvent.created_at || incident.created_at, timeZone)}</time></div>
+        {onClose ? <button type="button" className="incident-inspector-close" onClick={onClose} aria-label="Close incident details"><X size={17} /></button> : null}
       </div>
-      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
+      <section className="incident-current-summary">
+        <h3>Current incident</h3>
+        <div className="incident-summary-objects">
+          {objects.length ? objects.map((object, index) => <div className="inspector-detection summary" key={`${object.label}-${index}`}><div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div></div>) : <p>No eligible object detections.</p>}
+        </div>
+        <dl>
+          <div><dt>Trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
+          <div><dt>Duration</dt><dd>{formatDuration(incident.duration_seconds || 0)}</dd></div>
+          <div><dt>Zones</dt><dd>{zones.length ? zones.join(", ") : "None"}</dd></div>
+        </dl>
+      </section>
       <section className="incident-replay-analysis">
         <h3>Replay analysis</h3>
         <div className="incident-analysis-modes" role="group" aria-label="Replay analysis mode">
-          <button type="button" className={analysisMode === "clean" ? "active" : ""} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
-          <button type="button" className={analysisMode === "tracks" ? "active" : ""} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
-          <button type="button" className={analysisMode === "ai" ? "active" : ""} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
+          <button type="button" className={analysisMode === "clean" ? "active" : ""} aria-pressed={analysisMode === "clean"} onClick={() => onAnalysisModeChange("clean")} title="Replay without an analysis overlay"><Play size={14} /> Clean</button>
+          <button type="button" className={analysisMode === "tracks" ? "active" : ""} aria-pressed={analysisMode === "tracks"} onClick={() => onAnalysisModeChange("tracks")} disabled={!objectTracks.length} title={objectTracks.length ? "Replay stored object tracks" : "No stored tracks for this incident"}><ListTree size={14} /> Tracks</button>
+          <button type="button" className={analysisMode === "ai" ? "active" : ""} aria-pressed={analysisMode === "ai"} onClick={() => onAnalysisModeChange("ai")} title="Run OpenVINO detection while replaying"><Activity size={14} /> AI</button>
         </div>
         {analysisMode === "tracks" ? <small>{objectTracks.length} stored track{objectTracks.length === 1 ? "" : "s"} · {Number(incidentTracking?.sample_fps || 0) || "?"} FPS</small> : null}
         {analysisMode === "ai" && analysisStats ? <small className={analysisStats.error ? "analysis-error" : ""}>{analysisStats.error || `${analysisStats.inferenceMs ?? "--"} ms · ${analysisStats.objects ?? 0} current objects`}</small> : null}
-      </section>
-      <section>
-        <h3>Objects</h3>
-        {objects.length ? objects.map((object, index) => {
-          const box = object.box || {};
-          return (
-            <div className="inspector-detection" key={`${object.label}-${index}`}>
-              <div><strong>{object.label}</strong><span>{Math.round(Number(object.confidence || 0) * 100)}%</span></div>
-              <code>{Math.round(Number(box.x1 || 0))}, {Math.round(Number(box.y1 || 0))} → {Math.round(Number(box.x2 || 0))}, {Math.round(Number(box.y2 || 0))}</code>
-              {object.zones?.length ? <small>{object.zones.join(", ")}</small> : null}
-            </div>
-          );
-        }) : <p>No eligible object detections.</p>}
       </section>
       <section>
         <h3>Faces</h3>
@@ -3348,12 +3390,14 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
           </button>
         )) : <p>No recognized faces.</p>}
       </section>
-      <section>
-        <h3>Zones</h3>
-        <div className="pill-row">{zones.length ? zones.map((zone) => <span className="pill" key={zone}>{zone}</span>) : <span className="pill quiet">none</span>}</div>
-      </section>
-      <section>
-        <h3>Incident</h3>
+      <RelatedAppearanceIncidents anchorEventId={anchorEventId} selectedEventId={selectedRelatedEventId} loadingEventId={relatedLoadingEventId} cameraNameById={cameraNameById} timeZone={timeZone} onSelect={onRelatedSelect} onReturn={onRelatedReturn} />
+      <details className="incident-technical-details">
+        <summary>Technical details</summary>
+        <div className="incident-technical-body">
+        {objects.length ? <div className="incident-technical-objects">{objects.map((object, index) => {
+          const box = object.box || {};
+          return <code key={`${object.label}-${index}`}>{object.label}: {Math.round(Number(box.x1 || 0))}, {Math.round(Number(box.y1 || 0))} → {Math.round(Number(box.x2 || 0))}, {Math.round(Number(box.y2 || 0))}</code>;
+        })}</div> : null}
         <dl>
           <div><dt>Events</dt><dd>{incident.event_count || incident.events?.length || 1}</dd></div>
           <div><dt>Selected trigger</dt><dd>{incidentTriggerLabel(inspectedEvent)}</dd></div>
@@ -3363,7 +3407,8 @@ function IncidentInspector({ incident, faceEvent, anchorEventId, selectedRelated
           <div><dt>End</dt><dd>{formatTimeOnly(incident.end_at || incident.created_at, timeZone)}</dd></div>
           <div><dt>Loaded image</dt><dd>{imageSize?.width && imageSize?.height ? `${imageSize.width} × ${imageSize.height} px` : "—"}</dd></div>
         </dl>
-      </section>
+        </div>
+      </details>
       <div className="incident-inspector-actions">
         {clipUrl ? <a href={clipUrl} download={`survng-${incident.camera_id}-${eventId}.mp4`}><Download size={15} /> Video</a> : null}
         {inspectedEvent.snapshot_path && eventSnapshotDownloadUrl(inspectedEvent) ? <a href={eventSnapshotDownloadUrl(inspectedEvent)}><Download size={15} /> Snapshot</a> : null}
@@ -4305,6 +4350,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const [relatedPreviewIncident, setRelatedPreviewIncident] = useState(null);
   const [relatedPreviewEventId, setRelatedPreviewEventId] = useState(null);
   const [relatedPreviewLoadingEventId, setRelatedPreviewLoadingEventId] = useState(null);
+  const [tabletInspectorOpen, setTabletInspectorOpen] = useState(false);
+  const tabletInspectorToggleRef = useRef(null);
   const relatedPreviewRequestRef = useRef(0);
   const mobileView = isMobileViewport();
   const incidentRailReady = mobileView || (incidentRailSize.width > 0 && incidentRailSize.height > 0);
@@ -4315,10 +4362,27 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const incidentObjectOptions = incidentFacets.labels || [];
   const incidentZoneOptions = incidentFacets.zones || [];
   const semanticIncidentActive = Boolean(semanticIncidentActiveQuery);
+  const activeIncidentFilterCount = [incidentCameraFilter, incidentObjectFilter, incidentZoneFilter].filter((value) => value !== "all").length;
   const incidentResultSource = semanticIncidentActive ? semanticIncidentResults : incidents;
   const displayedIncidentTotal = semanticIncidentActive ? semanticIncidentResults.length : incidentTotal;
   const displayedIncidentLoading = semanticIncidentActive ? semanticIncidentLoading : incidentLoading;
   const displayedIncidentError = semanticIncidentActive ? semanticIncidentError : incidentLoadError;
+
+  function closeTabletInspector({ restoreFocus = true } = {}) {
+    setTabletInspectorOpen(false);
+    if (restoreFocus) window.requestAnimationFrame(() => tabletInspectorToggleRef.current?.focus());
+  }
+
+  useEffect(() => {
+    if (!tabletInspectorOpen) return undefined;
+    function closeOnEscape(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeTabletInspector();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [tabletInspectorOpen]);
   const visibleIncidents = semanticIncidentActive
     ? incidentResultSource.slice(incidentPage * incidentsPerPage, (incidentPage + 1) * incidentsPerPage)
     : incidentResultSource;
@@ -4343,6 +4407,10 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   const incidentPageCount = Math.max(1, Math.ceil(displayedIncidentTotal / incidentsPerPage));
   const clampedIncidentPage = Math.min(incidentPage, incidentPageCount - 1);
   const pagedIncidents = galleryIncidents;
+
+  useEffect(() => {
+    if (!displayedIncident && tabletInspectorOpen) setTabletInspectorOpen(false);
+  }, [displayedIncident, tabletInspectorOpen]);
 
   useEffect(() => {
     onAssistantContextChange?.({
@@ -4482,6 +4550,12 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     setIncidentPage(0);
   }
 
+  function clearIncidentFilters() {
+    setIncidentCameraFilter("all");
+    setIncidentObjectFilter("all");
+    setIncidentZoneFilter("all");
+  }
+
   useEffect(() => () => semanticIncidentRequestRef.current?.abort(), []);
 
   useEffect(() => {
@@ -4615,6 +4689,7 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
     setRelatedPreviewIncident(null);
     setRelatedPreviewEventId(null);
     setRelatedPreviewLoadingEventId(null);
+    setTabletInspectorOpen(false);
   }, [focusedIncident?.id, linkedIncidentDetail?.id, linkedIncidentEventId]);
 
   useEffect(() => {
@@ -4752,18 +4827,28 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
       <main className="incidents-desktop-page with-inspector">
         <section className="bento-card incidents-desktop-shell">
           <div className="incidents-desktop-toolbar">
-            <div className="incident-filter-toggle compact" aria-label="Incident type filter">
-              <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
-            </div>
-            <div className="incident-filter-selects desktop">
+            <div className="incidents-command-primary">
+              <div className="incident-filter-toggle compact" aria-label="Incident type filter">
+                <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
+                <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion only</button>
+              </div>
               <label className="incident-day-field"><span>Day</span><input type="date" value={incidentDay} max={today} onChange={(event) => setIncidentDay(event.target.value || today)} aria-label="Incident day" /></label>
-              <label><span>Camera</span><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
-              <label><span>Object</span><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
-              <label><span>Zone</span><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
+              {semanticIncidentControl}
+              <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
             </div>
-            {semanticIncidentControl}
-            <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
+            <div className="incidents-command-filters">
+              <div className="incident-filter-selects desktop">
+                <label><span>Camera</span><select value={incidentCameraFilter} onChange={(event) => setIncidentCameraFilter(event.target.value)}><option value="all">All cameras</option>{incidentCameraOptions.map((id) => <option value={id} key={id}>{cameraNameById.get(id) || id}</option>)}</select></label>
+                <label><span>Object</span><select value={incidentObjectFilter} onChange={(event) => setIncidentObjectFilter(event.target.value)}><option value="all">All objects</option>{incidentObjectOptions.map((label) => <option value={label} key={label}>{label}</option>)}</select></label>
+                <label><span>Zone</span><select value={incidentZoneFilter} onChange={(event) => setIncidentZoneFilter(event.target.value)}><option value="all">All zones</option>{incidentZoneOptions.map((zone) => <option value={zone} key={zone}>{zone}</option>)}</select></label>
+              </div>
+              <div className="incident-active-filters" aria-label={`${activeIncidentFilterCount} active filters`}>
+                {incidentCameraFilter !== "all" ? <span>Camera: {cameraNameById.get(incidentCameraFilter) || incidentCameraFilter}</span> : null}
+                {incidentObjectFilter !== "all" ? <span>Object: {incidentObjectFilter}</span> : null}
+                {incidentZoneFilter !== "all" ? <span>Zone: {incidentZoneFilter}</span> : null}
+                {activeIncidentFilterCount ? <button type="button" onClick={clearIncidentFilters}>Clear</button> : <small>All cameras, objects, and zones</small>}
+              </div>
+            </div>
           </div>
 
           <div className="incidents-desktop-workspace">
@@ -4771,15 +4856,15 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               <div className="incident-rail-head">
                 <strong>Incidents</strong>
                 <div className="density-control" aria-label="Thumbnail density">
-                  <button type="button" className={incidentDensity === "compact" ? "active" : ""} onClick={() => setIncidentDensity("compact")} title="Compact thumbnails" aria-label="Compact thumbnails"><Grid2X2 size={15} /></button>
-                  <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} onClick={() => setIncidentDensity("comfortable")} title="Comfortable thumbnails" aria-label="Comfortable thumbnails"><Rows3 size={15} /></button>
+                  <button type="button" className={incidentDensity === "compact" ? "active" : ""} aria-pressed={incidentDensity === "compact"} onClick={() => setIncidentDensity("compact")} title="Compact thumbnails" aria-label="Compact thumbnails"><Grid2X2 size={15} /></button>
+                  <button type="button" className={incidentDensity === "comfortable" ? "active" : ""} aria-pressed={incidentDensity === "comfortable"} onClick={() => setIncidentDensity("comfortable")} title="Comfortable thumbnails" aria-label="Comfortable thumbnails"><Rows3 size={15} /></button>
                 </div>
               </div>
               <div className="incident-rail-list" ref={incidentRailListRef}>
                 {displayedIncidentLoading && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "Searching indexed incidents..." : "Loading incidents..."}</div> : null}
                 {!galleryIncidents.length && displayedIncidentError ? <div className="empty-state">{displayedIncidentError}</div> : null}
                 {galleryIncidents.length ? pagedIncidents.map((incident) => (
-                  <IncidentCard key={incident.id} incident={incident} timeZone={timeZone} expanded={false} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} desktopWorkspace onToggle={toggleIncident} />
+                  <IncidentRailItem key={incident.id} incident={incident} cameraName={cameraNameById.get(incident.camera_id) || incident.camera_id} timeZone={timeZone} selected={incident.id === focusedIncident?.id} thumbnailAnnotations={thumbnailAnnotations} onSelect={toggleIncident} />
                 )) : null}
                 {!displayedIncidentLoading && !displayedIncidentError && !galleryIncidents.length ? <div className="empty-state">{semanticIncidentActive ? "No semantic matches for the selected filters." : "No other incidents."}</div> : null}
               </div>
@@ -4792,8 +4877,14 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
 
             <section className="incident-investigation">
               <div className="incident-focus-nav">
-                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${displayedIncidentTotal}` : "No incident selected"}</span>
+                <div className="incident-focus-summary" aria-live="polite">
+                  <strong>{displayedIncident ? cameraNameById.get(displayedIncident.camera_id) || displayedIncident.camera_id : "No incident selected"}</strong>
+                  <span>{displayedEvent ? formatDateTime(displayedEvent.created_at || displayedIncident?.created_at, timeZone) : ""}</span>
+                  <div className="pill-row compact"><IncidentObjectBadges labels={displayedEvent ? incidentLabels(displayedEvent) : []} /></div>
+                </div>
+                <span>{focusedIndex >= 0 ? `${incidentPage * incidentsPerPage + focusedIndex + 1} of ${displayedIncidentTotal}` : ""}</span>
                 {relatedPreviewIncident ? <button type="button" onClick={returnToSelectedIncident}>Viewing related appearance · return to selected incident</button> : null}
+                <button ref={tabletInspectorToggleRef} type="button" className="incident-inspector-toggle" onClick={() => setTabletInspectorOpen((open) => !open)} aria-expanded={tabletInspectorOpen} aria-controls="incident-inspector" disabled={!displayedIncident}>Details</button>
               </div>
               <div className="incident-desktop-focus">
                 {focusedIncident ? (
@@ -4806,7 +4897,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
               </div>
             </section>
 
-            <IncidentInspector incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} />
+            {tabletInspectorOpen ? <button type="button" className="incident-inspector-backdrop" onClick={() => closeTabletInspector()} aria-label="Close incident details" /> : null}
+            <IncidentInspector open={tabletInspectorOpen} incident={displayedIncident} faceEvent={displayedEvent} anchorEventId={relatedAnchorEventId} selectedRelatedEventId={relatedPreviewEventId} relatedLoadingEventId={relatedPreviewLoadingEventId} cameraNameById={cameraNameById} appConfig={appConfig} timeZone={timeZone} imageSize={focusedLoadedImageSize} analysisMode={desktopAnalysisMode} analysisStats={desktopAnalysisStats} onAnalysisModeChange={selectDesktopAnalysisMode} onFaceOpen={openFaceReview} onRelatedSelect={selectRelatedIncident} onRelatedReturn={returnToSelectedIncident} onClose={() => closeTabletInspector()} />
           </div>
         </section>
         {selectedFace ? <FaceReviewDialog observation={selectedFace} people={facePeople} timeZone={timeZone} onClose={() => setSelectedFace(null)} onUpdated={() => { setSelectedFace(null); refresh(); }} /> : null}
@@ -4821,8 +4913,8 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
           <div><h2>Incidents</h2></div>
           <div className="incident-head-actions">
             <div className="incident-filter-toggle compact" aria-label="Incident type filter">
-              <button className={eventFilter === "object" ? "active" : ""} onClick={() => setEventFilter("object")}>Object</button>
-              <button className={eventFilter === "motion" ? "active" : ""} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion</button>
+              <button className={eventFilter === "object" ? "active" : ""} aria-pressed={eventFilter === "object"} onClick={() => setEventFilter("object")}>Object</button>
+              <button className={eventFilter === "motion" ? "active" : ""} aria-pressed={eventFilter === "motion"} onClick={() => { resetSemanticIncidentSearch(); setEventFilter("motion"); }}>Motion only</button>
             </div>
             <span className="shown-bubble">{displayedIncidentTotal} {semanticIncidentActive ? "matches" : "shown"}</span>
           </div>

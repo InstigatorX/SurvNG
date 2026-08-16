@@ -93,11 +93,12 @@ assert.deepEqual(incidentTrackingFrameSize({
   objects: [{ detection_frame_width: 2560, detection_frame_height: 1920 }],
 }), { width: 1280, height: 720 });
 assert.equal(incidentDetectionFrameSize({ objects: [{}] }), null);
-assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 8);
-assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 12);
-assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 2);
-assert.equal(incidentThumbnailPageSize({ width: 400, height: 500, density: "compact", columns: 2, gap: 10, horizontalPadding: 24 }), 8);
-assert.equal(incidentThumbnailPageSize({ width: 0, height: 0, density: "compact" }), 16);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact" }), 6);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 720, density: "compact" }), 8);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "comfortable" }), 4);
+assert.equal(incidentThumbnailPageSize({ width: 400, height: 500, density: "compact", gap: 10, rowHeight: 90 }), 5);
+assert.equal(incidentThumbnailPageSize({ width: 334, height: 500, density: "compact", columns: 2, gap: 10, horizontalPadding: 24 }), 8);
+assert.equal(incidentThumbnailPageSize({ width: 0, height: 0, density: "compact" }), 12);
 
 const unorderedIncidents = [
   { id: "old", last_epoch: 100 },

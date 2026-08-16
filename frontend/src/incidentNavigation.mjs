@@ -256,17 +256,21 @@ export function incidentObjectIconName(label) {
   return "object";
 }
 
-export function incidentThumbnailPageSize({ width, height, density, columns: requestedColumns, gap: requestedGap, horizontalPadding: requestedPadding }) {
+export function incidentThumbnailPageSize({ width, height, density, columns: requestedColumns, gap: requestedGap, horizontalPadding: requestedPadding, rowHeight: requestedRowHeight }) {
   const safeWidth = Math.max(0, Number(width) || 0);
   const safeHeight = Math.max(0, Number(height) || 0);
-  if (!safeWidth || !safeHeight) return density === "comfortable" ? 10 : 16;
+  if (!safeWidth || !safeHeight) return density === "comfortable" ? 8 : 12;
   const compact = density !== "comfortable";
-  const columns = Math.max(1, Math.floor(Number(requestedColumns) || (compact ? 2 : 1)));
-  const gap = Math.max(0, Number.isFinite(Number(requestedGap)) ? Number(requestedGap) : compact ? 7 : 9);
-  const horizontalPadding = Math.max(0, Number.isFinite(Number(requestedPadding)) ? Number(requestedPadding) : 16);
-  const usableWidth = Math.max(1, safeWidth - horizontalPadding);
-  const cardWidth = Math.max(1, (usableWidth - gap * (columns - 1)) / columns);
-  const cardHeight = cardWidth * 10 / 16 + 2;
-  const rows = Math.max(1, Math.floor((safeHeight + gap) / (cardHeight + gap)));
-  return rows * columns;
+  const gap = Math.max(0, Number.isFinite(Number(requestedGap)) ? Number(requestedGap) : compact ? 6 : 9);
+  if (Number.isFinite(Number(requestedColumns))) {
+    const columns = Math.max(1, Math.floor(Number(requestedColumns)));
+    const horizontalPadding = Math.max(0, Number.isFinite(Number(requestedPadding)) ? Number(requestedPadding) : 16);
+    const usableWidth = Math.max(1, safeWidth - horizontalPadding);
+    const cardWidth = Math.max(1, (usableWidth - gap * (columns - 1)) / columns);
+    const cardHeight = cardWidth * 10 / 16 + 2;
+    const rows = Math.max(1, Math.floor((safeHeight + gap) / (cardHeight + gap)));
+    return rows * columns;
+  }
+  const rowHeight = Math.max(44, Number.isFinite(Number(requestedRowHeight)) ? Number(requestedRowHeight) : compact ? 78 : 98);
+  return Math.max(1, Math.floor((safeHeight + gap) / (rowHeight + gap)));
 }
