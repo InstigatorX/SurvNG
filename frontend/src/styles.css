@@ -4241,6 +4241,123 @@ button.status-pill.hud-toggle:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.live-framing-editor {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--control-muted);
+  padding: 12px;
+}
+
+.live-framing-heading,
+.live-framing-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.live-framing-heading h3,
+.live-framing-heading p {
+  margin: 0;
+}
+
+.live-framing-heading p {
+  max-width: 760px;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.live-framing-source button {
+  min-width: 74px;
+  min-height: 40px;
+}
+
+.live-framing-workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 1.4fr) minmax(280px, 1fr);
+  align-items: center;
+  gap: 14px;
+}
+
+.live-framing-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #020607;
+}
+
+.live-framing-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: var(--live-object-fit, cover);
+  object-position: var(--live-object-position, 50% 50%);
+  transform: scale(var(--live-view-zoom, 1));
+  transform-origin: var(--live-object-position, 50% 50%);
+}
+
+.live-framing-preview span {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  border-radius: 4px;
+  background: rgb(2 8 10 / 78%);
+  padding: 3px 6px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.live-framing-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.live-framing-controls label {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 5px 10px;
+}
+
+.live-framing-controls label select,
+.live-framing-controls label input {
+  grid-column: 1 / -1;
+}
+
+.live-framing-controls output {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.live-framing-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 900px) {
+  .live-framing-workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .live-framing-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .live-framing-source button,
+  .live-framing-actions button {
+    min-height: 44px;
+  }
+}
+
 .stream-field {
   display: grid;
   min-width: 0;

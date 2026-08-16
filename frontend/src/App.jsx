@@ -118,6 +118,7 @@ import { adjustRecordingExportRange, describePlaybackError, gridPlaybackNeedsSee
 import { recordingCameraAspect, recordingGridBestEpoch } from "./recordingGrid.mjs";
 import { liveCustomDropTarget, liveCustomGridMetrics, liveCustomTilePlacement, moveLiveCamera, readLiveCustomLayout, resizeLiveCamera, resizeLiveCameraToAspect } from "./liveCustomLayout.mjs";
 import { focusedLiveCameraId, LIVE_DENSITY_OPTIONS, liveActivityEventId, liveActivityIncidentHref, liveActivityQuickFilter, liveActivityQuickSelection, liveDensityPage, normalizedLiveDensity, orderedLiveCamerasForFocus, uniformLiveGridLayout } from "./liveWorkspace.mjs";
+import { liveFramingStyle, normalizedLiveFraming } from "./liveFraming.mjs";
 import { filteredTimelineCameras, normalizedTimelinePlaybackRate, parseTimelineView, timelineEventMatchesFilter, timelineEvidenceWindow, timelineStageCameras, timelineStagePage, TIMELINE_PLAYBACK_RATES } from "./timelineWorkspace.mjs";
 import { adjacentIncident, createIncidentPageCache, incidentArrowNavigationAllowed, incidentDetectionFrameSize, incidentDetailQuery, incidentEvidenceFrames, incidentMosaicEvents, incidentMosaicPage, incidentObjectIconName, incidentProgressiveImageWidth, incidentSelectionHref, incidentThumbnailPageSize, incidentTrackingFrameSize, incidentZoomLayout, incidentsNewestFirst, incidentTriggerLabel, linkedIncidentEventFilter, retainFocusedIncident, showIncidentCardAnnotations } from "./incidentNavigation.mjs";
 import { motionAuditRegions } from "./motionAudit.mjs";
@@ -1163,6 +1164,10 @@ function defaultCamera(cameras, seed = {}) {
     video_backend: seed.video_backend || "url",
     stream_url: clearMaskedUrlPassword(seed.stream_url),
     live_stream_url: clearMaskedUrlPassword(seed.live_stream_url),
+    live_view: structuredClone(seed.live_view || {
+      main: { fit: "cover", focal_x: 50, focal_y: 50, zoom: 1 },
+      live: { fit: "cover", focal_x: 50, focal_y: 50, zoom: 1 },
+    }),
     record: seed.record ?? true,
     record_sub: seed.record_sub ?? false,
     retention: {
@@ -1206,6 +1211,69 @@ function defaultCamera(cameras, seed = {}) {
       channel: seed.baichuan?.channel || 0,
     },
   };
+}
+
+function LiveViewFramingEditor({ camera, onChange }) {
+  const [source, setSource] = useState(camera.live_stream_url ? "live" : "main");
+  const [previewRevision, setPreviewRevision] = useState(() => Date.now());
+  const framing = normalizedLiveFraming(camera, source);
+  const sourceName = source === "main" ? "Main" : "Sub";
+  const update = (field, value) => onChange(["live_view", source, field], value);
+  const reset = () => onChange(["live_view", source], {
+    fit: "cover",
+    focal_x: 50,
+    focal_y: 50,
+    zoom: 1,
+  });
+
+  useEffect(() => {
+    setSource(camera.live_stream_url ? "live" : "main");
+    setPreviewRevision(Date.now());
+  }, [camera.id]);
+
+  return <section className="live-framing-editor" aria-labelledby={`live-framing-title-${camera.id}`}>
+    <div className="live-framing-heading">
+      <div>
+        <h3 id={`live-framing-title-${camera.id}`}>Live view framing</h3>
+        <p>Choose what stays visible inside equal-size Live tiles. This changes presentation only—not recordings, detection, or stored snapshots.</p>
+      </div>
+      <div className="segmented live-framing-source" role="group" aria-label="Stream to frame">
+        <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} onClick={() => setSource("main")}>Main</button>
+        <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} onClick={() => setSource("live")} disabled={!camera.live_stream_url}>Sub</button>
+      </div>
+    </div>
+    <div className="live-framing-workspace">
+      <div className="live-framing-preview" style={liveFramingStyle(camera, source)}>
+        <img
+          key={`${camera.id}:${source}:${previewRevision}`}
+          src={appUrl(`/api/cameras/${encodeURIComponent(camera.id)}/snapshot.jpg?source=${source}&t=${previewRevision}`)}
+          alt={`${camera.name} ${sourceName} stream framing preview`}
+        />
+        <span>{sourceName} preview</span>
+      </div>
+      <div className="live-framing-controls">
+        <label>Tile fill
+          <select value={framing.fit} onChange={(event) => update("fit", event.target.value)}>
+            <option value="cover">Fill frame (crop edges)</option>
+            <option value="contain">Fit entire image</option>
+          </select>
+        </label>
+        <label>Horizontal focus <output>{Math.round(framing.focalX)}%</output>
+          <input type="range" min="0" max="100" step="1" value={framing.focalX} onChange={(event) => update("focal_x", Number(event.target.value))} />
+        </label>
+        <label>Vertical focus <output>{Math.round(framing.focalY)}%</output>
+          <input type="range" min="0" max="100" step="1" value={framing.focalY} onChange={(event) => update("focal_y", Number(event.target.value))} />
+        </label>
+        <label>Display zoom <output>{framing.zoom.toFixed(2)}×</output>
+          <input type="range" min="1" max="3" step="0.05" value={framing.zoom} onChange={(event) => update("zoom", Number(event.target.value))} />
+        </label>
+        <div className="live-framing-actions">
+          <button type="button" onClick={() => setPreviewRevision(Date.now())}><RefreshCcw size={15} /> Refresh preview</button>
+          <button type="button" onClick={reset}><RotateCcw size={15} /> Reset {sourceName}</button>
+        </div>
+      </div>
+    </div>
+  </section>;
 }
 
 function defaultCameraMotionQualification() {
@@ -10673,6 +10741,7 @@ function ConfigPage({ timeZone, setTimeZone, theme, setTheme, onAssistantContext
                   <input id={`sub-stream-${selectedCamera.id}`} value={selectedCamera.live_stream_url || ""} onChange={(event) => updateCamera(selectedCamera.id, ["live_stream_url"], event.target.value)} />
                 </div>
               </div>
+              <LiveViewFramingEditor camera={selectedCamera} onChange={(path, value) => updateCamera(selectedCamera.id, path, value)} />
               <details className="camera-retention-details">
                 <summary>Camera recording retention</summary>
                 <div className="field-row">
