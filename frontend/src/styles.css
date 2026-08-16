@@ -14185,17 +14185,17 @@ a.button { border-radius: 3px; }
 }
 .live-activity-trigger.trigger-ema { border: 0; background: transparent; }
 .live-activity-trigger::before {
-  width: 10px;
-  height: 10px;
+  width: 5px;
+  height: 5px;
   border: 1px solid rgba(255, 255, 255, .3);
   border-radius: 50%;
   background: #36c8b5;
-  box-shadow: 0 0 0 3px rgba(54, 200, 181, .12);
+  box-shadow: 0 0 0 2px rgba(54, 200, 181, .12);
   content: "";
 }
 .live-activity-trigger.trigger-ema::before {
   background: #f4a019;
-  box-shadow: 0 0 0 3px rgba(244, 160, 25, .12);
+  box-shadow: 0 0 0 2px rgba(244, 160, 25, .12);
 }
 .live-activity-trigger:hover,
 .live-activity-trigger:focus-visible { background: var(--control-muted); }
