@@ -33,8 +33,12 @@ assert.deepEqual(parseTimelineView("?camera=gate&date=2026-08-15&source=main&at=
   inspector: "ai", windowHours: 4, lanes: { object: false, motion: true }, thumbnails: false, speed: 2,
 });
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const recordingsSource = appSource.slice(appSource.indexOf("function RecordingsPage"), appSource.indexOf("function exportStatusLabel"));
 assert.match(recordingsSource, /const timelineInspectorTriggerRef = useRef\(null\)/);
 assert.match(recordingsSource, /if \(samePlaybackScope\) playAt\(view\.at, false\)/);
+assert.match(recordingsSource, /<a className="recordings-v2-selected-event-image"[^>]+\/incidents\?event_ids=/);
+assert.doesNotMatch(recordingsSource, /View full incident/);
+assert.match(stylesSource, /\.recordings-v2-incidents\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1;[\s\S]*?grid-row:\s*3;/);
 
 console.log("timeline workspace tests passed");

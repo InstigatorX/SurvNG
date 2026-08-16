@@ -7649,22 +7649,23 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           ) : null}
         </div>
 
-        <div className="recordings-v2-incidents">
+      </section>
+
+      <div className="recordings-v2-incidents">
           <div className="recordings-v2-investigation">
             {selectedEvent ? <aside className="recordings-v2-selected-event" aria-label="Selected incident">
               <header>Selected incident</header>
-              <span className="recordings-v2-selected-event-image">
+              <a className="recordings-v2-selected-event-image" href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)} aria-label={`Open selected incident at ${formatTimeOnly(selectedEvent.incident_epoch, timeZone)}`}>
                 <Radar size={22} />
-                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 360, 120)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
+                {selectedEvent.snapshot_path ? <img src={eventThumbnailUrl(selectedEvent, 720, 120)} alt="" loading="lazy" decoding="async" onError={(loadEvent) => { loadEvent.currentTarget.hidden = true; }} /> : null}
                 {selectedEventDuration > 0 ? <time>{formatDuration(selectedEventDuration)}</time> : null}
-              </span>
+              </a>
               <div>
                 <strong>{formatTimeOnly(selectedEvent.incident_epoch, timeZone)}</strong>
                 <small>{cameras.find((camera) => camera.id === selectedEvent.camera_id)?.name || selectedEvent.camera_id}</small>
                 <em>{selectedEvent.labels?.length ? selectedEvent.labels.join(", ") : "Motion only"}</em>
                 {selectedEventConfidence > 0 ? <span>Confidence {Math.round(selectedEventConfidence * 100)}%</span> : null}
               </div>
-              <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={15} /></a>
             </aside> : <aside className="recordings-v2-selected-event empty"><Radar size={20} /><span>Select an event to investigate</span></aside>}
             <section className="recordings-related-events" aria-label="Nearby evidence">
               <header><strong>Nearby evidence</strong><span>{nearbyEvents.length} in view</span><button ref={timelineInspectorTriggerRef} type="button" className="recordings-inspector-toggle" onClick={() => setTimelineInspectorOpen(true)}>Details</button></header>
@@ -7728,11 +7729,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               {selectedEvent && timelineInspectorTab === "related" ? <div className="recordings-inspector-message"><Images size={18} /><strong>{Math.max(0, nearbyEvents.length - 1)} nearby events</strong><span>These events are close in time; they are not asserted to be the same activity.</span></div> : null}
               {!selectedEvent ? <div className="recordings-inspector-message"><Radar size={18} /><strong>No event selected</strong><span>Choose an event from the timeline or related rail.</span></div> : null}
               </div>
-              {selectedEvent ? <a href={appUrl(`/incidents?event_ids=${encodeURIComponent(selectedEvent.id)}`)}>View full incident <ArrowRight size={14} /></a> : null}
             </aside>
           </div>
-        </div>
-      </section>
+      </div>
     </main>
   );
 }
