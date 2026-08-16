@@ -7251,9 +7251,9 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
           <button type="button" onClick={() => changeDate(addDaysToDateKey(date, 1))} disabled={date >= today} aria-label="Next day"><SkipForward size={15} /></button>
           <button type="button" onClick={() => changeDate(today)} disabled={date === today}>Today</button>
         </div>
-        <div className="recordings-v2-player-source" aria-label="Recording stream">
-          <button type="button" className={source === "main" ? "active" : ""} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main <small>High</small></button>
-          <button type="button" className={source === "live" ? "active" : ""} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub <small>Medium</small></button>
+        <div className="recordings-v2-player-source" role="group" aria-label="Recording stream">
+          <button type="button" className={source === "main" ? "active" : ""} aria-pressed={source === "main"} onClick={() => setSource("main")} disabled={availableSources.length > 0 && !availableSources.includes("main")}>Main <small>High</small></button>
+          <button type="button" className={source === "live" ? "active" : ""} aria-pressed={source === "live"} onClick={() => setSource("live")} disabled={availableSources.length > 0 && !availableSources.includes("live")}>Sub <small>Medium</small></button>
         </div>
         <span className="recordings-commandbar-time">{Number.isFinite(playhead) ? formatDateTime(playhead, timeZone) : "Choose a recording time"}</span>
       </nav>

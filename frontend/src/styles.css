@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+}
+
 :root {
   color-scheme: light;
   --bg: #edf1f3;
@@ -127,7 +135,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--ink);
-  font-family: Inter, "SF Pro Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-family: "Inter Variable", Inter, "SF Pro Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.35;
   -webkit-text-size-adjust: 100%;
@@ -12796,6 +12804,27 @@ a:focus-visible {
   box-shadow: none;
 }
 
+@media (max-width: 960px) and (min-width: 761px) {
+  .app-shell {
+    grid-template-columns: 68px minmax(0, 1fr);
+  }
+
+  .workspace-brand {
+    justify-content: center;
+    padding-inline: 8px;
+  }
+
+  .workspace-brand strong,
+  .workspace-navigation a span {
+    display: none;
+  }
+
+  .workspace-navigation a {
+    justify-content: center;
+    padding-inline: 0;
+  }
+}
+
 .app-shell > .topbar {
   min-height: 58px;
   border-color: var(--line);
@@ -13164,12 +13193,38 @@ a:focus-visible {
 .recordings-v2-event-caption b { color: var(--muted); }
 
 @media (max-width: 1100px) and (min-width: 761px) {
-  .recordings-commandbar { grid-template-columns: auto minmax(140px, 1fr) auto auto; }
+  .recordings-v2-page { grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .recordings-commandbar {
+    grid-template-columns: auto minmax(140px, 1fr) auto;
+    grid-template-rows: auto auto;
+  }
+  .recordings-commandbar .recordings-section-switcher { grid-column: 1; grid-row: 1; }
+  .recordings-commandbar-scope { grid-column: 2; grid-row: 1; }
+  .recordings-commandbar .recordings-v2-player-source { grid-column: 3; grid-row: 1; }
+  .recordings-commandbar .recordings-v2-date {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+    overflow: visible;
+  }
   .recordings-commandbar-time { display: none; }
-  .recordings-v2-page { grid-template-columns: 190px minmax(0, 1fr); }
   .recordings-v2-investigation { grid-template-columns: 240px minmax(0, 1fr); }
   .recordings-v2-selected-event { grid-template-columns: 88px minmax(0, 1fr); }
   .recordings-v2-selected-event-image { width: 88px; }
+}
+
+@media (max-width: 1279px) and (min-width: 761px) {
+  .recordings-section-switcher a,
+  .recordings-v2-date input,
+  .recordings-v2-date button,
+  .recordings-commandbar .recordings-v2-player-source button,
+  .recordings-camera-list button,
+  .recordings-v2-event-filter button,
+  .recordings-v2-range select,
+  .recordings-v2-export-toggle,
+  .recordings-v2-selected-event a {
+    min-height: 44px;
+  }
 }
 
 @media (max-width: 760px) {

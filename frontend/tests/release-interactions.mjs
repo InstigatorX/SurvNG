@@ -64,6 +64,21 @@ try {
     assert.equal(await page.locator("h1").count(), 1);
   }
 
+  await page.setViewportSize({ width: 900, height: 844 });
+  await page.goto("http://127.0.0.1:8088/survng/timeline", { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.getByRole("button", { name: "All events" }).waitFor({ state: "visible" });
+  assert.ok(await page.locator(".workspace-sidebar").evaluate((node) => node.getBoundingClientRect().width <= 68));
+  assert.ok(await page.locator(".recordings-v2-date").evaluate((node) => node.scrollWidth <= node.clientWidth));
+  for (const selector of [
+    ".recordings-v2-date button",
+    ".recordings-v2-player-source button",
+    ".recordings-v2-event-filter button",
+    ".recordings-v2-export-toggle",
+  ]) {
+    assert.ok(await page.locator(selector).first().evaluate((node) => node.getBoundingClientRect().height >= 44));
+  }
+  assert.equal(await page.getByRole("button", { name: /Main High/ }).getAttribute("aria-pressed"), "true");
+
   await page.setViewportSize({ width: 740, height: 844 });
   await page.goto("http://127.0.0.1:8088/survng/", { waitUntil: "domcontentloaded", timeout: 30_000 });
   await page.locator(".camera-tile").first().waitFor({ state: "visible" });
