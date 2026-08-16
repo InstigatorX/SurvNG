@@ -43,6 +43,14 @@
   --shadow: 0 8px 24px rgba(22, 32, 31, 0.08);
   --safe-area-top: env(safe-area-inset-top, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  /* Command-center geometry. Keep these values in one place so Live, its
+     shell, and the responsive variants preserve the approved mockup rhythm. */
+  --workspace-rail-width: 176px;
+  --workspace-topbar-height: 58px;
+  --live-command-height: 52px;
+  --live-activity-width: 306px;
+  --live-tile-gap: 4px;
+  --workspace-control-radius: 4px;
 }
 
 :root[data-embedded="true"] {
@@ -12284,7 +12292,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
    the same component language without changing media ownership here. */
 .app-shell {
   display: grid;
-  grid-template-columns: 176px minmax(0, 1fr);
+  grid-template-columns: var(--workspace-rail-width) minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 100dvh;
   height: auto;
@@ -12308,7 +12316,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   display: flex;
   align-items: center;
   gap: 9px;
-  min-height: 64px;
+  min-height: var(--workspace-topbar-height);
   border-bottom: 1px solid var(--line);
   color: var(--ink);
   padding: 10px 13px;
@@ -12375,7 +12383,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 .app-shell > .topbar {
   grid-column: 2;
   grid-row: 1;
-  min-height: 64px;
+  min-height: var(--workspace-topbar-height);
   padding: 7px 14px;
 }
 
@@ -13272,14 +13280,14 @@ a:focus-visible {
 }
 
 /* Live Command Center */
-.live-grid { grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: 52px minmax(0, 1fr); gap: 0; background: var(--canvas); padding: 0; }
-.live-command-bar { min-height: 52px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--topbar); box-shadow: none; padding: 6px 12px; }
+.live-grid { grid-template-columns: minmax(0, 1fr) var(--live-activity-width); grid-template-rows: var(--live-command-height) minmax(0, 1fr); gap: 0; background: var(--canvas); padding: 0; }
+.live-command-bar { min-height: var(--live-command-height); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--topbar); box-shadow: none; padding: 6px 12px; }
 .live-command-context { display: flex; align-items: center; gap: 12px; }
 .live-command-context > span:last-child { color: var(--muted); font-size: 10px; }
-.live-command-scope { display: inline-flex; min-height: 38px; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--control); color: var(--ink); padding: 0 10px; }
+.live-command-scope { display: inline-flex; min-height: 38px; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: var(--workspace-control-radius); background: var(--control); color: var(--ink); padding: 0 10px; }
 .live-command-scope strong { font-size: 12px; font-weight: 600; }
 .live-command-scope small { color: var(--muted); font-size: 9px; font-weight: 520; }
-.live-layout-control { gap: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }
+.live-layout-control { gap: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--workspace-control-radius); }
 .live-layout-control > span { min-height: 38px; margin: 0; align-content: center; border-right: 1px solid var(--line); padding: 0 9px; font-size: 9px; font-weight: 580; text-transform: none; }
 .live-layout-control button { min-height: 38px; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; font-size: 11px; font-weight: 560; padding-inline: 12px; }
 .live-layout-control > span + button { border-left: 0; }
