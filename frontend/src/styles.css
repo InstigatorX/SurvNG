@@ -2325,7 +2325,7 @@ p {
     grid-auto-flow: dense;
     grid-auto-rows: var(--custom-pack-row-height, 2px);
     align-content: start;
-    gap: 8px;
+    gap: var(--live-tile-gap);
     padding: 0;
     overflow: auto;
     column-width: auto;
@@ -2363,6 +2363,64 @@ p {
   break-inside: avoid;
   cursor: default;
   transition: border-color 140ms ease, opacity 140ms ease, transform 140ms ease;
+}
+
+.live-camera-grid .camera-tile {
+  border: 1px solid #29343a;
+  border-radius: 2px;
+  background: #020405;
+}
+
+.camera-tile-chrome {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 4;
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 7px;
+  background: rgba(2, 5, 7, .9);
+  color: #f4f7f8;
+  padding: 0 6px;
+  pointer-events: none;
+}
+
+.camera-tile-name {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+}
+
+.camera-tile-name i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.camera-tile-name i.online { background: #46c82f; }
+.camera-tile-name strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.camera-tile-live-state { border-radius: 2px; background: rgba(255, 255, 255, .12); font-size: 9px; font-weight: 650; line-height: 16px; padding: 0 5px; }
+.camera-tile-menu { color: rgba(255, 255, 255, .78); font-size: 16px; line-height: 1; }
+
+.camera-tile-time {
+  position: absolute;
+  bottom: 5px;
+  left: 5px;
+  z-index: 3;
+  border-radius: 2px;
+  background: rgba(2, 5, 7, .78);
+  color: #fff;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 17px;
+  padding: 0 4px;
+  pointer-events: none;
 }
 
 .camera-tile.motion-active {
@@ -2502,7 +2560,8 @@ html.camera-layout-resizing * {
   left: 0;
   z-index: 2;
   align-items: flex-end;
-  padding: 38px 10px 10px;
+  justify-content: flex-end;
+  padding: 32px 7px 5px 58px;
   background: linear-gradient(to top, rgba(3, 10, 12, 0.82), rgba(3, 10, 12, 0.38) 58%, transparent);
   color: #fff;
   opacity: 0;
@@ -2517,6 +2576,9 @@ html.camera-layout-resizing * {
   pointer-events: auto;
   transform: translateY(0);
 }
+
+.camera-tile:hover .camera-tile-time,
+.camera-tile:focus-within .camera-tile-time { opacity: .34; }
 
 .tile-title {
   min-width: 0;
@@ -2617,6 +2679,7 @@ button.status-pill.hud-toggle:disabled {
 }
 
 .camera-hud .tile-controls {
+  margin-left: auto;
   gap: 3px;
 }
 

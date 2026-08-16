@@ -2235,6 +2235,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
         className="video-frame"
         style={{ "--media-aspect": aspect }}
       >
+        <div className="camera-tile-chrome">
+          <span className="camera-tile-name"><i className={cameraConnected ? "online" : "offline"} aria-hidden="true" /><strong>{camera.name}</strong></span>
+          <span className="camera-tile-live-state">{cameraConnected ? "LIVE" : camera.running ? "WAIT" : "OFF"}</span>
+          <span className="camera-tile-menu" aria-hidden="true">⋮</span>
+        </div>
         {!camera.running ? (
           <div className="camera-offline-state" role="img" aria-label={`${camera.name} is powered off`}>
             <Power size={24} />
@@ -2267,13 +2272,11 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
           </>
         )}
         <button type="button" className="camera-open-target" onClick={() => onOpen(camera)} aria-label={`Open ${camera.name} live view`} />
+        <time className="camera-tile-time">{formatTimeOnly(Date.now() / 1000, timeZone)}</time>
         <div
           className="tile-header camera-hud"
         >
           <span className="sr-only" aria-live="polite">{motionActive ? `${camera.name} motion active` : ""}</span>
-          <div className="tile-title">
-            <h2>{camera.name}</h2>
-          </div>
           <div className="tile-controls" aria-label={`${camera.name} controls`}>
             {dragHandleProps.onPointerDown ? <button
               type="button"
@@ -2284,9 +2287,6 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
             >
               <GripVertical size={16} />
             </button> : null}
-            <span className={`status-pill hud-status ${cameraConnected ? "ok" : "bad"}`} title={!camera.running ? "Powered off" : cameraConnected ? "Connected" : "Waiting for a fresh frame"}>
-              <CircleDot size={13} /> <span className="hud-full-label">{cameraConnected ? "online" : "offline"}</span>
-            </span>
             <button type="button" className="tile-control-button" onClick={toggleSourceMode} title="Switch main/sub stream">
               <Radio size={15} />
               <span className="hud-full-label">{sourceMode === "main" ? "Main" : "Sub"}</span>
@@ -5316,7 +5316,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
       "live",
       liveCameraGridSize.width,
       liveCameraGridSize.height,
-      8,
+      4,
       liveCameraAspects,
       { portraitPriority: true, portraitRowSpan: 2 },
     ),
