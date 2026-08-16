@@ -103,6 +103,7 @@ import {
 import { resetLiveDefaultsForServer } from "./liveDefaults.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
+import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "./assistantContext.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
@@ -1248,8 +1249,21 @@ function AssistantPanel({ pageContext, timeZone }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [applyingEvidenceId, setApplyingEvidenceId] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(null);
+  const [applyReview, setApplyReview] = useState(null);
   const bodyRef = useRef(null);
+  const drawerRef = useRef(null);
+  const applyDialogRef = useRef(null);
+  const applyReturnFocusRef = useRef(null);
+  const applyEvidenceRef = useRef(null);
+  const launcherRef = useRef(null);
+  const composerRef = useRef(null);
+  const followTranscriptRef = useRef(true);
+  const returnFocusRef = useRef(null);
+  const compactAssistant = useViewportQuery("(max-width: 1279px)");
+  const currentContext = useMemo(() => snapshotAssistantContext(pageContext, timeZone), [pageContext, timeZone]);
+  const currentContextLabel = assistantContextLabel(currentContext, (epoch) => formatDateTime(epoch, timeZone));
+  const quickPrompts = assistantContextPrompts(currentContext).slice(0, 3);
   const activeExportIds = [...new Set(messages.flatMap((message) =>
     (message.evidence || [])
       .map((item) => item.details?.media_export)
@@ -1261,19 +1275,38 @@ function AssistantPanel({ pageContext, timeZone }) {
     writeAssistantHistory(browserStorage(window), ASSISTANT_STORAGE_KEY, messages);
   }, [messages]);
 
+  async function loadAssistantStatus() {
+    setError((current) => current?.kind === "status" ? null : current);
+    try {
+      const response = await fetch("/api/assistant/status");
+      if (!response.ok) throw new Error("Assistant status unavailable");
+      setStatus(await response.json());
+    } catch (statusError) {
+      setError({ message: statusError.message || "Assistant status unavailable", kind: "status" });
+    }
+  }
+
   useEffect(() => {
     if (!open) return;
-    fetch("/api/assistant/status")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Assistant status unavailable")))
-      .then(setStatus)
-      .catch((statusError) => setError(statusError.message || "Assistant status unavailable"));
+    void loadAssistantStatus();
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
     const body = bodyRef.current;
-    if (body) body.scrollTop = body.scrollHeight;
+    if (body && followTranscriptRef.current) body.scrollTop = body.scrollHeight;
   }, [messages, busy, open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    returnFocusRef.current = document.activeElement;
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+    return () => {
+      const target = returnFocusRef.current;
+      if (target instanceof HTMLElement && target.isConnected) target.focus();
+      else launcherRef.current?.focus();
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open || !activeExportIds) return undefined;
@@ -1326,26 +1359,71 @@ function AssistantPanel({ pageContext, timeZone }) {
 
   useEffect(() => {
     if (!open) return undefined;
-    function closeOnEscape(event) {
-      if (event.key === "Escape") setOpenValue("false");
+    function handleAssistantKeyboard(event) {
+      if (event.key === "Escape") {
+        if (applyReview) closeApplyReview(false);
+        else setOpenValue("false");
+        return;
+      }
+      if (!compactAssistant || event.key !== "Tab" || applyReview) return;
+      const controls = [...(drawerRef.current?.querySelectorAll('button:not([disabled]), a[href], textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [open, setOpenValue]);
+    window.addEventListener("keydown", handleAssistantKeyboard);
+    return () => window.removeEventListener("keydown", handleAssistantKeyboard);
+  }, [applyReview, compactAssistant, open, setOpenValue]);
+
+  useEffect(() => {
+    if (!applyReview) return undefined;
+    const dialog = applyDialogRef.current;
+    const controls = [...(dialog?.querySelectorAll('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])') || [])];
+    controls[0]?.focus();
+    function trapApplyFocus(event) {
+      if (event.key !== "Tab" || !controls.length) return;
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    dialog?.addEventListener("keydown", trapApplyFocus);
+    return () => dialog?.removeEventListener("keydown", trapApplyFocus);
+  }, [applyReview]);
 
   function clearConversation() {
+    if (messages.length && !window.confirm("Start a new assistant conversation? The current conversation will be cleared.")) return;
     setMessages([]);
-    setError("");
+    setError(null);
   }
 
-  async function sendMessage(messageText = draft) {
+  function openApplyReview(messageId, evidence, trigger) {
+    applyReturnFocusRef.current = trigger || null;
+    applyEvidenceRef.current = trigger?.closest?.(".assistant-evidence-card") || null;
+    setApplyReview({ messageId, evidence });
+  }
+
+  function closeApplyReview(confirmed = false) {
+    const target = confirmed ? applyEvidenceRef.current : applyReturnFocusRef.current;
+    setApplyReview(null);
+    window.requestAnimationFrame(() => {
+      if (target instanceof HTMLElement && target.isConnected) target.focus();
+      else composerRef.current?.focus();
+    });
+  }
+
+  async function sendMessage(messageText = draft, contextOverride = null, { appendUser = true } = {}) {
     const content = String(messageText || "").trim();
     if (!content || busy) return;
-    const userMessage = { id: `user-${Date.now()}`, role: "user", content };
+    const submittedContext = contextOverride || snapshotAssistantContext(currentContext, timeZone);
+    const userMessage = { id: `user-${Date.now()}`, role: "user", content, context: submittedContext };
     const prior = messages.slice(-12);
-    setMessages((current) => [...current, userMessage].slice(-30));
+    if (appendUser) setMessages((current) => [...current, userMessage].slice(-30));
     setDraft("");
-    setError("");
+    setError(null);
+    followTranscriptRef.current = true;
     setBusy(true);
     try {
       const response = await fetch("/api/assistant/chat", {
@@ -1354,14 +1432,7 @@ function AssistantPanel({ pageContext, timeZone }) {
         body: JSON.stringify({
           message: content,
           history: prior.map(({ role, content: historyContent }) => ({ role, content: historyContent })),
-          context: {
-            page: pageContext?.page || "live",
-            camera_id: pageContext?.camera_id || "",
-            incident_event_id: pageContext?.incident_event_id || null,
-            recording_epoch: pageContext?.recording_epoch || null,
-            filters: pageContext?.filters || {},
-            time_zone: timeZone,
-          },
+          context: submittedContext,
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -1376,9 +1447,14 @@ function AssistantPanel({ pageContext, timeZone }) {
         suggestions: payload.suggestions || [],
         reasoningTier: payload.reasoning_tier || "fast",
         model: payload.model || "",
+        context: submittedContext,
       }].slice(-30));
     } catch (sendError) {
-      setError(sendError.message || "Assistant request failed");
+      const statusCode = Number(String(sendError.message || "").match(/\((\d+)\)/)?.[1]);
+      const message = statusCode === 429 ? "The AI provider is busy. Wait a moment, then retry."
+        : [502, 503, 504].includes(statusCode) ? "The AI provider is temporarily unavailable. Retry when it recovers."
+          : sendError.message || "Assistant request failed";
+      setError({ message, kind: "request", content, context: submittedContext });
     } finally {
       setBusy(false);
     }
@@ -1388,10 +1464,8 @@ function AssistantPanel({ pageContext, timeZone }) {
     const details = evidence?.details || {};
     const changes = details.advice?.changes || [];
     if (!changes.length || applyingEvidenceId) return;
-    const cameraLabel = details.camera_id || "this camera";
-    if (!window.confirm(`Apply ${changes.length} reviewed motion setting${changes.length === 1 ? "" : "s"} for ${cameraLabel}? Camera workers will restart.`)) return;
     setApplyingEvidenceId(evidence.id);
-    setError("");
+    setError(null);
     try {
       const response = await fetch(`/api/incidents/${details.event_id}/ai-apply`, {
         method: "POST",
@@ -1413,7 +1487,7 @@ function AssistantPanel({ pageContext, timeZone }) {
         }),
       }));
     } catch (applyError) {
-      setError(applyError.message || "Unable to apply the reviewed settings");
+      setError({ message: applyError.message || "Unable to apply the reviewed settings", kind: "apply" });
     } finally {
       setApplyingEvidenceId("");
     }
@@ -1421,53 +1495,46 @@ function AssistantPanel({ pageContext, timeZone }) {
 
   return (
     <>
-      <button type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => setOpenValue(open ? "false" : "true")} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} title="SurvNG Assistant">
+      <button ref={launcherRef} type="button" className={`assistant-launcher ${open ? "open" : ""}`} onClick={() => setOpenValue(open ? "false" : "true")} aria-label={open ? "Close SurvNG Assistant" : "Open SurvNG Assistant"} aria-expanded={open} aria-controls="survng-assistant" title="SurvNG Assistant">
         {open ? <X size={22} /> : <Sparkles size={22} />}
       </button>
-      {open ? <aside className="assistant-drawer" role="dialog" aria-label="SurvNG Assistant">
+      {open && compactAssistant ? <div className="assistant-backdrop" aria-hidden="true" onClick={() => setOpenValue("false")} /> : null}
+      {open ? <aside id="survng-assistant" ref={drawerRef} className="assistant-drawer" role={applyReview ? undefined : compactAssistant ? "dialog" : "complementary"} aria-modal={!applyReview && compactAssistant || undefined} aria-hidden={applyReview || undefined} inert={applyReview || undefined} aria-labelledby="assistant-heading">
         <header className="assistant-head">
-          <div><strong><Sparkles size={17} /> SurvNG Assistant</strong><small>Grounded analysis · exports on request</small></div>
+          <div><strong id="assistant-heading"><Sparkles size={17} /> SurvNG Assistant</strong><small>{status?.configured === false ? "AI provider needs setup" : "Grounded in SurvNG evidence"}</small></div>
           <div>
-            <button type="button" onClick={clearConversation} aria-label="Clear assistant conversation" title="Clear conversation"><Trash2 size={16} /></button>
+            <button type="button" onClick={clearConversation} disabled={busy} aria-label="Start a new assistant conversation" title="New conversation"><Trash2 size={16} /></button>
             <button type="button" onClick={() => setOpenValue("false")} aria-label="Close SurvNG Assistant"><X size={17} /></button>
           </div>
         </header>
-        <div className="assistant-context">
-          <span>{pageContext?.page || "live"}</span>
-          {pageContext?.camera_id ? <span>{pageContext.camera_id}</span> : null}
-          {pageContext?.incident_event_id ? <span>event #{pageContext.incident_event_id}</span> : null}
+        <div className="assistant-context" aria-live="polite">
+          <strong>Current view</strong><span>{currentContextLabel}</span>
           {status ? <span title={status.fast_model === status.reasoning_model ? "Everyday and detailed questions use this model" : `Everyday: ${status.fast_model} · Detailed: ${status.reasoning_model}`}>{status.fast_model === status.reasoning_model ? status.fast_model : "Everyday + detailed AI"}</span> : null}
         </div>
-        <div className="assistant-body" ref={bodyRef}>
+        <div className="assistant-body" ref={bodyRef} onScroll={(event) => { const body = event.currentTarget; followTranscriptRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 72; }}>
           {!messages.length ? <div className="assistant-welcome">
             <Sparkles size={26} />
             <strong>What would you like to know?</strong>
             <p>I can search incidents, trace related activity, review a selected incident, inspect camera health, explain settings, and create recording exports or timelapses.</p>
-            <div>
-              {[
-                "Is everything healthy?",
-                ...(pageContext?.incident_event_id ? ["Trace this incident across cameras", "Visually analyze this incident"] : []),
-                ...(pageContext?.camera_id ? [`Create a timelapse for ${pageContext.camera_id} from 8 AM to 8 PM yesterday`] : []),
-                "Find person incidents from the last 24 hours",
-              ].map((suggestion) => <button type="button" key={suggestion} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
-            </div>
           </div> : null}
           {messages.map((message) => <article className={`assistant-message ${message.role}`} key={message.id}>
+            {message.role === "user" && message.context ? <small className="assistant-turn-context">Asked about {assistantContextLabel(message.context, (epoch) => formatDateTime(epoch, message.context.time_zone || timeZone))}</small> : null}
             <div className="assistant-message-text">{message.content}</div>
             {message.role === "assistant" && (message.model || message.reasoningTier) ? <small className="assistant-model-tier">{message.reasoningTier === "deep" ? "Detailed analysis" : "Quick answer"}{message.model ? ` · ${message.model}` : ""}</small> : null}
             {message.evidence?.length ? <div className="assistant-evidence">
-              {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`}>
+              {message.evidence.map((item) => <div key={item.id} className={`assistant-evidence-card ${item.details ? "has-details" : ""}`} tabIndex={-1}>
                 {item.image_url ? <a className="assistant-evidence-image" href={appUrl(assistantEvidenceHref(item))} aria-label={`Open ${item.title || "incident"}`} title="Open incident"><img src={appUrl(item.image_url)} alt={item.title || "Incident evidence"} loading="lazy" /></a> : null}
-                <a href={assistantEvidenceHref(item) ? appUrl(assistantEvidenceHref(item)) : undefined}><span title={item.id}>Source</span><strong>{item.title}</strong><small>{item.summary}</small></a>
+                {assistantEvidenceHref(item) ? <a href={appUrl(assistantEvidenceHref(item))}><span title={item.id}>Open evidence</span><strong>{item.title}</strong><small>{item.summary}</small></a> : <div className="assistant-evidence-summary"><span>Evidence</span><strong>{item.title}</strong><small>{item.summary}</small></div>}
                 {item.details?.timeline ? <div className="assistant-timeline">
-                  {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <a className="assistant-timeline-link" href={appUrl(assistantIncidentHref(match.event_id))} key={match.event_id} title="Open incident"><span>{formatDateTime(match.start_at)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></a>) : <small>No related incidents were found in this time window.</small>}
+                  {item.details.timeline.matches?.length ? item.details.timeline.matches.map((match) => <a className="assistant-timeline-link" href={appUrl(assistantIncidentHref(match.event_id))} key={match.event_id} title="Open incident"><span>{formatDateTime(match.start_at, timeZone)}</span><strong>{match.camera_id}</strong><small>{({ confirmed_identity: "Confirmed face", possible_identity: "Possible face", appearance_similarity: `Visually similar ${match.appearance_similarity != null ? `${Math.round(Number(match.appearance_similarity) * 100)}%` : "appearance"}`, context_candidate: "Nearby matching class" })[match.match_strength] || "Possible connection"}</small></a>) : <small>No related incidents were found in this time window.</small>}
                   <p>{item.details.timeline.limitations?.[3]}</p>
                 </div> : null}
                 {item.details?.media_export ? <div className={`assistant-media-export ${item.details.media_export.status}`}>
                   <div><strong>{item.details.media_export.phase || item.details.media_export.status}</strong><span>{Math.round(Number(item.details.media_export.progress) || 0)}%</span></div>
                   <i><b style={{ width: `${Math.max(0, Math.min(100, Number(item.details.media_export.progress) || 0))}%` }} /></i>
                   {item.details.media_export.error ? <small>{item.details.media_export.error}</small> : null}
-                  {item.details.media_export.status === "completed" && item.details.media_export.download_url ? <a className="assistant-export-download" href={item.details.media_export.download_url}><Download size={14} />Download MP4</a> : null}
+                  <a className="assistant-export-download" href={appUrl("/timeline/exports")}>View in Export Center</a>
+                  {item.details.media_export.status === "completed" && item.details.media_export.download_url ? <a className="assistant-export-download" href={appUrl(item.details.media_export.download_url)}><Download size={14} />Download MP4</a> : null}
                 </div> : null}
                 {item.details?.advice ? <div className="assistant-visual-review">
                   <div><strong>{assistantVisualVerdicts[item.details.advice.verdict] || "The image is inconclusive"}</strong><span>{Math.round(Number(item.details.advice.confidence || 0) * 100)}%</span></div>
@@ -1485,7 +1552,7 @@ function AssistantPanel({ pageContext, timeZone }) {
                     </div>)}
                   </div> : <small>No bounded setting changes recommended from this image.</small>}
                   {item.details.applied?.length ? <div className="assistant-applied"><Check size={14} /> Applied after confirmation</div> : null}
-                  {item.details.can_apply && !item.details.applied?.length ? <button type="button" className="assistant-apply" disabled={Boolean(applyingEvidenceId)} onClick={() => applyVisualProposals(message.id, item)}>{applyingEvidenceId === item.id ? "Applying…" : "Review and apply"}</button> : null}
+                  {item.details.can_apply && !item.details.applied?.length ? <button type="button" className="assistant-apply" disabled={Boolean(applyingEvidenceId)} onClick={(event) => openApplyReview(message.id, item, event.currentTarget)}>{applyingEvidenceId === item.id ? "Applying…" : "Apply proposed changes"}</button> : null}
                   {item.details.proposals?.length && !item.details.can_apply && !item.details.applied?.length ? <small>Enable “Allow confirmed changes” in Admin to apply these proposals.</small> : null}
                 </div> : null}
               </div>)}
@@ -1495,14 +1562,25 @@ function AssistantPanel({ pageContext, timeZone }) {
             </div> : null}
           </article>)}
           {busy ? <div className="assistant-thinking"><span /><span /><span /> Gathering SurvNG evidence…</div> : null}
-          {error ? <div className="assistant-error"><CircleAlert size={15} /> {error}</div> : null}
-          {status && !status.configured ? <div className="assistant-error"><CircleAlert size={15} /> Configure and enable the AI provider under Admin → Object Detection.</div> : null}
+          {error ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>{error.message}</span>{error.kind === "request" ? <button type="button" onClick={() => sendMessage(error.content, error.context, { appendUser: false })}>Retry</button> : error.kind === "status" ? <button type="button" onClick={() => void loadAssistantStatus()}>Retry</button> : null}</div> : null}
+          {status && !status.configured ? <div className="assistant-error" role="alert"><CircleAlert size={15} /><span>Configure and enable the AI provider to use the assistant.</span><a href={appUrl("/admin?section=general&subsection=detection&detail=ai-provider")}>Open AI Provider settings</a></div> : null}
+        </div>
+        <div className="assistant-quick-actions" role="group" aria-label={`Suggestions for ${currentContextLabel}`}>
+          {quickPrompts.map((suggestion) => <button type="button" key={suggestion} disabled={busy} onClick={() => sendMessage(suggestion)}>{suggestion}</button>)}
         </div>
         <form className="assistant-compose" onSubmit={(event) => { event.preventDefault(); sendMessage(); }}>
-          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="Ask about SurvNG…" rows="2" maxLength="8000" disabled={busy} />
+          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} placeholder="Ask about SurvNG…" rows="2" maxLength="8000" disabled={busy || status?.configured === false} />
           <button type="submit" disabled={busy || !draft.trim()}>Send</button>
         </form>
       </aside> : null}
+      {applyReview ? <div ref={applyDialogRef} className="assistant-apply-dialog" role="dialog" aria-modal="true" aria-labelledby="assistant-apply-title">
+        <div>
+          <h2 id="assistant-apply-title">Apply proposed changes?</h2>
+          <p>{applyReview.evidence.details?.camera_id || "This camera"} will restart after these settings are applied.</p>
+          <ul>{(applyReview.evidence.details?.proposals || []).map((change) => <li key={change.setting}><strong>{assistantSettingLabels[change.setting] || change.setting}</strong><span>{String(change.current)} → {String(change.proposed)}</span></li>)}</ul>
+          <footer><button type="button" onClick={() => closeApplyReview(false)}>Cancel</button><button type="button" onClick={() => { const review = applyReview; closeApplyReview(true); void applyVisualProposals(review.messageId, review.evidence); }}>Confirm and apply</button></footer>
+        </div>
+      </div> : null}
     </>
   );
 }
@@ -11413,7 +11491,8 @@ function GeneralSettings({ config, updateConfig, commitImmediateConfig, onTokenS
   const [modelEvaluation, setModelEvaluation] = useState({ status: "idle" });
   const [modelEvaluationError, setModelEvaluationError] = useState("");
   const [modelEvaluationPreview, setModelEvaluationPreview] = useState(null);
-  const [detectionSection, setDetectionSection] = useStoredState("survng.adminDetectionSection.v1", "object");
+  const assistantRequestedAiProvider = new URLSearchParams(window.location.search).get("detail") === "ai-provider";
+  const [detectionSection, setDetectionSection] = useStoredState("survng.adminDetectionSection.v1", assistantRequestedAiProvider ? "ai" : "object", { preferInitial: assistantRequestedAiProvider });
   const modelEvaluationDialogRef = useRef(null);
   const modelEvaluationTriggerRef = useRef(null);
   const mediaLocations = config.media_storage?.locations || [];
@@ -13055,7 +13134,7 @@ function App() {
             : page === "live"
               ? <LivePage timeZone={timeZone} onRecordingContextChange={setRecordingContext} onAssistantContextChange={setAssistantContext} />
               : <main className="workspace-not-found"><CircleAlert size={30} /><h2>Page not found</h2><p>This SurvNG workspace does not exist.</p><a className="nav-button" href={appUrl("/")}>Return to Live</a></main>}
-      <AssistantPanel pageContext={{ page, ...assistantContext }} timeZone={timeZone} />
+      <AssistantPanel pageContext={{ ...assistantContext, page: isExportCenter ? "exports" : page }} timeZone={timeZone} />
     </Shell>
   );
 }

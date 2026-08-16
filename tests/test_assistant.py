@@ -28,6 +28,14 @@ from survng.app.config import AppConfig, AuditAiConfig, CameraConfig
 
 
 class AssistantModelsTest(unittest.TestCase):
+    def test_request_accepts_canonical_and_legacy_workspace_contexts(self) -> None:
+        for page in (
+            "live", "incidents", "timeline", "search", "people", "admin", "exports",
+            "recordings", "faces", "config",
+        ):
+            request = AssistantChatRequest.model_validate({"message": "help", "context": {"page": page}})
+            self.assertEqual(request.context.page, page)
+
     def test_request_normalizes_context_and_enforces_total_size(self) -> None:
         request = AssistantChatRequest.model_validate({
             "message": "  is gate healthy?  ",

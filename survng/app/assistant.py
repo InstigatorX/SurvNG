@@ -100,7 +100,10 @@ class AssistantHistoryMessage(BaseModel):
 
 
 class AssistantPageContext(BaseModel):
-    page: Literal["live", "incidents", "recordings", "faces", "config"] = "live"
+    page: Literal[
+        "live", "incidents", "timeline", "search", "people", "admin", "exports",
+        "recordings", "faces", "config",
+    ] = "live"
     camera_id: str = Field(default="", max_length=128)
     incident_event_id: int | None = Field(default=None, gt=0)
     recording_epoch: float | None = Field(default=None, ge=0)
