@@ -77,7 +77,7 @@ class CameraWorker:
         route_detection_watch: Callable[[str, float], Any | None] | None = None,
         consume_route_detection_watch: Callable[[str, int], bool] | None = None,
         record_ema_route_candidate: (
-            Callable[[str, float, dict[str, Any]], None] | None
+            Callable[[str, float, dict[str, Any]], object] | None
         ) = None,
         load_ema_route_candidates: (
             Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None

@@ -66,6 +66,10 @@ class EventStoreTest(unittest.TestCase):
             self.assertTrue(store.jobs_db_path.exists())
             with store._connect_jobs() as connection:
                 self.assertEqual(connection.execute("pragma synchronous").fetchone()[0], 2)
+                self.assertIsNone(connection.execute(
+                    "select 1 from sqlite_master where type='table' "
+                    "and name='ema_route_candidates'"
+                ).fetchone())
             with store._connect() as connection:
                 legacy = connection.execute(
                     "select count(*) from sqlite_master where type = 'table' "
@@ -186,39 +190,6 @@ class EventStoreTest(unittest.TestCase):
             recreated = EventStore(root)
             self.assertFalse(recreated.route_watch_consumed("back-left", 44720))
             self.assertTrue(recreated.route_watch_consumed("back-right", 44721))
-
-    def test_ema_route_candidate_survives_restart_and_is_window_bounded(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            store = EventStore(root)
-            store.record_ema_route_candidate(
-                "back-right",
-                1048.0,
-                {
-                    "accepted": True,
-                    "score": 0.5545,
-                    "threshold": 0.48,
-                    "reason": "qualified",
-                    "frame_count": 3,
-                    "features": {"motion_regions": [[0.1, 0.2, 0.3, 0.4]]},
-                    "telemetry": {},
-                },
-            )
-
-            recreated = EventStore(root)
-
-            rows = recreated.ema_route_candidates_between(
-                "back-right", 1040.0, 1050.0
-            )
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0][0], 1048.0)
-            self.assertEqual(rows[0][1]["score"], 0.5545)
-            self.assertEqual(
-                recreated.ema_route_candidates_between(
-                    "back-right", 1050.1, 1060.0
-                ),
-                [],
-            )
 
     def test_detection_job_lease_owner_prevents_stale_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

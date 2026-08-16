@@ -69,6 +69,8 @@ def manager_with_mocks() -> AppManager:
     manager.workers["gate"].wait_onvif_stopped.return_value = True
     manager.workers["gate"].active_workers.return_value = []
     manager.runtime_monitor = Mock()
+    manager.ema_route_candidates = Mock()
+    manager.ema_route_candidates.status.return_value = {}
     manager.camera_fleet = CameraFleetLifecycle(
         cameras=[camera],
         workers=manager.workers,

@@ -92,14 +92,6 @@ class EventStore:
         conn.execute("pragma synchronous = full")
         return conn
 
-    def _connect_jobs_low_priority(self) -> sqlite3.Connection:
-        """Open a fail-fast connection for optional bounded evidence caching."""
-        conn = sqlite3.connect(self.jobs_db_path, timeout=0.025)
-        conn.row_factory = sqlite3.Row
-        conn.execute("pragma busy_timeout = 25")
-        conn.execute("pragma synchronous = full")
-        return conn
-
     def _init_jobs_db(self) -> None:
         """Initialize the small local security-work ledger independently."""
         with self._connect_jobs() as conn:
@@ -179,21 +171,6 @@ class EventStore:
                     primary key(target_camera_id, source_event_id)
                 )
                 """
-            )
-            conn.execute(
-                """
-                create table if not exists ema_route_candidates (
-                    camera_id text not null,
-                    captured_at real not null,
-                    payload_json text not null,
-                    created_at text not null,
-                    primary key(camera_id, captured_at)
-                )
-                """
-            )
-            conn.execute(
-                "create index if not exists idx_ema_route_candidates_window "
-                "on ema_route_candidates(camera_id, captured_at)"
             )
 
     def _migrate_legacy_jobs(self) -> None:
@@ -926,65 +903,6 @@ class EventStore:
                 (str(target_camera_id), int(source_event_id)),
             ).fetchone()
         return row is not None
-
-    def record_ema_route_candidate(
-        self,
-        camera_id: str,
-        captured_at: float,
-        payload: dict[str, Any],
-        *,
-        retention_seconds: float = 600.0,
-    ) -> None:
-        """Retain compact accepted EMA evidence across a short restart gap."""
-        payload_json = durable_json_dumps(payload, sort_keys=True)
-        with self._connect_jobs_low_priority() as conn:
-            conn.execute(
-                "insert or replace into ema_route_candidates "
-                "(camera_id, captured_at, payload_json, created_at) values (?, ?, ?, ?)",
-                (
-                    str(camera_id),
-                    float(captured_at),
-                    payload_json,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            conn.execute(
-                "delete from ema_route_candidates where camera_id = ? and captured_at < ?",
-                (
-                    str(camera_id),
-                    float(captured_at) - max(300.0, float(retention_seconds)),
-                ),
-            )
-
-    def ema_route_candidates_between(
-        self,
-        camera_id: str,
-        start_at: float,
-        end_at: float,
-        *,
-        limit: int = 4096,
-    ) -> list[tuple[float, dict[str, Any]]]:
-        with self._connect_jobs() as conn:
-            rows = conn.execute(
-                "select captured_at, payload_json from ema_route_candidates "
-                "where camera_id = ? and captured_at >= ? and captured_at <= ? "
-                "order by captured_at desc limit ?",
-                (
-                    str(camera_id),
-                    float(start_at),
-                    float(end_at),
-                    max(1, min(int(limit), 4096)),
-                ),
-            ).fetchall()
-        candidates: list[tuple[float, dict[str, Any]]] = []
-        for row in rows:
-            try:
-                payload = json.loads(str(row["payload_json"]))
-            except (TypeError, ValueError):
-                continue
-            if isinstance(payload, dict):
-                candidates.append((float(row["captured_at"]), payload))
-        return candidates
 
     @staticmethod
     def _calibration_run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:

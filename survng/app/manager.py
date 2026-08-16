@@ -31,6 +31,7 @@ from .config import (
     SemanticSearchConfig,
 )
 from .events import EventStore
+from .ema_route_cache import EmaRouteCandidateCache
 from .detector import objects_to_json
 from .detection_watch import RouteDetectionWatch
 from .go2rtc import Go2RtcAdapter
@@ -206,6 +207,10 @@ class AppManager:
             self.storage_dir,
             database_dir=self.database_dir,
             media_storage=self.media_storage,
+        )
+        self.ema_route_candidates = EmaRouteCandidateCache(
+            self.database_dir / "ema-route-cache.sqlite3",
+            legacy_jobs_path=self.events.jobs_db_path,
         )
         self._restore_detection_watches()
         self.telemetry = TelemetryStore(self.database_dir)
@@ -585,8 +590,8 @@ class AppManager:
                 media_storage=self.media_storage,
                 route_detection_watch=self.detection_watch.match,
                 consume_route_detection_watch=self._consume_detection_watch,
-                record_ema_route_candidate=self.events.record_ema_route_candidate,
-                load_ema_route_candidates=self.events.ema_route_candidates_between,
+                record_ema_route_candidate=self.ema_route_candidates.submit,
+                load_ema_route_candidates=self.ema_route_candidates.between,
             )
         except BaseException:
             for pipeline in reversed(pipelines):
@@ -635,6 +640,7 @@ class AppManager:
             startup_started = time.monotonic()
             phase_started = startup_started
             try:
+                self.ema_route_candidates.start()
                 # Rewrite the restored or explicitly transferred snapshot so
                 # removed cameras are pruned before startup admission.
                 self.camera_controls.persist()
@@ -724,6 +730,7 @@ class AppManager:
         return {
             **self.camera_fleet.status(),
             "application_startup": dict(self._startup_timings),
+            "ema_route_cache": self.ema_route_candidates.status(),
         }
 
     def stop_all(self) -> None:
@@ -775,6 +782,7 @@ class AppManager:
 
         started = time.monotonic()
         self.camera_controls.quiesce()
+        self.ema_route_candidates.close_admission()
         self.mqtt.set_server_lifecycle("stopping", refresh_status=False)
         LOGGER.info(
             "SurvNG shutdown: cancelling camera admission and releasing ONVIF subscriptions"
@@ -801,6 +809,11 @@ class AppManager:
                 (f"camera {failure.label}", failure.error)
                 for failure in error.failures
             )
+
+        attempt(
+            "EMA route candidate cache",
+            lambda: self.ema_route_candidates.close(timeout=2.0),
+        )
 
         LOGGER.info("SurvNG shutdown: stopping inference lifecycle")
         attempt("inference lifecycle", self.inference.close)

@@ -27,6 +27,7 @@ from .ema_v2 import (
     VISUAL_BACKUP_EXCLUDED_REASONS,
     MotionSource,
 )
+from .ema_route_cache import EmaCandidateSubmitResult
 from .motion_analysis import FairMotionAnalysisLimiter
 from .motion_decisions import (
     MotionAuditRecorder,
@@ -204,12 +205,12 @@ class MotionAnalysisService:
         self._route_watch_provider: Callable[[str, float], Any | None] | None = None
         self._route_watch_consumer: Callable[[str, int], bool] | None = None
         self._ema_candidate_sink: (
-            Callable[[str, float, dict[str, Any]], None] | None
+            Callable[[str, float, dict[str, Any]], object] | None
         ) = None
         self._ema_candidate_source: (
             Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None
         ) = None
-        self._last_persisted_ema_candidate_at = 0.0
+        self._last_submitted_ema_candidate_at = 0.0
         self._last_ema_candidate_failure_log_monotonic = 0.0
         self._stop_event: threading.Event | None = None
         self._stop_requested = threading.Event()
@@ -302,7 +303,7 @@ class MotionAnalysisService:
         route_watch: Callable[[str, float], Any | None] | None = None,
         consume_route_watch: Callable[[str, int], bool] | None = None,
         record_ema_candidate: (
-            Callable[[str, float, dict[str, Any]], None] | None
+            Callable[[str, float, dict[str, Any]], object] | None
         ) = None,
         load_ema_candidates: (
             Callable[[str, float, float], list[tuple[float, dict[str, Any]]]] | None
@@ -355,7 +356,7 @@ class MotionAnalysisService:
             self.processed_frames.clear()
             self.qualification_results.clear()
             self.recent_accepted_results.clear()
-            self._last_persisted_ema_candidate_at = 0.0
+            self._last_submitted_ema_candidate_at = 0.0
             self.last_sample_clock = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
@@ -555,7 +556,7 @@ class MotionAnalysisService:
             self.processed_frames.clear()
             self.qualification_results.clear()
             self.recent_accepted_results.clear()
-            self._last_persisted_ema_candidate_at = 0.0
+            self._last_submitted_ema_candidate_at = 0.0
             self.last_continuous_result = None
             self.last_processed_at = 0.0
             self.primary_last_processed_at = 0.0
@@ -1067,7 +1068,7 @@ class MotionAnalysisService:
                 self.recent_accepted_results.append((captured_at, result))
                 if (
                     self._ema_candidate_sink is not None
-                    and captured_at - self._last_persisted_ema_candidate_at >= 0.5
+                    and captured_at - self._last_submitted_ema_candidate_at >= 0.5
                 ):
                     persist_candidate = {
                         "accepted": bool(result.accepted),
@@ -1102,9 +1103,16 @@ class MotionAnalysisService:
         # Admission has already run. This optional restart cache must never
         # stand in front of immediate detector work or wait materially on the
         # security ledger's writer.
-        self._last_persisted_ema_candidate_at = captured_at
+        self._last_submitted_ema_candidate_at = captured_at
         try:
-            self._ema_candidate_sink(self.camera_id, captured_at, payload)
+            outcome = self._ema_candidate_sink(self.camera_id, captured_at, payload)
+            if outcome in {
+                EmaCandidateSubmitResult.STOPPED,
+                EmaCandidateSubmitResult.OVERSIZE_DROPPED,
+            }:
+                self.state.increment_stat("ema_candidate_persist_failures", 1)
+            elif outcome is EmaCandidateSubmitResult.OVERFLOW_DROPPED:
+                self.state.increment_stat("ema_candidate_overflow_drops", 1)
         except Exception:
             self.state.increment_stat("ema_candidate_persist_failures", 1)
             now_monotonic = time.monotonic()
