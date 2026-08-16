@@ -55,6 +55,20 @@ try {
   assert.equal(await page.locator("h1").count(), 1);
   assert.equal(await page.getByRole("button", { name: "All events" }).getAttribute("aria-pressed"), "true");
   assert.equal(await page.locator(".recordings-camera-group").first().isVisible(), true);
+  const timelineEvidence = page.locator(".recordings-timeline-evidence button").first();
+  if (await timelineEvidence.count()) {
+    await timelineEvidence.click();
+    const selectedCard = page.locator(".recordings-v2-selected-event");
+    const selectedAction = selectedCard.getByRole("link", { name: /View full incident/ });
+    const cardBox = await selectedCard.boundingBox();
+    const actionBox = await selectedAction.boundingBox();
+    assert.ok(cardBox && actionBox && actionBox.y + actionBox.height <= cardBox.y + cardBox.height + 0.5);
+    const selectedImage = page.locator(".recordings-v2-selected-event-image");
+    assert.ok(await selectedImage.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return Math.abs((box.width / box.height) - (16 / 9)) < 0.08;
+    }));
+  }
 
   for (const [path, title] of [
     ["incidents", "Incidents"],
