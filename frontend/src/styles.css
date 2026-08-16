@@ -12745,3 +12745,65 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .settings-grid .camera-tree-actions button { flex: 1 1 auto; min-height: 44px; }
   .settings-grid .tree-list button { min-height: 44px; }
 }
+
+/* Final mobile geometry is owned by the shared shell. Workspace rules consume
+   these values instead of independently guessing Safari toolbar heights. */
+@media (max-width: 760px) {
+  .app-shell {
+    --mobile-nav-height: calc(62px + var(--safe-area-bottom));
+    --workspace-available-height: calc(100svh - var(--topbar-height, 50px) - var(--mobile-nav-height));
+  }
+
+  @supports (height: 100dvh) {
+    .app-shell { --workspace-available-height: calc(100dvh - var(--topbar-height, 50px) - var(--mobile-nav-height)); }
+  }
+
+  .incidents-grid { min-height: var(--workspace-available-height); }
+  .incidents-page-zone { height: var(--workspace-available-height); }
+  .search-page { min-height: var(--workspace-available-height); }
+
+  .workspace-content button,
+  .workspace-content select,
+  .workspace-content input:not([type="range"]),
+  .workspace-content summary,
+  .workspace-content .nav-button,
+  .workspace-content a.primary,
+  .workspace-content nav a,
+  .event-overlay button,
+  .motion-audit-overlay button,
+  .live-overlay button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .mobile-brand-block { min-height: 44px; }
+  .snapshot-focus-button { width: 44px; min-width: 44px; min-height: 44px; }
+  .incident-filter-toggle.compact button,
+  .event-filter button,
+  .incident-pager button,
+  .event-detail-head button,
+  .tree-list button { min-height: 44px; }
+  .incident-filter-selects select,
+  .incident-filter-selects input { min-height: 44px; }
+
+  .live-overlay-panel,
+  .live-overlay-media,
+  .event-overlay-panel,
+  .motion-audit-overlay-panel { max-height: calc(100dvh - 16px); }
+}
+
+@media (max-width: 900px) and (max-height: 500px) {
+  .workspace-content button,
+  .workspace-content select,
+  .workspace-content input:not([type="range"]),
+  .workspace-content summary,
+  .workspace-content .nav-button,
+  .workspace-content a.primary,
+  .workspace-content nav a,
+  .event-overlay button,
+  .motion-audit-overlay button,
+  .live-overlay button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

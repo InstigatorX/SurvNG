@@ -1,4 +1,5 @@
 import React, { forwardRef, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -104,6 +105,7 @@ import { resetLiveDefaultsForServer } from "./liveDefaults.mjs";
 import { browserStorage, readStoredValue, removeStoredValue, writeStoredValue } from "./storage.mjs";
 import { readAssistantHistory, writeAssistantHistory } from "./assistantStorage.mjs";
 import { assistantContextLabel, assistantContextPrompts, snapshotAssistantContext } from "./assistantContext.mjs";
+import { safeMediaUrl } from "./mediaUrl.mjs";
 import { assistantEvidenceHref, assistantIncidentHref } from "./assistantNavigation.mjs";
 import { containedFrameTransform, hlsPlaybackOffset, hlsProgramStartEpoch, incidentTrackingSource, playbackEpochAt, storedObjectTracks, trackFrameAt } from "./objectTrackReplay.mjs";
 import { describePlaybackError, gridPlaybackNeedsSeek, isUnsupportedPlaybackError, mergeRecordingAvailability, playbackMediaTimeForEpoch, playbackRowsCoverEpoch } from "./recordingPlayback.mjs";
@@ -183,6 +185,10 @@ function appUrl(path = "/") {
   if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) return path;
   if (APP_BASE_PATH && (path === APP_BASE_PATH || path.startsWith(`${APP_BASE_PATH}/`))) return path;
   return `${APP_BASE_PATH}${path}`;
+}
+
+function mediaUrl(value) {
+  return safeMediaUrl(value, APP_BASE_PATH, window.location.origin);
 }
 
 function appPathname() {
@@ -941,6 +947,54 @@ function useViewportQuery(query) {
   return matches;
 }
 
+function useModalFocus(onClose) {
+  const modalRef = useRef(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const modal = modalRef.current;
+    const root = document.getElementById("root");
+    const returnTarget = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    const rootWasInert = root?.inert || false;
+    const rootAriaHidden = root?.getAttribute("aria-hidden");
+    document.body.style.overflow = "hidden";
+    if (root) {
+      root.inert = true;
+      root.setAttribute("aria-hidden", "true");
+    }
+    window.requestAnimationFrame(() => (modal?.querySelector("[data-modal-initial]") || modal?.querySelector("button, [href], input, select, textarea"))?.focus());
+    function onKeyDown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current?.();
+        return;
+      }
+      if (event.key !== "Tab" || !modal) return;
+      const controls = [...modal.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')];
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (root) {
+        root.inert = rootWasInert;
+        if (rootAriaHidden == null) root.removeAttribute("aria-hidden");
+        else root.setAttribute("aria-hidden", rootAriaHidden);
+      }
+      window.requestAnimationFrame(() => {
+        if (returnTarget instanceof HTMLElement && returnTarget.isConnected) returnTarget.focus();
+      });
+    };
+  }, []);
+  return modalRef;
+}
+
 function preferredStreamSource() {
   return isMobileViewport() ? "live" : "main";
 }
@@ -1594,11 +1648,23 @@ const WORKSPACE_ICONS = Object.freeze({
   admin: Cog,
 });
 
+function MobileMoreSheet({ links, page, onClose }) {
+  const modalRef = useModalFocus(onClose);
+  return createPortal((
+    <div ref={modalRef} className="mobile-more-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-more-title">
+      <button type="button" className="mobile-more-backdrop" onClick={onClose} aria-label="Close more menu" />
+      <div id="mobile-more-panel" className="mobile-more-panel" tabIndex={-1}>
+        <header><h2 id="mobile-more-title">More</h2><button type="button" data-modal-initial onClick={onClose} aria-label="Close more menu"><X size={20} /></button></header>
+        {links.slice(4).map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
+      </div>
+    </div>
+  ), document.body);
+}
+
 function Shell({ page, theme, recordingContext, children }) {
   const shellRef = useRef(null);
   const topbarRef = useRef(null);
   const mobileMoreButtonRef = useRef(null);
-  const mobileMorePanelRef = useRef(null);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const workspaceLink = (id) => {
     const definition = workspaceDefinition(id);
@@ -1612,38 +1678,6 @@ function Shell({ page, theme, recordingContext, children }) {
   const workspaceLinks = [...DESKTOP_PRIMARY_WORKSPACES, "admin"].map(workspaceLink);
   const mobileLinks = MOBILE_PRIMARY_WORKSPACES.filter((id) => id !== "more").map(workspaceLink);
 
-  useEffect(() => {
-    if (!mobileMoreOpen) return undefined;
-    const previousOverflow = document.body.style.overflow;
-    const panel = mobileMorePanelRef.current;
-    document.body.style.overflow = "hidden";
-    panel?.querySelector("a, button")?.focus();
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setMobileMoreOpen(false);
-        return;
-      }
-      if (event.key !== "Tab" || !panel) return;
-      const focusable = [...panel.querySelectorAll("a, button:not([disabled])")];
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = previousOverflow;
-      mobileMoreButtonRef.current?.focus();
-    };
-  }, [mobileMoreOpen]);
   useLayoutEffect(() => {
     const shell = shellRef.current;
     const topbar = topbarRef.current;
@@ -1692,13 +1726,7 @@ function Shell({ page, theme, recordingContext, children }) {
         {mobileLinks.map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} aria-label={label} href={href} key={id}><Icon size={21} /><span>{label}</span></a>)}
         <button ref={mobileMoreButtonRef} type="button" className={page === "people" || page === "admin" || mobileMoreOpen ? "active" : ""} onClick={() => setMobileMoreOpen((current) => !current)} aria-expanded={mobileMoreOpen} aria-controls="mobile-more-panel"><Rows3 size={21} /><span>More</span></button>
       </nav>
-      {mobileMoreOpen ? <div className="mobile-more-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-more-title">
-        <button type="button" className="mobile-more-backdrop" onClick={() => setMobileMoreOpen(false)} aria-label="Close more menu" />
-        <div ref={mobileMorePanelRef} id="mobile-more-panel" className="mobile-more-panel" tabIndex={-1}>
-          <header><h2 id="mobile-more-title">More</h2><button type="button" onClick={() => setMobileMoreOpen(false)} aria-label="Close more menu"><X size={20} /></button></header>
-          {workspaceLinks.slice(4).map(([id, label, href, Icon]) => <a className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} href={href} key={id}><Icon size={20} /><span>{label}</span></a>)}
-        </div>
-      </div> : null}
+      {mobileMoreOpen ? <MobileMoreSheet links={workspaceLinks} page={page} onClose={() => setMobileMoreOpen(false)} /> : null}
     </div>
   );
 }
@@ -2257,6 +2285,7 @@ function CameraTile({ camera, timeZone, refresh, onOpen, onAspectChange, layout,
 }
 
 function LiveCameraOverlay({ camera, timeZone, onClose }) {
+  const modalRef = useModalFocus(onClose);
   const [source, setSource] = useStoredState(
     `survng.liveOverlaySource.${camera.id}`,
     preferredStreamSource(),
@@ -2280,14 +2309,6 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
     if (authoritativeOverlayAspect) setAspect(authoritativeOverlayAspect);
   }, [authoritativeOverlayAspect]);
 
-  useEffect(() => {
-    function onKey(event) {
-      if (event.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   function rememberAspect(media, sourceName = activeSource) {
     const nextAspect = mediaAspect(media);
     if (!cameraSourceAspect(camera, sourceName)) setAspect(nextAspect);
@@ -2298,8 +2319,8 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
     );
   }
 
-  return (
-    <div className="live-overlay" role="dialog" aria-modal="true" aria-label={`${camera.name} full live view`}>
+  return createPortal((
+    <div ref={modalRef} className="live-overlay" role="dialog" aria-modal="true" aria-label={`${camera.name} full live view`}>
       <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close live view" />
       <section
         className="live-overlay-panel"
@@ -2322,7 +2343,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
           <button type="button" className="tile-control-button" onClick={() => setSource(activeSource === "main" ? "live" : "main")} aria-label="Switch live stream">
             <Radio size={15} /> {sourceLabel(activeSource)}
           </button>
-          <button type="button" className="tile-control-button icon-only" onClick={onClose} aria-label="Close live view">
+          <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label="Close live view">
             <X size={18} />
           </button>
         </div>
@@ -2353,7 +2374,7 @@ function LiveCameraOverlay({ camera, timeZone, onClose }) {
         </div>
       </section>
     </div>
-  );
+  ), document.body);
 }
 
 function eventObjects(event) {
@@ -3647,6 +3668,7 @@ function DebugDetectionOverlay({ videoRef, active, confidence = 0.35, onStats })
 }
 
 function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh }) {
+  const modalRef = useModalFocus(onClose);
   const clipVideoRef = useRef(null);
   const mediaRef = useRef(null);
   const comparisonPanelRef = useRef(null);
@@ -4068,10 +4090,6 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
 
   useEffect(() => {
     function onKey(keyEvent) {
-      if (keyEvent.key === "Escape") {
-        onClose();
-        return;
-      }
       if (keyEvent.key !== "ArrowLeft" && keyEvent.key !== "ArrowRight") return;
       const direction = keyEvent.key === "ArrowRight" ? 1 : -1;
       const nextIncident = adjacentIncident(events, event, direction);
@@ -4083,8 +4101,8 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
     return () => window.removeEventListener("keydown", onKey);
   }, [event.id, events, onClose, onSelect]);
 
-  return (
-    <div className="event-overlay" role="dialog" aria-modal="true" aria-label="Event image">
+  return createPortal((
+    <div ref={modalRef} className="event-overlay" role="dialog" aria-modal="true" aria-label="Event image">
       <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close event image" />
       <section className="event-overlay-panel" style={mediaStyle}>
         <div className="event-detail-head">
@@ -4138,7 +4156,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
                 <Download size={18} />
               </span>
             )}
-            <button type="button" className="tile-control-button icon-only" onClick={onClose} aria-label="Close event image">
+            <button type="button" className="tile-control-button icon-only" data-modal-initial onClick={onClose} aria-label="Close event image">
               <X size={18} />
             </button>
           </div>
@@ -4392,7 +4410,7 @@ function EventOverlay({ event, events, timeZone, onClose, onSelect, onRefresh })
         </div>
       </section>
     </div>
-  );
+  ), document.body);
 }
 
 function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextChange }) {
@@ -6368,7 +6386,7 @@ function SemanticSearchPage({ timeZone, onAssistantContextChange }) {
           const matchLabel = ({ strong_match: "Strong match", possible_match: "Possible match" })[result.match_strength] || "Visually similar";
           const cameraName = cameras.find((camera) => camera.id === item.camera_id)?.name || item.camera_id;
           const observedAt = formatDateTime(new Date(item.created_at).getTime() / 1000, timeZone);
-          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={result.snapshot_url} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
+          return <article key={item.id} aria-label={`${matchLabel} at ${cameraName}, ${observedAt}`}><div className="semantic-result-image"><img src={mediaUrl(result.snapshot_url)} alt={`${cameraName} search result`} loading="lazy" /><span title={`Raw visual similarity ${Number(result.score || 0).toFixed(3)}`}>{matchLabel}</span></div><footer><div><strong>{cameraName}</strong><small>{observedAt}</small></div><nav aria-label={`Actions for ${cameraName} result`}><a href={appUrl(`/incidents?event_ids=${item.id}`)}>Open incident</a><a href={recordingsHref(context)}><Play size={14} />Timeline</a></nav></footer></article>;
         })}
         {!loading && !error && !visibleResults.length ? <div className="semantic-search-empty"><Search size={28} /><strong>{results.length && cameraId ? "No matching results from this camera" : "Search indexed incidents by appearance"}</strong><span>{results.length && cameraId ? "Choose All cameras or another camera to widen the current results." : "Results link to the exact incident and recording time."}</span></div> : null}
       </div>
@@ -7254,7 +7272,7 @@ function RecordingsPage({ timeZone, onAssistantContextChange }) {
               ) : null}
               {exportError ? <div className="recordings-v2-export-error"><CircleAlert size={15} />{exportError}</div> : null}
               <div className="recordings-v2-export-actions">
-                {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={exportJob.download_url}><Download size={15} />Download</a> : null}
+                {exportJob?.status === "completed" && exportJob.download_url ? <a className="nav-button" href={mediaUrl(exportJob.download_url)}><Download size={15} />Download</a> : null}
                 {exportJob?.status === "completed" ? <a className="nav-button" href={appUrl(`/timeline/exports?camera=${encodeURIComponent(activeCameraId)}`)}><Film size={15} />Export Center</a> : null}
                 {exportJob && ["queued", "running", "cancelling"].includes(exportJob.status) ? <button type="button" onClick={cancelExport} disabled={exportJob.status === "cancelling"}><X size={15} />{exportJob.status === "cancelling" ? "Cancelling" : "Cancel"}</button> : null}
                 {!exportJob ? <button type="button" className="primary" onClick={startExport} disabled={exportSubmitting}><Download size={15} />{exportSubmitting ? "Starting..." : `Start ${exportKind === "timelapse" ? "timelapse" : "export"}`}</button> : null}
@@ -7596,7 +7614,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
 
         <section className="export-center-review">
           <div className="export-center-player">
-            {selected?.status === "completed" && selected.media_url ? <video key={selected.id} src={selected.media_url} controls playsInline preload="metadata" /> : null}
+            {selected?.status === "completed" && selected.media_url ? <video key={selected.id} src={mediaUrl(selected.media_url)} controls playsInline preload="metadata" /> : null}
             {!selected && !loading ? <div className="export-center-empty"><Film size={30} /><strong>No exports match these filters</strong><span>Create a clip or timelapse from recording history or ask the SurvNG Assistant.</span></div> : null}
             {selected && selected.status !== "completed" ? <div className={`export-center-job-state ${selected.status}`}><RefreshCcw className={["queued", "running", "cancelling"].includes(selected.status) ? "spin" : ""} size={30} /><strong>{selected.phase || exportStatusLabel(selected.status)}</strong><span>{selected.error || `${Math.round(Number(selected.progress) || 0)}% complete`}</span></div> : null}
           </div>
@@ -7618,7 +7636,7 @@ function ExportCenterPage({ timeZone, onAssistantContextChange }) {
                 <div><dt>Retention</dt><dd>{selected.protected ? "Protected" : selected.expires_at ? `Until ${formatDateTime(selected.expires_at, timeZone)}` : "While active"}</dd></div>
               </dl>
               <div className="export-center-actions">
-                {selected.status === "completed" && selected.download_url ? <a className="primary" href={selected.download_url}><Download size={15} />Download</a> : null}
+                {selected.status === "completed" && selected.download_url ? <a className="primary" href={mediaUrl(selected.download_url)}><Download size={15} />Download</a> : null}
                 {selected.status === "completed" ? <button type="button" onClick={() => setExportProtection(selected, !selected.protected)} disabled={actionBusy === selected.id}><ShieldCheck size={15} />{selected.protected ? "Unprotect" : "Protect"}</button> : null}
                 <button type="button" className="danger" onClick={() => removeExport(selected)} disabled={actionBusy === selected.id || selected.status === "cancelling"}><Trash2 size={15} />{["queued", "running"].includes(selected.status) ? "Cancel" : "Delete"}</button>
               </div>
@@ -8134,7 +8152,7 @@ function RecordingTimeline({ cameraId, source, previewManifestUrl, previewStartT
         >
           <div>
             <canvas ref={localPreviewCanvasRef} aria-label="Decoded recording preview frame" />
-            {preview.mode === "jpeg" && preview.url && !preview.gap && !preview.unavailable ? <img src={preview.url} alt="Recording preview" /> : null}
+            {preview.mode === "jpeg" && preview.url && !preview.gap && !preview.unavailable ? <img src={mediaUrl(preview.url)} alt="Recording preview" /> : null}
             {preview.mode === "jpeg" && preview.gap ? <span><Film size={20} />No recording</span> : null}
             {preview.mode === "jpeg" && preview.unavailable ? <span><RefreshCcw size={18} />Preview unavailable</span> : null}
             {preview.mode === "jpeg" && !preview.url && !preview.gap && !preview.unavailable ? <span><RefreshCcw size={18} />Loading preview</span> : null}
@@ -11015,6 +11033,7 @@ function MotionAuditPipeline({ telemetry }) {
 }
 
 function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
+  const modalRef = useModalFocus(onClose);
   const outcome = motionAuditOutcome(item);
   const currentIndex = items.findIndex((candidate) => candidate.id === item.id);
   const [aiAdvice, setAiAdvice] = useState(null);
@@ -11079,7 +11098,6 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
 
   useEffect(() => {
     function onKeyDown(event) {
-      if (event.key === "Escape") onClose();
       if (event.key === "ArrowLeft") {
         event.preventDefault();
         move(-1);
@@ -11093,8 +11111,8 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [currentIndex, item.id, items, onClose, onSelect]);
 
-  return (
-    <div className="motion-audit-overlay" role="dialog" aria-modal="true" aria-label="Motion audit image">
+  return createPortal((
+    <div ref={modalRef} className="motion-audit-overlay" role="dialog" aria-modal="true" aria-label="Motion audit image">
       <button className="live-overlay-backdrop" type="button" onClick={onClose} aria-label="Close motion audit image" />
       <section className="motion-audit-overlay-panel">
         <header className="motion-audit-overlay-head">
@@ -11103,7 +11121,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
             <button type="button" className="icon-only" onClick={() => move(-1)} disabled={items.length < 2} aria-label="Previous audit image"><ChevronLeft size={19} /></button>
             <span>{currentIndex + 1} / {items.length}</span>
             <button type="button" className="icon-only" onClick={() => move(1)} disabled={items.length < 2} aria-label="Next audit image"><ChevronRight size={19} /></button>
-            <button type="button" className="icon-only" onClick={onClose} aria-label="Close motion audit image"><X size={19} /></button>
+            <button type="button" className="icon-only" data-modal-initial onClick={onClose} aria-label="Close motion audit image"><X size={19} /></button>
           </div>
         </header>
         <div className="motion-audit-overlay-content">
@@ -11153,7 +11171,7 @@ function MotionAuditOverlay({ item, items, timeZone, onClose, onSelect }) {
         </div>
       </section>
     </div>
-  );
+  ), document.body);
 }
 
 function ProbeResult({ probe }) {
@@ -11400,7 +11418,7 @@ function MotionAiReviewPanel({ cameras, advisorEnabled }) {
                   <div className="camera-intelligence-samples">
                     {report.samples.map((sample) => (
                       <article key={`${sample.kind}-${sample.record_id}`}>
-                        {sample.image_url?.startsWith("/api/") ? <img src={sample.image_url} alt={`${selectedCamera?.name || cameraId} review sample`} loading="lazy" /> : <div className="camera-intelligence-image-missing">Image unavailable</div>}
+                        {sample.image_url?.startsWith("/api/") ? <img src={mediaUrl(sample.image_url)} alt={`${selectedCamera?.name || cameraId} review sample`} loading="lazy" /> : <div className="camera-intelligence-image-missing">Image unavailable</div>}
                         <div><strong>{verdictLabels[sample.verdict] || String(sample.verdict || "Uncertain").replaceAll("_", " ")}</strong><span>{categoryLabels[sample.category] || String(sample.category || "Other").replaceAll("_", " ")}</span></div>
                         <p>{sample.summary}</p>
                       </article>

@@ -32,7 +32,8 @@
     "test:zone-geometry": "node tests/zone-geometry.mjs",
     "test:detection-tuneup": "node tests/detection-tuneup.mjs",
     "test:workspace-navigation": "node tests/workspace-navigation.mjs",
-    "test:duration": "node tests/duration.mjs"
+    "test:duration": "node tests/duration.mjs",
+    "test:media-url": "node tests/media-url.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
