@@ -177,14 +177,6 @@ p {
   min-height: 100vh;
 }
 
-.app-shell.page-faces {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  height: 100dvh;
-  min-height: 0;
-  overflow: hidden;
-}
-
 .topbar {
   position: sticky;
   top: 0;
@@ -200,7 +192,6 @@ p {
 }
 
 .brand-block,
-.topnav,
 .section-head,
 .tile-header,
 .event-title,
@@ -421,12 +412,6 @@ p {
   height: 100%;
 }
 
-.topbar h1 {
-  font-size: 25px;
-  line-height: 1.05;
-}
-
-.topbar p,
 .section-head p,
 .muted,
 .soft-line,
@@ -434,36 +419,10 @@ p {
   color: var(--muted);
 }
 
-.topbar p {
-  margin-top: 2px;
-  font-size: 13px;
-}
-
-.top-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.topnav {
-  gap: 10px;
-}
-
 .nav-button.active {
   border-color: color-mix(in srgb, var(--accent) 58%, var(--line));
   background: var(--active);
   color: var(--active-ink);
-}
-
-.incidents-nav {
-  display: inline-flex;
-}
-
-.theme-toggle {
-  min-height: 32px;
-  color: var(--muted);
-  padding: 0 10px;
 }
 
 .bento-grid {
@@ -6380,14 +6339,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 @media (max-width: 430px) {
-  .primary-nav {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .utility-nav {
-    grid-template-columns: repeat(2, 44px);
-  }
-
   .face-observation-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -10861,14 +10812,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
     min-width: 0;
   }
 
-  .topbar h1 {
-    font-size: 17px;
-  }
-
-  .topbar p {
-    display: none;
-  }
-
   .section-head {
     align-items: stretch;
     flex-wrap: wrap;
@@ -10954,65 +10897,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
   .motion-audit-overlay-details {
     max-height: 32dvh;
-  }
-
-  .top-actions {
-    display: contents;
-  }
-
-  .incidents-nav {
-    display: inline-flex;
-  }
-
-  .primary-nav {
-    display: grid;
-    grid-column: 1 / -1;
-    grid-row: 2;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
-    width: 100%;
-  }
-
-  .primary-nav .nav-button {
-    min-width: 0;
-    min-height: 44px;
-    gap: 0;
-    padding: 0 2px;
-    font-size: clamp(15px, 4.6vw, 18px);
-  }
-
-  .primary-nav .nav-button svg {
-    display: none;
-  }
-
-  .utility-nav {
-    display: grid;
-    grid-column: 2;
-    grid-row: 1;
-    grid-template-columns: repeat(2, 44px);
-    gap: 4px;
-  }
-
-  .utility-nav .nav-button,
-  .topnav select,
-  .theme-toggle {
-    min-width: 0;
-    min-height: 44px;
-    padding: 0;
-    font-size: 0;
-  }
-
-  .utility-nav .nav-button {
-    gap: 0;
-    justify-content: center;
-  }
-
-  .utility-nav .nav-button svg {
-    margin: 0;
-  }
-
-  .topnav select {
-    grid-column: 1 / -1;
   }
 
   .bento-grid {
@@ -11549,14 +11433,6 @@ html.zone-vertex-dragging .zone-canvas-media circle {
   .nav-button,
   select {
     min-height: 36px;
-  }
-
-  .primary-nav {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .utility-nav {
-    grid-template-columns: repeat(2, 44px);
   }
 
   .event-list {
@@ -12374,8 +12250,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 
 /* Shared workspace shell. Page-specific campaigns migrate their interiors into
    the same component language without changing media ownership here. */
-.app-shell,
-.app-shell.page-faces {
+.app-shell {
   display: grid;
   grid-template-columns: 176px minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
@@ -12519,8 +12394,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 @media (max-width: 960px) and (min-width: 721px) {
-  .app-shell,
-  .app-shell.page-faces {
+  .app-shell {
     grid-template-columns: 68px minmax(0, 1fr);
   }
 
@@ -12541,8 +12415,7 @@ html.zone-vertex-dragging .zone-canvas-media circle {
 }
 
 @media (max-width: 720px) {
-  .app-shell,
-  .app-shell.page-faces {
+  .app-shell {
     display: block;
     min-height: 100dvh;
     padding-bottom: calc(62px + var(--safe-area-bottom));
