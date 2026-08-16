@@ -5157,10 +5157,13 @@ function IncidentsPage({ timeZone, onRecordingContextChange, onAssistantContextC
   );
 }
 
-function LiveCommandBar({ layoutMode, customAvailable, onLayoutModeChange, onResetLayout }) {
+function LiveCommandBar({ cameraCount, layoutMode, customAvailable, onLayoutModeChange, onResetLayout }) {
   return (
     <header className="live-command-bar">
-      <div className="live-command-context"><strong>Command Center</strong><span>Live cameras and recent security activity</span></div>
+      <div className="live-command-context">
+        <span className="live-command-scope"><Grid2X2 size={15} /><strong>All cameras</strong><small>{cameraCount} visible</small></span>
+        <span>Live monitoring and recent security activity</span>
+      </div>
       <div className="live-layout-control" role="group" aria-label="Live camera layout">
         <span>Layout</span>
         <button type="button" className={layoutMode === "auto" ? "active" : ""} aria-pressed={layoutMode === "auto"} onClick={() => onLayoutModeChange("auto")}><Grid2X2 size={15} /> Automatic</button>
@@ -5176,14 +5179,15 @@ function LiveActivityItem({ incident, cameraName, timeZone, selected, thumbnailA
   const trigger = incidentTriggerLabel(incident);
   const eventId = liveActivityEventId(incident);
   const time = incident.start_at || incident.created_at;
+  const activityLabel = labels.length ? `${labels.join(", ")} detected` : "Motion detected";
   return (
     <article className={`live-activity-item${selected ? " selected" : ""}`} aria-current={selected ? "true" : undefined}>
       <button type="button" className="live-activity-select" onClick={() => onSelect(incident.id)} aria-label={`Select ${cameraName} activity at ${formatDateTime(time, timeZone)}`}>
         <span className="live-activity-thumb"><SnapshotImage event={incident} alt="" className="live-activity-snapshot" thumbnail allowObjectFocus={false} showAnnotations={thumbnailAnnotations} showTracking={false} /></span>
         <span className="live-activity-copy">
-          <strong>{cameraName}</strong>
+          <span className="live-activity-kind"><IncidentObjectBadges labels={labels} /><strong>{activityLabel}</strong></span>
+          <b>{cameraName}</b>
           <time>{formatDateTime(time, timeZone)}</time>
-          <span className="pill-row compact"><IncidentObjectBadges labels={labels} />{!labels.length ? <span className="pill quiet">Motion only</span> : null}</span>
         </span>
       </button>
       <button type="button" className={`live-activity-trigger trigger-${trigger.toLowerCase()}`} onClick={() => onOpenOverlay(incident)} aria-label={`Preview exact ${trigger} event`}>{trigger}</button>
@@ -5809,7 +5813,7 @@ function LivePage({ timeZone, onRecordingContextChange, onAssistantContextChange
 
   return (
     <main className="bento-grid live-grid">
-      <LiveCommandBar layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} />
+      <LiveCommandBar cameraCount={orderedCameras.length} layoutMode={effectiveLayoutMode} customAvailable={customLayoutAvailable} onLayoutModeChange={setLiveLayoutMode} onResetLayout={resetCustomLayout} />
       <div className="sr-only" role="status" aria-live="polite">{layoutAnnouncement}</div>
       <section className="bento-card camera-zone live-camera-zone">
         <div className="mobile-camera-picker" role="group" aria-label="Primary live camera">
