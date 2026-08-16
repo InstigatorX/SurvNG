@@ -372,12 +372,29 @@ class MediaStorageConfig(BaseModel):
         return self
 
 
+class CameraViewFrameConfig(BaseModel):
+    """Display-only framing for one camera stream."""
+
+    fit: Literal["cover", "contain"] = "cover"
+    focal_x: float = Field(default=50.0, ge=0.0, le=100.0)
+    focal_y: float = Field(default=50.0, ge=0.0, le=100.0)
+    zoom: float = Field(default=1.0, ge=1.0, le=3.0)
+
+
+class CameraLiveViewConfig(BaseModel):
+    """Presentation framing kept separate for Main and Sub streams."""
+
+    main: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
+    live: CameraViewFrameConfig = Field(default_factory=CameraViewFrameConfig)
+
+
 class CameraConfig(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str = Field(min_length=1, max_length=128)
     video_backend: str = "url"
     stream_url: str = Field(max_length=4096)
     live_stream_url: str | None = Field(default=None, max_length=4096)
+    live_view: CameraLiveViewConfig = Field(default_factory=CameraLiveViewConfig)
     record: bool = True
     record_sub: bool = False
     retention: CameraRetentionConfig = Field(default_factory=CameraRetentionConfig)

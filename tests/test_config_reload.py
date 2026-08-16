@@ -419,6 +419,33 @@ class ConfigReloadTest(unittest.TestCase):
         self.assertEqual(result["apply_mode"], "hot")
         self.assertFalse(result["camera_workers_restarted"])
 
+    def test_live_view_framing_saves_without_restarting_cameras(self) -> None:
+        active = Mock()
+        current = AppConfig(cameras=[CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+        )])
+        active.config = current
+        main.config = current
+        main.manager = active
+        incoming = current.model_copy(deep=True)
+        incoming.cameras[0].live_view.live.focal_x = 72
+        incoming.cameras[0].live_view.live.zoom = 1.4
+
+        with (
+            patch("survng.app.main.reload_manager") as reload,
+            patch("survng.app.main.save_config") as save,
+        ):
+            effective, result = main.apply_config_update(incoming)
+
+        reload.assert_not_called()
+        save.assert_called_once_with(effective, assign_ids=False)
+        active.reconfigure_motion.assert_not_called()
+        self.assertEqual(result["apply_mode"], "unchanged")
+        self.assertFalse(result["camera_workers_restarted"])
+        self.assertEqual(effective.cameras[0].live_view.live.focal_x, 72)
+
     def test_detector_policy_change_hot_applies_without_restarting_cameras(self) -> None:
         active = Mock()
         current = AppConfig()

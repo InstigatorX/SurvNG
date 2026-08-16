@@ -13,6 +13,7 @@
     "test:live-custom-layout": "node tests/live-custom-layout.mjs",
     "test:live-defaults": "node tests/live-defaults.mjs",
     "test:live-workspace": "node tests/live-workspace.mjs",
+    "test:live-framing": "node tests/live-framing.mjs",
     "test:storage": "node tests/storage.mjs",
     "test:assistant-storage": "node tests/assistant-storage.mjs",
     "test:assistant-context": "node tests/assistant-context.mjs",

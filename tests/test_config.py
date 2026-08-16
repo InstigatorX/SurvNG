@@ -325,6 +325,42 @@ class AppConfigTest(unittest.TestCase):
                 onvif={"enabled": True, "host": "camera", "port": 70000},
             )
 
+    def test_camera_live_view_framing_is_per_stream_and_bounded(self) -> None:
+        camera = CameraConfig(
+            id="gate",
+            name="Gate",
+            stream_url="rtsp://camera/main",
+            live_view={
+                "main": {"fit": "contain", "focal_x": 20, "focal_y": 75, "zoom": 1.5},
+                "live": {"focal_x": 80, "focal_y": 25, "zoom": 2.25},
+            },
+        )
+
+        self.assertEqual(camera.live_view.main.fit, "contain")
+        self.assertEqual(camera.live_view.main.focal_x, 20)
+        self.assertEqual(camera.live_view.live.zoom, 2.25)
+        self.assertEqual(CameraConfig(
+            id="default",
+            name="Default",
+            stream_url="rtsp://camera/main",
+        ).live_view.main.model_dump(), {
+            "fit": "cover", "focal_x": 50.0, "focal_y": 50.0, "zoom": 1.0,
+        })
+        for invalid in (
+            {"main": {"focal_x": -1}},
+            {"live": {"focal_y": 101}},
+            {"main": {"zoom": 0.9}},
+            {"live": {"zoom": 3.1}},
+            {"main": {"fit": "stretch"}},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                CameraConfig(
+                    id="gate",
+                    name="Gate",
+                    stream_url="rtsp://camera/main",
+                    live_view=invalid,
+                )
+
     def test_duplicate_camera_ids_are_rejected(self) -> None:
         camera = {
             "id": "gate",
